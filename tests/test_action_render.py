@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import builtins
 import importlib.util
+import io
 import json
+import os
+import pathlib
 import subprocess
 import sys
 from pathlib import Path
@@ -551,6 +555,377 @@ def test_written_artifact_never_exceeds_the_consumer_cap(tmp_path, offset):
     assert code == 0
     assert out.stat().st_size <= render._MAX_BODY, out.stat().st_size
     assert "Powered by [code-review-graph]" in out.read_text(encoding="utf-8")
+
+
+def test_output_file_preserves_the_bytes_measured_by_the_budget(tmp_path, report):
+    """Writing a report must not add platform-specific CRLF bytes."""
+    source = tmp_path / "report.json"
+    source.write_text(json.dumps(report), encoding="utf-8")
+    out = tmp_path / "comment.md"
+
+    expected = render.render_markdown(report)
+    assert render.main(
+        ["--input", str(source), "--output", str(out)]
+    ) == 0
+
+    assert out.read_bytes() == (expected + "\n").encode("utf-8")
+
+
+# ---------------------------------------------------------------------------
+# The artifact under Windows newline semantics (#1076, fixed in #1077)
+# ---------------------------------------------------------------------------
+#
+# On Windows a file opened for writing in text mode with newline=None turns
+# every "\n" into "\r\n", one extra byte per line the budget never counted.
+# POSIX CPython never translates, so on Linux and macOS the artifact is the
+# same whichever way main() writes it and the tests above cannot tell a text
+# write from a byte write. ``windows_text_writes`` reproduces the translation
+# in-process by handing newline="\r\n" -- os.linesep on Windows -- to every
+# text-mode write that left newline unset. The windows-native CI job does not
+# run this module, so this is where the Windows write path is exercised.
+
+
+def _is_text_write(mode: str) -> bool:
+    return "b" not in mode and any(flag in mode for flag in "wax+")
+
+
+@pytest.fixture()
+def windows_text_writes(monkeypatch):
+    """Make text-mode writes in this process translate newlines as Windows does."""
+    real_open = io.open
+
+    def win_open(file, mode="r", buffering=-1, encoding=None, errors=None,
+                 newline=None, closefd=True, opener=None):
+        if _is_text_write(mode) and newline is None:
+            newline = "\r\n"
+        return real_open(file, mode, buffering, encoding, errors, newline, closefd, opener)
+
+    def win_path_open(self, mode="r", buffering=-1, encoding=None, errors=None,
+                      newline=None):
+        return win_open(self, mode, buffering, encoding, errors, newline)
+
+    monkeypatch.setattr(io, "open", win_open)
+    monkeypatch.setattr(builtins, "open", win_open)
+    # Path.open is what Path.write_text goes through on every supported
+    # Python; 3.10 bound io.open at import, so patching io alone misses it.
+    monkeypatch.setattr(pathlib.Path, "open", win_path_open)
+
+
+def test_the_windows_simulation_really_translates(tmp_path, windows_text_writes):
+    """Teeth for the tests below: an inert simulation would pass them vacuously."""
+    probe = tmp_path / "probe.md"
+    probe.write_text("x\n" * 1000, encoding="utf-8")
+    # The issue's own reproduction: 3000 bytes on Windows, 2000 on POSIX.
+    assert len(probe.read_bytes()) == 3000
+    with open(probe, "w", encoding="utf-8") as fh:
+        fh.write("a\n")
+    assert probe.read_bytes() == b"a\r\n"
+    probe.write_bytes(b"a\n")
+    assert probe.read_bytes() == b"a\n"
+    assert probe.read_text(encoding="utf-8") == "a\n", "reads must stay untouched"
+
+
+def _render_to_file(tmp_path: Path, report: dict, *extra: str) -> tuple[int, bytes]:
+    source = tmp_path / "report.json"
+    source.write_text(json.dumps(report), encoding="utf-8")
+    out = tmp_path / "comment.md"
+    code = render.main(["--input", str(source), "--output", str(out), *extra])
+    return code, out.read_bytes()
+
+
+@pytest.mark.parametrize("offset", [-1, 0, 1])
+def test_windows_artifact_never_exceeds_the_consumer_cap(
+    tmp_path, windows_text_writes, offset
+):
+    """The boundary from #1076: 61,399 bytes on Windows before the fix."""
+    code, data = _render_to_file(
+        tmp_path,
+        report_rendering_to_exactly(render._MAX_BODY + offset),
+        "--max-functions",
+        "100000",
+    )
+    assert code == 0
+    assert b"\r" not in data
+    assert len(data) <= render._MAX_BODY, len(data)
+    assert b"Powered by [code-review-graph]" in data
+
+
+def test_windows_artifact_that_fits_is_written_whole(tmp_path, windows_text_writes):
+    """A 59,999-byte body is a 60,000-byte artifact on Windows too, not cut."""
+    code, data = _render_to_file(
+        tmp_path,
+        report_rendering_to_exactly(render._MAX_BODY - 1),
+        "--max-functions",
+        "100000",
+    )
+    assert code == 0
+    assert len(data) == render._MAX_BODY
+    assert b"*Report truncated.*" not in data
+
+
+def test_windows_truncated_multibyte_report_fits_the_cap(tmp_path, windows_text_writes):
+    """Non-ASCII names: the cap is UTF-8 bytes on disk, and the cut stays valid UTF-8."""
+    huge = {
+        "risk_score": 0.5,
+        "review_priorities": [
+            {
+                "qualified_name": f"src/café_日本.py::grüße_{i}_" + "é🚀" * 30,
+                "risk_score": 0.5,
+                "file_path": "src/café_日本.py",
+                "line_start": i,
+            }
+            for i in range(3000)
+        ],
+    }
+    code, data = _render_to_file(tmp_path, huge, "--max-functions", "3000")
+    assert code == 0
+    assert len(data) <= render._MAX_BODY, len(data)
+    assert b"\r" not in data
+    text = data.decode("utf-8")  # strict: a split code point would raise
+    assert "*Report truncated.*" in text
+    assert text.endswith(render.FOOTER + "\n")
+
+
+_NON_ASCII_REPORT = {
+    "risk_score": 0.5,
+    "changed_functions": [
+        {"qualified_name": "src/café.py::grüße", "file_path": "src/café.py",
+         "line_start": 3, "risk_score": 0.5},
+        {"qualified_name": "src/日本.py::関数_🚀", "file_path": "src/日本.py",
+         "line_start": 9, "risk_score": 0.4},
+    ],
+    "test_gaps": [
+        {"qualified_name": "src/café.py::grüße", "file_path": "src/café.py",
+         "line_start": 3},
+    ],
+}
+
+
+@pytest.mark.parametrize(
+    ("input_bytes", "expected_body", "expected_code"),
+    [
+        pytest.param(
+            FIXTURE.read_bytes(),
+            lambda: render.render_markdown(
+                json.loads(FIXTURE.read_text(encoding="utf-8"))
+            ),
+            0,
+            id="analysis",
+        ),
+        pytest.param(
+            json.dumps(_NON_ASCII_REPORT, ensure_ascii=False).encode("utf-8"),
+            lambda: render.render_markdown(_NON_ASCII_REPORT),
+            0,
+            id="non-ascii-names",
+        ),
+        pytest.param(
+            # An older report shape: no review_priorities, no coverage counts.
+            json.dumps({"risk_score": 0.2, "changed_functions": [
+                {"qualified_name": "a.py::f", "file_path": "a.py", "line_start": 1}
+            ]}).encode("utf-8"),
+            lambda: render.render_markdown({"risk_score": 0.2, "changed_functions": [
+                {"qualified_name": "a.py::f", "file_path": "a.py", "line_start": 1}
+            ]}),
+            0,
+            id="legacy-report-shape",
+        ),
+        pytest.param(b"{}", lambda: render.render_markdown({}), 0, id="empty-report"),
+        pytest.param(
+            # detect-changes' clean-tree line as a Windows shell would save it.
+            b"No changes detected.\r\n",
+            render.render_no_changes,
+            0,
+            id="no-changes-crlf-input",
+        ),
+        pytest.param(
+            b"Error: could not determine the changes\r\n",
+            lambda: render.render_not_analyzed(
+                "Error: could not determine the changes\n"
+            ),
+            4,
+            id="not-analyzed",
+        ),
+    ],
+)
+def test_windows_output_file_is_the_measured_utf8_bytes(
+    tmp_path, windows_text_writes, input_bytes, expected_body, expected_code
+):
+    """Every body main() can write lands on disk as exactly the bytes it measured."""
+    source = tmp_path / "report.json"
+    source.write_bytes(input_bytes)
+    out = tmp_path / "comment.md"
+    code = render.main(["--input", str(source), "--output", str(out)])
+    assert code == expected_code
+    assert out.read_bytes() == (expected_body() + "\n").encode("utf-8")
+
+
+def test_risk_gate_breach_still_writes_the_exact_artifact(tmp_path, windows_text_writes):
+    """Exit 3 is decided after the write; the file is complete and LF-only."""
+    out = tmp_path / "comment.md"
+    code = render.main(
+        ["--input", str(FIXTURE), "--output", str(out), "--fail-on-risk", "high"]
+    )
+    assert code == 3
+    expected = render.render_markdown(json.loads(FIXTURE.read_text(encoding="utf-8")))
+    assert out.read_bytes() == (expected + "\n").encode("utf-8")
+
+
+def test_output_path_with_spaces_and_unicode(tmp_path, windows_text_writes):
+    out_dir = tmp_path / "runner temp é 日本"
+    out_dir.mkdir()
+    out = out_dir / "crg comment 🚀.md"
+    assert render.main(["--input", str(FIXTURE), "--output", str(out)]) == 0
+    expected = render.render_markdown(json.loads(FIXTURE.read_text(encoding="utf-8")))
+    assert out.read_bytes() == (expected + "\n").encode("utf-8")
+
+
+def test_rendering_twice_replaces_a_larger_artifact_exactly(tmp_path):
+    """A rerun into the same file leaves no tail of the previous, larger one."""
+    out = tmp_path / "comment.md"
+    out.write_bytes(b"stale\r\n" * 20_000)
+    args = ["--input", str(FIXTURE), "--output", str(out)]
+    assert render.main(args) == 0
+    first = out.read_bytes()
+    assert render.main(args) == 0
+    assert out.read_bytes() == first
+    expected = render.render_markdown(json.loads(FIXTURE.read_text(encoding="utf-8")))
+    assert first == (expected + "\n").encode("utf-8")
+
+
+@pytest.mark.parametrize("target", ["missing-dir", "is-a-directory"])
+def test_unwritable_output_returns_2(tmp_path, caplog, target):
+    """The byte write keeps the OSError path: exit 2 and a logged reason."""
+    if target == "missing-dir":
+        out = tmp_path / "no" / "such" / "dir" / "comment.md"
+    else:
+        out = tmp_path / "comment.md"
+        out.mkdir()
+    with caplog.at_level("ERROR", logger="render_pr_comment"):
+        code = render.main(["--input", str(FIXTURE), "--output", str(out)])
+    assert code == 2
+    assert "Cannot write output file" in caplog.text
+    if target == "missing-dir":
+        assert not out.exists()
+
+
+# The consumer itself: the validator step of the privileged workflow, read
+# straight out of pr-review-comment.yml together with the cap it enforces, so
+# a Windows-written artifact is judged by the real check rather than by a
+# restatement of it, and the renderer's budget cannot drift from that cap.
+COMMENT_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "pr-review-comment.yml"
+
+
+def _trusted_validator() -> tuple[str, dict[str, str]]:
+    """The validator step's Python source and its declared environment."""
+    import yaml  # a runtime dependency, but only these tests need it
+
+    workflow = yaml.safe_load(COMMENT_WORKFLOW.read_text(encoding="utf-8"))
+    for job in workflow["jobs"].values():
+        for step in job.get("steps", []):
+            run = step.get("run") or ""
+            if "Report artifact is empty or too large" not in run:
+                continue
+            lines = run.split("\n")
+            start = lines.index("python - <<'PY'") + 1
+            end = next(i for i in range(start, len(lines)) if lines[i].strip() == "PY")
+            source = "\n".join(lines[start:end]) + "\n"
+            return source, {key: str(value) for key, value in step["env"].items()}
+    raise AssertionError("validator step not found in pr-review-comment.yml")
+
+
+def _run_trusted_validator(tmp_path: Path, download: Path) -> subprocess.CompletedProcess:
+    source, declared = _trusted_validator()
+    script = tmp_path / "validator.py"
+    script.write_bytes(source.encode("utf-8"))
+    env = dict(os.environ)
+    env.update(declared)
+    env.update(
+        {
+            "DOWNLOAD_DIR": str(download),
+            "COMMENT_BODY": str(tmp_path / "crg-comment-body.md"),
+            "VALIDATED_PR_NUMBER": str(tmp_path / "crg-pr-number.txt"),
+        }
+    )
+    return subprocess.run(
+        [sys.executable, str(script)],
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+        stdin=subprocess.DEVNULL,
+    )
+
+
+def test_renderer_budget_is_the_cap_the_trusted_workflow_enforces():
+    _source, declared = _trusted_validator()
+    assert render._MAX_BODY == int(declared["MAX_REPORT_BYTES"])
+    assert render.MARKER == declared["TRUSTED_MARKER"]
+
+
+@pytest.mark.parametrize("offset", [-1, 0, 1])
+def test_windows_artifact_at_the_cap_is_accepted_by_the_trusted_validator(
+    tmp_path, windows_text_writes, offset
+):
+    """#1076 end to end: the file main() writes on Windows passes the real check.
+
+    Before the fix all three were rejected ("Report artifact is empty or too
+    large"); the 59,999-byte body became the 61,399-byte artifact in the issue.
+    """
+    _source, declared = _trusted_validator()
+    cap = int(declared["MAX_REPORT_BYTES"])
+    source = tmp_path / "crg-report.json"
+    source.write_bytes(json.dumps(report_rendering_to_exactly(cap + offset)).encode("utf-8"))
+    download = tmp_path / "crg-report-download"
+    download.mkdir()
+    artifact = download / "crg-comment.md"
+    code = render.main(
+        ["--input", str(source), "--output", str(artifact), "--max-functions", "100000"]
+    )
+    assert code == 0
+    # pr-review.yml writes this on its Linux runner; bytes keep it exact here.
+    (download / "pr-number.txt").write_bytes(b"42\n")
+
+    completed = _run_trusted_validator(tmp_path, download)
+
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    wrapped = (tmp_path / "crg-comment-body.md").read_bytes().decode("utf-8")
+    assert wrapped.startswith(declared["TRUSTED_MARKER"] + "\n\n## code-review-graph review\n")
+    assert wrapped.rstrip("\n").endswith(render.FOOTER)
+
+
+@pytest.mark.parametrize(
+    "report_data",
+    [
+        pytest.param(json.loads(FIXTURE.read_text(encoding="utf-8")), id="analysis"),
+        pytest.param(_NON_ASCII_REPORT, id="non-ascii-names"),
+    ],
+)
+def test_windows_crlf_detect_changes_output_renders_the_exact_artifact(
+    tmp_path, windows_text_writes, report_data
+):
+    """The input the Action really gets on a Windows runner.
+
+    ``detect-changes`` prints ``json.dumps(result, indent=2)`` and the Action
+    redirects it into crg-report.json; Windows stdout is text mode, so that
+    file arrives ASCII-escaped with CRLF on every line. The artifact must be
+    the same LF-only bytes a Linux runner produces from the LF file.
+    """
+    printed = json.dumps(report_data, indent=2, default=str) + "\n"
+    lf_input = tmp_path / "lf.json"
+    lf_input.write_bytes(printed.encode("ascii"))
+    crlf_input = tmp_path / "crlf.json"
+    crlf_input.write_bytes(printed.replace("\n", "\r\n").encode("ascii"))
+    lf_out = tmp_path / "lf.md"
+    crlf_out = tmp_path / "crlf.md"
+
+    assert render.main(["--input", str(lf_input), "--output", str(lf_out)]) == 0
+    assert render.main(["--input", str(crlf_input), "--output", str(crlf_out)]) == 0
+
+    expected = (render.render_markdown(report_data) + "\n").encode("utf-8")
+    assert crlf_out.read_bytes() == expected
+    assert lf_out.read_bytes() == expected
 
 
 def test_a_body_that_still_fits_is_not_truncated(tmp_path):

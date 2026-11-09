@@ -116,6 +116,7 @@ def forget_files(
     # 2. Drop the forgotten files' own nodes and edges.
     for file_path in targets:
         store.remove_file_data(file_path)
+    store.set_metadata("intentionally_incomplete", "1")
     # Persist deletions before store_file_nodes_edges() opens its own
     # explicit transaction (BEGIN IMMEDIATE) during the re-parse below.
     store.commit()

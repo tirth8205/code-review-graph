@@ -19,7 +19,7 @@ import re
 import subprocess
 import sys
 import threading
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path, PurePath
@@ -43,11 +43,14 @@ try:
     from yaml import MappingNode as _YamlMapping
     from yaml import ScalarNode as _YamlScalar
     from yaml import SequenceNode as _YamlSequence
+    from yaml.events import AliasEvent as _YamlAliasEvent  # type: ignore[import-untyped]
 except ImportError:
     _yaml = None  # type: ignore[assignment]
     _YamlMapping = _YamlSequence = _YamlScalar = None  # type: ignore[assignment,misc]
+    _YamlAliasEvent = None  # type: ignore[assignment,misc]
 
 from .tsconfig_resolver import TsconfigResolver
+from .workspace_resolver import WorkspaceResolver
 
 
 class CellInfo(NamedTuple):
@@ -78,17 +81,32 @@ _PYTHON_STAR_CACHE_MAX = 15_000
 _PYTHON_STAR_EXPORT_CACHE: dict[tuple[str, int, int], dict[str, str]] = {}
 _PYTHON_STAR_EXPORT_CACHE_LOCK = threading.RLock()
 
+# ``{(module file, mtime, size): dotted module it installs as
+# sys.modules[__name__], or None}``. Process-wide like the star-export cache,
+# so parse workers and concurrent parsers read each module for this at most
+# once. See :meth:`CodeParser._python_module_alias`.
+_PYTHON_MODULE_ALIAS_CACHE: dict[tuple[str, int, int], Optional[str]] = {}
+_PYTHON_MODULE_ALIAS_CACHE_LOCK = threading.Lock()
+
 # ``{module file: {top-level def name: return annotation text}}``, keyed by
 # the module's mtime and size the way the star-export cache is. Only the text
 # of an annotation the module actually wrote is stored; nothing is inferred
 # from a function body.
 _PYTHON_RETURN_ANNOTATION_CACHE: dict[tuple[str, int, int], dict[str, str]] = {}
 _PYTHON_RETURN_ANNOTATION_CACHE_LOCK = threading.RLock()
+_PYTHON_PROPERTY_RETURN_ANNOTATION_CACHE: dict[
+    tuple[str, int, int], dict[tuple[str, str], str],
+] = {}
+_PYTHON_MODULE_CLASS_IDENTITY_CACHE: dict[
+    tuple[str, int, int], dict[str, tuple[str, str]],
+] = {}
+_PYTHON_MODULE_CLASS_IDENTITY_CACHE_LOCK = threading.RLock()
 
 # Marker separating expression-receiver evidence from name-receiver evidence
 # in the receiver-evidence map. ``\x00`` cannot occur in a Python identifier,
 # so the two key spaces cannot collide.
 _PY_EXPR_RECEIVER_KEY = "\x00expr:"
+_PY_CLASS_IDENTITY_PREFIX = "\x00python-class\x00"
 
 _PY_TUPLE_ANNOTATION_NAMES = frozenset({"Tuple", "tuple"})
 _PY_TARGET_PATTERN_TYPES = frozenset({
@@ -97,6 +115,24 @@ _PY_TARGET_PATTERN_TYPES = frozenset({
     "list", "list_pattern", "pattern_list", "tuple", "tuple_pattern",
 })
 _PY_SPLAT_PATTERN_TYPES = frozenset({"list_splat", "list_splat_pattern"})
+
+
+def _python_qualified_class_identity(file_path: str, class_name: str) -> str:
+    """Keep a class's defining module attached to its receiver evidence."""
+    return f"{_PY_CLASS_IDENTITY_PREFIX}{file_path}\x00{class_name}"
+
+
+def _python_split_class_identity(
+    identity: str,
+) -> Optional[tuple[str, str]]:
+    if not identity.startswith(_PY_CLASS_IDENTITY_PREFIX):
+        return None
+    file_path, separator, class_name = identity[
+        len(_PY_CLASS_IDENTITY_PREFIX):
+    ].partition("\x00")
+    if not separator or not file_path or not class_name:
+        return None
+    return file_path, class_name
 
 
 class _PyReceiverContext(NamedTuple):
@@ -113,7 +149,20 @@ class _PyReceiverContext(NamedTuple):
     imported_names: frozenset[str]
     module_bindings: dict[str, set[str]]
     symbol_origins: dict[str, str]
+    symbol_names: dict[str, str]
     local_returns: dict[str, str]
+    property_returns: dict[tuple[str, str], str]
+
+
+class _NodeGroup(NamedTuple):
+    """A stand-in parent for some of a tree-sitter node's children.
+
+    ``CodeParser._extract_from_tree`` only reads its root's ``children``, so a
+    group lets it visit a chosen subset exactly as a walk over the real parent
+    would have visited them.
+    """
+
+    children: list
 
 
 @lru_cache(maxsize=512)
@@ -172,6 +221,45 @@ class _PythonScopeBindingVisitor(ast.NodeVisitor):
         for alias in node.names:
             if alias.name != "*":
                 self.names.add(alias.asname or alias.name)
+
+    def visit_Global(self, node: ast.Global) -> None:  # noqa: N802
+        self.names.update(node.names)
+
+def _python_function_scope_bindings(
+    source: bytes,
+) -> dict[tuple[int, int], tuple[frozenset[str], frozenset[str]]]:
+    """Return parameter and local names for each Python function position."""
+    try:
+        tree = ast.parse(source.decode("utf-8"))
+    except (SyntaxError, UnicodeDecodeError, ValueError):
+        return {}
+    scopes: dict[
+        tuple[int, int], tuple[frozenset[str], frozenset[str]],
+    ] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        arguments = node.args
+        parameter_names = {
+            argument.arg
+            for argument in (
+                *arguments.posonlyargs,
+                *arguments.args,
+                *arguments.kwonlyargs,
+            )
+        }
+        if arguments.vararg is not None:
+            parameter_names.add(arguments.vararg.arg)
+        if arguments.kwarg is not None:
+            parameter_names.add(arguments.kwarg.arg)
+        bindings = _PythonScopeBindingVisitor()
+        for statement in node.body:
+            bindings.visit(statement)
+        bindings.names.update(parameter_names)
+        scopes[(node.lineno, node.col_offset)] = (
+            frozenset(parameter_names), frozenset(bindings.names),
+        )
+    return scopes
 
 
 def _python_type_checking_aliases(
@@ -248,7 +336,7 @@ def _python_static_truth(
 
 
 class _PythonUnreachableCallVisitor(ast.NodeVisitor):
-    """Collect calls inside branches whose condition is statically false."""
+    """Collect calls and attribute loads in statically unreachable branches."""
 
     def __init__(
         self,
@@ -261,6 +349,11 @@ class _PythonUnreachableCallVisitor(ast.NodeVisitor):
         self._typing_modules = typing_modules
 
     def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
+        if self._dead:
+            self.positions.add((node.lineno, node.col_offset))
+        self.generic_visit(node)
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:  # noqa: N802
         if self._dead:
             self.positions.add((node.lineno, node.col_offset))
         self.generic_visit(node)
@@ -364,7 +457,7 @@ class _PythonUnreachableCallVisitor(ast.NodeVisitor):
 def _python_unreachable_call_positions(
     source: bytes,
 ) -> frozenset[tuple[int, int]]:
-    """Return one-based line/byte-column positions of proven-dead calls."""
+    """Return positions of calls and attribute loads in proven-dead branches."""
     try:
         tree = ast.parse(source.decode("utf-8"))
     except (SyntaxError, UnicodeDecodeError, ValueError):
@@ -386,6 +479,8 @@ def _python_unreachable_call_positions(
 # walking the tree-sitter ancestor chain of a call node:
 #
 #   * Go / TypeScript / JavaScript:  ``if false { ... }`` / ``if (0) { ... }``
+#   * Rust:                          ``if false { ... }`` (an if_expression,
+#                                    whose false is a boolean_literal)
 #   * C / C++:                       ``#if 0`` / ``#elif 0`` preprocessor blocks
 #
 # Only the consequence (true branch) is dead; ``else`` / ``#else`` / ``#elif``
@@ -430,13 +525,44 @@ def _is_statically_false_condition(cond) -> bool:
     return False
 
 
+def _is_static_dead_guard_child(parent, child) -> bool:
+    """Return whether *child* enters a statically-dead branch of *parent*."""
+    if parent.type == "if_statement":
+        condition = parent.child_by_field_name("condition")
+        consequence = parent.child_by_field_name("consequence")
+        return (
+            condition is not None
+            and consequence is not None
+            and _is_statically_false_condition(condition)
+            and child.start_byte == consequence.start_byte
+            and child.end_byte == consequence.end_byte
+        )
+
+    if parent.type in ("preproc_if", "preproc_elif"):
+        condition = parent.child_by_field_name("condition")
+        if (
+            condition is None
+            or condition.type != "number_literal"
+            or condition.text != b"0"
+        ):
+            return False
+        alternative = parent.child_by_field_name("alternative")
+        return not (
+            alternative is not None
+            and child.start_byte == alternative.start_byte
+            and child.end_byte == alternative.end_byte
+        )
+
+    return False
+
+
 def _is_in_static_dead_guard(node) -> bool:
     """Return True if *node* sits in a statically-dead branch (non-Python).
 
-    Two independent ancestor walks:
+    Walk the ancestor chain once, checking each parent-child edge:
 
-    * A walk for Go / TS / JS ``if false`` / ``if (0)``.
-    * A walk for C/C++ ``#if 0`` / ``#elif 0``.
+    * Go / TS / JS ``if false`` / ``if (0)``.
+    * C/C++ ``#if 0`` / ``#elif 0``.
 
     Neither walk stops at a function or class boundary. A declaration
     nested inside a dead branch is never evaluated, so calls in its body
@@ -445,40 +571,54 @@ def _is_in_static_dead_guard(node) -> bool:
     JS/TS class declarations are not hoisted, so there is no reachable
     symbol to preserve either.
     """
-    # Go / TS / JS: ``if`` with a statically-false condition.
+    child = node
+    parent = child.parent
+    while parent is not None:
+        if _is_static_dead_guard_child(parent, child):
+            return True
+        child = parent
+        parent = parent.parent
+    return False
+
+
+def _is_in_rust_dead_guard(node) -> bool:
+    """Return True if *node* sits in the consequence of a Rust ``if false``.
+
+    Rust's if is an ``if_expression`` and its false is a ``boolean_literal``.
+    Both are shared with Kotlin and Scala, where ``if (false)`` is kept, so
+    this walk is only called for Rust. The else branch and ``if true`` stay
+    live, and only a literal ``false`` counts: ``false && false`` does not.
+
+    The walk ends at an ``impl_item``. Rust impl blocks are non-local: one
+    written inside a branch still applies to the type, so its methods and
+    associated consts are reached from outside that branch, and their callees
+    are live. Inheriting the guard from the declaration dropped those edges and
+    reported real targets as dead code, which is worse than keeping a call that
+    never runs. Everything else the branch encloses stays dead: a local ``fn``,
+    ``mod`` or ``trait`` is scoped to the block, so a call in its body is
+    unreachable. Guards written inside a body are still found, because the
+    walk reaches them before the item boundary.
+    """
     cursor = node.parent
     while cursor is not None:
-        node_type = cursor.type
-        if node_type == "if_statement":
+        if cursor.type == "impl_item":
+            return False
+        if cursor.type == "if_expression":
             condition = cursor.child_by_field_name("condition")
             consequence = cursor.child_by_field_name("consequence")
+            while condition is not None and condition.type == "parenthesized_expression":
+                condition = next(
+                    (child for child in condition.children if child.is_named), None
+                )
             if (
                 condition is not None
                 and consequence is not None
-                and _is_statically_false_condition(condition)
+                and condition.type == "boolean_literal"
+                and condition.text == b"false"
                 and _node_is_in_child(node, consequence)
             ):
                 return True
         cursor = cursor.parent
-
-    # C / C++: ``#if 0`` / ``#elif 0`` preprocessor block.
-    preproc = node.parent
-    while preproc is not None:
-        if preproc.type in ("preproc_if", "preproc_elif"):
-            condition = preproc.child_by_field_name("condition")
-            if (
-                condition is not None
-                and condition.type == "number_literal"
-                and condition.text == b"0"
-            ):
-                alternative = preproc.child_by_field_name("alternative")
-                if not (
-                    alternative is not None
-                    and _node_is_in_child(node, alternative)
-                ):
-                    return True
-        preproc = preproc.parent
-
     return False
 
 
@@ -1027,11 +1167,25 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
     # Keep the fallback deliberately structural and repository-local.
     ".vb": "vbnet",
     ".sql": "sql",
+    # Oracle PL/SQL source files. tree-sitter-sql has no PL/SQL grammar, so
+    # these route through the same "sql" dispatch as .sql and are handled by
+    # the PL/SQL-aware regex fallbacks in _parse_sql (packages, package
+    # bodies, triggers, and nested procedures/functions).
+    ".pls": "sql",
+    ".plb": "sql",
+    ".pks": "sql",
+    ".pkb": "sql",
+    ".pck": "sql",
+    ".prc": "sql",
+    ".fnc": "sql",
+    ".trg": "sql",
     ".tf": "hcl",
     ".hcl": "hcl",
     ".properties": "properties",
     ".yml": "yaml",
     ".yaml": "yaml",
+    ".robot": "robot",
+    ".resource": "robot",
 }
 
 # ``.h`` is shared by C and C++. Keep C as the extension default, then promote
@@ -1053,6 +1207,27 @@ _CPP_HEADER_EVIDENCE_TYPES = frozenset({
 })
 
 _CPP_HEADER_EVIDENCE_QUALIFIERS = frozenset({b"consteval", b"constinit"})
+
+# Comments and literals can hold any word, so they are blanked before the scan.
+_CPP_HEADER_NON_CODE_RE = re.compile(
+    rb"""/\*.*?(?:\*/|\Z)|//[^\n]*|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'""",
+    re.DOTALL,
+)
+
+# Text every shape above needs. It decides only whether to run the C++ parse, and
+# the tree check still has the last word, so it may match too much but must never
+# miss. Keep it a superset of _CPP_HEADER_EVIDENCE_TYPES (Q_SIGNALS masks to
+# ``public``). Base clauses and lambdas have no keyword: a base clause is a colon
+# after ``struct`` or ``union``, and a capture list is a ``]`` not followed by what
+# ends a C subscript. The gaps are capped so repeated keywords stay linear.
+_CPP_HEADER_TEXT_EVIDENCE_RE = re.compile(
+    rb"\b(?:class|namespace|template|concept|using|public|private|protected"
+    rb"|constexpr|noexcept|consteval|constinit|Q_SIGNALS)\b"
+    rb"|::|->"
+    rb"|\benum\b[^;{}]{0,1024}\bstruct\b"
+    rb"|\b(?:struct|union)\b[^;{}]{0,1024}:"
+    rb"|\]\s*(?:\[\[|[^\s;,)=\[\].+\-*/%&|^!?:>])",
+)
 
 _CPP_QT_STRUCTURAL_MACRO_REPLACEMENTS = {
     b"QT_BEGIN_NAMESPACE": b" " * len(b"QT_BEGIN_NAMESPACE"),
@@ -1156,11 +1331,11 @@ _CLASS_TYPES: dict[str, list[str]] = {
     # *.d.ts) contributes zero symbol nodes and its blast radius collapses to
     # whole-file IMPORTS_FROM fan-out. See: #737
     "typescript": [
-        "class_declaration", "class",
+        "class_declaration", "abstract_class_declaration", "class",
         "interface_declaration", "type_alias_declaration", "enum_declaration",
     ],
     "tsx": [
-        "class_declaration", "class",
+        "class_declaration", "abstract_class_declaration", "class",
         "interface_declaration", "type_alias_declaration", "enum_declaration",
     ],
     "go": ["type_declaration"],
@@ -1173,13 +1348,13 @@ _CLASS_TYPES: dict[str, list[str]] = {
     "csharp": [
         "class_declaration", "interface_declaration",
         "enum_declaration", "struct_declaration",
-        "record_declaration", "record_struct_declaration",
+        "record_declaration",
     ],
     "ruby": ["class", "module"],
     "r": [],  # Classes detected via call pattern-matching, not AST node types
     "perl": ["package_statement", "class_statement", "role_statement"],
     "kotlin": ["class_declaration", "object_declaration"],
-    "swift": ["class_declaration", "struct_declaration", "protocol_declaration"],
+    "swift": ["class_declaration", "protocol_declaration"],
     "php": [
         "class_declaration", "interface_declaration",
         "trait_declaration", "enum_declaration",
@@ -1197,7 +1372,7 @@ _CLASS_TYPES: dict[str, list[str]] = {
     "luau": ["type_definition"],  # Luau type aliases; table-based OOP via constructs handler
     "objc": [
         "class_interface", "class_implementation",
-        "category_interface", "protocol_declaration",
+        "protocol_declaration",
     ],
     "bash": [],  # Shell has no classes
     # Elixir: `defmodule Name do ... end` is a ``call`` node whose first
@@ -1224,7 +1399,8 @@ _CLASS_TYPES: dict[str, list[str]] = {
     # GDScript: inner classes use ``class Name:`` (class_definition); the
     # file-level ``class_name Name`` gives the script itself an identity.
     "gdscript": ["class_definition", "class_name_statement"],
-    # SQL: CREATE TABLE / CREATE VIEW are handled via _parse_sql dispatch.
+    # SQL: CREATE TABLE / CREATE VIEW / CREATE PACKAGE (Oracle PL/SQL) are
+    # handled via _parse_sql dispatch.
     "sql": [],
     # HCL/Terraform: all constructs are blocks; dispatched via
     # _extract_hcl_constructs.
@@ -1247,9 +1423,26 @@ _TS_TYPE_DECLARATIONS = frozenset({
 
 _FUNCTION_TYPES: dict[str, list[str]] = {
     "python": ["function_definition"],
-    "javascript": ["function_declaration", "method_definition", "arrow_function"],
-    "typescript": ["function_declaration", "method_definition", "arrow_function"],
-    "tsx": ["function_declaration", "method_definition", "arrow_function"],
+    "javascript": [
+        "function_declaration",
+        "generator_function_declaration",
+        "method_definition",
+        "arrow_function",
+    ],
+    "typescript": [
+        "function_declaration",
+        "generator_function_declaration",
+        "method_definition",
+        "abstract_method_signature",
+        "arrow_function",
+    ],
+    "tsx": [
+        "function_declaration",
+        "generator_function_declaration",
+        "method_definition",
+        "abstract_method_signature",
+        "arrow_function",
+    ],
     "go": ["function_declaration", "method_declaration"],
     "rust": ["function_item", "function_signature_item"],
     "java": ["method_declaration", "constructor_declaration"],
@@ -1303,7 +1496,7 @@ _FUNCTION_TYPES: dict[str, list[str]] = {
     # walker can't bridge the FnProto signature to its sibling Block body,
     # so the whole thing is dispatched via _extract_zig_constructs.
     "zig": [],
-    "powershell": ["function_statement"],
+    "powershell": ["function_statement", "class_method_definition"],
     # Julia: short-form functions `f(x) = expr` parse as `assignment` nodes
     # (not a dedicated definition node) and are handled in
     # _extract_julia_constructs.
@@ -1314,7 +1507,9 @@ _FUNCTION_TYPES: dict[str, list[str]] = {
     "verilog": ["task_declaration", "function_declaration", "always_construct"],
     # GDScript: ``func name(args) -> ReturnType:`` — includes ``static func``.
     "gdscript": ["function_definition"],
-    # SQL: CREATE FUNCTION / CREATE PROCEDURE handled via _parse_sql dispatch.
+    # SQL: CREATE FUNCTION / CREATE PROCEDURE / CREATE TRIGGER and PL/SQL
+    # procedures/functions nested in a PACKAGE BODY are handled via
+    # _parse_sql dispatch.
     "sql": [],
     # HCL/Terraform: dispatched via _extract_hcl_constructs.
     "hcl": [],
@@ -1393,7 +1588,7 @@ _CALL_TYPES: dict[str, list[str]] = {
     "c": ["call_expression"],
     "cpp": ["call_expression"],
     "csharp": ["invocation_expression", "object_creation_expression"],
-    "ruby": ["call", "method_call"],
+    "ruby": ["call"],
     "r": ["call"],
     "perl": [
         "function_call_expression", "method_call_expression",
@@ -1429,7 +1624,7 @@ _CALL_TYPES: dict[str, list[str]] = {
     # SuffixExpr); calls are walked explicitly in
     # _extract_zig_calls_in_subtree from inside function bodies.
     "zig": [],
-    "powershell": ["command_expression"],
+    "powershell": ["command"],
     "julia": [
         "call_expression",
         "broadcast_call_expression",
@@ -1445,7 +1640,9 @@ _CALL_TYPES: dict[str, list[str]] = {
     # GDScript: bare calls produce ``call``; ``obj.method()`` is an
     # ``attribute`` node whose right-hand side is an ``attribute_call``.
     "gdscript": ["call", "attribute_call"],
-    # SQL: no call edges extracted (grammar too unreliable for procedure calls).
+    # SQL: no CALLS edges from the tree-sitter grammar (too unreliable for
+    # procedure calls); PL/SQL call edges are extracted separately via regex
+    # in _parse_sql for CREATE PROCEDURE/FUNCTION/TRIGGER/PACKAGE BODY bodies.
     "sql": [],
     # HCL/Terraform: resource references dispatched via _extract_hcl_constructs.
     "hcl": [],
@@ -1522,6 +1719,7 @@ _TEST_HELPER_DIR_PATTERNS = [
 
 # Filename conventions.  Matched against the basename alone, so they hold
 # whatever the repository root is.
+_STORYBOOK_FILE_RE = re.compile(r"\.stories\.[jt]sx?$")
 _TEST_NAME_PATTERNS = [
     # Python: pytest/unittest stems plus conftest, which holds fixtures.
     re.compile(r"^test_.*\.py$"),
@@ -1529,6 +1727,8 @@ _TEST_NAME_PATTERNS = [
     re.compile(r"^conftest\.py$"),
     # JavaScript / TypeScript.
     re.compile(r"\.(?:test|spec)\.[cm]?[jt]sx?$"),
+    # Storybook CSF files demonstrate components; they are not production callers.
+    _STORYBOOK_FILE_RE,
     # Go.
     re.compile(r"_test\.go$"),
     # Ruby.
@@ -1545,6 +1745,8 @@ _TEST_NAME_PATTERNS = [
     re.compile(r"_test\.dart$"),
     # R.
     re.compile(r"^test[_-].*\.[rR]$"),
+    # PowerShell (Pester).
+    re.compile(r"\.tests\.ps1$", re.IGNORECASE),
     # ReScript.
     re.compile(r"[_.]test\.resi?$"),
     # Julia.
@@ -1618,6 +1820,7 @@ _SPRING_SCHEDULED_ANNOTATIONS = frozenset({"Scheduled", "Schedules"})
 _SPRING_EVENT_LISTENER_ANNOTATIONS = frozenset({"EventListener"})
 _SPRING_EVENT_PUBLISH_METHODS = frozenset({"publishEvent"})
 _JAVA_PACKAGE_KEY = "__crg_java_package__"
+_JAVA_WILDCARD_KEY = "__crg_java_wildcard__"
 _SPRING_REQUEST_PREFIX_KEY = "__crg_spring_request_prefix__:"
 _JS_IMPORT_ORIGINAL_PREFIX_KEY = "__crg_js_import_original__:"
 # Marks a Python local name bound to a MODULE rather than to a symbol inside
@@ -2732,8 +2935,15 @@ _HCL_REF_PREFIXES: frozenset[str] = frozenset({
 })
 
 
-def _hcl_ref_target(root: str, attrs: list[str]) -> Optional[str]:
+def _hcl_ref_target(
+    root: str, attrs: list[str], *, provider: bool = False,
+) -> Optional[str]:
     """Map a ``variable_expr.get_attr*`` chain to its canonical graph name."""
+    # Provider meta-arguments use the provider namespace even when a local
+    # provider name collides with an expression root such as "local".
+    # Only the block-local iterators cannot be a provider's local name.
+    if provider and root not in {"each", "count", "self"}:
+        return ".".join(["provider", root] + attrs[:1])
     if root == "var" and attrs:
         return f"var.{attrs[0]}"
     if root == "module" and attrs:
@@ -2937,7 +3147,25 @@ def _yaml_line(node: object) -> int:
 
 
 def _yaml_end_line(node: object) -> int:
-    return node.end_mark.line + 1  # type: ignore[attr-defined]
+    """Return the last source line of *node*, 1-based and inclusive.
+
+    A block collection or block scalar ends at the next token, so its end mark
+    sits on the line of whatever follows, which may be a sibling key. When only
+    indentation comes before the mark on that line, the node ended earlier: on
+    the last line before it that is not blank.
+    """
+    mark = node.end_mark  # type: ignore[attr-defined]
+    buffer, line_start = mark.buffer, mark.pointer - mark.column
+    if buffer is None or buffer[line_start:mark.pointer].strip():
+        return mark.line + 1
+    line = mark.line
+    while line > 1:
+        previous = buffer.rfind("\n", 0, line_start - 1) + 1
+        if buffer[previous:line_start].strip():
+            break
+        line_start = previous
+        line -= 1
+    return max(line, 1)
 
 
 def _yaml_get_key(mapping_node: object, key: str) -> Optional[object]:
@@ -2951,6 +3179,30 @@ def _yaml_scalar(node: object) -> Optional[str]:
     if isinstance(node, _YamlScalar):
         return node.value  # type: ignore[attr-defined]
     return None
+
+
+_YAML_SIMPLE_PATH_SEGMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
+
+
+def _yaml_path_child(prefix: str, segment: str) -> str:
+    """Append a mapping key to a path without making dotted keys ambiguous."""
+    if _YAML_SIMPLE_PATH_SEGMENT.fullmatch(segment):
+        return f"{prefix}.{segment}" if prefix else segment
+    quoted = json.dumps(segment, ensure_ascii=False)
+    return f"{prefix}[{quoted}]" if prefix else f"[{quoted}]"
+
+
+def _yaml_value_type(node: object) -> str:
+    """Return a bounded structural/scalar type label without exposing its value."""
+    if isinstance(node, _YamlMapping):
+        return "mapping"
+    if isinstance(node, _YamlSequence):
+        return "sequence"
+    tag = str(getattr(node, "tag", ""))
+    scalar_type = tag.rsplit(":", 1)[-1]
+    if scalar_type in {"binary", "bool", "float", "int", "null", "str", "timestamp"}:
+        return scalar_type
+    return "scalar"
 
 
 def _ansible_is_play_item(item: object) -> bool:
@@ -2978,10 +3230,35 @@ def _ansible_is_play_item(item: object) -> bool:
 # ---------------------------------------------------------------------------
 
 
+# Numeric endpoints accepted in PowerShell range expressions. Match the entire
+# literal so command names such as 1..3.ps1 and malformed suffixes stay calls.
+# https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_numeric_literals
+_POWERSHELL_NUMBER_PATTERN = (
+    r"[+-]?(?:(?:0x[0-9a-f]+|0b[01]+)(?:u[ysl]?|[ysln])?"
+    r"|\d+(?:u[ysl]?|[yslnd])?"
+    r"|(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?d?)(?:[kmgtp]b)?"
+)
+# The right side can also be a variable or, with nothing after the dots in the
+# command name, a parenthesised expression: 1..$n, 1..$a.Count, 0..($n - 1).
+_POWERSHELL_RANGE_RE = re.compile(
+    rf"{_POWERSHELL_NUMBER_PATTERN}\.\.(?:{_POWERSHELL_NUMBER_PATTERN}|\$.*)?",
+    re.IGNORECASE,
+)
+# function script:Get-Thing defines Get-Thing; callers do not write the scope.
+_POWERSHELL_SCOPE_RE = re.compile(r"^(?:global|local|private|script):", re.IGNORECASE)
+
+
 class CodeParser:
     """Parses source files using Tree-sitter and extracts structural information."""
 
     _MODULE_CACHE_MAX = 15_000  # Evict cache to cap memory on huge monorepos
+    _MAX_GENERIC_YAML_BYTES = 1_048_576
+    _MAX_YAML_DEPTH = 100
+    _MAX_YAML_NODES = 10_000
+    _MAX_YAML_PATH_LENGTH = 512
+    _MAX_YAML_OCCURRENCE_SAMPLES = 10_000
+    _MAX_YAML_DUPLICATE_GROUP_SAMPLES = 100
+    _MAX_YAML_DUPLICATE_LINE_SAMPLES = 20
     # Ruby load-root discovery reads a handful of repository-root scripts.
     _RUBY_MANIFEST_SCAN_MAX = 10
     _RUBY_MANIFEST_MAX_BYTES = 256 * 1024
@@ -3024,6 +3301,10 @@ class CodeParser:
         # (module file, symbol) -> file that really defines the symbol; see
         # :meth:`_python_reexport_origin`.
         self._python_reexport_cache: dict[str, str] = {}
+        # Python module file -> file of the module it installs in its place
+        # via ``sys.modules[__name__] = ...`` (None when it is not a shim);
+        # see :meth:`_python_module_alias_target`.
+        self._python_module_alias_cache: dict[str, Optional[str]] = {}
         # Absolute file paths to treat as absent during import resolution.
         # ``forget`` sets this (via :meth:`exclude_files`) so a re-parsed
         # referrer resolves exactly as it would in a build where the forgotten
@@ -3031,6 +3312,9 @@ class CodeParser:
         self._excluded_files: set[str] = set()
         self._export_symbol_cache: dict[str, Optional[str]] = {}
         self._tsconfig_resolver = TsconfigResolver()
+        self._workspace_resolver = WorkspaceResolver(
+            repo_root=self._repo_root, file_exists=self._file_exists_exact,
+        )
         # Per-parse cache of Dart pubspec root lookups; see #87
         self._dart_pubspec_cache: dict[tuple[str, str], Optional[Path]] = {}
         # Cargo discovery is shared by every Rust import/call in a source file.
@@ -3239,15 +3523,16 @@ class CodeParser:
         tree = None
         parse_source = source
         if language == "c" and path.suffix.lower() == ".h":
-            cpp_parser = self._get_parser("cpp")
-            if cpp_parser is not None:
-                cpp_source = self._mask_cpp_qt_macros(source)
-                cpp_tree = cpp_parser.parse(cpp_source)
-                if self._has_cpp_header_evidence(cpp_tree.root_node):
-                    language = "cpp"
-                    parser = cpp_parser
-                    tree = cpp_tree
-                    parse_source = cpp_source
+            if self._has_cpp_header_text_evidence(source):
+                cpp_parser = self._get_parser("cpp")
+                if cpp_parser is not None:
+                    cpp_source = self._mask_cpp_qt_macros(source)
+                    cpp_tree = cpp_parser.parse(cpp_source)
+                    if self._has_cpp_header_evidence(cpp_tree.root_node):
+                        language = "cpp"
+                        parser = cpp_parser
+                        tree = cpp_tree
+                        parse_source = cpp_source
         elif language == "cpp":
             parse_source = self._mask_cpp_qt_macros(source)
 
@@ -3290,12 +3575,20 @@ class CodeParser:
         if language == "rescript":
             return self._parse_rescript(path, source)
 
+        # Robot Framework has no grammar in the bundled language pack.  Parse
+        # its table sections directly so tests, keywords, calls, and resource
+        # dependencies still contribute useful graph structure.
+        if language == "robot":
+            return self._parse_robot(path, source)
+
         # SQL: dedicated parser — tree-sitter for tables/views/functions +
         # regex fallback for CREATE PROCEDURE (unsupported by the grammar).
         if language == "sql":
             return self._parse_sql(path, source)
 
-        # Ansible YAML: path heuristic promoted to "ansible".
+        # Ansible YAML: path heuristic promoted to "ansible". A directory
+        # name alone is not enough evidence; fall back to generic YAML so a
+        # repository's ordinary tasks/*.yml files still get structural nodes.
         if language == "ansible":
             if _yaml is None:
                 return [], []
@@ -3306,7 +3599,7 @@ class CodeParser:
             # directory names, so require Ansible content evidence there.
             if file_type in ("vars", "meta") or _is_ansible_content(source):
                 return self._parse_ansible(path, source)
-            return [], []
+            return self._parse_yaml(path, source)
 
         # Spring configuration: only conventional application files reach
         # this branch. Generic YAML and arbitrary .properties files stay out.
@@ -3315,11 +3608,18 @@ class CodeParser:
                 return [], []
             if path.suffix.lower() in (".yaml", ".yml") and _is_ansible_content(source):
                 return self._parse_ansible(path, source)
-            return self._parse_spring_config(path, source)
+            spring_nodes, spring_edges = self._parse_spring_config(path, source)
+            if spring_nodes or path.suffix.lower() == ".properties":
+                return spring_nodes, spring_edges
+            return self._parse_yaml(path, source)
 
-        # Generic YAML: no tree-sitter grammar bundled; skip.
+        # Generic YAML: index paths and structure while deliberately discarding
+        # scalar values. PyYAML is already a runtime dependency for the
+        # specialised Ansible and Spring parsers.
         if language == "yaml":
-            return [], []
+            if _yaml is None:
+                return [], []
+            return self._parse_yaml(path, source)
 
         if parser is None:
             parser = self._get_parser(language)
@@ -3357,6 +3657,7 @@ class CodeParser:
         import_map, defined_names = self._collect_file_scope(
             tree.root_node, language, source, file_path_str,
         )
+        self._index_ambiguous_method_scopes(tree.root_node, language, import_map)
         if language == "python":
             self._expand_python_star_imports(
                 tree.root_node, file_path_str, import_map,
@@ -3369,11 +3670,16 @@ class CodeParser:
             import_map,
             defined_names,
         )
-        python_receiver_evidence = (
-            self._collect_python_receiver_evidence(tree.root_node, file_path_str)
-            if language == "python"
-            else {}
-        )
+        if language == "python":
+            (
+                python_receiver_evidence,
+                python_property_read_edges,
+            ) = self._collect_python_receiver_evidence(
+                tree.root_node, file_path_str, source,
+            )
+        else:
+            python_receiver_evidence = {}
+            python_property_read_edges = []
 
         # Walk the tree
         self._extract_from_tree(
@@ -3385,6 +3691,7 @@ class CodeParser:
             self._extract_php_laravel_edges(
                 tree.root_node,
                 file_path_str,
+                nodes,
                 edges,
             )
             edges = self._resolve_php_scoped_calls(
@@ -3409,6 +3716,7 @@ class CodeParser:
             edges = self._apply_python_receiver_evidence(
                 edges, python_receiver_evidence,
             )
+            edges.extend(python_property_read_edges)
 
         # Resolve bare call targets to qualified names using same-file definitions
         edges = self._resolve_call_targets(nodes, edges, file_path_str)
@@ -3437,10 +3745,14 @@ class CodeParser:
     @staticmethod
     def _has_cpp_header_evidence(root) -> bool:
         """Return whether a parsed ``.h`` tree contains C++-only syntax."""
-        pending = [root]
+        # Carry dead-guard state down the tree.  Calling
+        # ``_is_in_static_dead_guard`` for every node repeatedly walks the
+        # nested ``preproc_elif`` chain in large generated headers, making
+        # this scan quadratic in the number of branches.
+        pending = [(root, False)]
         while pending:
-            node = pending.pop()
-            if node.type == "ERROR" or _is_in_static_dead_guard(node):
+            node, in_dead_guard = pending.pop()
+            if node.type == "ERROR" or in_dead_guard:
                 continue
 
             previous = node.prev_named_sibling
@@ -3464,12 +3776,24 @@ class CodeParser:
                 and node.text in _CPP_HEADER_EVIDENCE_QUALIFIERS
             ):
                 return True
-            pending.extend(node.named_children)
+            for child in node.named_children:
+                pending.append((
+                    child,
+                    in_dead_guard or _is_static_dead_guard_child(node, child),
+                ))
         return False
+
+    @staticmethod
+    def _has_cpp_header_text_evidence(source: bytes) -> bool:
+        """Cheaply decide whether a C header merits a speculative C++ parse."""
+        code = _CPP_HEADER_NON_CODE_RE.sub(b" ", source)
+        return _CPP_HEADER_TEXT_EVIDENCE_RE.search(code) is not None
 
     @staticmethod
     def _mask_cpp_qt_macros(source: bytes) -> bytes:
         """Shield structural Qt macros without changing byte or line offsets."""
+        if b"Q_" not in source and b"QT_" not in source:
+            return source
         masked = bytearray(source)
         length = len(source)
         index = 0
@@ -4523,6 +4847,245 @@ class CodeParser:
                     ))
         return nodes, edges
 
+    def _parse_robot(
+        self, path: Path, source: bytes,
+    ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
+        """Extract graph structure from Robot Framework tables."""
+        text = source.decode("utf-8-sig", errors="replace")
+        file_path = normalize_file_path(path)
+        lines = text.splitlines()
+        nodes = [NodeInfo(
+            kind="File",
+            name=file_path,
+            file_path=file_path,
+            line_start=1,
+            line_end=max(1, len(lines)),
+            language="robot",
+            is_test=_is_test_file(file_path),
+        )]
+        edges: list[EdgeInfo] = []
+        section: Optional[str] = None
+        current: Optional[tuple[str, str, int, str]] = None
+        ignored_settings = {
+            "[arguments]", "[documentation]", "[return]", "[returns]",
+            "[timeout]", "[tags]",
+        }
+        # Each of these names a keyword to run, unlike the settings above.
+        keyword_settings = {"[setup]", "[teardown]", "[template]"}
+        suite_keyword_settings = {
+            "suite setup", "suite teardown", "test setup", "test teardown",
+            "test template", "task setup", "task teardown", "task template",
+        }
+        # Robot spells these in upper case only: `End` can be a user keyword.
+        block_starts = {"IF", "FOR", "WHILE", "TRY", "GROUP"}
+        block_branches = {"ELSE IF", "ELSE", "EXCEPT", "FINALLY"}
+        statements = {"BREAK", "CONTINUE", "RETURN", "VAR"}
+        control_words = block_starts | block_branches | statements | {"END"}
+        section_names = {
+            "setting": "settings", "test case": "test cases", "task": "tasks",
+            "keyword": "keywords",
+        }
+
+        def qualified(name: str) -> str:
+            return f"{file_path}::{name}"
+
+        def normalize_keyword(name: str) -> str:
+            return re.sub(r"[\s_]+", "", name).casefold()
+
+        def add_call(source_name: str, target: str, line: int) -> None:
+            edges.append(EdgeInfo(
+                kind="CALLS",
+                source=source_name,
+                target=target,
+                file_path=file_path,
+                line=line,
+            ))
+
+        def finish(end_line: int) -> None:
+            nonlocal current
+            if current is None:
+                return
+            _, name, start_line, _ = current
+            for node in reversed(nodes):
+                if node.name == name and node.line_start == start_line:
+                    node.line_end = max(start_line, end_line)
+                    break
+            current = None
+
+        for line_number, raw_line in enumerate(lines, 1):
+            stripped = raw_line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if stripped.startswith("|"):
+                # `| name |` defines; `|   | Keyword |` sits in the body, the
+                # same way an indented row does in the space-separated format.
+                row = re.split(r"\s\|(?:\s|$)", stripped[1:] + " ")
+                is_body_row = not row[0].strip()
+                cells = [cell.strip() for cell in row if cell.strip()]
+            else:
+                is_body_row = raw_line[:1].isspace()
+                cells = [cell.strip() for cell in re.split(r"\s{2,}|\t+", raw_line) if cell.strip()]
+            if not cells:
+                continue
+            section_match = re.fullmatch(r"\*+\s*(.+?)\s*\*+", cells[0])
+            if section_match:
+                finish(line_number - 1)
+                section = section_match.group(1).casefold()
+                section = section_names.get(section, section)
+                continue
+            if cells[0] == "...":
+                continue  # A continuation row only adds arguments.
+
+            if section == "settings":
+                setting = cells[0].casefold()
+                if setting in suite_keyword_settings and len(cells) > 1:
+                    if cells[1].casefold() != "none":
+                        add_call(file_path, cells[1], line_number)
+                    continue
+                if setting in {"library", "resource", "variables"} and len(cells) > 1:
+                    target = cells[1]
+                    if setting == "resource":
+                        target = target.replace("${CURDIR}", str(path.parent))
+                        if "${" not in target:
+                            target = normalize_file_path(
+                                os.path.normpath(path.parent / target),
+                            )
+                    edges.append(EdgeInfo(
+                        kind="IMPORTS_FROM",
+                        source=file_path,
+                        target=target,
+                        file_path=file_path,
+                        line=line_number,
+                        extra={"robot_setting": setting},
+                    ))
+                continue
+
+            if section not in {"test cases", "tasks", "keywords"}:
+                continue
+
+            if not is_body_row:
+                finish(line_number - 1)
+                name = cells[0]
+                is_test = section in {"test cases", "tasks"}
+                node_kind = "Test" if is_test else "Function"
+                qname = qualified(name)
+                current = (node_kind, name, line_number, qname)
+                nodes.append(NodeInfo(
+                    kind=node_kind,
+                    name=name,
+                    file_path=file_path,
+                    line_start=line_number,
+                    line_end=line_number,
+                    language="robot",
+                    is_test=is_test,
+                ))
+                edges.append(EdgeInfo(
+                    kind="CONTAINS",
+                    source=file_path,
+                    target=qname,
+                    file_path=file_path,
+                    line=line_number,
+                ))
+                continue
+
+            if current is None:
+                continue
+            # A row may open by assigning variables, with or without `=`, and a
+            # single space can separate the `=` from the keyword.
+            first = re.fullmatch(r"([$@&]\{[^}]+\}\s*=)\s+(.+)", cells[0])
+            if first is not None:
+                cells = [first.group(2), *cells[1:]]
+            while cells and re.fullmatch(r"[$@&]\{[^}]+\}\s*=?", cells[0]):
+                cells = cells[1:]
+            if not cells:
+                continue
+            keyword = cells[0]
+            setting = keyword.casefold()
+            if setting in keyword_settings:
+                if len(cells) > 1 and cells[1].casefold() != "none":
+                    add_call(current[3], cells[1], line_number)
+                continue
+            if setting in ignored_settings:
+                continue
+            if keyword == "IF" and len(cells) > 2:
+                # Inline IF: the condition sits in cell 1, a keyword in cell 2,
+                # and each later branch names its own keyword.
+                branches = [cells[2]]
+                for index, cell in enumerate(cells):
+                    if cell == "ELSE IF" and index + 2 < len(cells):
+                        branches.append(cells[index + 2])
+                    elif cell == "ELSE" and index + 1 < len(cells):
+                        branches.append(cells[index + 1])
+                for branch in branches:
+                    if branch not in control_words:
+                        add_call(current[3], branch, line_number)
+                continue
+            if keyword not in control_words:
+                add_call(current[3], keyword, line_number)
+
+        finish(len(lines))
+
+        # Add a kind-qualified identity only where a test and keyword share a name.
+        test_names = {node.name for node in nodes if node.kind == "Test"}
+        keyword_names = {node.name for node in nodes if node.kind == "Function"}
+        shared_names = test_names & keyword_names
+        if shared_names:
+            for node in nodes:
+                if node.kind not in {"Test", "Function"} or node.name not in shared_names:
+                    continue
+                previous_qname = qualified(node.name)
+                node.identity_name = f"{node.kind}::{node.name}"
+                new_qname = self._node_qualified(node)
+                for edge in edges:
+                    if (
+                        edge.kind == "CONTAINS"
+                        and edge.target == previous_qname
+                        and edge.line == node.line_start
+                    ):
+                        edge.target = new_qname
+                    elif (
+                        edge.kind == "CALLS"
+                        and edge.source == previous_qname
+                        and node.line_start <= edge.line <= node.line_end
+                    ):
+                        edge.source = new_qname
+
+        keyword_definitions: dict[str, list[NodeInfo]] = {}
+        for node in nodes:
+            if node.kind == "Function":
+                normalized = normalize_keyword(node.name)
+                keyword_definitions.setdefault(normalized, []).append(node)
+
+        for edge in edges:
+            if edge.kind != "CALLS":
+                continue
+            matches = keyword_definitions.get(normalize_keyword(edge.target), [])
+            if not matches:
+                # Robot ignores a leading BDD word when it looks up a keyword.
+                edge.target = re.sub(
+                    r"^(?:given|when|then|and|but)\s+", "", edge.target, flags=re.IGNORECASE,
+                )
+                matches = keyword_definitions.get(normalize_keyword(edge.target), [])
+            if len(matches) == 1:
+                edge.target = self._node_qualified(matches[0])
+
+        test_qnames = {
+            self._node_qualified(node)
+            for node in nodes
+            if node.kind == "Test"
+        }
+        for edge in list(edges):
+            if edge.kind == "CALLS" and edge.source in test_qnames:
+                edges.append(EdgeInfo(
+                    kind="TESTED_BY",
+                    source=edge.target,
+                    target=edge.source,
+                    file_path=edge.file_path,
+                    line=edge.line,
+                    extra=edge.extra.copy(),
+                ))
+        return nodes, edges
+
     def _resolve_vbnet_edges(
         self,
         nodes: list[NodeInfo],
@@ -4982,10 +5545,24 @@ class CodeParser:
     # SQL parser
     # ------------------------------------------------------------------
 
+    # Oracle identifiers may contain `$`/`#` in addition to `\w` (common in
+    # practice — e.g. version-suffixed or internal-convention names like
+    # `log_event$v2`, `calc#total`). `\w+` alone truncates at the `$`/`#`,
+    # which then cascades into `_plsql_block_end` searching for the wrong
+    # (truncated) terminator name and mis-bounding the whole block.
+    # The leading class is `[^\W\d]` rather than `[A-Za-z_]` so the first
+    # character stays Unicode-aware (matching `\w`'s own default behavior
+    # elsewhere in this file, e.g. `_SQL_TABLE_RE`) instead of silently
+    # truncating identifiers like `café` at the accented letter.
+    _PLSQL_IDENT = r"[^\W\d][\w$#]*"
+
     # Regex for CREATE PROCEDURE — tree-sitter SQL grammar emits an ERROR node
-    # for this statement, so we fall back to a regex scan.
+    # for this statement, so we fall back to a regex scan. Leading `\b`
+    # keeps this from matching "RECREATE PROCEDURE ..." as if it were
+    # "CREATE PROCEDURE ...". It also serves other dialects, and MySQL allows
+    # a name to start with a digit, so this is wider than `_PLSQL_IDENT`.
     _SQL_PROC_RE = re.compile(
-        r"CREATE\s+(?:OR\s+REPLACE\s+)?PROCEDURE\s+(\w+(?:\.\w+)*)",
+        r"\bCREATE\s+(?:OR\s+REPLACE\s+)?PROCEDURE\s+(\w[\w$#]*(?:\.\w[\w$#]*)*)",
         re.IGNORECASE,
     )
 
@@ -4996,10 +5573,366 @@ class CodeParser:
         "create_function",
     })
 
+    # --- Oracle PL/SQL --------------------------------------------------
+    # tree-sitter-sql has no PL/SQL grammar: `IS|AS ... BEGIN ... END` bodies
+    # with no RETURNS/LANGUAGE clause are ANSI-invalid and parse as ERROR
+    # nodes, so packages, package bodies, triggers, and PL/SQL-style
+    # functions are all extracted via regex, mirroring the CREATE PROCEDURE
+    # fallback above. Each starts with `\b` for the same reason as above.
+    _SQL_PLSQL_FUNC_RE = re.compile(
+        rf"\bCREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+({_PLSQL_IDENT}(?:\.{_PLSQL_IDENT})*)",
+        re.IGNORECASE,
+    )
+    _SQL_TRIGGER_RE = re.compile(
+        rf"\bCREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER\s+({_PLSQL_IDENT}(?:\.{_PLSQL_IDENT})*)",
+        re.IGNORECASE,
+    )
+    # Package *specification* — must not also match "PACKAGE BODY".
+    _SQL_PACKAGE_RE = re.compile(
+        rf"\bCREATE\s+(?:OR\s+REPLACE\s+)?PACKAGE\s+(?!BODY\b)({_PLSQL_IDENT}(?:\.{_PLSQL_IDENT})*)",
+        re.IGNORECASE,
+    )
+    _SQL_PACKAGE_BODY_RE = re.compile(
+        rf"\bCREATE\s+(?:OR\s+REPLACE\s+)?PACKAGE\s+BODY\s+({_PLSQL_IDENT}(?:\.{_PLSQL_IDENT})*)",
+        re.IGNORECASE,
+    )
+    # Nested member declarations inside a PACKAGE BODY (no CREATE prefix).
+    _SQL_PACKAGE_MEMBER_RE = re.compile(
+        rf"\b(PROCEDURE|FUNCTION)\s+({_PLSQL_IDENT})",
+        re.IGNORECASE,
+    )
+    # A call-shaped token: `identifier(` or `pkg.proc(`, not preceded by
+    # another identifier character (so `.owner(` in `foo.owner(` still
+    # matches, but the `owner` in `xowner(` does not).
+    _PLSQL_CALL_RE = re.compile(
+        rf"(?<![\w$#])({_PLSQL_IDENT}(?:\.{_PLSQL_IDENT}){{0,2}})\s*\(",
+    )
+    # PL/SQL control-flow keywords and common scalar type names that also
+    # precede `(` (e.g. `v_x VARCHAR2(50);` or `WHILE (cond)`) but are not
+    # calls.
+    _PLSQL_CALL_KEYWORDS: frozenset[str] = frozenset({
+        "if", "elsif", "else", "then", "end", "loop", "while", "for", "case",
+        "when", "begin", "declare", "exception", "return", "raise", "is",
+        "as", "procedure", "function", "trigger", "package", "cursor",
+        "type", "record", "table", "pragma", "and", "or", "not", "in",
+        "exists", "between", "into", "over",
+        # Scalar/collection type names — precede `(` in declarations
+        # (`v_x VARCHAR2(50);`), not calls.
+        "varchar", "varchar2", "nvarchar2", "number", "char", "nchar",
+        "date", "timestamp", "raw", "boolean", "clob", "blob", "long",
+        "float", "integer", "int", "smallint", "decimal", "numeric",
+        "double", "real", "pls_integer", "binary_integer", "urowid",
+        "rowid", "bfile", "xmltype", "sys_refcursor", "interval",
+    })
+    # Common built-in SQL/PL-SQL functions — real calls, but not to
+    # user-defined code, and the reviewer on PR #785 flagged these as noise
+    # in the CALLS graph. Aggregates, conversions, null-handling, string,
+    # and numeric builtins.
+    _PLSQL_BUILTIN_FUNCS: frozenset[str] = frozenset({
+        "count", "sum", "avg", "max", "min", "greatest", "least",
+        "to_char", "to_date", "to_number", "to_timestamp", "cast",
+        "nvl", "nvl2", "coalesce", "nullif", "decode",
+        "substr", "substrb", "instr", "trim", "ltrim", "rtrim",
+        "upper", "lower", "initcap", "length", "lengthb", "replace",
+        "lpad", "rpad", "concat",
+        "round", "trunc", "mod", "abs", "ceil", "floor", "power", "sqrt",
+        "extract", "sysdate", "systimestamp", "raise_application_error",
+    })
+    # Built-in Oracle package namespaces (DBMS_*, UTL_*) — calls into these
+    # are noise for impact analysis, not user code.
+    _PLSQL_BUILTIN_PACKAGE_PREFIXES = ("dbms_", "utl_")
+    # A builtin's name is the builtin only when bare or under these packages:
+    # `text_utils.replace(` names user code. `l_tab.count()` and `l_tab.trim(1)`
+    # are collection methods, so those two stay out however they are qualified.
+    _PLSQL_BUILTIN_RECEIVERS = frozenset({"", "sys", "standard"})
+    _PLSQL_COLLECTION_METHODS = frozenset({"count", "trim"})
+
+    # Fixed lookback window (chars) for the INSERT INTO check in
+    # _extract_plsql_calls. Comfortably covers "INTO" plus a few lines of
+    # unusual whitespace/newlines before the target, without re-scanning the
+    # whole preceding body on every match.
+    _INTO_LOOKBACK = 60
+
+    # Oracle-specific file extensions that are unambiguously PL/SQL
+    # regardless of content.
+    _ORACLE_EXTENSIONS = frozenset({
+        ".pls", ".plb", ".pks", ".pkb", ".pck", ".prc", ".fnc", ".trg",
+    })
+    # Content signals that only appear in Oracle PL/SQL, never in plain
+    # ANSI SQL, T-SQL, or MySQL: `%TYPE`/`%ROWTYPE` anchored attribute
+    # types, VARCHAR2/PLS_INTEGER/etc. scalar types, DBMS_OUTPUT, packages,
+    # and `:NEW.`/`:OLD.` trigger correlation names (T-SQL uses
+    # `inserted`/`deleted`; MySQL uses unprefixed `NEW.`/`OLD.`).
+    #
+    # A subprogram's own shape counts too, since a plain routine may hold none
+    # of those: `FUNCTION f RETURN` (others write `RETURNS`) and `PROCEDURE p IS`.
+    # `PROCEDURE p AS` is also T-SQL, and with `OR REPLACE` also Postgres, whose
+    # body is then a dollar-quoted or quoted string.
+    _PLSQL_ROUTINE = (
+        rf"{_PLSQL_IDENT}(?:\.{_PLSQL_IDENT})*(?![\w$#])"
+        r"\s*(?:\((?:[^();]|\([^()]*\))*\)\s*)?"
+    )
+    _ORACLE_SIGNAL_RE = re.compile(
+        r"%TYPE\b|%ROWTYPE\b|\bVARCHAR2\b|\bPLS_INTEGER\b|\bBINARY_INTEGER\b|"
+        r"\bSYS_REFCURSOR\b|\bDBMS_OUTPUT\b|:(?:NEW|OLD)\.|"
+        r"\bCREATE\s+(?:OR\s+REPLACE\s+)?PACKAGE\b|"
+        rf"\bCREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+{_PLSQL_ROUTINE}RETURN\b|"
+        rf"\bCREATE\s+(?:OR\s+REPLACE\s+)?PROCEDURE\s+{_PLSQL_ROUTINE}IS\b|"
+        rf"\bCREATE\s+OR\s+REPLACE\s+PROCEDURE\s+{_PLSQL_ROUTINE}AS\s+[^\s$']",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _is_plsql_dialect(cls, path: Path, text: str) -> bool:
+        """True if this `.sql`-family file is Oracle PL/SQL, as opposed to
+        plain ANSI SQL, T-SQL, or MySQL.
+
+        Gates every PL/SQL-specific pass (body-span computation and CALLS
+        extraction for packages/triggers/PL/SQL-style functions) so a
+        non-Oracle `CREATE PROCEDURE` with no `END;` terminator (T-SQL uses
+        `GO`, MySQL uses a custom `DELIMITER`) doesn't have its span
+        computed at all — see PR #785 review, where unconditionally
+        computing a body span caused it to fall back to end-of-file and
+        pick up false CALLS edges spanning unrelated code.
+        """
+        if path.suffix.lower() in cls._ORACLE_EXTENSIONS:
+            return True
+        return bool(cls._ORACLE_SIGNAL_RE.search(text))
+
+    # Closing delimiter for each Oracle q-quote bracket-style opener
+    # (`q'[...]'`, `q'{...}'`, `q'(...)'`, `q'<...>'`); any other character
+    # closes with itself (`q'!...!'`).
+    _PLSQL_Q_DELIM_CLOSE = {"[": "]", "{": "}", "(": ")", "<": ">"}
+
+    @staticmethod
+    def _strip_plsql_noise(text: str) -> str:
+        """Blank `--`/`/* */` comments and string-literal contents with
+        spaces, preserving line numbers and overall text length.
+
+        Every PL/SQL-specific regex pass below (block-end search, forward-
+        declaration detection, call extraction, and the CREATE-statement
+        matchers themselves) runs against this cleaned text instead of the
+        raw source. Without it, a `;` or `END name;`-shaped substring inside
+        a trailing comment or a dynamic-SQL string literal (both common in
+        real PL/SQL) is indistinguishable from the real terminator — e.g. a
+        member with a same-line comment containing a semicolon before its
+        `IS` keyword was misdetected as a bodyless forward declaration and
+        dropped entirely; a body with a comment mentioning `END name;` had
+        its span truncated at the comment instead of the real end.
+
+        This runs as one pass over the whole text rather than per line or
+        as a separate global comment-stripping regex applied first (PR #785
+        review): both of those earlier approaches broke on real PL/SQL —
+        a plain `'...'` string's open/close state was reset at the start
+        of every line, so a string spanning multiple lines (or an Oracle
+        `q'[...]'`/`Q'<...>'` quoted string, which allows unescaped `'`
+        inside it) let a `;` or `END name;` inside the string terminate the
+        block early; and a bare `/\\*.*?\\*/` substitution over raw text
+        doesn't know it's inside a string either, so a string containing an
+        unterminated `/*` (e.g. a comment-like fragment in a literal) could
+        pair up with an unrelated later `*/` and blank out everything in
+        between, including real statements — silently dropping a
+        `CREATE PROCEDURE ...` that happened to fall inside that span.
+        """
+        out: list[str] = []
+        i, n = 0, len(text)
+        in_single = False
+        q_close: str | None = None  # set while inside a q'...' string
+        while i < n:
+            c = text[i]
+            if q_close is not None:
+                if text[i:i + len(q_close)] == q_close:
+                    # Keep the apostrophe, like a plain string: the opener kept
+                    # one, and the signature scan pairs them up.
+                    out.append(" " * (len(q_close) - 1) + "'")
+                    i += len(q_close)
+                    q_close = None
+                else:
+                    out.append("\n" if c == "\n" else " ")
+                    i += 1
+                continue
+            if in_single:
+                if c == "'":
+                    if i + 1 < n and text[i + 1] == "'":
+                        out.append("  ")
+                        i += 2
+                        continue
+                    out.append("'")
+                    in_single = False
+                    i += 1
+                    continue
+                out.append("\n" if c == "\n" else " ")
+                i += 1
+                continue
+            # Not inside any string literal here.
+            if c == "-" and i + 1 < n and text[i + 1] == "-":
+                nl = text.find("\n", i)
+                end = n if nl == -1 else nl
+                out.append(" " * (end - i))
+                i = end
+                continue
+            if c == "/" and i + 1 < n and text[i + 1] == "*":
+                close = text.find("*/", i + 2)
+                seg_end = n if close == -1 else close + 2
+                out.append(
+                    "".join("\n" if ch == "\n" else " " for ch in text[i:seg_end]),
+                )
+                i = seg_end
+                continue
+            if (
+                c in "qQ" and i + 2 < n and text[i + 1] == "'"
+                and (i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_"))
+            ):
+                open_delim = text[i + 2]
+                out.append(c)
+                out.append("'")
+                out.append(" ")
+                i += 3
+                q_close = CodeParser._PLSQL_Q_DELIM_CLOSE.get(
+                    open_delim, open_delim,
+                ) + "'"
+                continue
+            if c == "'":
+                out.append("'")
+                in_single = True
+                i += 1
+                continue
+            out.append(c)
+            i += 1
+        return "".join(out)
+
+    # Any top-level CREATE statement this parser recognizes — used to bound
+    # a block-end search that finds no END at all, so a malformed/unusual
+    # body doesn't swallow the rest of the file.
+    _SQL_NEXT_STMT_RE = re.compile(
+        r"\bCREATE\s+(?:OR\s+REPLACE\s+)?"
+        r"(?:PROCEDURE|FUNCTION|TRIGGER|PACKAGE|TABLE|VIEW)\b",
+        re.IGNORECASE,
+    )
+
+    _PLSQL_NAMED_END_RE = re.compile(rf"\bEND\b\s*({_PLSQL_IDENT})\s*;", re.IGNORECASE)
+    # The lookaround keeps `$END` (conditional compilation) and `end_date` out.
+    _PLSQL_BLOCK_WORD_RE = re.compile(
+        r"(?<![\w$#])(?:(?P<open>BEGIN|CASE)|(?P<skip>END\s+(?:IF|LOOP))|END(?:\s+CASE)?)"
+        r"(?![\w$#])",
+        re.IGNORECASE,
+    )
+
+    _PLSQL_IS_AS_RE = re.compile(r"(?:IS|AS)\b", re.IGNORECASE)
+
+    @staticmethod
+    def _plsql_is_forward_decl(text: str, start: int) -> bool:
+        """True if a PROCEDURE/FUNCTION member at `start` (just after the
+        name) is a forward declaration — `PROCEDURE x(...);` — rather than
+        a real definition — `PROCEDURE x(...) IS ... END;` (or
+        `... RETURN t IS ...` for functions).
+
+        Forward declarations in a PACKAGE BODY (used for mutual recursion)
+        have no body of their own; treating one as a real member makes its
+        block-end search land on the *next* member's END, producing a
+        phantom node with a bogus line span and false CALLS edges — see
+        PR #785 review.
+
+        Callers already pass comment/string-stripped text (`clean_text`),
+        but this function skips `--`/`/* */` comments on its own too, so
+        it's independently correct rather than only correct because of an
+        external pre-processing step — a `;` inside a trailing comment on
+        the declaration line must not be mistaken for the forward-decl
+        terminator. The `IS`/`AS` check also requires a word boundary on
+        *both* sides (`re.match` alone only anchors the end): without it,
+        a return type like `t_alias` matches `AS` mid-word (`t_ali|AS`)
+        and a genuine forward declaration gets misclassified as a real
+        definition, producing the same phantom-node failure mode.
+        """
+        depth = 0
+        i, n = start, len(text)
+        while i < n:
+            c = text[i]
+            if c == "-" and i + 1 < n and text[i + 1] == "-":
+                nl = text.find("\n", i)
+                i = n if nl == -1 else nl + 1
+                continue
+            if c == "/" and i + 1 < n and text[i + 1] == "*":
+                end = text.find("*/", i + 2)
+                i = n if end == -1 else end + 2
+                continue
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+            elif depth <= 0:
+                if c == ";":
+                    return True
+                if c.isalpha() and (
+                    i == start or not (text[i - 1].isalnum() or text[i - 1] == "_")
+                ):
+                    if CodeParser._PLSQL_IS_AS_RE.match(text, i):
+                        return False
+            i += 1
+        return True
+
+    @staticmethod
+    def _plsql_member_signature(text: str, start: int) -> str:
+        """Extract the raw, whitespace-normalized parameter-list text right
+        after a PACKAGE BODY member's name (e.g. ``p_x NUMBER, p_y NUMBER``).
+
+        Oracle allows overloaded PROCEDURE/FUNCTION members within a
+        package (never for standalone subprograms), so two members sharing
+        a name are a normal, common pattern — not a duplicate. Without a
+        signature to distinguish them, both would collide on the same
+        qualified name, same root cause as the spec/body collision fixed
+        above. Mirrors ``_cpp_function_identity``'s always-on signature
+        identity, for the same stable-identity property. Returns "" for a
+        parameterless member.
+
+        Skips `--`/`/* */` comments and `'...'` string-literal contents on
+        its own (like ``_plsql_is_forward_decl``), so an unbalanced paren
+        inside a default-value string (e.g. ``p_x VARCHAR2 := '('``) can't
+        throw off the paren-depth count when called directly on raw text.
+        """
+        i, n = start, len(text)
+        while i < n and text[i].isspace():
+            i += 1
+        if i >= n or text[i] != "(":
+            return ""
+        depth = 0
+        sig_start = i + 1
+        while i < n:
+            c = text[i]
+            if c == "-" and i + 1 < n and text[i + 1] == "-":
+                nl = text.find("\n", i)
+                i = n if nl == -1 else nl + 1
+                continue
+            if c == "/" and i + 1 < n and text[i + 1] == "*":
+                end = text.find("*/", i + 2)
+                i = n if end == -1 else end + 2
+                continue
+            if c == "'":
+                j = i + 1
+                while j < n:
+                    if text[j] == "'":
+                        if j + 1 < n and text[j + 1] == "'":
+                            j += 2
+                            continue
+                        j += 1
+                        break
+                    j += 1
+                i = j
+                continue
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+                if depth == 0:
+                    return " ".join(text[sig_start:i].split())
+            i += 1
+        return " ".join(text[sig_start:].split())
+
     def _parse_sql(
         self, path: Path, source: bytes,
     ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
-        """Parse a `.sql` file.
+        """Parse a `.sql` file, including Oracle PL/SQL (`.sql`, `.pls`,
+        `.plb`, `.pks`, `.pkb`, `.pck`, `.prc`, `.fnc`, `.trg`).
 
         Extracts:
         - Tables (CREATE TABLE) → Class nodes with extra["sql_kind"]="table"
@@ -5007,6 +5940,27 @@ class CodeParser:
         - Functions (CREATE FUNCTION) → Function nodes with extra["sql_kind"]="function"
         - Procedures (CREATE PROCEDURE, regex fallback) → Function nodes with
           extra["sql_kind"]="procedure"
+
+        The following are Oracle-only and only extracted when
+        ``_is_plsql_dialect`` confirms the file is PL/SQL (via an Oracle
+        extension or a content signal like `VARCHAR2`/`%TYPE`/`:NEW.`) —
+        never for plain ANSI/T-SQL/MySQL `.sql` files:
+        - Packages (CREATE PACKAGE) → Class nodes with extra["sql_kind"]="package"
+        - Package bodies (CREATE PACKAGE BODY) → Class nodes with
+          extra["sql_kind"]="package_body", qualified as ``pkg_name$body``
+          (distinct from the spec's ``pkg_name``, since they're separate
+          Oracle objects), containing nested PROCEDURE/FUNCTION members as
+          Function nodes qualified as ``pkg_name$body.member_name(params)``
+          — the parameter signature is always included (even with zero
+          overloads) since Oracle allows overloaded package members
+          — mirrors ``_cpp_function_identity``'s always-on signature identity
+        - Triggers (CREATE TRIGGER) → Function nodes with extra["sql_kind"]="trigger"
+
+        For confirmed-PL/SQL files, procedure/function/trigger/package-member
+        bodies are also scanned for `identifier(` call sites to produce
+        CALLS edges (regex-based: no PL/SQL grammar is available, so this is
+        a best-effort heuristic that skips known PL/SQL keywords, scalar
+        type names, common builtins, and INSERT INTO table targets).
 
         Data dependencies (FROM/JOIN table references) are recorded as
         IMPORTS_FROM edges so the impact-radius query can follow them.
@@ -5055,18 +6009,56 @@ class CodeParser:
                 tree.root_node, source, file_path_str, nodes, edges,
             )
 
+        # Whether the PL/SQL-specific passes below (body-span computation
+        # and CALLS extraction) should run at all. Plain ANSI/T-SQL/MySQL
+        # `.sql` files skip them entirely — computing a body span for a
+        # dialect that doesn't use `END;` terminators is what caused the
+        # false CALLS edges flagged in the PR #785 review.
+        #
+        # Blanking comments and strings only makes sense for Oracle's quoting
+        # rules. A MySQL `\'` or `#` comment, a `"it's"`, or a pg_dump COPY row
+        # holding an apostrophe would flip its string state and blank real
+        # statements, so anything else keeps the raw text. Blanking can only
+        # remove a signal, so the raw check also spares plain files the cost.
+        # The second check stops a comment that merely mentions an Oracle word
+        # ("-- migrated from Oracle VARCHAR2") from counting as a signal.
+        clean_text = text
+        is_plsql = self._is_plsql_dialect(path, text)
+        if is_plsql:
+            clean_text = self._strip_plsql_noise(text)
+            is_plsql = self._is_plsql_dialect(path, clean_text)
+            if not is_plsql:
+                clean_text = text
+
+        # Names already captured by the tree-sitter pass, so the Oracle-style
+        # FUNCTION regex fallback below doesn't double-count ANSI-style
+        # `CREATE FUNCTION ... LANGUAGE sql` definitions the grammar already
+        # parsed correctly.
+        existing_function_names = {
+            n.name for n in nodes
+            if n.kind == "Function" and n.extra.get("sql_kind") == "function"
+        }
+
         # --- regex fallback for CREATE PROCEDURE ---
-        for m in self._SQL_PROC_RE.finditer(text):
+        # Body-span computation and CALLS extraction only run for confirmed
+        # Oracle PL/SQL; a plain ANSI/T-SQL/MySQL procedure still gets a
+        # Function node (as before this file supported PL/SQL at all), just
+        # without a computed body span.
+        for m in self._SQL_PROC_RE.finditer(clean_text):
             raw_name = m.group(1)
             name = raw_name.split(".")[-1]  # strip schema prefix
-            line = text[: m.start()].count("\n") + 1
+            line = clean_text[: m.start()].count("\n") + 1
             qualified = f"{file_path_str}::{name}"
+            line_end = line
+            if is_plsql:
+                body_end = self._plsql_block_end(clean_text, m.end(), name)
+                line_end = clean_text[:body_end].count("\n") + 1
             nodes.append(NodeInfo(
                 kind="Function",
                 name=name,
                 file_path=file_path_str,
                 line_start=line,
-                line_end=line,
+                line_end=line_end,
                 language="sql",
                 extra={"sql_kind": "procedure"},
             ))
@@ -5077,15 +6069,208 @@ class CodeParser:
                 file_path=file_path_str,
                 line=line,
             ))
+            if is_plsql:
+                self._extract_plsql_calls(
+                    clean_text, m.end(), body_end, qualified, file_path_str, edges,
+                )
+
+        # --- regex fallback for Oracle-style CREATE FUNCTION ---
+        # (PL/SQL `IS|AS ... BEGIN ... END` bodies with no RETURNS/LANGUAGE
+        # clause; the ANSI grammar above only catches `RETURNS ... AS $$ ...`
+        # style definitions.) Oracle-only: skip entirely for non-PL/SQL files.
+        for m in self._SQL_PLSQL_FUNC_RE.finditer(clean_text) if is_plsql else ():
+            raw_name = m.group(1)
+            name = raw_name.split(".")[-1]
+            if name in existing_function_names:
+                continue
+            line = clean_text[: m.start()].count("\n") + 1
+            qualified = f"{file_path_str}::{name}"
+            body_end = self._plsql_block_end(clean_text, m.end(), name)
+            nodes.append(NodeInfo(
+                kind="Function",
+                name=name,
+                file_path=file_path_str,
+                line_start=line,
+                line_end=clean_text[:body_end].count("\n") + 1,
+                language="sql",
+                extra={"sql_kind": "function"},
+            ))
+            edges.append(EdgeInfo(
+                kind="CONTAINS",
+                source=file_path_str,
+                target=qualified,
+                file_path=file_path_str,
+                line=line,
+            ))
+            self._extract_plsql_calls(
+                clean_text, m.end(), body_end, qualified, file_path_str, edges,
+            )
+
+        # --- regex fallback for CREATE TRIGGER ---
+        # Oracle-only (T-SQL/MySQL also have CREATE TRIGGER with different
+        # body syntax, so this must not run unless the file is confirmed
+        # PL/SQL, or their triggers would get an incorrect body span too).
+        for m in self._SQL_TRIGGER_RE.finditer(clean_text) if is_plsql else ():
+            raw_name = m.group(1)
+            name = raw_name.split(".")[-1]
+            line = clean_text[: m.start()].count("\n") + 1
+            qualified = f"{file_path_str}::{name}"
+            body_end = self._plsql_block_end(clean_text, m.end(), name)
+            nodes.append(NodeInfo(
+                kind="Function",
+                name=name,
+                file_path=file_path_str,
+                line_start=line,
+                line_end=clean_text[:body_end].count("\n") + 1,
+                language="sql",
+                extra={"sql_kind": "trigger"},
+            ))
+            edges.append(EdgeInfo(
+                kind="CONTAINS",
+                source=file_path_str,
+                target=qualified,
+                file_path=file_path_str,
+                line=line,
+            ))
+            self._extract_plsql_calls(
+                clean_text, m.end(), body_end, qualified, file_path_str, edges,
+            )
+
+        # --- regex fallback for CREATE PACKAGE (specification) ---
+        for m in self._SQL_PACKAGE_RE.finditer(clean_text) if is_plsql else ():
+            raw_name = m.group(1)
+            name = raw_name.split(".")[-1]
+            line = clean_text[: m.start()].count("\n") + 1
+            qualified = f"{file_path_str}::{name}"
+            body_end = self._plsql_block_end(clean_text, m.end(), name)
+            nodes.append(NodeInfo(
+                kind="Class",
+                name=name,
+                file_path=file_path_str,
+                line_start=line,
+                line_end=clean_text[:body_end].count("\n") + 1,
+                language="sql",
+                extra={"sql_kind": "package"},
+            ))
+            edges.append(EdgeInfo(
+                kind="CONTAINS",
+                source=file_path_str,
+                target=qualified,
+                file_path=file_path_str,
+                line=line,
+            ))
+
+        # --- regex fallback for CREATE PACKAGE BODY (+ nested members) ---
+        # The body's qualified name gets a `$body` suffix, distinct from the
+        # spec's `file::pkg_name` — spec and body are separate Oracle
+        # objects, and sharing one qualified name collided on the graph
+        # store's `nodes.qualified_name UNIQUE` constraint, silently
+        # dropping whichever was inserted second (PR #785 review).
+        #
+        # GraphStore.upsert_node computes each node's *real* qualified_name
+        # itself, via `identity_name or name` + `parent_name` — it does not
+        # read back whatever string this method uses for edge targets. So
+        # the `$body` suffix has to be threaded through `identity_name`
+        # (for the body's own node) and `parent_name` (for its members),
+        # not just baked into the local `body_qualified`/`member_qualified`
+        # strings below — otherwise the edges above would point at a
+        # qualified name the stored node never actually has.
+        for m in self._SQL_PACKAGE_BODY_RE.finditer(clean_text) if is_plsql else ():
+            raw_name = m.group(1)
+            pkg_name = raw_name.split(".")[-1]
+            body_identity = f"{pkg_name}$body"
+            line = clean_text[: m.start()].count("\n") + 1
+            body_qualified = f"{file_path_str}::{body_identity}"
+            body_start = m.end()
+            body_end = self._plsql_block_end(clean_text, body_start, pkg_name, package=True)
+            nodes.append(NodeInfo(
+                kind="Class",
+                name=pkg_name,
+                identity_name=body_identity,
+                file_path=file_path_str,
+                line_start=line,
+                line_end=clean_text[:body_end].count("\n") + 1,
+                language="sql",
+                extra={"sql_kind": "package_body"},
+            ))
+            edges.append(EdgeInfo(
+                kind="CONTAINS",
+                source=file_path_str,
+                target=body_qualified,
+                file_path=file_path_str,
+                line=line,
+            ))
+
+            body_text = clean_text[body_start:body_end]
+            named_ends: dict[str, list[int]] = {}
+            for em in self._PLSQL_NAMED_END_RE.finditer(clean_text, body_start, body_end):
+                named_ends.setdefault(em.group(1).lower(), []).append(em.end())
+            members = list(self._SQL_PACKAGE_MEMBER_RE.finditer(body_text))
+            # An overload with a bare `END;` must not run on to the `END name;`
+            # of the next overload, so each member stops at the next one of its
+            # name. Other names cannot bound it: it may nest local procedures.
+            member_limits = [body_end] * len(members)
+            next_of_name: dict[str, int] = {}
+            for index in range(len(members) - 1, -1, -1):
+                key = members[index].group(2).lower()
+                member_limits[index] = next_of_name.get(key, body_end)
+                next_of_name[key] = body_start + members[index].start()
+            for mm, member_limit in zip(members, member_limits):
+                member_start = body_start + mm.end()
+                if self._plsql_is_forward_decl(clean_text, member_start):
+                    # `PROCEDURE x(...);` with no body — the real
+                    # definition is matched separately later in this loop.
+                    continue
+                member_kind = mm.group(1).lower()
+                member_name = mm.group(2)
+                member_sig = self._plsql_member_signature(clean_text, member_start)
+                member_identity = f"{member_name}({member_sig})"
+                member_line = clean_text[: body_start + mm.start()].count("\n") + 1
+                member_body_end = self._plsql_block_end(
+                    clean_text, member_start, member_name,
+                    limit=member_limit, named_ends=named_ends,
+                )
+                member_qualified = f"{body_qualified}.{member_identity}"
+                nodes.append(NodeInfo(
+                    kind="Function",
+                    name=member_name,
+                    identity_name=member_identity,
+                    file_path=file_path_str,
+                    line_start=member_line,
+                    line_end=clean_text[:member_body_end].count("\n") + 1,
+                    language="sql",
+                    parent_name=body_identity,
+                    extra={
+                        "sql_kind": (
+                            "procedure" if member_kind == "procedure"
+                            else "function"
+                        ),
+                    },
+                ))
+                edges.append(EdgeInfo(
+                    kind="CONTAINS",
+                    source=body_qualified,
+                    target=member_qualified,
+                    file_path=file_path_str,
+                    line=member_line,
+                ))
+                self._extract_plsql_calls(
+                    clean_text, member_start, member_body_end,
+                    member_qualified, file_path_str, edges,
+                )
 
         # --- table-reference pass (FROM / JOIN targets) ---
+        # Uses clean_text too: PL/SQL dynamic SQL commonly builds statements
+        # inside string literals (`l_sql := 'SELECT * FROM ' || t;`), which
+        # would otherwise produce a phantom IMPORTS_FROM to a table name
+        # that's just documentation/example text inside a string.
         seen_refs: set[str] = set()
-        for m in _SQL_TABLE_RE.finditer(text):
+        for m in _SQL_TABLE_RE.finditer(clean_text):
             raw_ref = m.group(1).strip("`")
             ref = raw_ref.split(".")[-1]  # strip schema/db prefix
             if ref and ref.upper() not in _SQL_KEYWORDS and ref not in seen_refs:
                 seen_refs.add(ref)
-                line = text[: m.start()].count("\n") + 1
+                line = clean_text[: m.start()].count("\n") + 1
                 edges.append(EdgeInfo(
                     kind="IMPORTS_FROM",
                     source=file_path_str,
@@ -5215,6 +6400,163 @@ class CodeParser:
                     file_path=file_path_str,
                     line=text[: m.start()].count("\n") + 1,
                 ))
+
+    @staticmethod
+    def _plsql_block_end(
+        text: str,
+        start: int,
+        name: str,
+        limit: int | None = None,
+        named_ends: dict[str, list[int]] | None = None,
+        package: bool = False,
+    ) -> int:
+        """Return the index just past the terminating ``;`` of a named
+        PL/SQL block beginning at ``start``.
+
+        Prefers a name-qualified ``END <name>;`` — the Oracle style-guide
+        convention — since that reliably identifies the *outer* block even
+        when nested ``BEGIN ... EXCEPTION ... END;`` blocks inside it use a
+        bare, unnamed ``END;``. Falls back to counting blocks if no named
+        terminator exists; see :meth:`_plsql_bare_end`.
+
+        ``limit`` bounds how far either search can look (defaults to the
+        next top-level ``CREATE`` statement after ``start``, or end of
+        file, if no ``END`` at all is found). Without this bound, the named
+        search ran unbounded to end-of-file: two package bodies with a
+        same-named member (two overloads sharing a name is explicitly a
+        supported case, but so is one package body's member called `foo`
+        and another, unrelated package body's member also called `foo`)
+        could bleed into each other when the first used a bare `END;` and
+        the regex, un-bounded, found some *later* package body's own named
+        `END foo;` instead — see PR #785 review. An unbounded scan from
+        every member's start to end-of-file is also quadratic over a file
+        with many members (~4s for 4,000 members, per that review); passing
+        the enclosing block's own end as `limit` keeps each member's search
+        proportional to that block's size instead of to the whole file.
+
+        ``named_ends`` maps a lower-cased name to the sorted end offsets of its
+        ``END name;`` terminators. A caller walking many members of one body
+        passes it so that a member with a bare ``END;`` does not rescan the rest
+        of the body for a name that never appears.
+        """
+        if limit is None:
+            next_stmt = CodeParser._SQL_NEXT_STMT_RE.search(text, start)
+            limit = next_stmt.start() if next_stmt else len(text)
+        if named_ends is not None:
+            ends = named_ends.get(name.lower(), [])
+            at = bisect_left(ends, start)
+            if at < len(ends) and ends[at] <= limit:
+                return ends[at]
+        else:
+            named = re.compile(
+                rf"\bEND\b\s*{re.escape(name)}(?![\w$#])\s*;", re.IGNORECASE,
+            ).search(text, start, limit)
+            if named:
+                return named.end()
+        return CodeParser._plsql_bare_end(text, start, limit, package)
+
+    @staticmethod
+    def _plsql_bare_end(text: str, start: int, limit: int, package: bool) -> int:
+        """Find the end of a block with no ``END <name>;``, counting nested blocks.
+
+        A package body holds whole subprograms, so its end is the ``END`` with no
+        block open. A subprogram ends at the bare ``END;`` closing its outermost
+        block; a named ``END`` that closes everything belongs to a local
+        subprogram. A local subprogram with a bare ``END;`` still under-shoots:
+        telling it apart needs a real PL/SQL grammar, and none is available.
+
+        A package's initialisation section opens a block whose ``END`` is also
+        the package's, so the last ``END`` seen stands in when none is left over.
+        """
+        open_blocks: list[str] = []
+        last_end = limit
+        for m in CodeParser._PLSQL_BLOCK_WORD_RE.finditer(text, start, limit):
+            if m.group("open"):
+                open_blocks.append(m.group("open").upper())
+                continue
+            if m.group("skip"):
+                continue
+            semicolon = text.find(";", m.end(), limit)
+            end = m.end() if semicolon == -1 else semicolon + 1
+            if not open_blocks:
+                return end
+            closed = open_blocks.pop()
+            is_bare = not text[m.end():end - 1].strip()
+            if not open_blocks and closed == "BEGIN" and is_bare and not package:
+                return end
+            last_end = end
+        return last_end
+
+    def _extract_plsql_calls(
+        self,
+        text: str,
+        body_start: int,
+        body_end: int,
+        caller_qualified: str,
+        file_path_str: str,
+        edges: list[EdgeInfo],
+    ) -> None:
+        """Emit CALLS edges for procedure/function invocations found between
+        ``body_start`` and ``body_end``.
+
+        Regex-based (no PL/SQL grammar is available): matches
+        ``identifier(`` / ``pkg.proc(``, skipping PL/SQL/SQL keywords,
+        scalar type names that also precede ``(`` (e.g. ``VARCHAR2(50)``
+        in a variable declaration), the target of ``INSERT INTO t (cols)``,
+        and common builtin functions/packages (``COUNT``, ``NVL``,
+        ``TO_CHAR``, ``DBMS_OUTPUT.PUT_LINE``, ...) which are calls but not
+        to user code.
+        """
+        body_text = text[body_start:body_end]
+        seen: set[str] = set()
+        line = text.count("\n", 0, body_start) + 1
+        counted_to = 0
+        for m in self._PLSQL_CALL_RE.finditer(body_text):
+            target = m.group(1)
+            first = target.split(".", 1)[0]
+            receiver, _, last = target.rpartition(".")
+            if last.lower() in self._PLSQL_CALL_KEYWORDS:
+                continue
+            if last.upper() in _SQL_KEYWORDS:
+                continue
+            if (
+                receiver.lower() in self._PLSQL_BUILTIN_RECEIVERS
+                and last.lower() in self._PLSQL_BUILTIN_FUNCS
+            ):
+                continue
+            if receiver and last.lower() in self._PLSQL_COLLECTION_METHODS:
+                continue
+            if first.lower().startswith(self._PLSQL_BUILTIN_PACKAGE_PREFIXES):
+                continue
+            # Bounded lookback instead of body_text[:m.start()]: slicing and
+            # re-searching the whole preceding text on every match made this
+            # function O(n^2) on files with many call sites (~25s on large
+            # files per review). "INTO" immediately preceding the target is
+            # a local pattern — a small fixed window is enough to catch it
+            # even across a few lines of unusual whitespace/formatting.
+            lookback_start = max(0, m.start() - self._INTO_LOOKBACK)
+            if re.search(
+                r"\bINTO\s*$", body_text[lookback_start:m.start()], re.IGNORECASE,
+            ):
+                continue  # INSERT INTO t (cols) — t is a table, not a call
+            if target in seen:
+                continue
+            seen.add(target)
+            # Counted forward: recounting the prefix per call is quadratic.
+            line += body_text.count("\n", counted_to, m.start())
+            counted_to = m.start()
+            # `pkg.proc(` is stored under `proc`, as other languages store
+            # `obj.method()`. Members are keyed `pkg$body.proc(params)`, so the
+            # dotted spelling can never resolve: the member would look uncalled
+            # to `callers_of` and `dead-code`.
+            edges.append(EdgeInfo(
+                kind="CALLS",
+                source=caller_qualified,
+                target=last,
+                file_path=file_path_str,
+                line=line,
+                extra={"receiver": receiver} if receiver else {},
+            ))
 
     def _walk_sql_tree(
         self,
@@ -5361,6 +6703,28 @@ class CodeParser:
             for node in nodes
             if node.language == "go" and "go_receiver" in node.extra
         }
+        disambiguated_leaves = {
+            node.parent_name.rsplit(".", 1)[-1] for node in nodes
+            if node.language == "python" and node.parent_name
+            and "." in node.parent_name and node.kind in ("Function", "Test")
+        }
+        # Every nested Ruby class has a dotted scope, so a dot proves nothing
+        # there. A Ruby leaf is ambiguous only when two scopes really share it.
+        ruby_scopes_by_leaf: dict[str, set[str]] = {}
+        for node in nodes:
+            if node.language == "ruby" and node.parent_name and node.kind in ("Function", "Test"):
+                ruby_scopes_by_leaf.setdefault(
+                    node.parent_name.rsplit(".", 1)[-1], set(),
+                ).add(node.parent_name)
+        disambiguated_leaves.update(
+            leaf for leaf, scopes in ruby_scopes_by_leaf.items() if len(scopes) > 1
+        )
+        disambiguated_scopes = {
+            node.parent_name for node in nodes
+            if node.language in ("python", "ruby") and node.parent_name
+            and node.kind in ("Function", "Test")
+            and node.parent_name.rsplit(".", 1)[-1] in disambiguated_leaves
+        }
 
         def candidate_entries(
             target: str,
@@ -5387,6 +6751,37 @@ class CodeParser:
             has_receiver = bool(receiver) or (
                 edge.extra.get("receiver_form") == "expression"
             )
+            scope = source_scopes.get(edge.source)
+            if (
+                scope in disambiguated_scopes
+                and edge.kind in ("CALLS", "REFERENCES")
+                and "::" not in edge.target
+                and (not has_receiver or receiver == "self")
+            ):
+                entries = candidate_entries(edge.target, edge.kind)
+                local = [qualified for qualified, parent in entries if parent == scope]
+                if len(local) == 1:
+                    edge = EdgeInfo(
+                        kind=edge.kind, source=edge.source, target=local[0],
+                        file_path=edge.file_path, line=edge.line, extra=edge.extra,
+                    )
+                    resolved.append(edge)
+                    continue
+                if entries and not any(parent is None for _, parent in entries):
+                    # A same-named member in a different lexical class is
+                    # not evidence of the target of this unbound call. The
+                    # class binding stops post-build resolution choosing it.
+                    edge = EdgeInfo(
+                        kind=edge.kind, source=edge.source, target=edge.target,
+                        file_path=edge.file_path, line=edge.line,
+                        extra={
+                            **edge.extra,
+                            "receiver_binding": "class",
+                            "receiver_class": scope,
+                        },
+                    )
+                    resolved.append(edge)
+                    continue
             if (
                 is_go
                 and edge.kind == "CALLS"
@@ -6276,9 +7671,12 @@ class CodeParser:
     # consulted anywhere.
 
     def _collect_python_receiver_evidence(
-        self, root, file_path: str,
-    ) -> dict[tuple[int, str], tuple[str, str]]:
-        """Return ``{(line, receiver): (kind, detail)}`` for every member call.
+        self, root, file_path: str, source: bytes,
+    ) -> tuple[
+        dict[tuple[int, str], tuple[str, str]],
+        list[EdgeInfo],
+    ]:
+        """Collect typed receiver evidence and edges for property reads.
 
         Scoped the way Python is scoped, because a file-wide answer is wrong
         often enough to matter: ``store`` is a ``GraphStore`` in fifteen test
@@ -6296,22 +7694,51 @@ class CodeParser:
         module_bindings: dict[str, set[str]] = {}
         imported_names: set[str] = set()
         class_names: set[str] = set()
-        symbol_origins: dict[str, str] = {}
+        ambiguous_property_classes: set[str] = set()
+        symbol_binding_candidates: dict[str, set[tuple[str, str]]] = {}
         local_returns: dict[str, str] = {}
+        property_returns: dict[tuple[str, str], str] = {}
         ambiguous_returns: set[str] = set()
 
-        def scan_declarations(node, in_class: bool, depth: int = 0) -> None:
+        def scan_declarations(
+            node, owner_class: Optional[str], in_function: bool = False,
+            depth: int = 0,
+        ) -> None:
             if depth > self._MAX_AST_DEPTH:
                 return
-            nested = in_class
             if node.type == "class_definition":
-                nested = True
                 name_node = node.child_by_field_name("name")
                 if name_node is not None:
-                    class_names.add(
-                        name_node.text.decode("utf-8", errors="replace"),
+                    owner_class = name_node.text.decode(
+                        "utf-8", errors="replace",
                     )
-            elif node.type == "function_definition" and not in_class:
+                    if owner_class in class_names:
+                        ambiguous_property_classes.add(owner_class)
+                    class_names.add(owner_class)
+                in_function = False
+            elif (
+                node.type == "function_definition"
+                and owner_class and not in_function
+            ):
+                name_node = node.child_by_field_name("name")
+                return_node = node.child_by_field_name("return_type")
+                decorators = _python_decorator_names(node)
+                if name_node is not None and any(
+                    decorator.rsplit(".", 1)[-1] == "property"
+                    for decorator in decorators
+                ):
+                    property_name = name_node.text.decode(
+                        "utf-8", errors="replace",
+                    )
+                    property_returns[(owner_class, property_name)] = (
+                        return_node.text.decode("utf-8", errors="replace")
+                        if return_node is not None
+                        else ""
+                    )
+            elif (
+                node.type == "function_definition"
+                and owner_class is None and not in_function
+            ):
                 # A module-local ``def`` with a return annotation types every
                 # name assigned from a call to it. Only the annotation is
                 # read; a function body is never inspected for a return type.
@@ -6329,16 +7756,44 @@ class CodeParser:
                     node, file_path, module_bindings, imported_names,
                 )
             elif node.type == "import_from_statement":
+                import_origins: dict[str, str] = {}
+                import_names: dict[str, str] = {}
                 self._python_from_import_bindings(
                     node, file_path, module_bindings, imported_names,
-                    symbol_origins,
+                    import_origins, import_names,
                 )
+                for name, origin in import_origins.items():
+                    imported_name = import_names.get(name)
+                    if imported_name is not None:
+                        symbol_binding_candidates.setdefault(name, set()).add(
+                            (origin, imported_name),
+                        )
             for child in node.children:
-                scan_declarations(child, nested, depth + 1)
+                scan_declarations(
+                    child, owner_class,
+                    in_function or node.type == "function_definition",
+                    depth + 1,
+                )
 
-        scan_declarations(root, False)
+        scan_declarations(root, None)
+        symbol_origins = {
+            name: next(iter(bindings))[0]
+            for name, bindings in symbol_binding_candidates.items()
+            if len(bindings) == 1
+        }
+        symbol_names = {
+            name: next(iter(bindings))[1]
+            for name, bindings in symbol_binding_candidates.items()
+            if len(bindings) == 1
+        }
         for name in ambiguous_returns:
             local_returns.pop(name, None)
+        if ambiguous_property_classes:
+            property_returns = {
+                key: annotation
+                for key, annotation in property_returns.items()
+                if key[0] not in ambiguous_property_classes
+            }
 
         context = _PyReceiverContext(
             file_path=file_path,
@@ -6346,7 +7801,9 @@ class CodeParser:
             imported_names=frozenset(imported_names),
             module_bindings=module_bindings,
             symbol_origins=symbol_origins,
+            symbol_names=symbol_names,
             local_returns=local_returns,
+            property_returns=property_returns,
         )
 
         module_env: dict[str, tuple[str, str]] = {}
@@ -6364,51 +7821,194 @@ class CodeParser:
 
         evidence: dict[tuple[int, str], tuple[str, str]] = {}
         expression_evidence: dict[tuple[int, str], list[tuple[str, str]]] = {}
+        property_read_edges: list[EdgeInfo] = []
+        unreachable_positions = _python_unreachable_call_positions(source)
+        function_scopes = _python_function_scope_bindings(source)
 
-        def bind_targets(left, value, type_node, env) -> None:
+        def bind_targets(
+            left, value, type_node, env, class_fields, current_class,
+            instance_receiver_name, class_receiver_name,
+        ) -> None:
             """Record what one binding form says about each name it binds."""
             for name, path in self._python_binding_targets(left):
                 bound = self._python_binding_evidence(
                     value, type_node, path, context,
+                    env, class_fields, current_class, instance_receiver_name,
+                    class_receiver_name,
                 )
                 if bound is not None:
                     env[name] = bound
+
+        def first_parameter_name(function_node) -> Optional[str]:
+            parameters = function_node.child_by_field_name("parameters")
+            if parameters is None or not parameters.named_children:
+                return None
+            first = parameters.named_children[0]
+            if first.type == "identifier":
+                return first.text.decode("utf-8", errors="replace")
+            if first.type in (
+                "typed_parameter", "typed_default_parameter", "default_parameter",
+            ):
+                name = next(
+                    (child for child in first.children if child.type == "identifier"),
+                    None,
+                )
+                return (
+                    name.text.decode("utf-8", errors="replace")
+                    if name is not None
+                    else None
+                )
+            return None
+
+        def instance_receiver_parameter(function_node) -> Optional[str]:
+            """Name the implicit instance parameter of an ordinary method."""
+            if any(
+                decorator.rsplit(".", 1)[-1] in {"classmethod", "staticmethod"}
+                for decorator in _python_decorator_names(function_node)
+            ):
+                return None
+            return first_parameter_name(function_node)
+
+        def class_receiver_parameter(function_node) -> Optional[str]:
+            """Name the implicit class-object parameter of a class method."""
+            if any(
+                decorator.rsplit(".", 1)[-1] == "classmethod"
+                for decorator in _python_decorator_names(function_node)
+            ):
+                return first_parameter_name(function_node)
+            return None
+
+        def is_named_receiver(expression, receiver_name: Optional[str]) -> bool:
+            return (
+                expression is not None
+                and expression.type == "identifier"
+                and receiver_name is not None
+                and expression.text.decode("utf-8", errors="replace") == receiver_name
+            )
+
+        def is_attribute_store_target(attribute_node) -> bool:
+            """Whether this attribute itself is stored, deleted, or loop-bound.
+
+            Stop at an enclosing attribute/subscript: its receiver is still a
+            load (``self.value.child = ...`` reads ``self.value``). Augmented
+            assignment deliberately remains a read because Python fetches the
+            old property value before applying the operator.
+            """
+            parent = attribute_node.parent
+            while parent is not None:
+                if parent.type in ("attribute", "subscript", "augmented_assignment"):
+                    return False
+                if parent.type in (
+                    "assignment", "for_statement", "for_in_clause",
+                ):
+                    target = (
+                        parent.child_by_field_name("left")
+                        or parent.child_by_field_name("target")
+                    )
+                    return (
+                        target is not None
+                        and target.start_byte <= attribute_node.start_byte
+                        and attribute_node.end_byte <= target.end_byte
+                    )
+                if parent.type == "as_pattern":
+                    alias = parent.child_by_field_name("alias")
+                    return alias is not None and _node_is_in_child(
+                        attribute_node, alias,
+                    )
+                if parent.type == "delete_statement":
+                    return True
+                parent = parent.parent
+            return False
 
         def walk(
             node,
             env: dict[str, tuple[str, str]],
             class_fields: dict[str, tuple[str, str]],
+            current_class: Optional[str] = None,
+            current_function: Optional[str] = None,
             depth: int = 0,
+            instance_receiver_name: Optional[str] = None,
+            class_receiver_name: Optional[str] = None,
         ) -> None:
             if depth > self._MAX_AST_DEPTH:
                 return
             node_type = node.type
             if node_type == "class_definition":
                 fields = self._collect_python_class_fields(node, context)
+                name_node = node.child_by_field_name("name")
+                nested_class = (
+                    name_node.text.decode("utf-8", errors="replace")
+                    if name_node is not None
+                    else current_class
+                )
                 class_env = dict(env)
                 class_env.update(fields)
                 for child in node.children:
-                    walk(child, class_env, fields, depth + 1)
+                    walk(
+                        child, class_env, fields, nested_class,
+                        current_function, depth + 1, None, class_receiver_name,
+                    )
                 return
             if node_type == "function_definition":
                 scoped = dict(env)
                 scoped.update(class_fields)
+                function_key = (node.start_point[0] + 1, node.start_point[1])
+                parameter_names, local_names = function_scopes.get(
+                    function_key, (frozenset(), frozenset()),
+                )
+                for parameter_name in parameter_names:
+                    scoped.pop(parameter_name, None)
                 for name, type_name in self._collect_function_typed_parameters(
                     node, "python",
                 ).items():
                     scoped[name] = ("class", type_name)
+                name_node = node.child_by_field_name("name")
+                function_name = (
+                    name_node.text.decode("utf-8", errors="replace")
+                    if name_node is not None
+                    else current_function
+                )
+                # A closure still sees the method's receiver unless it hides it.
+                receiver_name = (
+                    instance_receiver_parameter(node)
+                    if current_class and current_function is None
+                    else (
+                        instance_receiver_name
+                        if instance_receiver_name is not None
+                        and instance_receiver_name not in local_names
+                        else None
+                    )
+                )
+                class_receiver = (
+                    class_receiver_parameter(node)
+                    if current_class and current_function is None
+                    else (
+                        class_receiver_name
+                        if class_receiver_name is not None
+                        and class_receiver_name not in local_names
+                        else None
+                    )
+                )
                 for child in node.children:
-                    walk(child, scoped, class_fields, depth + 1)
+                    walk(
+                        child, scoped, class_fields, current_class,
+                        function_name, depth + 1, receiver_name, class_receiver,
+                    )
                 return
             if node_type == "assignment":
                 # The right-hand side is evaluated before the name is rebound.
                 for child in node.children:
-                    walk(child, env, class_fields, depth + 1)
+                    walk(
+                        child, env, class_fields, current_class,
+                        current_function, depth + 1, instance_receiver_name,
+                        class_receiver_name,
+                    )
                 bind_targets(
                     node.child_by_field_name("left"),
                     node.child_by_field_name("right"),
                     node.child_by_field_name("type"),
-                    env,
+                    env, class_fields, current_class, instance_receiver_name,
+                    class_receiver_name,
                 )
                 return
             if node_type == "as_pattern":
@@ -6418,7 +8018,11 @@ class CodeParser:
                 # differently. The value is the ``as_pattern``'s first child
                 # and the alias its ``alias`` field.
                 for child in node.children:
-                    walk(child, env, class_fields, depth + 1)
+                    walk(
+                        child, env, class_fields, current_class,
+                        current_function, depth + 1, instance_receiver_name,
+                        class_receiver_name,
+                    )
                 alias = node.child_by_field_name("alias")
                 value = node.children[0] if node.children else None
                 if alias is not None and value is not None and value is not alias:
@@ -6428,9 +8032,53 @@ class CodeParser:
                         else alias,
                         value,
                         None,
-                        env,
+                        env, class_fields, current_class, instance_receiver_name,
+                        class_receiver_name,
                     )
                 return
+            if node_type == "attribute":
+                owner = node.child_by_field_name("object")
+                property_name_node = node.child_by_field_name("attribute")
+                owner_evidence = self._python_expression_class_evidence(
+                    owner, env, class_fields, current_class, context,
+                    instance_receiver_name, class_receiver_name,
+                )
+                if (
+                    not is_attribute_store_target(node)
+                    and (node.start_point[0] + 1, node.start_point[1])
+                    not in unreachable_positions
+                    and owner_evidence is not None
+                    and owner_evidence[0] == "class"
+                    and property_name_node is not None
+                ):
+                    property_name = property_name_node.text.decode(
+                        "utf-8", errors="replace",
+                    )
+                    definition = self._python_property_definition(
+                        owner_evidence[1], property_name, context,
+                    )
+                    if (
+                        definition is not None
+                        and not is_named_receiver(owner, class_receiver_name)
+                    ):
+                        target_file, target_class, _ = definition
+                        caller = (
+                            self._qualify(
+                                current_function, file_path, current_class,
+                            )
+                            if current_function
+                            else file_path
+                        )
+                        property_read_edges.append(EdgeInfo(
+                            kind="CALLS",
+                            source=caller,
+                            target=self._qualify(
+                                property_name, target_file, target_class,
+                            ),
+                            file_path=file_path,
+                            line=node.start_point[0] + 1,
+                            extra={"python_property_read": True},
+                        ))
             if node_type == "call":
                 receiver, method = self._get_member_call_receiver_method(
                     node, "python",
@@ -6446,6 +8094,19 @@ class CodeParser:
                     constructed = self._python_expression_receiver_evidence(
                         node, context,
                     )
+                    if constructed is None:
+                        callee = node.child_by_field_name("function")
+                        receiver_node = (
+                            callee.child_by_field_name("object")
+                            if callee is not None
+                            and callee.type == "attribute"
+                            else None
+                        )
+                        constructed = self._python_expression_class_evidence(
+                            receiver_node, env, class_fields,
+                            current_class, context, instance_receiver_name,
+                            class_receiver_name,
+                        )
                     if constructed is not None:
                         key = (
                             node.start_point[0] + 1,
@@ -6455,14 +8116,18 @@ class CodeParser:
                             constructed,
                         )
             for child in node.children:
-                walk(child, env, class_fields, depth + 1)
+                walk(
+                    child, env, class_fields, current_class,
+                    current_function, depth + 1, instance_receiver_name,
+                    class_receiver_name,
+                )
 
         walk(root, module_env, {})
         for key, found in expression_evidence.items():
             # Two expression receivers on one line sharing a method name are
             # indistinguishable downstream, so they must agree to count.
             evidence[key] = self._merge_python_evidence(found)
-        return evidence
+        return evidence, property_read_edges
 
     def _collect_python_class_fields(
         self,
@@ -6526,6 +8191,319 @@ class CodeParser:
             name: self._merge_python_evidence(found)
             for name, found in gathered.items()
         }
+
+    def _python_property_definition(
+        self,
+        owner_type: str,
+        property_name: str,
+        context: _PyReceiverContext,
+    ) -> Optional[tuple[str, str, str]]:
+        """Return the defining file, class, and return annotation of a property.
+
+        Cross-file metadata is read only from the file bound by a ``from``
+        import in the current module. An unresolved or ambiguous import never
+        supplies a property definition.
+        """
+        identity = _python_split_class_identity(owner_type)
+        if identity is not None:
+            origin, actual_class = identity
+            annotations = self._python_module_property_return_annotations(origin)
+            key = (actual_class, property_name)
+            if key not in annotations:
+                return None
+            return origin, actual_class, annotations[key]
+
+        local_key = (owner_type, property_name)
+        if local_key in context.property_returns:
+            return context.file_path, owner_type, context.property_returns[local_key]
+
+        origin = context.symbol_origins.get(owner_type)
+        if not origin:
+            return None
+        actual_class = context.symbol_names.get(owner_type, owner_type)
+        annotations = self._python_module_property_return_annotations(origin)
+        key = (actual_class, property_name)
+        if key not in annotations:
+            return None
+        return origin, actual_class, annotations[key]
+
+    def _python_module_property_return_annotations(
+        self, module_file: str,
+    ) -> dict[tuple[str, str], str]:
+        """Read explicitly decorated property getters from one Python module."""
+        if not module_file.endswith(".py"):
+            return {}
+        try:
+            module_path = Path(module_file).resolve()
+            file_stat = module_path.stat()
+        except (OSError, ValueError):
+            return {}
+        resolved = normalize_file_path(module_path)
+        if self._excluded_files and resolved in self._excluded_files:
+            return {}
+        cache_key = (resolved, file_stat.st_mtime_ns, file_stat.st_size)
+        with _PYTHON_RETURN_ANNOTATION_CACHE_LOCK:
+            cached = _PYTHON_PROPERTY_RETURN_ANNOTATION_CACHE.get(cache_key)
+            if cached is not None:
+                return cached
+            properties = self._read_python_property_return_annotations(module_path)
+            for stale in [
+                key for key in _PYTHON_PROPERTY_RETURN_ANNOTATION_CACHE
+                if key[0] == resolved and key != cache_key
+            ]:
+                _PYTHON_PROPERTY_RETURN_ANNOTATION_CACHE.pop(stale, None)
+            if len(_PYTHON_PROPERTY_RETURN_ANNOTATION_CACHE) >= _PYTHON_STAR_CACHE_MAX:
+                for oldest in list(_PYTHON_PROPERTY_RETURN_ANNOTATION_CACHE)[
+                    : _PYTHON_STAR_CACHE_MAX // 2
+                ]:
+                    _PYTHON_PROPERTY_RETURN_ANNOTATION_CACHE.pop(oldest, None)
+            _PYTHON_PROPERTY_RETURN_ANNOTATION_CACHE[cache_key] = properties
+            return properties
+
+    def _python_module_class_identities(
+        self, module_file: str,
+    ) -> dict[str, tuple[str, str]]:
+        """Resolve class names in one module without borrowing caller names."""
+        try:
+            module_path = Path(module_file).resolve()
+            file_stat = module_path.stat()
+            source = module_path.read_bytes()
+        except (OSError, RuntimeError, ValueError):
+            return {}
+        resolved = normalize_file_path(module_path)
+        if self._excluded_files and resolved in self._excluded_files:
+            return {}
+        cache_key = (resolved, file_stat.st_mtime_ns, file_stat.st_size)
+        with _PYTHON_MODULE_CLASS_IDENTITY_CACHE_LOCK:
+            cached = _PYTHON_MODULE_CLASS_IDENTITY_CACHE.get(cache_key)
+            if cached is not None:
+                return cached
+
+        parser = self._get_parser("python")
+        if not parser:
+            return {}
+        try:
+            tree = parser.parse(source)  # type: ignore[union-attr]
+        except (RecursionError, ValueError):  # pragma: no cover
+            return {}
+
+        class_counts: dict[str, int] = {}
+        imported_names: set[str] = set()
+        module_bindings: dict[str, set[str]] = {}
+        symbol_bindings: dict[str, set[tuple[str, str]]] = {}
+
+        def visit(node, depth: int = 0) -> None:
+            if depth > self._MAX_AST_DEPTH or node.type == "function_definition":
+                return
+            if node.type == "class_definition":
+                name_node = node.child_by_field_name("name")
+                if name_node is not None:
+                    name = name_node.text.decode("utf-8", errors="replace")
+                    class_counts[name] = class_counts.get(name, 0) + 1
+            elif node.type == "import_statement":
+                self._python_plain_import_bindings(
+                    node, resolved, module_bindings, imported_names,
+                )
+            elif node.type == "import_from_statement":
+                import_origins: dict[str, str] = {}
+                import_names: dict[str, str] = {}
+                self._python_from_import_bindings(
+                    node, resolved, module_bindings, imported_names,
+                    import_origins, import_names,
+                )
+                for name, origin in import_origins.items():
+                    imported_name = import_names.get(name)
+                    if imported_name is not None:
+                        symbol_bindings.setdefault(name, set()).add(
+                            (origin, imported_name),
+                        )
+            for child in node.children:
+                visit(child, depth + 1)
+
+        visit(tree.root_node)
+        identities = {
+            name: (resolved, name)
+            for name, count in class_counts.items()
+            if count == 1 and name not in symbol_bindings
+        }
+        for name, bindings in symbol_bindings.items():
+            if len(bindings) == 1 and name not in class_counts:
+                identities[name] = next(iter(bindings))
+
+        with _PYTHON_MODULE_CLASS_IDENTITY_CACHE_LOCK:
+            for stale in [
+                key for key in _PYTHON_MODULE_CLASS_IDENTITY_CACHE
+                if key[0] == resolved and key != cache_key
+            ]:
+                _PYTHON_MODULE_CLASS_IDENTITY_CACHE.pop(stale, None)
+            if len(_PYTHON_MODULE_CLASS_IDENTITY_CACHE) >= _PYTHON_STAR_CACHE_MAX:
+                for oldest in list(_PYTHON_MODULE_CLASS_IDENTITY_CACHE)[
+                    : _PYTHON_STAR_CACHE_MAX // 2
+                ]:
+                    _PYTHON_MODULE_CLASS_IDENTITY_CACHE.pop(oldest, None)
+            _PYTHON_MODULE_CLASS_IDENTITY_CACHE[cache_key] = identities
+        return identities
+
+    def _read_python_property_return_annotations(
+        self, module_path: Path,
+    ) -> dict[tuple[str, str], str]:
+        """Parse class property declarations without evaluating their bodies."""
+        try:
+            source = module_path.read_bytes()
+        except (OSError, PermissionError):
+            return {}
+        parser = self._get_parser("python")
+        if not parser:
+            return {}
+        try:
+            tree = parser.parse(source)  # type: ignore[union-attr]
+        except (RecursionError, ValueError) as exc:  # pragma: no cover
+            logger.debug("Property-annotation parse failed for %s: %s", module_path, exc)
+            return {}
+
+        properties: dict[tuple[str, str], str] = {}
+        class_names: set[str] = set()
+        ambiguous_classes: set[str] = set()
+
+        def visit(
+            node, owner_class: Optional[str] = None, in_function: bool = False,
+            depth: int = 0,
+        ):
+            if depth > self._MAX_AST_DEPTH:
+                return
+            if node.type == "class_definition":
+                name_node = node.child_by_field_name("name")
+                nested_class = (
+                    name_node.text.decode("utf-8", errors="replace")
+                    if name_node is not None
+                    else owner_class
+                )
+                if name_node is not None:
+                    if nested_class in class_names:
+                        ambiguous_classes.add(nested_class)
+                    class_names.add(nested_class)
+                for child in node.children:
+                    visit(child, nested_class, False, depth + 1)
+                return
+            if node.type == "function_definition":
+                if owner_class and not in_function:
+                    name_node = node.child_by_field_name("name")
+                    if name_node is not None and any(
+                        decorator.rsplit(".", 1)[-1] == "property"
+                        for decorator in _python_decorator_names(node)
+                    ):
+                        return_node = node.child_by_field_name("return_type")
+                        properties[(
+                            owner_class,
+                            name_node.text.decode("utf-8", errors="replace"),
+                        )] = (
+                            return_node.text.decode("utf-8", errors="replace")
+                            if return_node is not None
+                            else ""
+                        )
+                for child in node.children:
+                    visit(child, owner_class, True, depth + 1)
+                return
+            for child in node.children:
+                visit(child, owner_class, in_function, depth + 1)
+
+        visit(tree.root_node)
+        if ambiguous_classes:
+            properties = {
+                key: annotation
+                for key, annotation in properties.items()
+                if key[0] not in ambiguous_classes
+            }
+        return properties
+
+    def _python_expression_class_evidence(
+        self,
+        expression,
+        env: dict[str, tuple[str, str]],
+        class_fields: dict[str, tuple[str, str]],
+        current_class: Optional[str],
+        context: _PyReceiverContext,
+        instance_receiver_name: Optional[str] = None,
+        class_receiver_name: Optional[str] = None,
+    ) -> Optional[tuple[str, str]]:
+        """Infer a class only from a local binding, field, or property annotation."""
+        if expression is None:
+            return None
+        if expression.type == "identifier":
+            name = expression.text.decode("utf-8", errors="replace")
+            if name == class_receiver_name:
+                return ("class", current_class) if current_class else None
+            if name == instance_receiver_name:
+                return ("class", current_class) if current_class else None
+            if name in context.class_names or name in context.imported_names:
+                # A bare class symbol is a class receiver, not an instance on
+                # which Python invokes @property getters.
+                return None
+            return env.get(name)
+        if expression.type != "attribute":
+            return None
+        owner = expression.child_by_field_name("object")
+        attribute = expression.child_by_field_name("attribute")
+        if attribute is None:
+            return None
+        owner_evidence = self._python_expression_class_evidence(
+            owner, env, class_fields, current_class, context,
+            instance_receiver_name, class_receiver_name,
+        )
+        if owner_evidence is None or owner_evidence[0] != "class":
+            return None
+        member = attribute.text.decode("utf-8", errors="replace")
+        is_class_receiver = (
+            owner.type == "identifier"
+            and class_receiver_name is not None
+            and owner.text.decode("utf-8", errors="replace") == class_receiver_name
+        )
+        if (
+            is_class_receiver
+            and self._python_property_definition(
+                owner_evidence[1], member, context,
+            ) is not None
+        ):
+            # A classmethod receives a class object. Reading a property through
+            # that object returns the descriptor; it does not invoke the getter.
+            return ("unknown", "")
+        if owner_evidence[1] == current_class:
+            field_evidence = class_fields.get(member)
+            if field_evidence is not None and field_evidence[0] == "class":
+                return field_evidence
+        definition = self._python_property_definition(
+            owner_evidence[1], member, context,
+        )
+        if definition is None:
+            return None
+        annotation = definition[2]
+        if not annotation:
+            return ("unknown", "")
+        type_name = self._base_type_name(annotation)
+        if not type_name:
+            return ("builtin", "")
+        defining_file = definition[0]
+        if defining_file == context.file_path:
+            origin = context.symbol_origins.get(type_name)
+            if origin:
+                if (
+                    type_name in context.class_names
+                    or type_name in context.imported_names
+                ):
+                    return "unknown", ""
+                return (
+                    "class",
+                    _python_qualified_class_identity(
+                        origin, context.symbol_names.get(type_name, type_name),
+                    ),
+                )
+            return "class", type_name
+        identity = self._python_module_class_identities(defining_file).get(
+            type_name,
+        )
+        if identity is None:
+            return "unknown", ""
+        return "class", _python_qualified_class_identity(*identity)
 
     @staticmethod
     def _merge_python_evidence(
@@ -6614,6 +8592,11 @@ class CodeParser:
         type_node,
         path: tuple[int, ...],
         context: _PyReceiverContext,
+        env: Optional[dict[str, tuple[str, str]]] = None,
+        class_fields: Optional[dict[str, tuple[str, str]]] = None,
+        current_class: Optional[str] = None,
+        instance_receiver_name: Optional[str] = None,
+        class_receiver_name: Optional[str] = None,
     ) -> Optional[tuple[str, str]]:
         """What one binding says its target holds, or None for "nothing"."""
         if type_node is not None:
@@ -6640,11 +8623,18 @@ class CodeParser:
                 return "unknown", ""
             return self._python_binding_evidence(
                 elements[path[0]], None, path[1:], context,
+                env, class_fields, current_class, instance_receiver_name,
+                class_receiver_name,
             )
         if value.type in _PY_LITERAL_VALUE_TYPES:
             return "builtin", ""
         if value.type == "call":
             return self._python_call_evidence(value, path, context)
+        if value.type == "attribute":
+            return self._python_expression_class_evidence(
+                value, env or {}, class_fields or {}, current_class, context,
+                instance_receiver_name, class_receiver_name,
+            ) or ("unknown", "")
         return "unknown", ""
 
     def _python_call_evidence(
@@ -6998,6 +8988,7 @@ class CodeParser:
         module_bindings: dict[str, set[str]],
         imported_names: set[str],
         symbol_origins: Optional[dict[str, str]] = None,
+        symbol_names: Optional[dict[str, str]] = None,
     ) -> None:
         """Record names bound by ``from X import a, b as c``.
 
@@ -7028,6 +9019,8 @@ class CodeParser:
                     module_bindings.setdefault(local, set()).add(target)
                     return
             imported_names.add(local)
+            if symbol_names is not None:
+                symbol_names[local] = imported
             if symbol_origins is not None and module_file:
                 # A package re-export names the file that really defines the
                 # symbol; a plain module names itself.
@@ -7074,8 +9067,8 @@ class CodeParser:
                 return attribute.text.decode("utf-8", errors="replace")
         return None
 
-    @staticmethod
     def _apply_python_receiver_evidence(
+        self,
         edges: list[EdgeInfo],
         evidence: dict[tuple[int, str], tuple[str, str]],
     ) -> list[EdgeInfo]:
@@ -7103,9 +9096,20 @@ class CodeParser:
             extra = dict(edge.extra)
             extra["receiver_binding"] = kind
             if kind == "module":
-                extra["receiver_module"] = detail
+                # `pkg.func()` where `pkg` only re-exports `func` is a call
+                # into the file that defines it; the resolver looks for the
+                # name at top level of `receiver_module`.
+                extra["receiver_module"] = (
+                    self._python_reexport_origin(detail, edge.target)
+                    if detail
+                    else detail
+                )
             elif kind == "class":
-                extra["receiver_class"] = detail
+                identity = _python_split_class_identity(detail)
+                if identity is None:
+                    extra["receiver_class"] = detail
+                else:
+                    extra["receiver_class_file"], extra["receiver_class"] = identity
             annotated.append(EdgeInfo(
                 kind=edge.kind,
                 source=edge.source,
@@ -7132,6 +9136,567 @@ class CodeParser:
                             normalized = normalized[: self._MAX_TEST_DESCRIPTION_LEN]
                         return normalized
         return None
+
+    # -----------------------------------------------------------------------
+    # Generic YAML parser
+    # -----------------------------------------------------------------------
+
+    def _parse_yaml(
+        self,
+        path: Path,
+        source: bytes,
+    ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
+        """Index generic YAML structure while deliberately discarding values.
+
+        Repeated sequence shapes are aggregated under ``[*]`` paths to keep
+        large configuration repositories bounded. Nodes retain occurrence and
+        source-line samples, while duplicate keys and aliases receive explicit
+        diagnostics. Scalar values never enter node or edge metadata.
+        """
+        if len(source) > self._MAX_GENERIC_YAML_BYTES:
+            logger.debug(
+                "Skipping generic YAML file %s: %d bytes exceeds the %d-byte limit",
+                path,
+                len(source),
+                self._MAX_GENERIC_YAML_BYTES,
+            )
+            return [], []
+
+        text = source.decode("utf-8", errors="replace")
+        try:
+            documents = list(_yaml.compose_all(text))
+            yaml_events = list(_yaml.parse(text)) if b"&" in source else []
+            anchor_definitions = {
+                event.start_mark.index: str(event.anchor)
+                for event in yaml_events
+                if not isinstance(event, _YamlAliasEvent)
+                and getattr(event, "anchor", None) is not None
+            }
+            alias_lines_by_anchor: dict[str, list[int]] = {}
+            for event in yaml_events:
+                if isinstance(event, _YamlAliasEvent):
+                    alias_lines_by_anchor.setdefault(str(event.anchor), []).append(
+                        event.start_mark.line + 1,
+                    )
+        except (_yaml.YAMLError, RecursionError) as exc:
+            logger.debug("YAML parse error in %s: %s", path, exc)
+            return [], []
+
+        file_path = normalize_file_path(path)
+        file_extra: dict[str, Any] = {
+            "config_format": path.suffix.lower().lstrip("."),
+            "yaml_document_count": len(documents),
+            "yaml_duplicate_key_count": 0,
+            "yaml_duplicate_keys": [],
+            "yaml_unsupported_key_count": 0,
+            "yaml_truncated": False,
+            "values_indexed": False,
+        }
+        nodes = [NodeInfo(
+            kind="File",
+            name=file_path,
+            file_path=file_path,
+            line_start=1,
+            line_end=source.count(b"\n") + 1,
+            language="yaml",
+            extra=file_extra,
+        )]
+        edges: list[EdgeInfo] = []
+        shared_targets: dict[int, str] = {}
+        shared_anchor_names: dict[int, str] = {}
+        path_nodes: dict[tuple[int, str], NodeInfo] = {}
+        path_value_types: dict[tuple[int, str], set[str]] = {}
+        path_key_tags: dict[tuple[int, str], set[str]] = {}
+        contains_edges: set[tuple[str, str]] = set()
+        duplicate_summaries: list[dict[str, Any]] = []
+        duplicate_count = 0
+        unsupported_key_count = 0
+        alias_indices: dict[str, int] = {}
+        skipped_seen: set[int] = set()
+        truncated = False
+
+        def qualified(schema_path: str, document_index: int) -> str:
+            return f"{file_path}::yaml:{document_index}:{schema_path}"
+
+        def can_emit(
+            schema_path: str,
+            depth: int,
+            *source_paths: str,
+        ) -> bool:
+            nonlocal truncated
+            if (
+                len(nodes) - 1 >= self._MAX_YAML_NODES
+                or depth > self._MAX_YAML_DEPTH
+                or len(schema_path) > self._MAX_YAML_PATH_LENGTH
+                or any(
+                    len(source_path) > self._MAX_YAML_PATH_LENGTH
+                    for source_path in source_paths
+                )
+            ):
+                truncated = True
+                return False
+            return True
+
+        def add_contains(parent: str, target: str, line: int) -> None:
+            edge_key = (parent, target)
+            if edge_key in contains_edges:
+                return
+            contains_edges.add(edge_key)
+            edges.append(EdgeInfo(
+                kind="CONTAINS",
+                source=parent,
+                target=target,
+                file_path=file_path,
+                line=line,
+            ))
+
+        def next_alias_line(value_node: object, fallback: int) -> int:
+            anchor_name = shared_anchor_names.get(id(value_node))
+            if anchor_name is None:
+                return fallback
+            lines = alias_lines_by_anchor.get(anchor_name, [])
+            alias_index = alias_indices.get(anchor_name, 0)
+            if alias_index >= len(lines):
+                return fallback
+            line = lines[alias_index]
+            alias_indices[anchor_name] = alias_index + 1
+            return line
+
+        def emit_alias(
+            value_node: object,
+            exact_path: str,
+            schema_path: str,
+            identity_path: str,
+            parent_qualified: str,
+            document_index: int,
+            depth: int,
+            line_start: int,
+            extra: dict[str, Any],
+            yaml_merge: bool,
+            line_is_key: bool,
+        ) -> None:
+            if not can_emit(schema_path, depth, exact_path, identity_path):
+                return
+            original_target = shared_targets[id(value_node)]
+            reference_line = next_alias_line(value_node, line_start)
+            node_line_start = min(line_start, reference_line) if line_is_key else reference_line
+            # The alias is this one reference. Its target's own end is elsewhere,
+            # and past later keys when the alias sits inside its own anchor.
+            node_line_end = max(node_line_start, reference_line)
+            alias_identity = f"alias:{identity_path}@{reference_line}"
+            target = qualified(alias_identity, document_index)
+            nodes.append(NodeInfo(
+                kind="YamlPath",
+                name=exact_path,
+                file_path=file_path,
+                line_start=node_line_start,
+                line_end=node_line_end,
+                language="yaml",
+                extra={
+                    "document_index": document_index,
+                    "path": exact_path,
+                    "schema_path": schema_path,
+                    "source_file": path.name,
+                    "value_type": "alias",
+                    "is_alias": True,
+                    "yaml_merge": yaml_merge,
+                    **extra,
+                },
+                identity_name=f"yaml:{document_index}:{alias_identity}",
+            ))
+            add_contains(parent_qualified, target, node_line_start)
+            edges.append(EdgeInfo(
+                kind="REFERENCES",
+                source=target,
+                target=original_target,
+                file_path=file_path,
+                line=reference_line,
+                extra={"yaml_alias": True, "yaml_merge": yaml_merge},
+            ))
+
+        def emit_node(
+            value_node: object,
+            exact_path: str,
+            schema_path: str,
+            identity_path: str,
+            parent_qualified: str,
+            document_index: int,
+            depth: int,
+            line_start: int,
+            line_end: int,
+            extra: dict[str, Any],
+            ancestors: frozenset[int],
+            yaml_merge: bool = False,
+            line_is_key: bool = False,
+        ) -> None:
+            if not can_emit(schema_path, depth, exact_path, identity_path):
+                return
+            value_id = id(value_node)
+            if value_id in shared_targets:
+                emit_alias(
+                    value_node,
+                    exact_path,
+                    schema_path,
+                    identity_path,
+                    parent_qualified,
+                    document_index,
+                    depth,
+                    line_start,
+                    extra,
+                    yaml_merge,
+                    line_is_key,
+                )
+                return
+
+            node_mark = getattr(value_node, "start_mark", None)
+            anchor_name = anchor_definitions.get(getattr(node_mark, "index", -1))
+            if anchor_name is not None:
+                anchor_identity = (
+                    f"anchor:{getattr(node_mark, 'index', line_start)}:{identity_path}"
+                )
+                target = qualified(anchor_identity, document_index)
+                value_type = _yaml_value_type(value_node)
+                node_extra = {
+                    "document_index": document_index,
+                    "path": schema_path,
+                    "schema_path": schema_path,
+                    "example_path": exact_path,
+                    "source_file": path.name,
+                    "value_type": value_type,
+                    "value_types": [value_type],
+                    "occurrence_count": 1,
+                    "line_samples": [line_start],
+                    "range_samples": [[line_start, max(line_start, line_end)]],
+                    "lines_truncated": False,
+                    "is_alias": False,
+                    "anchor_definition": True,
+                    **extra,
+                }
+                key_tag = extra.get("key_tag")
+                if isinstance(key_tag, str):
+                    node_extra["key_tags"] = [key_tag]
+                if extra.get("duplicate_key"):
+                    node_extra["duplicate_key_occurrence_count"] = 1
+                    if extra.get("duplicate_group_start"):
+                        node_extra["duplicate_group_count"] = 1
+                        node_extra["duplicate_group_samples"] = [
+                            extra["duplicate_group"],
+                        ]
+                nodes.append(NodeInfo(
+                    kind="YamlPath",
+                    name=schema_path,
+                    file_path=file_path,
+                    line_start=line_start,
+                    line_end=max(line_start, line_end),
+                    language="yaml",
+                    extra=node_extra,
+                    identity_name=f"yaml:{document_index}:{anchor_identity}",
+                ))
+                add_contains(parent_qualified, target, line_start)
+                shared_targets[value_id] = target
+                shared_anchor_names[value_id] = anchor_name
+                value_ancestors = ancestors | {value_id}
+                if isinstance(value_node, _YamlMapping):
+                    visit_mapping(
+                        value_node,
+                        exact_path,
+                        schema_path,
+                        identity_path,
+                        target,
+                        document_index,
+                        depth + 1,
+                        value_ancestors,
+                    )
+                elif isinstance(value_node, _YamlSequence):
+                    visit_sequence(
+                        value_node,
+                        exact_path,
+                        schema_path,
+                        identity_path,
+                        target,
+                        document_index,
+                        depth + 1,
+                        value_ancestors,
+                        merge_context=yaml_merge or bool(extra.get("merge_key")),
+                    )
+                return
+
+            path_key = (document_index, schema_path)
+            node = path_nodes.get(path_key)
+            if node is None:
+                target = qualified(schema_path, document_index)
+                value_type = _yaml_value_type(value_node)
+                node_extra = {
+                    "document_index": document_index,
+                    "path": schema_path,
+                    "schema_path": schema_path,
+                    "example_path": exact_path,
+                    "source_file": path.name,
+                    "value_type": value_type,
+                    "value_types": [value_type],
+                    "occurrence_count": 1,
+                    "line_samples": [line_start],
+                    "range_samples": [[line_start, max(line_start, line_end)]],
+                    "lines_truncated": False,
+                    "is_alias": False,
+                    **extra,
+                }
+                node = NodeInfo(
+                    kind="YamlPath",
+                    name=schema_path,
+                    file_path=file_path,
+                    line_start=line_start,
+                    line_end=max(line_start, line_end),
+                    language="yaml",
+                    extra=node_extra,
+                    identity_name=f"yaml:{document_index}:{schema_path}",
+                )
+                nodes.append(node)
+                path_nodes[path_key] = node
+                path_value_types[path_key] = {value_type}
+                key_tag = extra.get("key_tag")
+                path_key_tags[path_key] = {key_tag} if isinstance(key_tag, str) else set()
+                add_contains(parent_qualified, target, line_start)
+            else:
+                add_contains(
+                    parent_qualified,
+                    qualified(schema_path, document_index),
+                    line_start,
+                )
+                node.line_start = min(node.line_start, line_start)
+                node.line_end = max(node.line_end, line_end)
+                node.extra["occurrence_count"] += 1
+                line_samples = node.extra["line_samples"]
+                if len(line_samples) < self._MAX_YAML_OCCURRENCE_SAMPLES:
+                    line_samples.append(line_start)
+                    node.extra["range_samples"].append([
+                        line_start,
+                        max(line_start, line_end),
+                    ])
+                else:
+                    node.extra["lines_truncated"] = True
+                value_types = path_value_types[path_key]
+                value_types.add(_yaml_value_type(value_node))
+                node.extra["value_types"] = sorted(value_types)
+                node.extra["value_type"] = (
+                    next(iter(value_types)) if len(value_types) == 1 else "mixed"
+                )
+                key_tag = extra.get("key_tag")
+                if isinstance(key_tag, str):
+                    key_tags = path_key_tags[path_key]
+                    key_tags.add(key_tag)
+                    node.extra["key_tags"] = sorted(key_tags)
+
+            if extra.get("duplicate_key"):
+                node.extra["duplicate_key"] = True
+                node.extra["duplicate_key_occurrence_count"] = (
+                    node.extra.get("duplicate_key_occurrence_count", 0) + 1
+                )
+                if extra.get("duplicate_group_start"):
+                    node.extra["duplicate_group_count"] = (
+                        node.extra.get("duplicate_group_count", 0) + 1
+                    )
+                    group_samples = node.extra.setdefault("duplicate_group_samples", [])
+                    if len(group_samples) < self._MAX_YAML_DUPLICATE_GROUP_SAMPLES:
+                        group_samples.append(extra["duplicate_group"])
+                    else:
+                        node.extra["duplicate_groups_truncated"] = True
+
+            shared_targets[value_id] = qualified(schema_path, document_index)
+            value_ancestors = ancestors | {value_id}
+            if isinstance(value_node, _YamlMapping):
+                visit_mapping(
+                    value_node,
+                    exact_path,
+                    schema_path,
+                    identity_path,
+                    qualified(schema_path, document_index),
+                    document_index,
+                    depth + 1,
+                    value_ancestors,
+                )
+            elif isinstance(value_node, _YamlSequence):
+                visit_sequence(
+                    value_node,
+                    exact_path,
+                    schema_path,
+                    identity_path,
+                    qualified(schema_path, document_index),
+                    document_index,
+                    depth + 1,
+                    value_ancestors,
+                    merge_context=yaml_merge or bool(extra.get("merge_key")),
+                )
+
+        def consume_skipped_aliases(skipped_node: object) -> None:
+            """Advance alias positions hidden below unsupported complex keys.
+
+            Anchors in here never enter ``shared_targets``, so an alias leads
+            back into a node already walked. Walking it again would double the
+            work at every link of a chain of aliases, and would also count the
+            aliases inside it twice though the source holds them once.
+            """
+            skipped_id = id(skipped_node)
+            if skipped_id in shared_targets:
+                next_alias_line(skipped_node, _yaml_line(skipped_node))
+                return
+            if skipped_id in skipped_seen:
+                return
+            skipped_seen.add(skipped_id)
+            if isinstance(skipped_node, _YamlMapping):
+                for child_key, child_value in skipped_node.value:
+                    consume_skipped_aliases(child_key)
+                    consume_skipped_aliases(child_value)
+            elif isinstance(skipped_node, _YamlSequence):
+                for child in skipped_node.value:
+                    consume_skipped_aliases(child)
+
+        def visit_mapping(
+            mapping_node: object,
+            exact_prefix: str,
+            schema_prefix: str,
+            identity_prefix: str,
+            parent_qualified: str,
+            document_index: int,
+            depth: int,
+            ancestors: frozenset[int],
+        ) -> None:
+            nonlocal duplicate_count, unsupported_key_count
+            pairs = list(mapping_node.value)  # type: ignore[attr-defined]
+            key_counts: dict[tuple[str, str], int] = {}
+            key_line_samples: dict[tuple[str, str], list[int]] = {}
+            for key_node, _ in pairs:
+                raw_key = _yaml_scalar(key_node)
+                if raw_key is None:
+                    continue
+                signature = (str(getattr(key_node, "tag", "")), raw_key)
+                key_counts[signature] = key_counts.get(signature, 0) + 1
+                samples = key_line_samples.setdefault(signature, [])
+                if len(samples) < self._MAX_YAML_DUPLICATE_LINE_SAMPLES:
+                    samples.append(_yaml_line(key_node))
+
+            occurrences: dict[tuple[str, str], int] = {}
+            identity_occurrences: dict[str, int] = {}
+            for key_node, value_node in pairs:
+                raw_key = _yaml_scalar(key_node)
+                if raw_key is None:
+                    unsupported_key_count += 1
+                    consume_skipped_aliases(key_node)
+                    consume_skipped_aliases(value_node)
+                    continue
+                key_tag = str(getattr(key_node, "tag", ""))
+                signature = (key_tag, raw_key)
+                occurrence = occurrences.get(signature, 0) + 1
+                occurrences[signature] = occurrence
+                exact_path = _yaml_path_child(exact_prefix, raw_key)
+                schema_path = _yaml_path_child(schema_prefix, raw_key)
+                base_identity = _yaml_path_child(identity_prefix, raw_key)
+                identity_occurrence = identity_occurrences.get(base_identity, 0) + 1
+                identity_occurrences[base_identity] = identity_occurrence
+                identity_path = (
+                    f"{base_identity}#{identity_occurrence}"
+                    if identity_occurrence > 1
+                    else base_identity
+                )
+                duplicate = key_counts[signature] > 1
+                bounded_exact_path = exact_path[: self._MAX_YAML_PATH_LENGTH]
+                duplicate_group = {
+                    "example_path": bounded_exact_path,
+                    "occurrence_count": key_counts[signature],
+                    "line_samples": key_line_samples[signature],
+                    "lines_truncated": (
+                        key_counts[signature] > self._MAX_YAML_DUPLICATE_LINE_SAMPLES
+                    ),
+                }
+                extra: dict[str, Any] = {
+                    "raw_key": raw_key,
+                    "key_tag": key_tag,
+                    "duplicate_key": duplicate,
+                    "key_occurrence": occurrence,
+                }
+                if duplicate:
+                    extra["duplicate_group"] = duplicate_group
+                    extra["duplicate_group_start"] = occurrence == 1
+                    if occurrence == 1:
+                        duplicate_count += 1
+                        if len(duplicate_summaries) < self._MAX_YAML_DUPLICATE_GROUP_SAMPLES:
+                            duplicate_summaries.append({
+                                "document_index": document_index,
+                                "path": bounded_exact_path,
+                                **duplicate_group,
+                            })
+                # The tag, not the text: a quoted "<<" is an ordinary string key.
+                is_merge = key_tag == "tag:yaml.org,2002:merge"
+                if is_merge:
+                    extra["merge_key"] = True
+                emit_node(
+                    value_node,
+                    exact_path,
+                    schema_path,
+                    identity_path,
+                    parent_qualified,
+                    document_index,
+                    depth,
+                    _yaml_line(key_node),
+                    _yaml_end_line(value_node),
+                    extra,
+                    ancestors,
+                    yaml_merge=is_merge,
+                    line_is_key=True,
+                )
+
+        def visit_sequence(
+            sequence_node: object,
+            exact_prefix: str,
+            schema_prefix: str,
+            identity_prefix: str,
+            parent_qualified: str,
+            document_index: int,
+            depth: int,
+            ancestors: frozenset[int],
+            merge_context: bool = False,
+        ) -> None:
+            for index, item in enumerate(sequence_node.value):  # type: ignore[attr-defined]
+                exact_path = f"{exact_prefix}[{index}]"
+                schema_path = f"{schema_prefix}[*]"
+                identity_path = f"{identity_prefix}[{index}]"
+                emit_node(
+                    item,
+                    exact_path,
+                    schema_path,
+                    identity_path,
+                    parent_qualified,
+                    document_index,
+                    depth,
+                    _yaml_line(item),
+                    _yaml_end_line(item),
+                    {"sequence_index_sample": index},
+                    ancestors,
+                    yaml_merge=merge_context,
+                )
+
+        for document_index, document in enumerate(documents):
+            if document is None:
+                continue
+            emit_node(
+                document,
+                "$",
+                "$",
+                "$",
+                file_path,
+                document_index,
+                0,
+                _yaml_line(document),
+                _yaml_end_line(document),
+                {"document_root": True},
+                frozenset(),
+            )
+
+        file_extra["yaml_duplicate_key_count"] = duplicate_count
+        file_extra["yaml_duplicate_keys"] = duplicate_summaries
+        file_extra["yaml_unsupported_key_count"] = unsupported_key_count
+        file_extra["yaml_truncated"] = truncated
+        return nodes, edges
 
     # -----------------------------------------------------------------------
     # Spring application configuration parser
@@ -7168,7 +9733,7 @@ class CodeParser:
         """Flatten Spring YAML keys using PyYAML's syntax tree, never values."""
         try:
             documents = list(_yaml.compose_all(source.decode("utf-8", errors="replace")))
-        except _yaml.YAMLError as exc:
+        except (_yaml.YAMLError, RecursionError) as exc:
             logger.debug("Spring YAML parse error in %s: %s", path, exc)
             return [], []
 
@@ -7349,7 +9914,7 @@ class CodeParser:
         """
         try:
             root = _yaml.compose(source.decode("utf-8", errors="replace"))
-        except _yaml.YAMLError as exc:
+        except (_yaml.YAMLError, RecursionError) as exc:
             logger.debug("Ansible YAML parse error in %s: %s", path, exc)
             return [], []
         if root is None:
@@ -8135,7 +10700,25 @@ class CodeParser:
         first child is the function's identifier and whose children
         (past the parens) are the parameters.
         """
+        def function_head(node):
+            if node.type != "binary_operator":
+                return node
+            operator = next(
+                (child for child in node.children
+                 if child.text.decode("utf-8", errors="replace") == "when"),
+                None,
+            )
+            if operator is None:
+                return None
+            left = node.child_by_field_name("left")
+            if left is None:
+                return None
+            return function_head(left)
+
         for child in arguments.children:
+            child = function_head(child)
+            if child is None:
+                continue
             if child.type == "call":
                 name: Optional[str] = None
                 for sub in child.children:
@@ -8270,6 +10853,18 @@ class CodeParser:
                     import_map=import_map, defined_names=defined_names,
                     _depth=_depth + 1,
                 )
+            else:
+                # Short form ``def f(x), do: g(x)``: the body is a keyword
+                # argument of the ``def`` call rather than a do_block.
+                for sub in arguments.children:
+                    if sub.type == "keywords":
+                        self._extract_from_tree(
+                            sub, source, language, file_path, nodes, edges,
+                            enclosing_class=enclosing_class,
+                            enclosing_func=fn_name,
+                            import_map=import_map, defined_names=defined_names,
+                            _depth=_depth + 1,
+                        )
             return True
 
         # ---- alias / import / require / use ----------------------------
@@ -8656,6 +11251,11 @@ class CodeParser:
         if name is None:
             return True
 
+        if block_type == "provider" and body_node is not None:
+            alias = self._hcl_get_attribute_string(body_node, "alias")
+            if alias:
+                name += f".{alias}"
+
         qualified = self._qualify(name, file_path, None)
         nodes.append(NodeInfo(
             kind=kind, name=name, file_path=file_path,
@@ -8680,7 +11280,15 @@ class CodeParser:
                 ))
 
         if emit_refs:
-            self._walk_hcl_expressions(body_node, file_path, edges, name)
+            provider_attributes = (
+                frozenset({"provider"}) if block_type in ("resource", "data")
+                else frozenset({"providers"}) if block_type == "module"
+                else frozenset()
+            )
+            self._walk_hcl_expressions(
+                body_node, file_path, edges, name,
+                provider_body=body_node, provider_attributes=provider_attributes,
+            )
 
         return True
 
@@ -8743,6 +11351,10 @@ class CodeParser:
         edges: list[EdgeInfo],
         enclosing_name: str,
         local_names: frozenset[str] = frozenset(),
+        *,
+        provider_body=None,
+        provider_attributes: frozenset[str] = frozenset(),
+        provider_context: bool = False,
     ) -> None:
         """Emit REFERENCES edges for every HCL variable reference under *node*.
 
@@ -8756,7 +11368,7 @@ class CodeParser:
             for root, attrs, line in _hcl_variable_refs(node):
                 if root in local_names:
                     continue
-                ref = _hcl_ref_target(root, attrs)
+                ref = _hcl_ref_target(root, attrs, provider=provider_context)
                 if ref:
                     edges.append(EdgeInfo(
                         kind="REFERENCES",
@@ -8768,6 +11380,19 @@ class CodeParser:
         for child in node.children:
             if child.type not in _HCL_RECURSE_TYPES:
                 continue
+            # Module provider-map keys name the child's provider slots;
+            # only their values refer to providers in this module.
+            if provider_context and node.type == "object_elem":
+                if child == node.child_by_field_name("key"):
+                    continue
+            child_provider_context = provider_context
+            if child.type == "attribute":
+                key = _hcl_child(child, "identifier")
+                child_provider_context = (
+                    child.parent == provider_body
+                    and key is not None
+                    and _hcl_text(key) in provider_attributes
+                )
             child_local_names = local_names
             if child.type == "block":
                 iter_name = _hcl_dynamic_iterator_name(child)
@@ -8777,7 +11402,11 @@ class CodeParser:
                 child_local_names = (
                     local_names | _hcl_for_iterator_names(child)
                 )
-            self._walk_hcl_expressions(child, file_path, edges, enclosing_name, child_local_names)
+            self._walk_hcl_expressions(
+                child, file_path, edges, enclosing_name, child_local_names,
+                provider_body=provider_body, provider_attributes=provider_attributes,
+                provider_context=child_provider_context,
+            )
 
 
     def _extract_bash_source_command(
@@ -10184,8 +12813,142 @@ class CodeParser:
     # ------------------------------------------------------------------
 
     _JS_FUNC_VALUE_TYPES = frozenset(
-        {"arrow_function", "function_expression", "function"},
+        {"arrow_function", "function_expression", "function", "generator_function"},
     )
+
+    # Wrapper calls nest at most this deep before we give up: memo(forwardRef(fn)).
+    _JS_WRAPPER_MAX_DEPTH = 3
+
+    # Wrappers documented to return a component. A single function argument is not
+    # enough on its own to know that a call returns something CALLABLE:
+    # ``const result = evaluate(() => compute())`` has the same shape and returns a
+    # number, so treating it as a definition invents a `result` function and moves
+    # `compute`'s caller off the function that really makes the call. The name is
+    # what establishes it. A wrapper outside this set is simply not a definition
+    # here, which is the behaviour that predates wrapped components being indexed
+    # at all.
+    _JS_COMPONENT_WRAPPERS = frozenset({
+        "forwardRef", "memo", "observer", "withRouter", "withStyles", "withTheme",
+        "connect", "styled", "inject", "withTranslation", "withErrorBoundary",
+    })
+
+    # Curried wrappers: the first call takes configuration and returns the wrapper, and
+    # only the second call, ``connect(mapState)(Component)``, makes a component. The
+    # function in a first call is a selector, a style sheet or a callback.
+    _JS_CURRIED_WRAPPERS = frozenset(
+        {"connect", "withStyles", "inject", "withTranslation", "styled"},
+    )
+
+    # Grammar extras that tree-sitter lists among a call's named arguments.
+    _JS_COMMENT_TYPES = frozenset({"comment", "html_comment"})
+
+    def _js_argument_values(self, arguments) -> list:
+        """The arguments of a call, without the comments between them.
+
+        ``forwardRef(/* why */ fn)`` passes one argument, not two.
+        """
+        return [arg for arg in arguments.named_children if arg.type not in self._JS_COMMENT_TYPES]
+
+    def _js_wrapper_name(self, call_node, _depth: int = 0) -> Optional[str]:
+        """The wrapper a call applies, or None when the callee is not one we can name.
+
+        ``memo(fn)`` and ``React.memo(fn)`` both answer ``memo``; the curried
+        ``styled(Base)(fn)`` and ``connect(map)(fn)`` answer through their own callee,
+        followed no deeper than {@link _JS_WRAPPER_MAX_DEPTH}, the same bound the
+        unwrapping keeps. A member callee answers only on ``React``: ``pool.connect(cb)``
+        and ``utils.memo(fn)`` call methods that share a wrapper's name, and losing a
+        namespace import such as ``ReactModule.forwardRef`` is the smaller mistake.
+        """
+        callee = call_node.children[0] if call_node.children else None
+        if callee is None:
+            return None
+        if callee.type == "call_expression":
+            if _depth >= self._JS_WRAPPER_MAX_DEPTH:
+                return None
+            return self._js_wrapper_name(callee, _depth + 1)
+        if callee.type == "identifier":
+            return callee.text.decode("utf-8", errors="replace")
+        if callee.type == "member_expression":
+            obj = callee.child_by_field_name("object")
+            prop = callee.child_by_field_name("property")
+            if obj is None or prop is None or obj.type != "identifier" or obj.text != b"React":
+                return None
+            return prop.text.decode("utf-8", errors="replace")
+        return None
+
+    def _js_wrapped_function(self, call_node, _depth: int = 0, chain=None):
+        """Return the function literal a component wrapper call receives, if any.
+
+        ``forwardRef(fn)``, ``memo(fn)``, ``observer(fn)``, ``withRouter(fn)`` and
+        ``styled(Base)(fn)`` all put the component's function inside a
+        ``call_expression`` instead of assigning it directly, and nested wrappers
+        (``memo(forwardRef(fn))``) are unwrapped.
+
+        Two things have to hold. The wrapper has to be one that returns a component
+        ({@link _JS_COMPONENT_WRAPPERS}), and it has to take the function as its ONLY
+        argument: a call that takes a callback among others is computing a value, and
+        ``useMemo(() => x, [dep])`` assigns whatever it returns rather than the
+        callback. ``memo`` is the one exception, its documented second argument is the
+        props comparator: ``memo(fn, arePropsEqual)``. Calls without a function
+        argument (``createClient({...})``) return None as well.
+
+        ``chain``, when given, collects every wrapper call traversed, innermost first.
+        Each of them runs where the declaration is, so the caller records them against
+        the enclosing function rather than against the component.
+        """
+        name = self._js_wrapper_name(call_node)
+        if name is None or name not in self._JS_COMPONENT_WRAPPERS:
+            return None
+        callee = call_node.children[0] if call_node.children else None
+        curried = name in self._JS_CURRIED_WRAPPERS
+        if curried and (callee is None or callee.type != "call_expression"):
+            return None
+        arguments = None
+        for sub in call_node.children:
+            if sub.type == "arguments":
+                arguments = sub
+                break
+        if arguments is None:
+            return None
+        args = self._js_argument_values(arguments)
+        if len(args) != 1 and not (name == "memo" and len(args) == 2):
+            return None
+        arg = args[0]
+        # A generator returns an iterator, so no wrapper makes a component of one.
+        if arg.type in self._JS_FUNC_VALUE_TYPES and arg.type != "generator_function":
+            if chain is not None:
+                chain.append(call_node)
+            return arg
+        if arg.type == "call_expression" and _depth < self._JS_WRAPPER_MAX_DEPTH:
+            inner = self._js_wrapped_function(arg, _depth + 1, chain)
+            if inner is not None and chain is not None:
+                chain.append(call_node)
+            return inner
+        return None
+
+    def _js_in_test_body(
+        self,
+        nodes: list[NodeInfo],
+        file_path: str,
+        enclosing_class: Optional[str],
+        enclosing_func: Optional[str],
+    ) -> bool:
+        """Whether a declaration sits in the body of a test (``it``, ``describe``, ...).
+
+        TESTED_BY edges are minted from the calls a test makes. A component a test
+        builds for itself, ``const Probe = React.forwardRef(function Probe(props, ref)
+        { ... useForkRef(handleOwnRef, ref) ... })`` inside ``it(...)``, is part of the
+        test: indexing it would move ``useForkRef``'s caller onto the fixture and take
+        the test out of ``tests_for(useForkRef)``. The enclosing function's node is
+        added before its body is walked, so it is already in ``nodes``.
+        """
+        if not enclosing_func:
+            return False
+        qualified = self._qualify(enclosing_func, file_path, enclosing_class)
+        return any(
+            node.is_test and self._node_qualified(node) == qualified
+            for node in reversed(nodes)
+        )
 
     def _extract_js_var_functions(
         self,
@@ -10207,11 +12970,19 @@ class CodeParser:
           const foo = () => {}
           let bar = function() {}
           export const baz = (x: number): string => x.toString()
+          export const Button = forwardRef((props, ref) => <button ref={ref} />)
 
         Returns True if at least one function was extracted from the
         declaration, so the caller can skip generic recursion.
         """
         handled = False
+        # Declarators this pass does not own. One declaration can mix them:
+        # `const Button = memo(() => paint()), token = nextToken()` defines a
+        # component and calls a function, and the call belongs to whatever function
+        # encloses the declaration. The caller skips its generic recursion over the
+        # whole declaration once anything here is extracted, so what is left has to
+        # be walked here or it is lost.
+        unowned = []
         for declarator in child.children:
             if declarator.type != "variable_declarator":
                 continue
@@ -10219,13 +12990,33 @@ class CodeParser:
             # Find identifier and function value
             var_name = None
             func_node = None
+            # The component's own body. For a wrapped component that is the function
+            # the wrapper receives, NOT the declarator: the wrapper call itself runs
+            # where the declaration is, not inside the component it produces.
+            walk_node = None
+            wrapper_calls = []
             for sub in declarator.children:
                 if sub.type == "identifier" and var_name is None:
                     var_name = sub.text.decode("utf-8", errors="replace")
                 elif sub.type in self._JS_FUNC_VALUE_TYPES:
                     func_node = sub
+                    walk_node = sub
+                elif sub.type == "call_expression":
+                    # Higher-order wrappers (forwardRef, memo, observer, ...) hide
+                    # the component's function inside the call's arguments. In a
+                    # test's body the component is a fixture and its calls stay the
+                    # test's, as they were before wrapped components were indexed.
+                    chain: list = []
+                    wrapped = self._js_wrapped_function(sub, chain=chain)
+                    if wrapped is not None and not self._js_in_test_body(
+                        nodes, file_path, enclosing_class, enclosing_func,
+                    ):
+                        func_node = wrapped
+                        walk_node = wrapped
+                        wrapper_calls = chain
 
             if not var_name or not func_node:
+                unowned.append(declarator)
                 continue
 
             is_test = _is_test_function(var_name, file_path, repo_root=self._repo_root)
@@ -10260,18 +13051,65 @@ class CodeParser:
 
             # Recurse into the function body for calls
             self._extract_from_tree(
-                func_node, source, language, file_path, nodes, edges,
+                walk_node or func_node, source, language, file_path, nodes, edges,
                 enclosing_class=enclosing_class,
                 enclosing_func=var_name,
                 import_map=import_map,
                 defined_names=defined_names,
                 _depth=_depth + 1,
             )
+            # A wrapped declaration was walked whole before it counted as a
+            # definition, and what it evaluates besides the component still belongs
+            # to the enclosing scope. That starts with its type annotation:
+            # `const Card: FC<Props> = memo(...)` references Props from here.
+            rest: list = []
+            if wrapper_calls:
+                rest = [sub for sub in declarator.children if sub.type == "type_annotation"]
+            for wrapper_call in wrapper_calls:
+                # `memo(...)` and any wrapper it nests are called where the
+                # declaration is, so the edges belong to the enclosing function.
+                # Recorded through the call extractor rather than by walking the
+                # node, which would descend into the wrapped function again and
+                # credit its calls to the enclosing function as well.
+                self._extract_calls(
+                    wrapper_call, source, language, file_path, nodes, edges,
+                    enclosing_class, enclosing_func, import_map, defined_names,
+                    _depth + 1,
+                )
+                # So does the rest of the wrapper call: the inner call of a curried
+                # `connect(mapState)(fn)` or `styled(Base)(fn)`, the type arguments
+                # of `forwardRef<El, Props>(fn)` and memo's comparator. Only the
+                # first argument leads to the component.
+                arguments = wrapper_call.child_by_field_name("arguments")
+                self._extract_value_references(
+                    arguments, arguments.type, source, language, file_path, edges,
+                    enclosing_class, enclosing_func, import_map, defined_names,
+                )
+                rest.extend(part for part in wrapper_call.children if part.type != "arguments")
+                rest.extend(self._js_argument_values(arguments)[1:])
+            if rest:
+                self._extract_from_tree(
+                    _NodeGroup(rest), source, language, file_path, nodes, edges,
+                    enclosing_class=enclosing_class,
+                    enclosing_func=enclosing_func,
+                    import_map=import_map,
+                    defined_names=defined_names,
+                    _depth=_depth + 1,
+                )
             handled = True
 
         if not handled:
             # Not a function assignment — let generic recursion handle it
             return False
+        for declarator in unowned:
+            self._extract_from_tree(
+                declarator, source, language, file_path, nodes, edges,
+                enclosing_class=enclosing_class,
+                enclosing_func=enclosing_func,
+                import_map=import_map,
+                defined_names=defined_names,
+                _depth=_depth + 1,
+            )
         return True
 
     def _extract_js_field_function(
@@ -10618,6 +13456,7 @@ class CodeParser:
         language: str,
         file_path: str,
         edges: list[EdgeInfo],
+        import_map: Optional[dict[str, str]] = None,
     ) -> None:
         """Emit INJECTS edges for Spring DI injection points in a Java class.
 
@@ -10642,11 +13481,11 @@ class CodeParser:
                 if member.type == "field_declaration":
                     self._emit_spring_field_injection(
                         member, qualified_source, file_path,
-                        edges, has_required_args, has_all_args,
+                        edges, has_required_args, has_all_args, import_map,
                     )
                 elif member.type == "constructor_declaration":
                     self._emit_spring_constructor_injection(
-                        member, qualified_source, file_path, edges,
+                        member, qualified_source, file_path, edges, import_map,
                     )
 
     def _emit_spring_field_injection(
@@ -10657,6 +13496,7 @@ class CodeParser:
         edges: list[EdgeInfo],
         has_required_args: bool,
         has_all_args: bool,
+        import_map: Optional[dict[str, str]],
     ) -> None:
         """Emit one INJECTS edge per field selected by Spring/Lombok."""
         field_annotations: list[str] = []
@@ -10720,16 +13560,19 @@ class CodeParser:
             else:
                 continue
 
+            extra = {
+                "injection_type": injection_type,
+                "field_name": field_name,
+            }
+            if import_map is not None:
+                extra["java_type"] = self._spring_java_type(field_type, import_map)
             edges.append(EdgeInfo(
                 kind="INJECTS",
                 source=qualified_source,
                 target=field_type,
                 file_path=file_path,
                 line=field_node.start_point[0] + 1,
-                extra={
-                    "injection_type": injection_type,
-                    "field_name": field_name,
-                },
+                extra=extra,
             ))
 
     def _emit_spring_constructor_injection(
@@ -10738,6 +13581,7 @@ class CodeParser:
         qualified_source: str,
         file_path: str,
         edges: list[EdgeInfo],
+        import_map: Optional[dict[str, str]],
     ) -> None:
         """Emit INJECTS edges for @Autowired constructor parameters."""
         ctor_annotations = self._get_java_annotations(ctor_node)
@@ -10761,6 +13605,8 @@ class CodeParser:
                     extra: dict = {"injection_type": "constructor"}
                     if param_name:
                         extra["field_name"] = param_name
+                    if import_map is not None:
+                        extra["java_type"] = self._spring_java_type(param_type, import_map)
                     edges.append(EdgeInfo(
                         kind="INJECTS",
                         source=qualified_source,
@@ -11221,6 +14067,14 @@ class CodeParser:
             if found:
                 return found
         return None
+
+    @classmethod
+    def _spring_java_type(cls, type_name: str, import_map: dict[str, str]) -> str:
+        """Identity of a type in Spring DI, bare when a wildcard hides its package."""
+        head = type_name.strip().partition(".")[0]
+        if import_map.get(_JAVA_WILDCARD_KEY) and head not in import_map:
+            return type_name.strip()
+        return cls._resolve_java_type_identity(type_name, import_map)
 
     @staticmethod
     def _resolve_java_type_identity(
@@ -11755,6 +14609,34 @@ class CodeParser:
             csharp_namespace = _csharp_namespace_context(child)[0][0]
             class_parent = enclosing_class or csharp_namespace or None
 
+        # Ruby: a compact declaration (``class Foo::Bar``) carries its own
+        # scope, so the enclosing lexical scope is not the whole story. Append
+        # the compact scope chain to the full enclosing scope chain, so the
+        # compact form lands on the same identity as the nested form at any
+        # depth: ``module A; class B::C`` and ``module A; module B; class C``
+        # both qualify to ``A.B.C``. Without this, ``class A::Same`` and
+        # ``class B::Same`` in one file collapse onto a single
+        # ``file.rb::Same``.
+        #
+        # A leading ``::`` (``class ::Root``, ``class ::A::B``) anchors the
+        # name at the top level, so the enclosing scope is dropped instead of
+        # stacked, and the leading separator must not leave an empty segment.
+        if language == "ruby" and child.type in ("class", "module"):
+            _name_child = child.child_by_field_name("name")
+            if _name_child is not None and _name_child.type == "scope_resolution":
+                _scope = _name_child.child_by_field_name("scope")
+                _chain = (
+                    _scope.text.decode("utf-8", errors="replace").replace("::", ".")
+                    if _scope is not None
+                    else ""
+                ).lstrip(".")
+                if _name_child.text.lstrip().startswith(b"::"):
+                    class_parent = _chain or None
+                elif _chain:
+                    class_parent = (
+                        f"{class_parent}.{_chain}" if class_parent else _chain
+                    )
+
         # Swift: detect the actual type keyword (class/struct/enum/actor/extension)
         # and store it in extra["swift_kind"] for richer downstream analysis.
         # Tree-sitter maps struct/enum/actor/extension all to class_declaration;
@@ -11773,6 +14655,12 @@ class CodeParser:
                 )
             if any(c.type == "modifier" and c.text == b"partial" for c in child.children):
                 extra["csharp_partial"] = True
+        # TypeScript interfaces and type aliases share kind Class but have no
+        # runtime body, so changes.py must not report them as test gaps (#1109).
+        if language in ("typescript", "tsx") and child.type in (
+            "interface_declaration", "type_alias_declaration",
+        ):
+            extra["typescript_kind"] = child.type
         if language == "swift":
             if child.type == "class_declaration":
                 _swift_keywords = {"class", "struct", "enum", "actor", "extension"}
@@ -11787,6 +14675,17 @@ class CodeParser:
         # Java: detect Spring stereotype annotations and store as metadata
         class_annotations: list[str] = []
         if language == "java":
+            package = (import_map or {}).get(_JAVA_PACKAGE_KEY)
+            if package:
+                extra["java_package"] = package
+            if child.type == "interface_declaration":
+                extra["java_kind"] = "interface"
+            else:
+                extra["java_kind"] = "abstract" if any(
+                    grandchild.type == "abstract"
+                    for modifier in child.children if modifier.type == "modifiers"
+                    for grandchild in modifier.children
+                ) else "concrete"
             class_annotations = self._get_java_annotations(child)
             spring_stereotypes = [
                 a for a in class_annotations if a in _SPRING_STEREOTYPE_ANNOTATIONS
@@ -11803,6 +14702,9 @@ class CodeParser:
                 role = "workflow_interface" if is_wf else "activity_interface"
                 extra["temporal_role"] = role
             if import_map is not None:
+                java_package = import_map.get(_JAVA_PACKAGE_KEY, "")
+                if java_package:
+                    extra["java_package"] = java_package
                 request_prefixes: list[str] = []
                 for annotation in self._java_annotations_named(
                     child,
@@ -11867,6 +14769,9 @@ class CodeParser:
         # Inheritance edges
         bases = self._get_bases(child, language, source)
         for base in bases:
+            inheritance_extra = {}
+            if language == "java" and import_map is not None:
+                inheritance_extra["java_type"] = self._spring_java_type(base, import_map)
             edges.append(EdgeInfo(
                 kind="INHERITS",
                 source=self._qualify(
@@ -11875,12 +14780,14 @@ class CodeParser:
                 target=base,
                 file_path=file_path,
                 line=child.start_point[0] + 1,
+                extra=inheritance_extra,
             ))
 
         # Spring DI: emit INJECTS edges for injected dependencies
         if language == "java":
             self._emit_spring_injections(
                 child, name, class_annotations, language, file_path, edges,
+                import_map,
             )
             self._emit_spring_config_edges(
                 child, name, enclosing_class, file_path, edges,
@@ -11895,6 +14802,14 @@ class CodeParser:
             recursive_class = self._julia_scope_join(enclosing_class, name)
         elif language == "csharp":
             recursive_class = f"{class_parent}.{name}" if class_parent else name
+        elif language == "ruby" and class_parent:
+            # The class node is keyed ``_qualify(name, file, class_parent)``,
+            # i.e. ``file::Parent.Name``. Descend with that same scope string so
+            # its methods qualify to ``file::Parent.Name.method`` and the
+            # CONTAINS edge points at a node that exists. Passing the bare leaf
+            # leaves every class with a parent_name pointing its methods at a
+            # ``file::Name`` container that was never emitted.
+            recursive_class = f"{class_parent}.{name}"
         else:
             recursive_class = name
         self._extract_from_tree(
@@ -11904,6 +14819,35 @@ class CodeParser:
             _depth=_depth + 1,
         )
         return True
+
+    def _index_ambiguous_method_scopes(self, root, language: str, import_map: dict) -> None:
+        """Carry full method scopes only where legacy leaf scopes would collide.
+
+        The per-file import map already carries internal resolver metadata.
+        Keeping this index there avoids parser-instance state leaking between
+        files (including recursive parsing). The tree is visited once.
+
+        Python only: a Ruby class already descends with its full lexical scope,
+        so its methods cannot collide on a leaf.
+        """
+        if language != "python":
+            return
+        scopes: dict[str, set[str]] = {}
+        methods: list[tuple[int, str, str]] = []
+        pending = [(root, "")]
+        while pending:
+            node, scope = pending.pop()
+            if node.type in self._class_types[language]:
+                name = self._get_name(node, language, "class")
+                if name:
+                    scope = f"{scope}.{name}" if scope else name
+                    scopes.setdefault(name, set()).add(scope)
+            if node.type in self._function_types[language] and scope:
+                methods.append((node.id, scope.rsplit(".", 1)[-1], scope))
+            pending.extend((child, scope) for child in reversed(node.named_children))
+        for node_id, leaf, scope in methods:
+            if len(scopes.get(leaf, ())) > 1:
+                import_map[f"__crg_method_scope__:{node_id}"] = scope
 
     def _extract_functions(
         self,
@@ -11989,6 +14933,10 @@ class CodeParser:
             decorators = tuple(deco_list)
 
         is_test = _is_test_function(name, file_path, decorators, repo_root=self._repo_root)
+        # PowerShell's Test-* verb and DSC Test() methods are production
+        # declarations unless the containing file is test code.
+        if language == "powershell":
+            is_test = self._is_test_path(file_path)
         # PHPUnit's name convention is ``test*`` (not only ``test_*``).
         if (
             language == "php"
@@ -12001,6 +14949,14 @@ class CodeParser:
 
         parent_name = enclosing_class
         container_scope = enclosing_class
+        if language == "python" and import_map is not None:
+            parent_name = import_map.get(f"__crg_method_scope__:{child.id}", parent_name)
+            # A Class node's identity is its direct parent plus its own name,
+            # however deep it sits, so CONTAINS must use the same two parts.
+            container_scope = (
+                ".".join(parent_name.split(".")[-2:]) if parent_name else parent_name
+            )
+            enclosing_class = parent_name
         julia_qualifier: Optional[str] = None
         if language == "julia":
             lexical_parent = self._julia_scope_join(
@@ -12052,6 +15008,8 @@ class CodeParser:
                 )
         if julia_qualifier:
             method_extra["julia_module_qualifier"] = julia_qualifier
+        if child.type == "abstract_method_signature":
+            method_extra["abstract"] = True
         if language == "java" and deco_list:
             endpoint_count = self._emit_spring_endpoint_nodes(
                 child,
@@ -12134,6 +15092,10 @@ class CodeParser:
         modifiers_str: Optional[str] = ",".join(deco_list) if deco_list else None
         if deco_list:
             method_extra["decorators"] = list(deco_list)
+        if language == "java" and child.type == "constructor_declaration":
+            # Lets consumers tell a constructor from a method; Spring AOP,
+            # for one, cannot intercept constructors.
+            method_extra["java_constructor"] = True
 
         docstring = self._get_docstring_summary(child, language)
         if docstring:
@@ -12339,6 +15301,11 @@ class CodeParser:
 
         # Non-Python languages: tree-sitter dead-guard walk (Go/TS/JS
         # ``if false``, C/C++ ``#if 0``).  ``ast`` above cannot reach them.
+        # Rust is separate: its if is an if_expression and its false is a
+        # boolean_literal, and both shapes are shared with Kotlin and Scala,
+        # whose if (false) stays live.
+        if language == "rust" and _is_in_rust_dead_guard(child):
+            return True
         if language != "python" and _is_in_static_dead_guard(child):
             return True
 
@@ -13063,12 +16030,14 @@ class CodeParser:
         self,
         root,
         file_path: str,
+        nodes: list[NodeInfo],
         edges: list[EdgeInfo],
     ) -> None:
         """Run evidence-gated Laravel analysis without altering generic calls."""
         self._walk_php_laravel_sequence(
             root,
             file_path,
+            nodes,
             edges,
             namespace="",
         )
@@ -13077,6 +16046,7 @@ class CodeParser:
         self,
         container,
         file_path: str,
+        nodes: list[NodeInfo],
         edges: list[EdgeInfo],
         namespace: str,
     ) -> None:
@@ -13098,6 +16068,7 @@ class CodeParser:
                     self._walk_php_laravel_sequence(
                         block,
                         file_path,
+                        nodes,
                         edges,
                         namespace=child_namespace,
                     )
@@ -13113,6 +16084,7 @@ class CodeParser:
             self._walk_php_laravel_node(
                 child,
                 file_path,
+                nodes,
                 edges,
                 current_namespace,
                 imports,
@@ -13125,6 +16097,7 @@ class CodeParser:
         self,
         node,
         file_path: str,
+        nodes: list[NodeInfo],
         edges: list[EdgeInfo],
         namespace: str,
         imports: dict[str, str],
@@ -13147,6 +16120,7 @@ class CodeParser:
                 self._walk_php_laravel_node(
                     child,
                     file_path,
+                    nodes,
                     edges,
                     namespace,
                     imports,
@@ -13162,6 +16136,7 @@ class CodeParser:
                 self._walk_php_laravel_node(
                     child,
                     file_path,
+                    nodes,
                     edges,
                     namespace,
                     imports,
@@ -13181,21 +16156,29 @@ class CodeParser:
                 enclosing_class,
                 enclosing_func,
             )
-        elif node.type == "member_call_expression" and eloquent_model:
-            self._emit_laravel_relationship_edge(
-                node,
-                file_path,
-                edges,
-                namespace,
-                imports,
-                enclosing_class,
-                enclosing_func,
+            self._emit_laravel_endpoint_nodes(
+                node, file_path, nodes, edges, namespace, imports,
+            )
+        elif node.type == "member_call_expression":
+            if eloquent_model:
+                self._emit_laravel_relationship_edge(
+                    node,
+                    file_path,
+                    edges,
+                    namespace,
+                    imports,
+                    enclosing_class,
+                    enclosing_func,
+                )
+            self._emit_laravel_endpoint_nodes(
+                node, file_path, nodes, edges, namespace, imports,
             )
 
         for child in node.children:
             self._walk_php_laravel_node(
                 child,
                 file_path,
+                nodes,
                 edges,
                 namespace,
                 imports,
@@ -13397,6 +16380,269 @@ class CodeParser:
         ):
             return None
         return class_reference, method
+
+    @staticmethod
+    def _php_route_arguments(node) -> list:
+        arguments = next((c for c in node.children if c.type == "arguments"), None)
+        return [c for c in arguments.children if c.type == "argument"] if arguments else []
+
+    @staticmethod
+    def _php_string_literal(value) -> Optional[str]:
+        """Return a quoted PHP string's value without interpolation or escapes, else None.
+
+        Single-quoted strings are decoded (``\\'`` and ``\\\\``); double-quoted strings
+        with escape sequences or interpolation are rejected.
+        """
+        if value is None:
+            return None
+        if value.type == "encapsed_string" and any(
+            c.is_named and c.type != "string_content" for c in value.children
+        ):
+            return None
+        if value.type not in ("string", "encapsed_string"):
+            return None
+        text = value.text.decode("utf-8", errors="replace")
+        if value.type == "string" and text.startswith("'"):
+            return re.sub(r"\\([\\'])", r"\1", text[1:-1])
+        return text[1:-1]
+
+    @classmethod
+    def _php_route_literal(cls, node) -> Optional[str]:
+        return cls._php_string_literal(next((c for c in node.children if c.is_named), None))
+
+    def _php_route_facade_call(
+        self, node, namespace: str, imports: dict[str, str],
+    ) -> Optional[str]:
+        receiver, method = self._php_scoped_call_parts(node)
+        if not receiver or not method:
+            return None
+        resolved = self._php_resolve_class_reference(receiver, namespace, imports)
+        return method if resolved.casefold() == self._LARAVEL_ROUTE_FACADE.casefold() else None
+
+    def _php_route_group_settings(
+        self, call, namespace: str, imports: dict[str, str],
+    ) -> Optional[tuple[str, Optional[str]]]:
+        """Read literal prefix and controller from a Route group call chain."""
+        prefix = ""
+        controller = None
+        chain = []
+        current = call
+        while current.type == "member_call_expression":
+            name = current.child_by_field_name("name")
+            if name is None:
+                return None
+            chain.append((name.text.decode("utf-8"), self._php_route_arguments(current)))
+            current = current.child_by_field_name("object")
+            if current is None:
+                return None
+        base = self._php_route_facade_call(current, namespace, imports)
+        if base is None:
+            return None
+        chain.append((base, self._php_route_arguments(current)))
+        for method, args in reversed(chain):
+            if method == "prefix":
+                if not args or (part := self._php_route_literal(args[0])) is None:
+                    return None
+                prefix = self._join_spring_route(prefix, part)
+            elif method == "controller":
+                if not args:
+                    return None
+                access = next(
+                    (c for c in args[0].children if c.type == "class_constant_access_expression"),
+                    None,
+                )
+                controller = self._php_class_constant_reference(access) if access else None
+                if controller is None:
+                    return None
+            elif method == "group" and len(args) > 1:
+                # Route::group($attributes, $routes): only a literal array with literal
+                # keys is static evidence; anything else may carry a prefix we cannot see.
+                options = next((c for c in args[0].children if c.is_named), None)
+                if options is None or options.type != "array_creation_expression":
+                    return None
+                for item in options.children:
+                    if item.type != "array_element_initializer":
+                        continue
+                    values = [c for c in item.children if c.is_named]
+                    if len(values) != 2:
+                        return None
+                    key = self._php_string_literal(values[0])
+                    if key is None:
+                        return None
+                    if key == "prefix":
+                        part = self._php_string_literal(values[1])
+                        if part is None:
+                            return None
+                        prefix = self._join_spring_route(prefix, part)
+                    elif key == "controller":
+                        controller = (
+                            self._php_class_constant_reference(values[1])
+                            if values[1].type == "class_constant_access_expression"
+                            else None
+                        )
+                        if controller is None:
+                            return None
+        return prefix, controller
+
+    def _php_route_enclosing_groups(
+        self, node, namespace: str, imports: dict[str, str],
+    ) -> Optional[tuple[str, Optional[str]]]:
+        groups = []
+        current = node.parent
+        while current is not None:
+            if current.type in ("anonymous_function", "arrow_function"):
+                argument = current.parent
+                if argument is not None and argument.type == "argument":
+                    arguments = argument.parent
+                    call = arguments.parent if arguments is not None else None
+                    if call is not None and call.type in (
+                        "scoped_call_expression", "member_call_expression",
+                    ):
+                        name = call.child_by_field_name("name")
+                        if name is not None and name.text == b"group":
+                            settings = self._php_route_group_settings(call, namespace, imports)
+                            if settings is None:
+                                return None
+                            groups.append(settings)
+            current = current.parent
+        prefix = ""
+        controller = None
+        for group_prefix, group_controller in reversed(groups):
+            prefix = self._join_spring_route(prefix, group_prefix)
+            controller = group_controller or controller
+        return prefix, controller
+
+    def _php_endpoint_handler(
+        self, argument, group_controller: Optional[str],
+    ) -> Optional[tuple[str, str]]:
+        value = next((c for c in argument.children if c.is_named), None)
+        if value is None:
+            return None
+        if value.type == "class_constant_access_expression":
+            controller = self._php_class_constant_reference(value)
+            return (controller, "__invoke") if controller else None
+        if value.type in ("string", "encapsed_string"):
+            literal = self._php_route_literal(argument)
+            if literal is None:
+                return None
+            if "@" in literal:
+                # Laravel reads 'Class@method' as a class name, not through PHP `use`
+                # aliases or the file namespace; the leading backslash keeps it literal.
+                class_name, method = literal.rsplit("@", 1)
+                controller = "\\" + class_name.lstrip("\\") if class_name.strip("\\") else None
+            else:
+                controller, method = group_controller, literal
+            if controller and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", method):
+                return controller, method
+            return None
+        if value.type != "array_creation_expression":
+            return None
+        elements = [c for c in value.children if c.type == "array_element_initializer"]
+        if len(elements) != 2:
+            return None
+        access = next(
+            (c for c in elements[0].children if c.type == "class_constant_access_expression"),
+            None,
+        )
+        controller = self._php_class_constant_reference(access) if access else None
+        method = self._php_route_literal(elements[1])
+        if controller and method and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", method):
+            return controller, method
+        return None
+
+    def _emit_laravel_endpoint_nodes(
+        self, node, file_path: str, nodes: list[NodeInfo], edges: list[EdgeInfo],
+        namespace: str, imports: dict[str, str],
+    ) -> None:
+        """Emit parse-time Laravel endpoints using Spring's node and edge shape."""
+        if Path(file_path).parent.name != "routes":
+            return
+        fluent_prefix, fluent_controller = "", None
+        if node.type == "member_call_expression":
+            # Route::middleware('auth')->get(...): the chain may carry settings.
+            name_node = node.child_by_field_name("name")
+            verb = name_node.text.decode("utf-8") if name_node is not None else None
+        else:
+            verb = self._php_route_facade_call(node, namespace, imports)
+        if verb not in self._LARAVEL_ROUTE_VERBS or verb in {"resource", "apiResource"}:
+            return
+        if node.type == "member_call_expression":
+            fluent = self._php_route_group_settings(node, namespace, imports)
+            if fluent is None:
+                return
+            fluent_prefix, fluent_controller = fluent
+        args = self._php_route_arguments(node)
+        path_index = 1 if verb == "match" else 0
+        if len(args) <= path_index + 1:
+            return
+        path = self._php_route_literal(args[path_index])
+        if path is None:
+            return
+        context = self._php_route_enclosing_groups(node, namespace, imports)
+        if context is None:
+            return
+        prefix = self._join_spring_route(context[0], fluent_prefix)
+        group_controller = fluent_controller or context[1]
+        handler = self._php_endpoint_handler(args[path_index + 1], group_controller)
+        handler_value = next(
+            (c for c in args[path_index + 1].children if c.is_named), None,
+        )
+        if handler is None and (
+            handler_value is None
+            or handler_value.type not in ("anonymous_function", "arrow_function")
+        ):
+            return
+        methods = [verb.upper()]
+        if verb == "match":
+            array = next(
+                (c for c in args[0].children if c.type == "array_creation_expression"),
+                None,
+            )
+            if array is None:
+                return
+            methods = []
+            for item in array.children:
+                if item.type == "array_element_initializer":
+                    method = self._php_route_literal(item)
+                    if method is None:
+                        return
+                    methods.append(method.upper())
+        route = self._join_spring_route(prefix, path)
+        # Route::get(...)->prefix('v1') prepends to the full URI, once per call.
+        current = node
+        while (
+            current.parent is not None
+            and current.parent.type == "member_call_expression"
+            and current.parent.child_by_field_name("object") == current
+        ):
+            current = current.parent
+            name = current.child_by_field_name("name")
+            if name is not None and name.text == b"prefix":
+                chain_args = self._php_route_arguments(current)
+                part = self._php_route_literal(chain_args[0]) if chain_args else None
+                if part is None:
+                    return
+                route = self._join_spring_route(part, route)
+        handler_name = handler[1] if handler else "closure"
+        for method in dict.fromkeys(methods):
+            # No position in the name: a line added above must not rename the node.
+            name = f"{handler_name}@Route {method} {route}"
+            metadata = {"http_method": method, "route": route, "handler": handler_name}
+            nodes.append(NodeInfo(
+                kind="Endpoint", name=name, file_path=file_path,
+                line_start=node.start_point[0] + 1, line_end=node.end_point[0] + 1,
+                language="php", extra=metadata,
+            ))
+            if handler:
+                edges.append(EdgeInfo(
+                    kind="HANDLES",
+                    source=self._php_semantic_target(
+                        handler[0], namespace, imports, file_path, handler[1],
+                    ),
+                    target=self._qualify(name, file_path, None),
+                    file_path=file_path, line=node.start_point[0] + 1,
+                    extra=metadata,
+                ))
 
     def _php_semantic_target(
         self,
@@ -14821,7 +18067,9 @@ class CodeParser:
             if module_node is None:
                 continue
             module = module_node.text.decode("utf-8", errors="replace")
-            resolved = self._resolve_python_module_in_repo(module, file_path)
+            # `_python_import_origin` sees through sys.modules shims, so
+            # `from shim import *` enumerates the real module's exports.
+            resolved = self._python_import_origin(module, file_path)
             if resolved is None or resolved in resolving:
                 continue
             for name, origin in self._get_python_star_exports(
@@ -14899,6 +18147,13 @@ class CodeParser:
                 tree.root_node, resolved_module, origins, next_resolving,
             )
             for name, module in import_map.items():
+                if f"{_JS_IMPORT_ORIGINAL_PREFIX_KEY}{name}" in import_map:
+                    # `from .impl import charge as pay` exports `pay`, but the
+                    # origin file defines `charge`; an origin keyed by file
+                    # alone would send `pkg.pay` to an unrelated `impl.pay`.
+                    # Keep the name on this module, where it stays unresolved.
+                    origins[name] = resolved_module
+                    continue
                 # A relative import stores its already-resolved file here,
                 # an absolute one a dotted module name; both must work.
                 origin = self._python_import_origin(module, resolved_module)
@@ -15140,8 +18395,222 @@ class CodeParser:
             package_dir / f"{name}.py",
         ):
             if self._file_exists_exact(candidate):
-                return normalize_file_path(candidate)
+                return self._python_module_alias_target(
+                    normalize_file_path(candidate),
+                )
         return None
+
+    # Shims that re-point each other are followed at most this many hops.
+    _PY_MODULE_ALIAS_MAX_DEPTH = 5
+
+    def _python_module_alias_target(self, module_file: str) -> str:
+        """The module that really answers an import of *module_file*.
+
+        A compatibility shim such as::
+
+            import importlib, sys
+            sys.modules[__name__] = importlib.import_module("pkg.real")
+
+        swaps itself out of ``sys.modules`` on first import, so ``import shim``
+        hands the caller ``pkg/real.py``. Treating the five-line shim as the
+        module left every ``shim.func()`` without a definition to land on and
+        recorded the shim as the file importers depend on. Follows chains of
+        shims; returns *module_file* unchanged for an ordinary module, a
+        target outside the repository, or a target excluded via
+        :meth:`exclude_files` (a build without that file would not see it).
+        """
+        current = module_file
+        seen = {current}
+        for _ in range(self._PY_MODULE_ALIAS_MAX_DEPTH):
+            target = self._python_module_alias(current)
+            if (
+                target is None
+                or target in seen
+                or target in self._excluded_files
+            ):
+                break
+            seen.add(target)
+            current = target
+        return current
+
+    def _python_module_alias(self, module_file: str) -> Optional[str]:
+        """One hop of :meth:`_python_module_alias_target`, cached per file."""
+        if not module_file.endswith(".py"):
+            return None
+        if module_file in self._python_module_alias_cache:
+            return self._python_module_alias_cache[module_file]
+        target: Optional[str] = None
+        # A repository path can be a symlink to a file elsewhere; only a file
+        # that really lives inside the repository is read.
+        try:
+            real_path = Path(module_file).resolve()
+        except (OSError, ValueError):
+            real_path = None
+        module_name = (
+            self._cached_python_module_alias(real_path)
+            if real_path is not None
+            and self._path_is_within(
+                real_path, self._import_repo_boundary(module_file),
+            )
+            else None
+        )
+        if module_name:
+            target = self._resolve_python_module_in_repo(module_name, module_file)
+        if len(self._python_module_alias_cache) >= self._MODULE_CACHE_MAX:
+            self._python_module_alias_cache.clear()
+        self._python_module_alias_cache[module_file] = target
+        return target
+
+    @classmethod
+    def _cached_python_module_alias(cls, module_path: Path) -> Optional[str]:
+        """:meth:`_read_python_module_alias`, cached by the file's mtime and size."""
+        try:
+            file_stat = module_path.stat()
+        except (OSError, ValueError):
+            return None
+        cache_key = (str(module_path), file_stat.st_mtime_ns, file_stat.st_size)
+        with _PYTHON_MODULE_ALIAS_CACHE_LOCK:
+            if cache_key in _PYTHON_MODULE_ALIAS_CACHE:
+                return _PYTHON_MODULE_ALIAS_CACHE[cache_key]
+            module_name = cls._read_python_module_alias(module_path)
+            if len(_PYTHON_MODULE_ALIAS_CACHE) >= _PYTHON_STAR_CACHE_MAX:
+                _PYTHON_MODULE_ALIAS_CACHE.clear()
+            _PYTHON_MODULE_ALIAS_CACHE[cache_key] = module_name
+            return module_name
+
+    @staticmethod
+    def _read_python_module_alias(module_path: Path) -> Optional[str]:
+        """Dotted module a file installs as ``sys.modules[__name__]``, if any.
+
+        Only the literal, module-level form counts:
+        ``sys.modules[__name__] = importlib.import_module("dotted.name")``
+        (or ``import_module(...)`` imported from ``importlib``). A computed or
+        relative module name, a swap inside a function or ``if`` block, or a
+        later write that replaces the literal swap is not something static
+        analysis can follow, so the file stays the module. Of several
+        module-level swaps the last one is what importers get.
+        """
+        try:
+            source = module_path.read_bytes()
+        except OSError:
+            return None
+        if b"sys.modules" not in source or b"import_module" not in source:
+            return None
+        try:
+            tree = ast.parse(source)
+        except (SyntaxError, ValueError, RecursionError, MemoryError):
+            # A file ast cannot read must not cost its importers their edges.
+            return None
+
+        def writes_own_entry(target: ast.AST) -> bool:
+            return (
+                isinstance(target, ast.Subscript)
+                and isinstance(target.value, ast.Attribute)
+                and target.value.attr == "modules"
+                and isinstance(target.value.value, ast.Name)
+                and target.value.value.id == "sys"
+                and isinstance(target.slice, ast.Name)
+                and target.slice.id == "__name__"
+            )
+
+        # Importers get the LAST value written, so every write counts: a
+        # second swap, one nested in a block, or a computed one means the
+        # module that answers the import is not provable from the source.
+        top_level = {id(statement) for statement in tree.body}
+        writes: list[ast.stmt] = []
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Assign, ast.Delete)):
+                targets = node.targets
+            elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+                targets = [node.target]
+            else:
+                continue
+            if any(writes_own_entry(target) for target in targets):
+                if id(node) not in top_level:
+                    return None
+                writes.append(node)
+        if not writes:
+            return None
+        final = max(writes, key=lambda node: (node.lineno, node.col_offset))
+        if not (isinstance(final, ast.Assign) and len(final.targets) == 1):
+            return None
+        call = final.value
+        if not (
+            isinstance(call, ast.Call)
+            and len(call.args) == 1
+            and not call.keywords
+            and isinstance(call.args[0], ast.Constant)
+            and isinstance(call.args[0].value, str)
+        ):
+            return None
+        func = call.func
+        expected: tuple[str, Optional[str]]
+        if (
+            isinstance(func, ast.Attribute)
+            and func.attr == "import_module"
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "importlib"
+        ):
+            callee, expected = "importlib", ("importlib", None)
+        elif isinstance(func, ast.Name) and func.id == "import_module":
+            callee, expected = "import_module", ("importlib", "import_module")
+        else:
+            return None
+        # The name must mean importlib's function and nothing else: a local
+        # `def import_module(...)` or a rebinding of `importlib` makes the
+        # call something static analysis cannot vouch for.
+        for local, wanted in ((callee, expected), ("sys", ("sys", None))):
+            # `sys` too: `import fake as sys` makes `sys.modules` an ordinary
+            # mapping, and the assignment replaces nothing.
+            bindings = CodeParser._python_name_bindings(tree, local)
+            if not bindings or any(binding != wanted for binding in bindings):
+                return None
+        name = call.args[0].value
+        if name and not name.startswith("."):
+            return name
+        return None
+
+    @staticmethod
+    def _python_name_bindings(
+        tree: ast.Module, local: str,
+    ) -> list[tuple[str, Optional[str]]]:
+        """How *local* is bound anywhere in *tree*, one entry per binding.
+
+        An import binding is ``(module, imported name)``: ``import importlib``
+        gives ``("importlib", None)`` and ``from importlib import
+        import_module`` gives ``("importlib", "import_module")``. Any other
+        binding (def, class, assignment, loop or ``with`` target, ``global``)
+        is ``("", None)``, which matches no expected import.
+        """
+        bindings: list[tuple[str, Optional[str]]] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.asname is not None:
+                        if alias.asname == local:
+                            bindings.append((alias.name, None))
+                    elif alias.name.split(".")[0] == local:
+                        # `import importlib.util` binds `importlib` itself.
+                        bindings.append((local, None))
+            elif isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    if (alias.asname or alias.name) == local:
+                        module = node.module if not node.level else ""
+                        bindings.append((module or "", alias.name))
+            elif isinstance(
+                node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef),
+            ):
+                if node.name == local:
+                    bindings.append(("", None))
+            elif isinstance(node, ast.Name) and isinstance(
+                node.ctx, (ast.Store, ast.Del),
+            ):
+                if node.id == local:
+                    bindings.append(("", None))
+            elif isinstance(node, (ast.Global, ast.Nonlocal)):
+                if local in node.names:
+                    bindings.append(("", None))
+        return bindings
 
     def _python_submodule_names(
         self, node, package_dir: Path,
@@ -15182,10 +18651,21 @@ class CodeParser:
         prefix = module if module.endswith(".") else f"{module}."
         targets: list[str] = [] if namespace else [module]
         if package_dir is not None:
-            targets.extend(
-                f"{prefix}{name}"
-                for name in self._python_submodule_names(node, package_dir)
-            )
+            for name in self._python_submodule_names(node, package_dir):
+                dotted = f"{prefix}{name}"
+                submodule = self._python_submodule_file(package_dir, name)
+                if (
+                    submodule is not None
+                    and file_path
+                    and submodule not in self._excluded_files
+                    and self._resolve_module_to_file(dotted, file_path, "python")
+                    != submodule
+                ):
+                    # `module` is a shim installing another package, so the
+                    # dotted name points under the shim, where no file is.
+                    targets.append(submodule)
+                else:
+                    targets.append(dotted)
         # A namespace package that binds no submodule (only possible for a
         # name that cannot be imported at all) still has to say something.
         return targets or [module]
@@ -15210,11 +18690,12 @@ class CodeParser:
             if not self._path_is_within(resolved, boundary):
                 return None
             return (
-                normalize_file_path(resolved)
+                self._python_module_alias_target(normalize_file_path(resolved))
                 if self._file_exists_exact(resolved)
                 else None
             )
-        return self._resolve_python_module_in_repo(module, file_path)
+        origin = self._resolve_python_module_in_repo(module, file_path)
+        return self._python_module_alias_target(origin) if origin else None
 
     def _python_module_search(
         self, module: str, file_path: str,
@@ -15488,8 +18969,20 @@ class CodeParser:
                             import_map[
                                 f"{_PY_MODULE_BINDING_KEY}{local_name}"
                             ] = target
+                            import_map.pop(
+                                f"{_JS_IMPORT_ORIGINAL_PREFIX_KEY}{local_name}",
+                                None,
+                            )
                             return
                     import_map[local_name] = module
+                    original_key = f"{_JS_IMPORT_ORIGINAL_PREFIX_KEY}{local_name}"
+                    if imported_name != local_name:
+                        # `from X import A as B; B()` calls X's `A`; without
+                        # the original name the call qualified as `X::B`.
+                        import_map[original_key] = imported_name
+                    else:
+                        # A later `from Y import B` rebinds B to Y's own `B`.
+                        import_map.pop(original_key, None)
 
                 seen_import_keyword = False
                 for child in node.children:
@@ -15605,7 +19098,10 @@ class CodeParser:
             if not text.startswith("import "):
                 return
             imported = text[len("import "):].rstrip(";").strip()
-            if imported.startswith("static ") or imported.endswith(".*"):
+            if imported.startswith("static "):
+                return
+            if imported.endswith(".*"):
+                import_map[_JAVA_WILDCARD_KEY] = "1"
                 return
             original, separator, alias = imported.partition(" as ")
             local_name = alias.strip() if separator else original.rsplit(".", 1)[-1]
@@ -15679,6 +19175,7 @@ class CodeParser:
         # Drop resolutions cached before the exclusions were applied.
         self._module_file_cache.clear()
         self._python_reexport_cache.clear()
+        self._python_module_alias_cache.clear()
 
     def _resolve_module_to_file(
         self,
@@ -15715,6 +19212,8 @@ class CodeParser:
             self._module_file_cache[cache_key] = resolved
         if resolved is not None and resolved in self._excluded_files:
             return None
+        if resolved is not None and language == "python":
+            resolved = self._python_module_alias_target(resolved)
         return resolved
 
     def _do_resolve_module(
@@ -15774,6 +19273,10 @@ class CodeParser:
             return None
 
         if language == "python":
+            if Path(module).is_absolute():
+                # A submodule reached through a shim that installs a package
+                # is named by its file; see `_python_from_import_targets`.
+                return self._python_import_origin(module, file_path)
             if module.startswith("."):
                 # Relative import. The leading dots ARE the resolution: one
                 # dot is the caller's own package, each further dot one
@@ -15852,9 +19355,23 @@ class CodeParser:
                         if target.is_file():
                             return str(target.resolve())
             else:
-                # Non-relative import — try tsconfig path alias resolution
+                # Non-relative import — try tsconfig path alias resolution, but
+                # never an edge to a file the build would not index. baseUrl
+                # reaches every bare specifier, ``vendor/x`` and ``dist/x`` too.
                 resolved = self._tsconfig_resolver.resolve_alias(module, file_path)
-                if resolved:
+                if resolved and (
+                    self._repo_root is None
+                    or self._path_is_indexed(Path(resolved), self._repo_root)
+                ):
+                    return resolved
+                # Then a sibling package of an npm/yarn/pnpm workspace (#1030),
+                # but never an edge to a file the build would not index: one
+                # that is ignored, or (a CSS export, say) has no language.
+                resolved = self._workspace_resolver.resolve(module, file_path)
+                if resolved and self.detect_language(Path(resolved)) and (
+                    self._repo_root is None
+                    or self._path_is_indexed(Path(resolved), self._repo_root)
+                ):
                     return resolved
 
         elif language == "dart":
@@ -16935,7 +20452,18 @@ class CodeParser:
         cached = self._python_reexport_cache.get(cache_key)
         if cached is not None:
             return cached
-        origin = self._get_python_star_exports(module_file).get(symbol_name)
+        # A repository path can be a symlink to a file elsewhere; only a file
+        # that really lives inside the repository is read.
+        try:
+            real_path: Optional[Path] = Path(module_file).resolve()
+        except (OSError, ValueError):
+            real_path = None
+        origin = (
+            self._get_python_star_exports(module_file).get(symbol_name)
+            if real_path is not None
+            and self._path_is_within(real_path, self._import_repo_boundary(module_file))
+            else None
+        )
         result = origin if origin and origin != module_file else module_file
         if len(self._python_reexport_cache) >= self._MODULE_CACHE_MAX:
             self._python_reexport_cache.clear()
@@ -17162,6 +20690,12 @@ class CodeParser:
 
     def _get_name(self, node, language: str, kind: str) -> Optional[str]:
         """Extract the name from a class/function definition node."""
+        if language == "powershell":
+            for child in node.children:
+                if child.type in ("function_name", "simple_name"):
+                    name = child.text.decode("utf-8", errors="replace")
+                    return _POWERSHELL_SCOPE_RE.sub("", name)
+            return None
         # Dart: function_signature has a return-type node before the identifier;
         # search only for 'identifier' to avoid returning the return type name.
         if language == "dart" and node.type == "function_signature":
@@ -17434,6 +20968,29 @@ class CodeParser:
             name_child = node.child_by_field_name("name")
             if name_child is not None:
                 return name_child.text.decode("utf-8", errors="replace")
+
+        # Ruby: compact namespace declarations (``class Foo::Bar`` /
+        # ``module Foo::Bar``) put the name in a ``scope_resolution`` node, not
+        # a bare ``constant``, so the generic loop below misses them and
+        # _extract_classes drops the whole Class node. Take the rightmost
+        # ``constant`` so the emitted name matches the nested form
+        # (``module Foo`` + ``class Bar`` -> Class "Bar").
+        if language == "ruby" and node.type in ("class", "module"):
+            name_child = node.child_by_field_name("name")
+            if name_child is not None and name_child.type == "scope_resolution":
+                # Only a constant scope names a namespace. ``class klass::Inner``
+                # (identifier) and ``class self::Foo`` (self) resolve their scope
+                # at runtime, so there is no static namespace to record -- fall
+                # through and emit nothing, as before this branch existed. The
+                # root of the chain decides: ``klass::Outer::Inner`` is no more
+                # static than ``klass::Inner``.
+                scope = name_child.child_by_field_name("scope")
+                while scope is not None and scope.type == "scope_resolution":
+                    scope = scope.child_by_field_name("scope")
+                if scope is None or scope.type == "constant":
+                    for sub in reversed(name_child.children):
+                        if sub.type == "constant":
+                            return sub.text.decode("utf-8", errors="replace")
 
         # Most built-in languages use a 'name' child.
         # field_identifier covers C++ class member function names inside
@@ -18746,11 +22303,15 @@ class CodeParser:
                 return method_node.text.decode("utf-8", errors="replace")
 
         # Bash: `command` node's first child is the command name.
-        if language == "bash" and node.type == "command":
+        if language in ("bash", "powershell") and node.type == "command":
             for child in node.children:
                 if child.type == "command_name":
                     # command_name wraps a word — get its text
                     txt = child.text.decode("utf-8", errors="replace").strip()
+                    # The PowerShell grammar can wrap a numeric range in a
+                    # command_name even though it is a pipeline expression.
+                    if language == "powershell" and _POWERSHELL_RANGE_RE.fullmatch(txt):
+                        return None
                     return txt or None
             return None
 

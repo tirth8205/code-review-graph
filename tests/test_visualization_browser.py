@@ -473,6 +473,15 @@ def test_clicking_a_file_node_collapses_and_expands_its_children(full_page):
     full_page.assert_no_errors()
 
 
+def test_legend_icons_keep_their_size_and_clear_the_filter_panel(full_page):
+    """The page-wide svg rule once made each icon 104px, filling the screen."""
+    box = full_page.page.locator("#legend .legend-item svg").first.bounding_box()
+    assert (box["width"], box["height"]) == (16, 16)
+    legend = full_page.page.locator("#legend").bounding_box()
+    panel = full_page.page.locator("#filter-panel").bounding_box()
+    assert legend["y"] + legend["height"] <= panel["y"]
+
+
 def test_legend_edge_toggle_hides_that_edge_type(full_page):
     """Clicking an edge type in the legend removes those lines from the canvas."""
     calls_toggle = full_page.page.locator('.legend-item[data-edge-kind="CALLS"]')
