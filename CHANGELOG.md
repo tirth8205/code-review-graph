@@ -253,6 +253,15 @@
   root, so the seed never matched a node. The graph-derived ground truth now
   counts real neighbour files too, and `seed_file` stays relative to the
   repository.
+- Members of nested classes keep the full scope chain in every language that
+  did not already (#934): in Java, Kotlin, Swift, Scala and others,
+  `Alpha.Same.run` and `Beta.Same.run` are two nodes instead of one, a
+  nested class is contained by its enclosing class, and three levels keep all
+  three. Local calls stay inside their own class, and a JVM import of a nested
+  class (`import app.Outer.Inner`) targets `Outer.Inner`. On gson this leaves
+  no dangling `CONTAINS` edges (700 before) and 14 dangling `CALLS` (154
+  before). Existing graphs reparse their files with nested classes, and the
+  callers of those members, once on the next update.
 - C# declarations no longer collapse across namespaces, and calls no longer
   bind to a type the caller cannot name. Qualified names now carry the
   namespace and the complete containing-type path

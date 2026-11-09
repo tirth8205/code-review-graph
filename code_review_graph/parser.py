@@ -2888,6 +2888,29 @@ def _php_docblock_marks_test(node) -> bool:
     )
 
 
+# Languages with their own rule for nested member scopes: Python and C++ keep
+# leaf spellings, Julia joins its own way, and the namespace-aware pass binds
+# C# calls (#934, #964). Every other language keeps the full scope chain.
+_SEPARATE_SCOPE_RULE_LANGUAGES = frozenset({"python", "cpp", "julia", "csharp"})
+
+
+def _nested_import_chain(module: str, resolved: str, symbol: str) -> str:
+    """Return the in-file scope chain a JVM import of a nested class names.
+
+    ``import app.Outer.Inner`` resolves to ``app/Outer.java``; the class it
+    names is ``Outer.Inner`` there, and its members carry that whole chain
+    (#934). Any other import keeps *symbol* unchanged.
+    """
+    parts = module.split(".")
+    if len(parts) < 2 or parts[-1] != symbol:
+        return symbol
+    stem = Path(resolved).stem
+    for index in range(len(parts) - 2, -1, -1):
+        if parts[index] == stem:
+            return ".".join(parts[index:])
+    return symbol
+
+
 class _OuterBinding(str):
     """A C# binding declared *levels* containing types out from its use.
 
@@ -7833,25 +7856,32 @@ class CodeParser:
             for node in nodes
             if node.language == "go" and "go_receiver" in node.extra
         }
+        # A dot in a Python member's parent scope proves nesting; Ruby and
+        # Julia always dot, so they are handled by their own rules below. C#
+        # never reaches here: its namespace-aware binder owns every call (#964).
         disambiguated_leaves = {
             node.parent_name.rsplit(".", 1)[-1] for node in nodes
             if node.language == "python" and node.parent_name
             and "." in node.parent_name and node.kind in ("Function", "Test")
         }
-        # Every nested Ruby class has a dotted scope, so a dot proves nothing
-        # there. A Ruby leaf is ambiguous only when two scopes really share it.
-        ruby_scopes_by_leaf: dict[str, set[str]] = {}
+        # Ruby and every language that keeps the full nested scope chain
+        # (#934) give each nested member a dotted scope, so a dot proves
+        # nothing there. A leaf is ambiguous only when two scopes share it.
+        chained_scopes_by_leaf: dict[str, set[str]] = {}
         for node in nodes:
-            if node.language == "ruby" and node.parent_name and node.kind in ("Function", "Test"):
-                ruby_scopes_by_leaf.setdefault(
+            if (
+                node.language not in _SEPARATE_SCOPE_RULE_LANGUAGES
+                and node.parent_name and node.kind in ("Function", "Test")
+            ):
+                chained_scopes_by_leaf.setdefault(
                     node.parent_name.rsplit(".", 1)[-1], set(),
                 ).add(node.parent_name)
         disambiguated_leaves.update(
-            leaf for leaf, scopes in ruby_scopes_by_leaf.items() if len(scopes) > 1
+            leaf for leaf, scopes in chained_scopes_by_leaf.items() if len(scopes) > 1
         )
         disambiguated_scopes = {
             node.parent_name for node in nodes
-            if node.language in ("python", "ruby") and node.parent_name
+            if node.language not in ("cpp", "julia", "csharp") and node.parent_name
             and node.kind in ("Function", "Test")
             and node.parent_name.rsplit(".", 1)[-1] in disambiguated_leaves
         }
@@ -7886,7 +7916,7 @@ class CodeParser:
                 scope in disambiguated_scopes
                 and edge.kind in ("CALLS", "REFERENCES")
                 and "::" not in edge.target
-                and (not has_receiver or receiver == "self")
+                and (not has_receiver or receiver in ("self", "this"))
             ):
                 entries = candidate_entries(edge.target, edge.kind)
                 local = [qualified for qualified, parent in entries if parent == scope]
@@ -15891,10 +15921,13 @@ class CodeParser:
         )
         nodes.append(node)
 
-        # CONTAINS edge
+        # CONTAINS edge: a nested class is contained by its enclosing class,
+        # which is always emitted as a node on the same scope chain (#934).
+        # Python's collision-only identities are addressed by their own
+        # container below, so they keep the file-level edge here.
         class_container = (
             self._qualify(enclosing_class, file_path, None)
-            if language in ("julia", "csharp") and enclosing_class
+            if enclosing_class and language not in ("python", "cpp")
             else file_path
         )
         edges.append(EdgeInfo(
@@ -15936,18 +15969,25 @@ class CodeParser:
             # Kafka: emit CONSUMES/PRODUCES edges for Kafka field declarations
             self._emit_kafka_edges_from_class(child, name, file_path, edges)
 
-        # Recurse into class body
+        # Recurse into class body. Descend with the full accumulated scope
+        # chain (``Parent.Name``), not the bare leaf name: the class node is
+        # keyed ``_qualify(name, file, class_parent)``, so passing the leaf
+        # leaves nested members qualifying to ``file::Name.member`` while the
+        # container node is ``file::Parent.Name`` — two same-named nested
+        # classes collapse their methods onto one node, deep nesting keeps
+        # only one level, and CONTAINS edges point at containers that were
+        # never emitted (#934). Ruby already recursed this way; Julia joins
+        # through its own helper.
         if language == "julia":
             recursive_class = self._julia_scope_join(enclosing_class, name)
-        elif language == "csharp":
-            recursive_class = f"{class_parent}.{name}" if class_parent else name
-        elif language == "ruby" and class_parent:
-            # The class node is keyed ``_qualify(name, file, class_parent)``,
-            # i.e. ``file::Parent.Name``. Descend with that same scope string so
-            # its methods qualify to ``file::Parent.Name.method`` and the
-            # CONTAINS edge points at a node that exists. Passing the bare leaf
-            # leaves every class with a parent_name pointing its methods at a
-            # ``file::Name`` container that was never emitted.
+        elif language in ("python", "cpp"):
+            # Python keeps its legacy leaf spelling unless a same-leaf class
+            # actually collides; ``_index_ambiguous_method_scopes`` carries
+            # the full chain for exactly those methods (#999). C++ pins
+            # legacy nested-class keys while its namespace-aware function
+            # scopes stay complete (test_cpp_overload_identity).
+            recursive_class = name
+        elif class_parent:
             recursive_class = f"{class_parent}.{name}"
         else:
             recursive_class = name
@@ -21585,6 +21625,8 @@ class CodeParser:
         export_target = self._resolve_exported_symbol(resolved, symbol_name)
         if export_target:
             return export_target
+        if language in ("java", "kotlin", "scala"):
+            symbol_name = _nested_import_chain(module, resolved, symbol_name)
         return self._qualify(symbol_name, resolved, None)
 
     def _python_reexport_origin(self, module_file: str, symbol_name: str) -> str:
