@@ -32,7 +32,7 @@ from ..incremental import (
     discover_review_changes,
     get_db_path,
 )
-from ..parser import is_test_file, normalize_file_path
+from ..parser import is_test_file, normalize_file_path, repo_relative_path
 from ..search import hybrid_search
 from ..uncertainty import (
     empty_impact_confidence,
@@ -305,6 +305,76 @@ def _rank_disambiguation_candidates(
     ]
 
 
+def _compact_impact_response(
+    result: dict[str, Any], root: Path, changed_files: list[str],
+    unmatched_files: list[str], max_files: int, resolution: str,
+    unresolved_call_sites: int,
+) -> dict[str, Any]:
+    """Project the radius onto files without serializing its graph records."""
+    def requested_path(path: str) -> str:
+        # The caller named this file, so show it as named, made relative to
+        # the repository when it was given as an absolute path inside it.
+        relative = repo_relative_path(path, root)
+        return path if relative is None else relative
+
+    def graph_path(path: str) -> str:
+        relative = repo_relative_path(path, root)
+        if relative is None:
+            # A graph may include an external file: retain its identity.
+            return path
+        stored_relative = repo_relative_path(path) is not None
+        if stored_relative and not (root / relative).exists():
+            # A cwd-relative graph path (``fixtures/repo/src/app.py`` for root
+            # ``.../fixtures/repo``) starts with the root's trailing parts.
+            # Only a path the graph stored relative gets this: an absolute
+            # one under the root is exact already, and a file deleted since
+            # the build must not lose a directory that shares the root's name
+            # (``django/x.py`` in a checkout called ``django``).
+            parts = relative.split("/")
+            for k in range(min(len(root.parts), len(parts) - 1), 0, -1):
+                if tuple(parts[:k]) == root.parts[-k:]:
+                    return "/".join(parts[k:])
+        return relative
+
+    # The graph already ranks nodes best-first. Keep each file's first
+    # appearance, rather than using impacted_files' unordered set order.
+    file_set = set(result["impacted_files"])
+    ranked_files = list(dict.fromkeys(
+        node.file_path for node in result["impacted_nodes"]
+        if node.file_path in file_set
+    ))
+    ranked_set = set(ranked_files)
+    ranked_files.extend(sorted(file_set - ranked_set))
+    shown, total, cut = _bounded(ranked_files, max_files, _MAX_IMPACT_FILES)
+    # The changed-file list is the caller's own, and a whole-repo diff makes
+    # it as long as the repository: it gets the same display limit.
+    changed_shown, changed_total, changed_cut = _bounded(
+        changed_files, max_files, _MAX_IMPACT_FILES,
+    )
+    unmatched_shown, unmatched_total, unmatched_cut = _bounded(
+        unmatched_files, max_files, _MAX_IMPACT_FILES,
+    )
+    return {
+        "status": "ok",
+        "summary": f"Showing {len(shown)} of {total} impacted files (best-first).",
+        "changed_files": [requested_path(path) for path in changed_shown],
+        "changed_file_count": changed_total,
+        "changed_files_omitted": changed_total - len(changed_shown),
+        # Changed files the graph has no nodes for, so a short radius is not
+        # read as a small one.
+        "unmatched_files": [requested_path(path) for path in unmatched_shown],
+        "unmatched_files_total": unmatched_total,
+        "unmatched_files_truncated": unmatched_cut,
+        "impacted_files": [graph_path(path) for path in shown],
+        "impacted_file_count": total,
+        "impacted_files_omitted": total - len(shown),
+        "total_impacted": result["total_impacted"],
+        "truncated": result["truncated"] or cut or changed_cut or unmatched_cut,
+        "resolution": resolution,
+        "unresolved_call_sites": unresolved_call_sites,
+    }
+
+
 def get_impact_radius(
     changed_files: list[str] | None = None,
     max_depth: int = 2,
@@ -313,6 +383,7 @@ def get_impact_radius(
     base: str = "HEAD~1",
     detail_level: str = "standard",
     resolution: str = RESOLUTION_ALL,
+    max_files: int = 25,
 ) -> dict[str, Any]:
     """Analyze the blast radius of changed files.
 
@@ -324,7 +395,10 @@ def get_impact_radius(
             ``CRG_MAX_IMPACT_NODES``, or 500).
         repo_root: Repository root path. Auto-detected if omitted.
         base: Git ref for auto-detecting changes (default: HEAD~1).
-        detail_level: "standard" (full output) or "minimal" (summary only).
+        detail_level: "standard" (full output), "minimal" (summary only),
+                      or "compact" (ranked file paths and counts, no node/edge records).
+        max_files: Compact-mode file display limit (default: 25, hard ceiling: 200).
+                   Independent of max_results, so it does not shrink the traversal.
         resolution: "all" (default) traverses every edge; "direct" refuses to
             traverse a CALLS/REFERENCES edge whose target was never bound to
             an indexed node.
@@ -338,6 +412,8 @@ def get_impact_radius(
     """
     if isinstance(max_results, bool) or max_results < 1:
         raise ValueError("max_results must be an integer greater than or equal to 1")
+    if isinstance(max_files, bool) or not isinstance(max_files, int) or max_files < 1:
+        raise ValueError("max_files must be an integer greater than or equal to 1")
     if resolution not in IMPACT_RESOLUTIONS:
         raise ValueError(
             f"resolution must be one of {list(IMPACT_RESOLUTIONS)}, got {resolution!r}"
@@ -349,6 +425,12 @@ def get_impact_radius(
             changed_files, base = discover_review_changes(root, base)
 
         if not changed_files:
+            if detail_level == "compact":
+                return _compact_impact_response(
+                    {"impacted_files": [], "impacted_nodes": [],
+                     "total_impacted": 0, "truncated": False},
+                    root, [], [], max_files, resolution, 0,
+                )
             return {
                 "status": "ok",
                 "summary": "No changed files detected.",
@@ -371,6 +453,25 @@ def get_impact_radius(
             abs_files, max_depth=max_depth, max_nodes=max_results,
             resolution=resolution,
         )
+
+        if detail_level == "compact":
+            compact_response = _compact_impact_response(
+                result, root, changed_files, unmatched_files, max_files, resolution,
+                store.count_unresolved_call_sites({
+                    n.name for n in result["changed_nodes"] if n.kind != "File"
+                }),
+            )
+            if not result["impacted_nodes"]:
+                language = next(
+                    (n.language for n in result["changed_nodes"] if n.language), None,
+                )
+                confidence = empty_impact_confidence(
+                    store, root, changed_files, abs_files, language,
+                )
+                if confidence:
+                    compact_response["confidence"] = confidence
+            attach_context_savings(compact_response, original_tokens=original_tokens)
+            return compact_response
 
         impact_scores = result.get("impact_scores", {})
         changed_dicts = [node_to_dict(n) for n in result["changed_nodes"]]

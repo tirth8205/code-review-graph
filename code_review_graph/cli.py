@@ -639,6 +639,8 @@ def _run_graph_tool_command(args, repo_root: Path) -> None:
             max_results=args.max_results,
             repo_root=root,
             base=args.base,
+            detail_level=args.detail_level,
+            max_files=args.max_files,
         )
     elif args.command == "search":
         result = tools.semantic_search_nodes(
@@ -1658,6 +1660,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     impact_cmd.add_argument("--depth", type=_non_negative_int, default=2)
     impact_cmd.add_argument("--max-results", type=_positive_int, default=500)
+    impact_cmd.add_argument(
+        "--detail-level", choices=["standard", "minimal", "compact"], default="standard",
+        help="standard: graph records; minimal: summary; compact: ranked file paths",
+    )
+    impact_cmd.add_argument(
+        "--max-files", type=_positive_int, default=25,
+        help="Compact-mode file display limit (does not change graph traversal)",
+    )
     impact_cmd.add_argument("--base", default="HEAD~1")
     impact_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
 

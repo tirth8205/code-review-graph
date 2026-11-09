@@ -41,6 +41,12 @@
   by search only with `kind="Output"`: on Shopify's Dawn theme they otherwise took
   all ten top hits for "product". (#878, #348)
 
+- `get_impact_radius_tool(detail_level="compact")` and `code-review-graph impact
+  --detail-level compact` return the blast radius as ranked repository-relative
+  file paths and counts, with no node or edge records. `max_files` (default 25,
+  at most 200) limits each file list without shrinking the traversal, and
+  changed files the graph has no nodes for are listed in `unmatched_files`. The
+  CLI can also ask for `--detail-level minimal`.
 - Python modules that replace themselves in `sys.modules` are followed to the
   module they install. A compatibility shim such as
   `sys.modules[__name__] = importlib.import_module("app.services.billing")`

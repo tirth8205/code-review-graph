@@ -397,6 +397,7 @@ async def get_impact_radius_tool(
     base: str = "HEAD~1",
     detail_level: str = "standard",
     resolution: str = "all",
+    max_files: int = 25,
 ) -> dict:
     """Analyze the blast radius of changed files in the codebase.
 
@@ -418,7 +419,10 @@ async def get_impact_radius_tool(
             the rest.
         repo_root: Repository root path. Auto-detected if omitted.
         base: Git ref for auto-detecting changes. Default: HEAD~1.
-        detail_level: "standard" for full output, "minimal" for compact summary. Default: standard.
+        detail_level: "standard" for graph records, "minimal" for a summary,
+            "compact" for ranked repo-relative file paths without node/edge records.
+        max_files: File display limit in compact mode (default 25, maximum 200).
+            Does not reduce the graph traversal budget set by max_results.
         resolution: "all" (default) or "direct" to traverse only calls bound to an indexed node.
     """
     root = _resolve_repo_root(repo_root)
@@ -428,7 +432,7 @@ async def get_impact_radius_tool(
             changed_files=changed_files, max_depth=max_depth,
             max_results=max_results,
             repo_root=root, base=base, detail_level=detail_level,
-            resolution=resolution,
+            resolution=resolution, max_files=max_files,
         ),
         root,
     )
