@@ -111,12 +111,13 @@ code-review-graph impact --files src/auth.py --detail-level minimal
 #### `query_graph_tool`
 ```
 pattern: str    # callers_of, references_to, callees_of, imports_of, importers_of,
-                # children_of, tests_for, inheritors_of, file_summary
+                # children_of, tests_for, inheritors_of, file_summary, path_to
 target: str     # Node name, qualified name, or file path
 repo_root: str | None
 detail_level: str = "standard"   # "standard" or "minimal"
 max_results: int = 100           # Minimal mode also caps visible results at 5
 resolution: str = "all"          # "all", "direct", or "unresolved"
+to: str | None                   # path_to only: the node or file to reach
 ```
 `callers_of`, `callees_of` and `references_to` return one row per call site, not
 one per node. Each row carries `call_site` (`line`, plus `file` only when the
@@ -125,6 +126,23 @@ matched by bare name alone carry `target_resolution: "unresolved"`. The response
 adds `distinct_nodes` and a `resolution_split` of the whole answer. Call sites
 are ordered so every distinct node appears before any node's second call site,
 so truncation never costs a caller.
+
+`path_to` answers how `target` reaches `to`, with one row per hop through calls,
+references, inheritance, imports and containment. It picks the route whose weakest
+hop is strongest, and the shortest of those. Each hop's `certainty` says how it was
+bound: `direct` to that node, `unique_name` through a bare name only one symbol
+has, or `shared_name` through a name several share. `certainty` and `weakest_hop`
+on the response give the weakest one, which is the hop to check first. How a hop
+was bound ranks first and the edge's stored `confidence` only breaks ties, since
+graphs built before #984 was fixed store 1.0 even on an edge that names no node.
+In standard mode a hop shows `confidence` when it is below 1.0. When there is no
+route, `results` is empty, and `reverse_route_exists` is set if one runs the other
+way. If the search stops at its visit limit first, `search_incomplete` is set
+instead, as a route may still exist. Callbacks and dynamic dispatch are not in the
+graph, so no route does not prove there is none. An unclear end comes back as
+`not_found` or `ambiguous`, with `endpoint` saying which. Minimal mode names each
+hop by its qualified name from the repository root, and adds `file` only when the
+call is written outside the source's own file.
 
 #### `get_review_context_tool`
 ```
@@ -513,6 +531,7 @@ code-review-graph dead-code --kind Function --file-pattern src/ --json
 # Read-only graph queries (CLI mirrors of the MCP tools)
 code-review-graph query callers_of <target>    # Patterns: callers_of, callees_of, imports_of, importers_of,
                                                 #   children_of, tests_for, inheritors_of, file_summary
+code-review-graph query path_to <a> --to <b>  # How a reaches b, hop by hop
 code-review-graph impact [--files F ...] [--depth N] [--base REF]
 code-review-graph search <query> [--kind Function] [--limit N]
 code-review-graph flows [--sort criticality] [--limit N] [--kind KIND]

@@ -631,6 +631,7 @@ def _run_graph_tool_command(args, repo_root: Path) -> None:
             pattern=args.pattern,
             target=args.target,
             repo_root=root,
+            **({"to": args.to} if args.to else {}),
         )
     elif args.command == "impact":
         result = tools.get_impact_radius(
@@ -1667,9 +1668,13 @@ def build_parser() -> argparse.ArgumentParser:
             "tests_for",
             "inheritors_of",
             "file_summary",
+            "path_to",
         ],
     )
     query_cmd.add_argument("target", help="Node name, qualified name, or file path")
+    query_cmd.add_argument(
+        "--to", default=None, help="For path_to: the node or file to reach",
+    )
     query_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
 
     impact_cmd = sub.add_parser("impact", help="Analyze the blast radius of changes")

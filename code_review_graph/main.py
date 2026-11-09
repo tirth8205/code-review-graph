@@ -514,6 +514,7 @@ async def query_graph_tool(
     detail_level: str = "standard",
     max_results: int = 100,
     resolution: str = "all",
+    to: Optional[str] = None,
 ) -> dict:
     """Run a predefined graph query to explore code relationships.
 
@@ -536,11 +537,17 @@ async def query_graph_tool(
     - endpoints_for: Find endpoints handled by a method
     - consumers_of: Find classes that consume a Spring configuration property
     - file_summary: Get all nodes in a file
+    - path_to: Find how the target reaches ``to``, one row per hop
 
     callers_of, callees_of and references_to return one row per call site, each
     carrying the ``call_site`` (file and line) the call is written at, plus a
     ``resolution_split`` saying how many of those call sites are bound to an
     indexed node and how many are bare-name matches.
+
+    path_to picks the route whose weakest hop is strongest. Each hop's
+    ``certainty`` says how it was bound: ``direct`` to that node, ``unique_name``
+    through a bare name one symbol has, or ``shared_name`` through one several
+    share. ``weakest_hop`` names the hop to check first.
 
     Args:
         pattern: Query pattern name (see above).
@@ -552,6 +559,7 @@ async def query_graph_tool(
         max_results: Maximum results to return. Default: 100.
         resolution: "all" (default), "direct" for only calls bound to an indexed
             node, or "unresolved" for only the bare-name matches.
+        to: For path_to, the node name, qualified name, or file path to reach.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -559,7 +567,7 @@ async def query_graph_tool(
         lambda: query_graph(
             pattern=pattern, target=target, repo_root=root,
             detail_level=detail_level, max_results=max_results,
-            resolution=resolution,
+            resolution=resolution, to=to,
         ),
         root,
     )

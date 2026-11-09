@@ -28,7 +28,7 @@ Report a structured review with a blast-radius table and risk scores. Do not inc
 
 <section name="commands">
 MCP tools (30): build_or_update_graph_tool, run_postprocess_tool, get_minimal_context_tool, get_impact_radius_tool, query_graph_tool, get_review_context_tool, semantic_search_nodes_tool, embed_graph_tool, list_graph_stats_tool, get_docs_section_tool, find_large_functions_tool, list_flows_tool, get_flow_tool, get_affected_flows_tool, list_communities_tool, get_community_tool, get_architecture_overview_tool, detect_changes_tool, refactor_tool, apply_refactor_tool, generate_wiki_tool, get_wiki_page_tool, get_hub_nodes_tool, get_bridge_nodes_tool, get_knowledge_gaps_tool, get_surprising_connections_tool, get_suggested_questions_tool, traverse_graph_tool, list_repos_tool, cross_repo_search_tool.
-query_graph_tool patterns: callers_of, references_to, callees_of, imports_of, importers_of, children_of, tests_for, inheritors_of, triggers_of, triggered_by, publishers_of, listeners_of, handlers_of, endpoints_for, consumers_of, file_summary.
+query_graph_tool patterns: callers_of, references_to, callees_of, imports_of, importers_of, children_of, tests_for, inheritors_of, triggers_of, triggered_by, publishers_of, listeners_of, handlers_of, endpoints_for, consumers_of, file_summary, path_to (needs to=<node or file>; hops carry certainty: direct, unique_name or shared_name).
 refactor_tool modes: rename (old_name, new_name; apply with apply_refactor_tool(refactor_id)), dead_code, suggest.
 MCP prompts (5): review_changes, architecture_map, debug_issue, onboard_developer, pre_merge_check.
 Skills: build-graph, debug-issue, explore-codebase, refactor-safely, review-changes, review-delta, review-pr.

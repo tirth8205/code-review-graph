@@ -68,6 +68,11 @@
   `autoload`. To tell these apart, import edges now record
   `extra.import_context`: `type_only`, `deferred` or `parent_package`. Run
   `code-review-graph build` once to get it on an existing graph. Part of #434.
+- `query_graph_tool` has a new `path_to` pattern that answers how one symbol or
+  file reaches another: `pattern="path_to", target="A", to="B"`, or
+  `code-review-graph query path_to A --to B`. Each hop says how sure it is, and
+  the answer names the weakest hop. A longer route through bound edges beats a
+  shorter one that guesses at a name.
 - Python modules that replace themselves in `sys.modules` are followed to the
   module they install. A compatibility shim such as
   `sys.modules[__name__] = importlib.import_module("app.services.billing")`
