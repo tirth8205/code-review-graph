@@ -464,6 +464,9 @@ code-review-graph detect-changes --churn       # Add opt-in change-frequency ris
                                                 #   recorded as unavailable for the life of the process, so the timeout is
                                                 #   paid once, and the response says so: `churn_status` is "unavailable"
                                                 #   and the summary carries a "Degraded" line.
+code-review-graph detect-changes --details all # Add bounded graph context under "details" (JSON only):
+                                                #   risk, communities, hubs, coupling, impact, gaps, graph.
+                                                #   Off by default; the GitHub Action's `details` input uses it.
 code-review-graph dead-code                    # Functions/classes with no callers or test references
 code-review-graph dead-code --kind Function --file-pattern src/ --json
 

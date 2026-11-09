@@ -4,6 +4,22 @@
 
 ### Added
 
+- The GitHub Action has an opt-in `details` input that adds graph context
+  to the review comment (#882). It takes a list of sections: `risk` shows
+  each term of the top symbols' risk scores, so a reader sees why a score
+  moved and not only that it did; `communities`, `hubs` and `coupling` show
+  the communities the change touches, its most connected symbols and the
+  links that cross a community or language boundary; `impact` shows its
+  impact radius and direct callers; `gaps` ranks the test gaps by what
+  depends on them; `graph` gives the graph's size, community count, the
+  method that found the communities (Leiden or file-based grouping), and
+  versions. The block is folded away, shows at most 5 rows per list, is
+  capped at 12,000 bytes with a note saying what was cut, and never takes
+  room from the report. Left empty, the default, the Action runs the same
+  commands and posts the same comment byte for byte. The data comes from the
+  new `code-review-graph detect-changes --details <sections>` option, which
+  adds a `details` object to the JSON and nothing else. Building communities
+  now also records the method used, in graph metadata.
 - Python modules that replace themselves in `sys.modules` are followed to the
   module they install. A compatibility shim such as
   `sys.modules[__name__] = importlib.import_module("app.services.billing")`
