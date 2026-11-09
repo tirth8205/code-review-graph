@@ -2069,3 +2069,35 @@ class TestQualifiedNameCollisionLifecycle:
         assert [n.qualified_name for n in self.store.get_nodes_by_file(posix)] == [survivor]
         callers = self.store.get_edges_by_target(survivor)
         assert [e.source_qualified for e in callers] == ["C:/t/caller.py::go"]
+
+    def test_replacement_plan_reads_each_previous_row_once(self, monkeypatch):
+        """Planning bucketed old rows per new base, rescanning every old row for
+        every name: 6000 unique definitions took seconds. One pass suffices.
+        """
+        path = "/test/many.py"
+        nodes = [
+            NodeInfo(kind="Function", name=f"f{i}", file_path=path,
+                     line_start=i * 3 + 1, line_end=i * 3 + 2, language="python")
+            for i in range(300)
+        ]
+        self.store.store_file_nodes_edges(path, nodes, [])
+        checks = []
+        for helper in ("_is_collision_identity", "_collision_base"):
+            real = getattr(GraphStore, helper, None)
+            if real is None:
+                continue
+            monkeypatch.setattr(GraphStore, helper, staticmethod(
+                lambda *args, _real=real: checks.append(args) or _real(*args)))
+
+        shifted = [
+            NodeInfo(kind="Function", name=n.name, file_path=path,
+                     line_start=n.line_start + 1, line_end=n.line_end + 1,
+                     language="python")
+            for n in nodes
+        ]
+        self.store.store_file_nodes_edges(path, shifted, [])
+
+        assert len(checks) <= 2 * (len(nodes) + len(shifted))
+        assert {n.qualified_name for n in self.store.get_nodes_by_file(path)} == {
+            f"{path}::f{i}" for i in range(300)
+        }

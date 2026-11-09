@@ -70,6 +70,11 @@ _JAVASCRIPT_LANGUAGE_FAMILY_SET = frozenset(_JAVASCRIPT_LANGUAGE_FAMILY)
 _COLLISION_SUFFIX_RE = re.compile(
     r"^[0-9a-f]{12}(?::(?:[2-9]|[1-9][0-9]+))?$",
 )
+# The same suffix shape, anchored at the end of a full qualified name, so one
+# match recovers the base identity a collision row was disambiguated from.
+_COLLISION_IDENTITY_RE = re.compile(
+    r"^(?P<base>.+):S[0-9a-f]{12}(?::(?:[2-9]|[1-9][0-9]+))?$",
+)
 
 
 def _compatible_edge_languages(language: str) -> tuple[str, ...]:
@@ -1005,6 +1010,12 @@ class GraphStore:
             return False
         return _COLLISION_SUFFIX_RE.fullmatch(qualified_name[len(prefix):]) is not None
 
+    @staticmethod
+    def _collision_base(qualified_name: str) -> str:
+        """Return the base identity of a collision row, or the name itself."""
+        match = _COLLISION_IDENTITY_RE.fullmatch(qualified_name)
+        return match.group("base") if match else qualified_name
+
     def _plan_file_identities(
         self, file_path: str, nodes: list[NodeInfo],
     ) -> list[str]:
@@ -1023,23 +1034,22 @@ class GraphStore:
             "is_test FROM nodes WHERE file_path = ? ORDER BY id",
             (file_path,),
         ).fetchall()
-        old_by_base: dict[str, list[sqlite3.Row]] = {}
         new_by_base: dict[str, list[int]] = {}
         for index, node in enumerate(nodes):
             new_by_base.setdefault(self._make_qualified(node), []).append(index)
-        for base in new_by_base:
-            old_by_base[base] = [
-                row
-                for row in old_rows
-                if row["qualified_name"] == base
-                or self._is_collision_identity(base, row["qualified_name"])
-            ]
+        # One pass over the old rows: rescanning them for every new base made
+        # replacing a file quadratic in its definition count.
+        old_by_base: dict[str, list[sqlite3.Row]] = {}
+        for row in old_rows:
+            old_by_base.setdefault(
+                self._collision_base(row["qualified_name"]), [],
+            ).append(row)
 
         planned: list[str | None] = [None] * len(nodes)
         reserved = {row["qualified_name"] for row in old_rows}
         assigned: set[str] = set()
         for base, indices in new_by_base.items():
-            candidates = old_by_base[base]
+            candidates = old_by_base.get(base, [])
             used_old_ids: set[int] = set()
             if len(indices) == 1 and len(candidates) == 1:
                 index = indices[0]
