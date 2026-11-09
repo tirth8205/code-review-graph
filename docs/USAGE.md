@@ -184,6 +184,65 @@ missing paths or rebuild the graph before treating that result as complete.
 
 Review and impact responses include compact `context_savings` metadata (`estimated`, `saved_tokens`, `saved_percent`). The CLI shows the same figures as a boxed `Token Savings` panel on `detect-changes --brief` and `update --brief`, with a breakdown (Functions / Tests / Risk / Other) that sums to the graph response size. Add `--verify` to compare against OpenAI's `cl100k_base` tokenizer (needs `pip install tiktoken`). The figures are labelled estimated because they use a `chars / 4` approximation; the calibration in [REPRODUCING.md](REPRODUCING.md#calibration-table) puts the aggregate estimate within about 1% of real tokens. A small single-file change can use more context than the raw file, because the graph metadata has a fixed overhead.
 
+### Context history
+
+To see how these estimates add up over real use, turn on the local log. It is
+off by default:
+
+```bash
+export CRG_CONTEXT_HISTORY=1     # or set it in the "env" of your MCP server config
+```
+
+Each response that carries `context_savings` (from `get_impact_radius`,
+`get_review_context`, `detect_changes`, the compact `get_architecture_overview`,
+`detect-changes`, `update --brief`, `impact` and `architecture`) then adds one
+line to `context-history.jsonl` next to `graph.db`:
+
+```json
+{"v":1,"ts":"2026-11-09T18:59:01Z","tool":"detect_changes_tool","baseline_tokens":12932,"returned_tokens":773,"saved_tokens":12159,"detail_level":"minimal","files":3,"depth":2}
+```
+
+A line holds the time (UTC), the tool or command, the three token estimates,
+and, where the call has them, `detail_level`, the number of changed files and
+the depth. It never holds file names, paths, symbol names or source text, and
+nothing is sent anywhere. At 1 MiB the file is renamed to
+`context-history.jsonl.1` (replacing the older one), so the log never takes
+much more than 2 MiB, about 10,000 calls. Writers share an empty
+`context-history.lock` so two of them never roll the log over at once. Delete
+the files to clear it. Nothing is written in read-only mode
+(`CRG_READ_ONLY=1`).
+
+Read it back as a trend:
+
+```bash
+code-review-graph context-history                     # per UTC day
+code-review-graph context-history --by tool --days 7  # per tool, last 7 days
+code-review-graph context-history --json              # the same numbers as JSON
+```
+
+```text
+Context history (last 7 day(s)): 7 call(s). Token counts are estimates (about 4 characters per token).
+Log: /path/to/flask/.code-review-graph/context-history.jsonl
+
+Tool                             Calls   Full context  Graph context              Saved  Largest reply
+detect_changes_tool                  2         74,904          6,393       68,511 (91%)          6,182
+detect-changes                       1         37,452         18,533       18,919 (51%)         18,533
+get_architecture_overview_tool       1         74,610            443       74,167 (99%)            443
+get_impact_radius_tool               1         16,945            258       16,687 (98%)            258
+get_review_context_tool              1         21,511         28,180      -6,669 (-31%)         28,180
+impact                               1          4,566         31,804    -27,238 (-597%)         31,804
+Total                                7        229,988         85,611      144,377 (63%)         31,804
+
+A negative Saved means the graph replies were bigger than the files they stand for.
+```
+
+`Full context` is the estimated size of the changed files (or, for the
+architecture overview, the full overview), `Graph context` is the size of the
+replies, and `Saved` is the difference, so it is negative where a reply cost
+more than reading the files. `Largest reply` is the biggest single reply,
+which is where to look for a spike. Rows by day use UTC days, and `--days 1`
+means today.
+
 The evaluation runner produces the benchmark numbers quoted in the README:
 
 ```bash

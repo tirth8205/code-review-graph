@@ -14,6 +14,7 @@ from ..changes import (  # noqa: F401
     parse_diff_ranges,
     parse_git_diff_ranges,
 )
+from ..context_history import CallInfo
 from ..context_savings import attach_context_savings, estimate_file_tokens
 from ..errors import ChangeDiscoveryError
 from ..flows import get_affected_flows as _get_affected_flows
@@ -499,6 +500,10 @@ def get_review_context(
             unmatched_files, 5 if detail_level == "minimal" else max_files, _MAX_REVIEW_FILES,
         )
         original_tokens = estimate_file_tokens(root, changed_files)
+        history_call = CallInfo(
+            data_dir=store.db_path.parent, tool="get_review_context_tool",
+            detail_level=detail_level, files=len(changed_files), depth=max_depth,
+        )
         impact = store.get_impact_radius(graph_files, max_depth=max_depth)
         impacted_count = impact.get("total_impacted", len(impact["impacted_nodes"]))
         risk = (
@@ -564,7 +569,7 @@ def get_review_context(
                     "get_impact_radius_tool",
                 ],
             }
-            attach_context_savings(result, original_tokens=original_tokens)
+            attach_context_savings(result, original_tokens=original_tokens, call=history_call)
             return result
 
         # Build review context. Every list below scales with the change set,
@@ -738,7 +743,7 @@ def get_review_context(
             "summary": "\n".join(summary_parts),
             "context": context,
         }
-        attach_context_savings(result, original_tokens=original_tokens)
+        attach_context_savings(result, original_tokens=original_tokens, call=history_call)
         return result
     except ChangeDiscoveryError as exc:
         # Distinct from the "no changed files" answer above, and deliberately
@@ -1167,7 +1172,14 @@ def detect_changes_func(
         result["_hints"] = generate_hints(
             "detect_changes_tool", result, get_session()
         )
-        attach_context_savings(result, original_tokens=original_tokens)
+        attach_context_savings(
+            result,
+            original_tokens=original_tokens,
+            call=CallInfo(
+                data_dir=store.db_path.parent, tool="detect_changes_tool",
+                detail_level=detail_level, files=len(changed_files), depth=max_depth,
+            ),
+        )
         return result
     except Exception as exc:
         return {"status": "error", "error": str(exc)}

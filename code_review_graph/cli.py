@@ -621,6 +621,7 @@ _GRAPH_TOOL_COMMANDS = {
 
 
 _PATH_REPO_COMMANDS = frozenset({
+    "context-history",
     "install",
     "init",
     "uninstall",
@@ -676,6 +677,79 @@ def _find_explicit_repo_root(start: Path) -> "Path | None":
         if current == current.parent:
             return None
         current = current.parent
+
+
+def _handle_context_history(args) -> None:
+    """Print the opt-in context history log as a trend (#813).
+
+    Reads only. A repository with no log, or no data directory at all, gets
+    a hint and exit 0, and nothing is created.
+    """
+    from datetime import datetime, time, timedelta, timezone
+
+    from . import context_history as ch
+    from .incremental import find_project_root, get_data_dir
+
+    if args.repo:
+        # Same walk as the graph-tool commands, so ``impact --repo repo/src``
+        # and ``context-history --repo repo/src`` use the same log.
+        given = Path(args.repo).expanduser()
+        repo_root = _find_explicit_repo_root(given) or given
+    else:
+        repo_root = find_project_root()
+    if args.data_dir:
+        data_dir = Path(args.data_dir).expanduser().resolve()
+    else:
+        data_dir = get_data_dir(repo_root, create=False)
+    since = None
+    if args.days:
+        # Whole UTC days, matching the rows: --days 1 is today.
+        first_day = datetime.now(timezone.utc).date() - timedelta(days=args.days - 1)
+        since = datetime.combine(first_day, time(), tzinfo=timezone.utc)
+    entries, skipped = ch.read_history(data_dir, since=since)
+    recording = ch.history_enabled()
+    rows = ch.summarise(entries, by=args.by)
+    totals = ch.total(entries)
+    log_path = data_dir / ch.HISTORY_FILE
+
+    if args.json_output:
+        print(json.dumps({
+            "log": str(log_path),
+            "recording": recording,
+            "by": args.by,
+            "days": args.days,
+            "rows": rows,
+            "total": totals,
+            "skipped_lines": skipped,
+        }, indent=2))
+        return
+
+    window = f"last {args.days} day(s)" if args.days else "whole log"
+    if not entries:
+        if recording:
+            print(f"No context history ({window}) in {log_path}.")
+        else:
+            print(f"No context history ({window}). Recording is off.")
+            print(
+                f"Set {ch.HISTORY_ENV}=1 where the MCP server or the CLI runs, and "
+                f"each call that reports context savings adds one line to {log_path}."
+            )
+            print("The log stays on this machine and holds only token counts and tool names.")
+        if skipped:
+            print(f"Skipped {skipped} line(s) that could not be read.")
+        return
+
+    print(
+        f"Context history ({window}): {totals['calls']:,} call(s). "
+        "Token counts are estimates (about 4 characters per token)."
+    )
+    print(f"Log: {log_path}")
+    print()
+    print(ch.format_table(rows, totals, by=args.by))
+    if skipped:
+        print(f"\nSkipped {skipped} line(s) that could not be read.")
+    if not recording:
+        print(f"\nRecording is off. Set {ch.HISTORY_ENV}=1 to add new calls.")
 
 
 def _run_graph_tool_command(args, repo_root: Path) -> None:
@@ -919,6 +993,7 @@ def _handle_build_update(args, repo_root: Path, embedding_refresh_kwargs) -> Non
         # commands are directly comparable.
         if getattr(args, "brief", False) and not args.quiet:
             from .changes import analyze_changes
+            from .context_history import CallInfo
             from .context_savings import (
                 attach_context_savings,
                 estimate_file_tokens,
@@ -955,6 +1030,11 @@ def _handle_build_update(args, repo_root: Path, embedding_refresh_kwargs) -> Non
                     attach_context_savings(
                         impact,
                         original_tokens=original_tokens,
+                        call=CallInfo(
+                            data_dir=store.db_path.parent,
+                            tool="update --brief",
+                            files=len(changed),
+                        ),
                     )
                     summary = impact.get("summary", "")
                     if summary:
@@ -1535,6 +1615,41 @@ def build_parser() -> argparse.ArgumentParser:
         "--data-dir",
         default=None,
         help="External directory to store graph database (useful for network shares)"
+    )
+
+    # context-history
+    history_cmd = sub.add_parser(
+        "context-history",
+        help="Show the opt-in context savings log as a per-day or per-tool trend",
+        description=(
+            "Read the local context history log and print a trend. Recording "
+            "is off unless CRG_CONTEXT_HISTORY=1 is set; the log stays on this "
+            "machine and holds only token counts and tool names."
+        ),
+    )
+    history_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
+    history_cmd.add_argument(
+        "--by",
+        choices=["day", "tool"],
+        default="day",
+        help="Group by UTC day (default) or by tool",
+    )
+    history_cmd.add_argument(
+        "--days",
+        type=_positive_int,
+        default=None,
+        help="Only the last N days (default: everything in the log)",
+    )
+    history_cmd.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Output one machine-readable JSON object",
+    )
+    history_cmd.add_argument(
+        "--data-dir",
+        default=None,
+        help="Directory that holds graph.db, when it is not the default",
     )
 
     # forget
@@ -2164,7 +2279,16 @@ def _dispatch() -> None:
                 file=sys.stderr,
             )
             raise SystemExit(1)
-        _run_graph_tool_command(args, repo_root)
+        from .context_history import recorded_as
+
+        # ``impact`` and ``architecture`` run the MCP tool bodies; the
+        # context history log names the command that was typed instead.
+        with recorded_as(args.command):
+            _run_graph_tool_command(args, repo_root)
+        return
+
+    if args.command == "context-history":
+        _handle_context_history(args)
         return
 
     embedding_refresh_kwargs = _embedding_refresh_kwargs(args, ap)
@@ -2830,6 +2954,7 @@ def _dispatch() -> None:
 
         elif args.command == "detect-changes":
             from .changes import analyze_changes
+            from .context_history import CallInfo
             from .context_savings import (
                 attach_context_savings,
                 estimate_file_tokens,
@@ -2860,6 +2985,11 @@ def _dispatch() -> None:
                 attach_context_savings(
                     result,
                     original_tokens=original_tokens,
+                    call=CallInfo(
+                        data_dir=store.db_path.parent,
+                        tool="detect-changes",
+                        files=len(changed),
+                    ),
                 )
                 if args.brief:
                     from .context_savings import (

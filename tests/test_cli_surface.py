@@ -509,6 +509,7 @@ INVOCATIONS: dict[str, list[str]] = {
     "postprocess": ["postprocess"],
     "status": ["status"],
     "forget": ["forget", "pkg/util.py", "--dry-run"],
+    "context-history": ["context-history"],
     "visualize": ["visualize"],
     "wiki": ["wiki"],
     "register": ["register", "."],

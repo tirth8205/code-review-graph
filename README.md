@@ -420,6 +420,7 @@ code-review-graph detect-changes --brief         # Risk panel + token savings (r
 code-review-graph detect-changes --brief --base main  # Against the merge base of main and HEAD
 code-review-graph update --brief                 # Refresh graph + same panel
 code-review-graph detect-changes --brief --verify  # Cross-check against tiktoken
+code-review-graph context-history  # Trend of the opt-in savings log (CRG_CONTEXT_HISTORY=1)
 code-review-graph register <path>  # Register repo in the multi-repo registry
 code-review-graph unregister <path|alias>  # Remove repo from the registry
 code-review-graph repos            # List registered repositories
@@ -465,6 +466,8 @@ Both commands print the same panel showing how many tokens the graph saved compa
 Add `--verify` to either command to compare the figures with OpenAI's `cl100k_base` tokenizer (needs `pip install tiktoken`). The estimate is within about 1% of real tokens in aggregate; see [`docs/REPRODUCING.md`](docs/REPRODUCING.md#calibration-table).
 
 The same `context_savings` metadata is attached to the JSON responses of the `get_impact_radius`, `get_review_context`, `detect_changes` and `get_architecture_overview` MCP tools.
+
+To see these estimates over time, set `CRG_CONTEXT_HISTORY=1` (off by default). Each estimate then adds one line to a local log next to `graph.db`, holding token counts and tool names only, and `code-review-graph context-history` prints it per day or per tool. See [docs/USAGE.md](docs/USAGE.md#context-history).
 
 </details>
 
@@ -600,6 +603,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_CALLER_TEST_ROUTE_MAX_CALLERS` | Maximum callers examined while looking for that tested caller | `500` |
 | `CRG_TOOL_TIMEOUT` | Timeout in seconds for read-only MCP tools (`0` disables). Does not bound the tools that write: build, postprocess, embed, wiki and apply-refactor | `0` |
 | `CRG_CHURN_WINDOW_DAYS` | Window for `detect-changes --churn` commit counts | `90` |
+| `CRG_CONTEXT_HISTORY` | Set to `1` to keep a local log of each `context_savings` estimate in `.code-review-graph/context-history.jsonl`; read it with `code-review-graph context-history`. Token counts and tool names only, never sent anywhere | - |
 | `CRG_LEIDEN_SEED` | Seed for Leiden community detection | `42` |
 | `CRG_RECURSE_SUBMODULES` | Include git submodules when set to `1`, `true` or `yes` | - |
 | `CRG_TOOLS` | Comma-separated allowlist of MCP tools to expose when serving | - |

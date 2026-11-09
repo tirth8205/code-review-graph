@@ -405,6 +405,7 @@ code-review-graph detect-changes --brief         # Risk panel + token savings (r
 code-review-graph detect-changes --brief --base main  # Against the merge base of main and HEAD
 code-review-graph update --brief                 # Refresh graph + same panel
 code-review-graph detect-changes --brief --verify  # Cross-check against tiktoken
+code-review-graph context-history  # Trend of the opt-in savings log (CRG_CONTEXT_HISTORY=1)
 code-review-graph register <path>  # Register repo in the multi-repo registry
 code-review-graph unregister <path|alias>  # Remove repo from the registry
 code-review-graph repos            # List registered repositories
@@ -450,6 +451,8 @@ JSON निर्यात स्थानीय ग्राफ़ डेटा
 किसी भी कमांड में `--verify` जोड़कर आँकड़ों की तुलना OpenAI के `cl100k_base` टोकनाइज़र से करें (`pip install tiktoken` चाहिए)। कुल मिलाकर अनुमान असली टोकन से लगभग 1% के भीतर रहता है; देखें [`docs/REPRODUCING.md`](docs/REPRODUCING.md#calibration-table)।
 
 यही `context_savings` मेटाडेटा `get_impact_radius`, `get_review_context`, `detect_changes` और `get_architecture_overview` MCP टूल के JSON उत्तरों के साथ भी जुड़ता है।
+
+इन अनुमानों को समय के साथ देखने के लिए `CRG_CONTEXT_HISTORY=1` सेट करें (डिफ़ॉल्ट रूप से बंद)। हर अनुमान `graph.db` के पास एक स्थानीय लॉग में एक पंक्ति जोड़ता है, जिसमें केवल टोकन संख्या और टूल के नाम होते हैं, और `code-review-graph context-history` इसे दिन या टूल के हिसाब से दिखाता है। देखें [docs/USAGE.md](docs/USAGE.md#context-history)।
 
 </details>
 
@@ -585,6 +588,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_CALLER_TEST_ROUTE_MAX_CALLERS` | उस टेस्ट किए गए कॉलर की खोज में अधिकतम कितने कॉलर देखे जाएँ | `500` |
 | `CRG_TOOL_TIMEOUT` | केवल-पठन MCP टूल की समय सीमा (सेकंड; `0` से बंद)। लिखने वाले टूल (build / postprocess / embed / wiki / apply-refactor) पर लागू नहीं | `0` |
 | `CRG_CHURN_WINDOW_DAYS` | `detect-changes --churn` की कमिट गिनती की अवधि | `90` |
+| `CRG_CONTEXT_HISTORY` | `1` करने पर हर `context_savings` अनुमान `.code-review-graph/context-history.jsonl` नाम के स्थानीय लॉग में लिखा जाता है; इसे `code-review-graph context-history` से पढ़ें। इसमें केवल टोकन संख्या और टूल के नाम होते हैं, यह कहीं भेजा नहीं जाता | - |
 | `CRG_LEIDEN_SEED` | Leiden कम्युनिटी पहचान का सीड | `42` |
 | `CRG_RECURSE_SUBMODULES` | `1`, `true` या `yes` होने पर git सबमॉड्यूल शामिल करें | - |
 | `CRG_TOOLS` | सर्व करते समय दिखाए जाने वाले MCP टूल की अल्पविराम से अलग सूची | - |
