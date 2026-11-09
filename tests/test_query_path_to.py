@@ -1,9 +1,9 @@
 """``query_graph("path_to", A, to=B)``: how A reaches B, and how sure the route is.
 
-Stored edge confidence is 1.0 on every edge (#984), so it cannot name a weak hop.
-Each hop says how it was bound instead: to the very node (``direct``), through a
-bare name only one symbol has (``unique_name``), or through one several share
-(``shared_name``).
+Each hop says how it was bound: to the very node (``direct``), through a bare
+name only one symbol has (``unique_name``), or through one several share
+(``shared_name``). Stored edge confidence only breaks ties within a level: graphs
+built before #984 was fixed say 1.0 even on an edge that names no node.
 """
 
 from __future__ import annotations
@@ -374,6 +374,49 @@ class TestCertainty:
         assert result["weakest_hop"]["from"] == b
         assert result["weakest_hop"]["to"] == c
         assert result["weakest_hop"]["line"] == 9
+
+    @pytest.mark.parametrize("guess", [
+        {},  # an older graph: a bare name still says EXTRACTED and 1.0
+        {"confidence": 0.2, "confidence_tier": "UNRESOLVED"},
+    ])
+    def test_a_name_guess_is_weaker_than_any_bound_hop(self, tmp_path, guess):
+        """How a hop was bound ranks first, whatever score the edge stores."""
+        root, store = _repo(tmp_path)
+        try:
+            a = _node(store, root / "a.py", "start")
+            b = _node(store, root / "a.py", "middle")
+            c = _node(store, root / "b.py", "finish")
+            _edge(store, a, b, line=3, extra={"confidence": 0.7, "confidence_tier": "INFERRED"})
+            _edge(store, b, "finish", line=9, extra=guess)
+            store.commit()
+        finally:
+            store.close()
+
+        result = query_graph("path_to", "start", str(root), to="finish")
+
+        assert result["certainty"] == "unique_name"
+        assert result["weakest_hop"]["to"] == c
+        assert result["weakest_hop"]["line"] == 9
+
+    def test_a_lower_stored_score_breaks_a_tie(self, tmp_path):
+        root, store = _repo(tmp_path)
+        try:
+            a = _node(store, root / "a.py", "start")
+            b = _node(store, root / "a.py", "middle")
+            c = _node(store, root / "b.py", "finish")
+            _edge(store, a, b, line=3)
+            _edge(store, b, c, line=9, extra={"confidence": 0.7, "confidence_tier": "INFERRED"})
+            store.commit()
+        finally:
+            store.close()
+
+        result = query_graph("path_to", "start", str(root), to="finish")
+
+        assert result["certainty"] == "direct"
+        assert result["weakest_hop"]["line"] == 9
+        assert result["weakest_hop"]["confidence"] == 0.7
+        # A hop at the full score does not spell it out.
+        assert "confidence" not in result["results"][0]
 
     def test_receiver_evidence_blocks_a_name_match(self, tmp_path):
         """``some_dict.get(...)`` does not mean ``ConnectionPool.get``."""

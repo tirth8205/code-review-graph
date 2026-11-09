@@ -108,10 +108,12 @@ references, inheritance, imports and containment. It picks the route whose weake
 hop is strongest, and the shortest of those. Each hop's `certainty` says how it was
 bound: `direct` to that node, `unique_name` through a bare name only one symbol
 has, or `shared_name` through a name several share. `certainty` and `weakest_hop`
-on the response give the weakest one, which is the hop to check first. Stored edge
-confidence cannot do this today, as it is 1.0 on every edge (#984). When there is
-no route, `results` is empty, and `reverse_route_exists` is set if one runs the
-other way. If the search stops at its visit limit first, `search_incomplete` is set
+on the response give the weakest one, which is the hop to check first. How a hop
+was bound ranks first and the edge's stored `confidence` only breaks ties, since
+graphs built before #984 was fixed store 1.0 even on an edge that names no node.
+In standard mode a hop shows `confidence` when it is below 1.0. When there is no
+route, `results` is empty, and `reverse_route_exists` is set if one runs the other
+way. If the search stops at its visit limit first, `search_incomplete` is set
 instead, as a route may still exist. Callbacks and dynamic dispatch are not in the
 graph, so no route does not prove there is none. An unclear end comes back as
 `not_found` or `ambiguous`, with `endpoint` saying which. Minimal mode names each

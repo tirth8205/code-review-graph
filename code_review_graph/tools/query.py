@@ -246,8 +246,9 @@ def _rank_disambiguation_candidates(
     return [node_to_dict(node) for node in sorted(candidates, key=score)]
 
 
-# How sure a hop is, strongest first. Stored edge confidence is 1.0 on every edge
-# (#984), so it cannot name a weak hop; how the hop was bound can.
+# How sure a hop is, strongest first, by how it was bound. This ranks first:
+# graphs built before #984 was fixed store 1.0 even on an edge that names no node,
+# so the stored score only breaks ties within a level.
 _HOP_CERTAINTY = ("direct", "unique_name", "shared_name")
 _HOP_DIRECT, _HOP_UNIQUE_NAME, _HOP_SHARED_NAME = range(len(_HOP_CERTAINTY))
 
@@ -562,7 +563,7 @@ def _query_route(
             if source_node is not None and edge.file_path != source_node.file_path:
                 row["file"] = relative(edge.file_path)
             return row
-        return {
+        row = {
             "from": _sanitize_name(source),
             "to": _sanitize_name(destination),
             "kind": edge.kind,
@@ -570,8 +571,12 @@ def _query_route(
             "line": edge.line,
             "certainty": _HOP_CERTAINTY[certainty],
         }
+        if edge.confidence < 1.0:
+            row["confidence"] = round(edge.confidence, 2)
+        return row
 
-    weakest = max(route, key=lambda hop: hop[2])
+    # How the hop was bound first; the stored score only breaks a tie.
+    weakest = max(route, key=lambda hop: (hop[2], -hop[3].confidence))
     weakest_name = _HOP_CERTAINTY[weakest[2]]
     response["result_count"] = len(route)
     response["results_omitted"] = max(0, len(route) - _MAX_ROUTE_HOPS)
