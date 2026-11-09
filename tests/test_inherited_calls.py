@@ -303,7 +303,9 @@ def test_java_receiver_type_in_the_same_package_finds_the_inherited_method(tmp_p
 
     assert inherited["target"] == f"{root}/src/model/NamedEntity.java::NamedEntity.getName"
     assert inherited["extra"]["receiver_type"] == "Pet"
-    assert inherited["extra"]["inherited_through"] == f"{root}/src/owner/Pet.java::Pet"
+    # The parser binds ``pet`` to ``Pet`` in the same package (#1154), so the
+    # call is written ``Pet.getName`` and the inherited pass moves it on.
+    assert inherited["extra"]["inherited_endpoint"] == f"{root}/src/owner/Pet.java::Pet.getName"
     # It was a self-loop: ``pet.addVisit`` sent to ``Owner.addVisit``.
     assert direct["target"] == f"{root}/src/owner/Pet.java::Pet.addVisit"
 
