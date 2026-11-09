@@ -422,7 +422,9 @@ content table behind it.
 ### Results on this repository
 
 323 files, 6,509 nodes, 57,042 edges, 186 flows. Differing rows per table, incremental
-update against clean rebuild:
+update against clean rebuild. Measured at schema v14: `community_summaries`,
+`flow_snapshots` and `risk_index` were removed in v15, as nothing read them, and the
+benchmark no longer compares them.
 
 | Edit | Status | Total | nodes | node_community | edges | communities | flows | flow_memberships | nodes_fts | community_summaries | flow_snapshots | risk_index | metadata | Seconds |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -453,10 +455,7 @@ the repair path as well, so a full rebuild is the only way back.
 edit leaves 718 nodes with `community_id IS NULL` against the rebuild's 306.
 `incremental_detect_communities` and `incremental_trace_flows` both match `nodes.file_path`
 (absolute) against `incremental_update`'s `changed_files` (repo-relative), so both always
-count zero affected rows and skip. `community_summaries` inherits the error: after the same
-edit its `key_symbols` for `code-review-graph-name` read
-`["main", "GraphStore", "close", "upsert_node", "commit"]` against the rebuild's
-`["CodeParser", "main", "GraphStore", "close", "NodeInfo"]`.
+count zero affected rows and skip.
 
 **3. Deleting a file silently shortens other files' caller lists.** Deleting
 `code_review_graph/graph.py` leaves the incremental graph with 52,913 edges against the
@@ -465,8 +464,6 @@ has no outgoing `CALLS` edge at all at lines 73 and 100 in the incremental graph
 rebuild has two (`_build_networkx_graph` and `_sanitize_name`). Those edges had been
 resolved into `graph.py`, were removed with it, and `analysis.py` was never re-parsed to
 restore them as bare calls. Two edges still target `graph.py::` names that have no node.
-`risk_index` inherits it: `parser.py::EdgeInfo` reports `caller_count` 268 against the
-rebuild's 267.
 
 The six `edges` rows that differ on every edit are a separate, smaller issue: the
 `ambiguous_targets` list inside an edge's `extra` JSON is ordered by node id, so re-parsing a

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 from watchdog.events import FileModifiedEvent
@@ -89,8 +90,10 @@ def test_event_queued_before_the_consumer_first_waits_is_processed(
 ):
     release, held, _stop_sent = held_debouncers
     calls, done = updates
-    # No store is touched on this path; anything that tried would fail loudly.
-    handler = incremental._create_watch_handler(tmp_path, object(), None)
+    # Only the path the write lock sits beside; anything else would fail loudly.
+    handler = incremental._create_watch_handler(
+        tmp_path, SimpleNamespace(db_path=tmp_path / "graph.db"), None,
+    )
     handler.start()
     try:
         assert len(held) == 1, "the debouncer thread was not intercepted"
@@ -118,7 +121,9 @@ def test_stop_before_the_consumer_first_waits_does_not_hang(
 ):
     release, held, stop_sent = held_debouncers
     calls, _done = updates
-    handler = incremental._create_watch_handler(tmp_path, object(), None)
+    handler = incremental._create_watch_handler(
+        tmp_path, SimpleNamespace(db_path=tmp_path / "graph.db"), None,
+    )
     handler.start()
     assert len(held) == 1
     stopper = threading.Thread(target=handler.stop, name="debouncer-stopper", daemon=True)

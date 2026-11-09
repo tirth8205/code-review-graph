@@ -372,6 +372,29 @@ class TestBuildUpdateCommands:
 
         assert mock_build.call_args.kwargs["wait_for_lock"] is True
 
+    @pytest.mark.parametrize("command", ["build", "update"])
+    @pytest.mark.parametrize(("flags", "expected"), [([], None), (["--enrich"], True)])
+    def test_enrich_flag_reaches_the_shared_seam(self, command, flags, expected):
+        """Review of #823: Jedi runs only on request; no flag defers to the env var."""
+        argv = ["code-review-graph", command, *flags, "--repo", "repo-root"]
+        result = {"files_parsed": 1, "files_updated": 1, "total_nodes": 2, "total_edges": 1}
+
+        with patch.object(sys, "argv", argv):
+            with patch("code_review_graph.graph.GraphStore") as mock_store:
+                mock_store.return_value = MagicMock()
+                with patch("code_review_graph.incremental.get_db_path") as mock_db:
+                    mock_db.return_value = MagicMock()
+                    with patch(
+                        "code_review_graph.tools.build.build_or_update_graph",
+                        return_value=result,
+                    ) as mock_build:
+                        with patch(
+                            "code_review_graph.postprocessing.run_post_processing",
+                        ):
+                            cli.main()
+
+        assert mock_build.call_args.kwargs.get("enrich") is expected
+
     def test_update_that_stood_down_exits_tempfail_and_says_who_owns_the_build(
         self, capsys,
     ):

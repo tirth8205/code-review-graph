@@ -11,9 +11,10 @@ import hashlib
 import json
 import logging
 import os
-import shutil
 from pathlib import Path
 from typing import Any
+
+from . import install_plan
 
 logger = logging.getLogger(__name__)
 
@@ -67,10 +68,14 @@ def _iter_resource_files(root: Path) -> dict[str, Path]:
 
 def _read_manifest(skill_dir: Path) -> dict[str, str] | None:
     path = skill_dir / MANIFEST_NAME
-    if skill_dir.is_symlink() or not _safe_target(skill_dir, path) or not path.is_file():
+    if (
+        skill_dir.is_symlink()
+        or not _safe_target(skill_dir, path)
+        or not install_plan.is_file(path)
+    ):
         return None
     try:
-        parsed: Any = json.loads(path.read_text(encoding="utf-8"))
+        parsed: Any = json.loads(install_plan.read_text(path, encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
     files = parsed.get("files") if isinstance(parsed, dict) else None
@@ -116,14 +121,14 @@ def _safe_target(root: Path, target: Path) -> bool:
 
 def _write_manifest(skill_dir: Path, hashes: dict[str, str]) -> None:
     payload = {"version": 1, "files": dict(sorted(hashes.items()))}
-    (skill_dir / MANIFEST_NAME).write_text(
-        json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    install_plan.write_text(
+        skill_dir / MANIFEST_NAME, json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
     )
 
 
 def _file_hash(path: Path) -> str | None:
     try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
+        return hashlib.sha256(install_plan.read_bytes(path)).hexdigest()
     except OSError:
         return None
 
@@ -141,13 +146,12 @@ def install_codex_skill() -> Path | None:
     if destination.is_symlink() or not _safe_target(codex_home(), destination):
         logger.warning("Cannot install Codex skill through symlink: %s", destination)
         return None
-    destination.mkdir(parents=True, exist_ok=True)
     if not _safe_target(destination, destination / MANIFEST_NAME):
         logger.warning("Unsafe Codex skill manifest; leaving %s unchanged", destination)
         return None
 
     manifest = _read_manifest(destination)
-    if (destination / MANIFEST_NAME).exists() and manifest is None:
+    if install_plan.exists(destination / MANIFEST_NAME) and manifest is None:
         logger.warning(
             "Existing Codex skill manifest is invalid; leaving %s unchanged", destination
         )
@@ -169,7 +173,7 @@ def install_codex_skill() -> Path | None:
         relative
         for relative, source in source_files.items()
         if relative not in manifest
-        and (destination / relative).exists()
+        and install_plan.exists(destination / relative)
         and _file_hash(destination / relative)
         != hashlib.sha256(source.read_bytes()).hexdigest()
     ]
@@ -184,18 +188,17 @@ def install_codex_skill() -> Path | None:
     preserved_files: set[str] = set()
     for relative, source in source_files.items():
         target = destination / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
         source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
         old_hash = manifest.get(relative)
         if (
-            target.exists()
+            install_plan.exists(target)
             and old_hash is not None
             and _file_hash(target) not in {old_hash, source_hash}
         ):
             logger.warning("Preserving user-edited Codex skill file: %s", target)
             preserved_files.add(relative)
             continue
-        shutil.copy2(source, target)
+        install_plan.copy_file(source, target)
         current_hashes[relative] = source_hash
 
     # Remove obsolete files that the previous CRG manifest owned, but only if
@@ -204,8 +207,8 @@ def install_codex_skill() -> Path | None:
         if relative in source_files:
             continue
         old_path = destination / relative
-        if old_path.is_file() and _file_hash(old_path) == old_hash:
-            old_path.unlink()
+        if install_plan.is_file(old_path) and _file_hash(old_path) == old_hash:
+            install_plan.unlink(old_path)
 
     # Keep a user-edited file out of the next manifest so uninstall will not
     # mistake the edited bytes for installer-owned content.

@@ -46,11 +46,14 @@ import inspect
 import json
 import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from code_review_graph import changes as changes_mod
 from code_review_graph import main as crg_main
 from code_review_graph.graph import GraphStore
 from code_review_graph.incremental import full_build
@@ -187,22 +190,6 @@ def count_tokens(value: Any) -> int:
 # A sentinel that pushes any result cap past its hard ceiling.
 HUGE = 10**6
 
-# Tools whose result lists live in code_review_graph/tools/query.py. That
-# module is owned elsewhere and its unbounded worst cases are reported, not
-# fixed, by this change:
-#   * find_large_functions -- limit is neither validated nor capped
-#     (737k tokens at limit=10**6).
-#   * traverse_graph -- token_budget is neither validated nor capped
-#     (385k tokens at token_budget=10**6).
-#   * semantic_search_nodes -- limit is neither validated nor capped.
-# Their *default* budgets are still asserted below; only the worst case is
-# skipped, so a regression in normal use is still caught here.
-QUERY_OWNED_UNBOUNDED = {
-    "find_large_functions_tool",
-    "traverse_graph_tool",
-    "semantic_search_nodes_tool",
-}
-
 # No tool this change owns may exceed this even with every knob maxed out.
 # Before the sweep, six tools blew past it by one to two orders of
 # magnitude. It is deliberately generous: it is a catastrophe backstop, not
@@ -250,8 +237,27 @@ BUDGETS: dict[str, dict[str, Any]] = {
         # the same lists at the same caps.
         "worst_max": 50_000,
     },
+    "get_impact_radius_tool:compact": {
+        "tool": "get_impact_radius_tool",
+        "default": {"changed_files": "LEAF", "detail_level": "compact"},
+        "worst": {
+            "changed_files": "ALL", "max_depth": 5, "max_results": HUGE,
+            "detail_level": "compact", "max_files": HUGE,
+        },
+        # File paths only, each list held to max_files under the 200-file
+        # ceiling, and repository-relative, so the cost does not depend on
+        # where the checkout lives. Measured 164 and 492 under the len/4
+        # fallback; the worst case echoes all 78 changed files. The ceilings
+        # leave room for tiktoken, which splits paths finer, and still fail
+        # at once if node or edge records come back (the standard response
+        # costs tens of thousands here).
+        "default_max": 600,
+        "worst_max": 2_000,
+    },
     "query_graph_tool": {
-        "default": {"pattern": "callers_of", "target": "helper_0_0_0"},
+        # A partial name, so this pins the cost of an ambiguous answer. The
+        # full name ``helper_0_0_0`` now resolves to its one symbol.
+        "default": {"pattern": "callers_of", "target": "helper_0_0"},
         "worst": {
             "pattern": "file_summary", "target": "pkg0/mod0.py",
             "max_results": HUGE,
@@ -282,6 +288,21 @@ BUDGETS: dict[str, dict[str, Any]] = {
         # the caller's own value is the ceiling.
         "worst_max": 40_000,
     },
+    # A route is one answer, so neither max_results nor the minimal cap cuts it.
+    # What bounds it is _MAX_ROUTE_HOPS rows. This walks one helper chain across
+    # the fixture, the longest route it holds.
+    "query_graph_tool:path_to": {
+        "tool": "query_graph_tool",
+        "default": {
+            "pattern": "path_to", "target": "helper_0_0_5", "to": "helper_0_0_0",
+        },
+        "worst": {
+            "pattern": "path_to", "target": "helper_0_0_5", "to": "helper_0_0_0",
+            "max_results": HUGE,
+        },
+        "default_max": 2_000,
+        "worst_max": 2_000,
+    },
     "get_review_context_tool": {
         "default": {"changed_files": "LEAF"},
         "worst": {
@@ -300,7 +321,8 @@ BUDGETS: dict[str, dict[str, Any]] = {
         "default": {"query": "helper"},
         "worst": {"query": "helper", "limit": HUGE},
         "default_max": 8_000,
-        "worst_max": None,  # see QUERY_OWNED_UNBOUNDED
+        # 100 rows, the ceiling in query.py.
+        "worst_max": 30_000,
     },
     "embed_graph_tool": {
         # sentence-transformers is not a test dependency, so this exercises
@@ -326,7 +348,16 @@ BUDGETS: dict[str, dict[str, Any]] = {
         "default": {},
         "worst": {"min_lines": 1, "limit": HUGE},
         "default_max": 20_000,
-        "worst_max": None,  # see QUERY_OWNED_UNBOUNDED
+        # 100 rows, the ceiling in query.py.
+        "worst_max": 30_000,
+    },
+    # Minimal must stay the cheap way to call this tool, as CLAUDE.md advises.
+    "find_large_functions_tool:minimal": {
+        "tool": "find_large_functions_tool",
+        "default": {"detail_level": "minimal"},
+        "worst": {"min_lines": 1, "limit": HUGE, "detail_level": "minimal"},
+        "default_max": 4_000,
+        "worst_max": 4_000,
     },
     "list_flows_tool": {
         "default": {},
@@ -488,7 +519,8 @@ BUDGETS: dict[str, dict[str, Any]] = {
         "default": {"query": "helper_0_0_0"},
         "worst": {"query": "helper_0_0_0", "depth": 6, "token_budget": HUGE},
         "default_max": 8_000,
-        "worst_max": None,  # see QUERY_OWNED_UNBOUNDED
+        # The 10,000 ceiling is a chars/4 estimate, which runs low on paths.
+        "worst_max": 30_000,
     },
     "list_repos_tool": {
         "no_repo_root": True,
@@ -661,12 +693,6 @@ def test_default_args_stay_in_budget(name, repo):
 def test_worst_case_args_stay_in_budget(name, repo):
     """Maxing every verbosity knob must still hit a hard ceiling."""
     spec = BUDGETS[name]
-    if spec["worst_max"] is None:
-        pytest.skip(
-            f"{name} is bounded in code_review_graph/tools/query.py, which "
-            "this change does not own; its unbounded worst case is reported "
-            "rather than fixed (see QUERY_OWNED_UNBOUNDED)."
-        )
     result = _call(name, spec, spec["worst"], repo)
     tokens = count_tokens(result)
     assert tokens <= spec["worst_max"], (
@@ -743,6 +769,11 @@ MAX_CEILINGS = {
     "review._MAX_REVIEW_SOURCE_LINES": (review._MAX_REVIEW_SOURCE_LINES, 800),
     "review._MAX_LINES_PER_FILE": (review._MAX_LINES_PER_FILE, 500),
     "review._MAX_CHANGED_FUNCTIONS": (review._MAX_CHANGED_FUNCTIONS, 100),
+    # Symbols a diff removed, and the users listed for each. Their cost is
+    # measured in tests/test_pure_deletion_review.py, which needs a real git
+    # history that this fixture does not have.
+    "review._MAX_REMOVED_SYMBOLS": (review._MAX_REMOVED_SYMBOLS, 25),
+    "changes._MAX_REMOVED_USERS_SHOWN": (changes_mod._MAX_REMOVED_USERS_SHOWN, 3),
     "review._MAX_AFFECTED_FLOWS_STANDARD": (
         review._MAX_AFFECTED_FLOWS_STANDARD, 25,
     ),
@@ -756,6 +787,12 @@ MAX_CEILINGS = {
     "query._MAX_IMPACT_NODES_SHOWN": (query._MAX_IMPACT_NODES_SHOWN, 100),
     "query._MAX_IMPACT_EDGES": (query._MAX_IMPACT_EDGES, 150),
     "query._MAX_IMPACT_FILES": (query._MAX_IMPACT_FILES, 200),
+    "query._MAX_SEARCH_RESULTS_STANDARD": (query._MAX_SEARCH_RESULTS_STANDARD, 100),
+    "query._MAX_SEARCH_RESULTS_MINIMAL": (query._MAX_SEARCH_RESULTS_MINIMAL, 5),
+    "query._SEARCH_WINDOW_FACTOR": (query._SEARCH_WINDOW_FACTOR, 3),
+    "query._MAX_LARGE_FUNCTIONS_STANDARD": (query._MAX_LARGE_FUNCTIONS_STANDARD, 100),
+    "query._MAX_LARGE_FUNCTIONS_MINIMAL": (query._MAX_LARGE_FUNCTIONS_MINIMAL, 25),
+    "query._MAX_TRAVERSAL_TOKEN_BUDGET": (query._MAX_TRAVERSAL_TOKEN_BUDGET, 10_000),
 }
 
 
@@ -878,6 +915,65 @@ def test_hard_ceilings_bind(repo):
         dead["total"], refactor_mod._MAX_REFACTOR_RESULTS,
     )
 
+    search = _invoke(
+        crg_main.semantic_search_nodes_tool,
+        repo_root=root, query="helper", limit=HUGE,
+    )
+    assert search["total"] > query._MAX_SEARCH_RESULTS_STANDARD
+    assert len(search["results"]) == query._MAX_SEARCH_RESULTS_STANDARD
+
+    large = _invoke(
+        crg_main.find_large_functions_tool,
+        repo_root=root, min_lines=1, limit=HUGE,
+    )
+    assert large["total"] > query._MAX_LARGE_FUNCTIONS_STANDARD
+    assert len(large["results"]) == query._MAX_LARGE_FUNCTIONS_STANDARD
+
+    traversal = _invoke(
+        crg_main.traverse_graph_tool,
+        repo_root=root, query="helper_0_0_0", depth=6, token_budget=HUGE,
+    )
+    assert traversal["token_budget"] == query._MAX_TRAVERSAL_TOKEN_BUDGET
+    assert traversal["truncated"] is True
+
+
+def test_dfs_expands_a_node_reached_again_by_a_shorter_path(tmp_path):
+    """A node first reached at the depth limit must not hide what lies past it."""
+    root = tmp_path.resolve()
+    (root / ".git").mkdir()
+    source = root / "graph_shape.py"
+    source.write_text(
+        "def start_here():\n"
+        "    side_a()\n"
+        "    side_b()\n"
+        "\n"
+        "def side_a():\n"
+        "    far_leaf()\n"
+        "\n"
+        "def side_b():\n"
+        "    side_c()\n"
+        "\n"
+        "def side_c():\n"
+        "    side_a()\n"
+        "\n"
+        "def far_leaf():\n"
+        "    return 1\n",
+        encoding="utf-8",
+    )
+    store = GraphStore(root / ".code-review-graph" / "graph.db")
+    try:
+        full_build(root, store)
+    finally:
+        store.close()
+
+    result = query.traverse_graph_func(
+        "start_here", mode="dfs", depth=2, token_budget=10_000, repo_root=str(root),
+    )
+
+    names = [entry["name"] for entry in result["traversal"]]
+    assert "far_leaf" in names
+    assert len(names) == len(set(names))
+
 
 class TestTruncationContract:
     """The contract PR #853 established, applied to the newly capped tools."""
@@ -903,6 +999,161 @@ class TestTruncationContract:
         assert community["members_truncated"] is True
         # ``size`` is the real member count, not the truncated list length.
         assert community["size"] > len(community["members"])
+
+    def test_semantic_search_reports_what_it_ranked(self, repo):
+        result = _invoke(
+            crg_main.semantic_search_nodes_tool,
+            repo_root=repo["root"], query="helper", limit=1,
+        )
+        assert len(result["results"]) == 1
+        assert result["truncated"] is True
+        assert result["total"] == result["result_count"] == query._SEARCH_WINDOW_FACTOR
+        assert result["results_omitted"] == result["total"] - 1
+        assert result["total_is_lower_bound"] is True
+        assert f"Found {result['total']}+ node(s)" in result["summary"]
+        assert f"showing 1 of {result['total']}" in result["summary"]
+
+    def test_semantic_search_counts_exactly_when_the_window_is_not_full(
+        self, repo, monkeypatch,
+    ):
+        # With an embedding model installed, the module's embed_graph_tool case
+        # leaves vectors behind, and vector search ranks every node, so the
+        # window fills. Count keyword matches only, whatever extras are present.
+        from code_review_graph import search as search_mod
+
+        monkeypatch.setattr(search_mod, "_embedding_search", lambda *a, **k: [])
+        result = _invoke(
+            crg_main.semantic_search_nodes_tool,
+            repo_root=repo["root"], query="helper_0_0_0", limit=100,
+        )
+        assert result["truncated"] is False
+        assert result["total"] == len(result["results"]) > 0
+        assert result["results_omitted"] == 0
+        assert "total_is_lower_bound" not in result
+        assert "showing" not in result["summary"]
+
+    @pytest.mark.parametrize(
+        ("kwargs", "ranked"),
+        [
+            ({"limit": 1}, query._SEARCH_WINDOW_FACTOR),
+            ({"limit": HUGE}, query._MAX_SEARCH_RESULTS_STANDARD * query._SEARCH_WINDOW_FACTOR),
+            (
+                {"limit": HUGE, "detail_level": "minimal"},
+                query._MAX_SEARCH_RESULTS_MINIMAL * query._SEARCH_WINDOW_FACTOR,
+            ),
+        ],
+    )
+    def test_semantic_search_ranks_a_small_multiple_of_what_it_shows(
+        self, repo, monkeypatch, kwargs, ranked,
+    ):
+        asked: list[int] = []
+        real = query.hybrid_search
+
+        def spy(*args, **call_kwargs):
+            asked.append(call_kwargs["limit"])
+            return real(*args, **call_kwargs)
+
+        monkeypatch.setattr(query, "hybrid_search", spy)
+        _invoke(
+            crg_main.semantic_search_nodes_tool,
+            repo_root=repo["root"], query="helper", **kwargs,
+        )
+        assert asked == [ranked]
+
+    def test_semantic_search_minimal_uses_the_smaller_ceiling(self, repo):
+        result = _invoke(
+            crg_main.semantic_search_nodes_tool,
+            repo_root=repo["root"], query="helper", limit=HUGE,
+            detail_level="minimal",
+        )
+        assert len(result["results"]) == query._MAX_SEARCH_RESULTS_MINIMAL
+        assert result["truncated"] is True
+        assert result["results_omitted"] == (
+            result["total"] - query._MAX_SEARCH_RESULTS_MINIMAL
+        )
+
+    def test_large_functions_reports_the_count_before_the_cut(self, repo):
+        result = _invoke(
+            crg_main.find_large_functions_tool,
+            repo_root=repo["root"], min_lines=1, limit=1,
+        )
+        assert len(result["results"]) == 1
+        assert result["truncated"] is True
+        assert result["total"] == result["result_count"] == result["total_found"] > 1
+        assert result["results_omitted"] == result["total"] - 1
+        assert f"showing 1 of {result['total']}" in result["summary"]
+
+    def test_large_functions_fetches_only_what_it_shows(self, repo, monkeypatch):
+        asked: list[int] = []
+        real = GraphStore.get_nodes_by_size
+
+        def spy(self, *args, **kwargs):
+            asked.append(kwargs["limit"])
+            return real(self, *args, **kwargs)
+
+        monkeypatch.setattr(GraphStore, "get_nodes_by_size", spy)
+        _invoke(
+            crg_main.find_large_functions_tool,
+            repo_root=repo["root"], min_lines=1, limit=HUGE,
+        )
+        assert asked == [query._MAX_LARGE_FUNCTIONS_STANDARD]
+
+    def test_large_functions_minimal_costs_less_than_standard(self, repo):
+        standard = _invoke(
+            crg_main.find_large_functions_tool,
+            repo_root=repo["root"], min_lines=1, limit=HUGE,
+        )
+        minimal = _invoke(
+            crg_main.find_large_functions_tool,
+            repo_root=repo["root"], min_lines=1, limit=HUGE,
+            detail_level="minimal",
+        )
+        assert count_tokens(minimal) < count_tokens(standard)
+        assert minimal["total"] == standard["total"]
+        assert len(minimal["results"]) == query._MAX_LARGE_FUNCTIONS_MINIMAL
+        assert set(minimal["results"][0]) <= {
+            "name", "kind", "relative_path", "line_start", "line_count",
+        }
+
+    def test_traversal_stops_walking_when_the_budget_ends(self, repo, monkeypatch):
+        walked: list[str] = []
+        real = GraphStore.get_edges_by_source
+
+        def spy(self, qualified_name):
+            walked.append(qualified_name)
+            return real(self, qualified_name)
+
+        monkeypatch.setattr(GraphStore, "get_edges_by_source", spy)
+        result = _invoke(
+            crg_main.traverse_graph_tool,
+            repo_root=repo["root"], query="helper_0_0_0", depth=6, token_budget=1,
+        )
+        assert result["traversal"] == []
+        assert result["nodes_visited"] == 0
+        assert result["truncated"] is True
+        assert walked == []
+
+    def test_impact_default_follows_the_environment_setting(self, repo):
+        """Through the MCP tool, not just the store: #888's silent 500."""
+        script = (
+            "import asyncio, json, sys\n"
+            "from code_review_graph import main\n"
+            "tool = main.get_impact_radius_tool\n"
+            "func = getattr(tool, 'fn', tool)\n"
+            "result = asyncio.run(func(changed_files=['pkg0/mod0.py'], repo_root=sys.argv[1]))\n"
+            "print(json.dumps(len(result['impacted_nodes'])))\n"
+        )
+        done = subprocess.run(
+            [sys.executable, "-c", script, repo["root"]],
+            capture_output=True, text=True, timeout=120, check=True,
+            env={**os.environ, "CRG_MAX_IMPACT_NODES": "3"},
+        )
+        assert json.loads(done.stdout.strip().splitlines()[-1]) == 3
+        baseline = _invoke(
+            crg_main.get_impact_radius_tool,
+            repo_root=repo["root"], changed_files=["pkg0/mod0.py"],
+        )
+        assert len(baseline["impacted_nodes"]) > 3
 
     def test_detect_changes_flows_carry_no_step_lists(self, repo):
         """#849's payload must not leak back in through detect_changes."""
@@ -964,6 +1215,12 @@ class TestBoundValidation:
             ("list_communities_tool", {"max_members": True}),
             ("get_community_tool", {"max_members": 0}),
             ("get_architecture_overview_tool", {"max_results": 0}),
+            ("semantic_search_nodes_tool", {"query": "x", "limit": 0}),
+            ("semantic_search_nodes_tool", {"query": "x", "limit": True}),
+            ("find_large_functions_tool", {"limit": 0}),
+            ("find_large_functions_tool", {"limit": True}),
+            ("traverse_graph_tool", {"query": "x", "token_budget": -1}),
+            ("traverse_graph_tool", {"query": "x", "token_budget": False}),
             ("list_flows_tool", {"limit": 0}),
             ("get_flow_tool", {"max_steps": 0}),
             ("get_flow_tool", {"max_source_lines": -5}),

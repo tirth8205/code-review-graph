@@ -7,7 +7,8 @@ from typing import Any
 
 from ..flows import get_flow_by_id, get_flows
 from ..hints import generate_hints, get_session
-from ._common import _bounded, _get_store, _shown_of, _source_path, _validate_positive_int
+from ..incremental import followed_files, path_within_repo
+from ._common import _bounded, _get_store, _shown_of, _validate_positive_int
 
 # ---------------------------------------------------------------------------
 # Tool 10: list_flows  [EXPLORE]
@@ -173,6 +174,7 @@ def get_flow(
         # line budget so a deep flow cannot inline the whole call chain.
         if include_source:
             budget = min(max_source_lines, _MAX_FLOW_SOURCE_LINES)
+            followed = followed_files(store)
             for step in steps:
                 if budget <= 0:
                     flow["truncated"] = True
@@ -181,8 +183,12 @@ def get_flow(
                 fp = Path(step["file"]) if step.get("file") else None
                 if fp is not None and not fp.is_absolute():
                     fp = root / fp
-                file_path = _source_path(root, fp) if fp is not None else None
-                if file_path and file_path.is_file():
+                file_path = fp
+                if (
+                    file_path
+                    and file_path.is_file()
+                    and path_within_repo(root, file_path, followed)
+                ):
                     try:
                         lines = file_path.read_text(encoding="utf-8",
                             errors="replace"

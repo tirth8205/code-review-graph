@@ -30,7 +30,7 @@ Release highlights by version. The full changelog is in [CHANGELOG.md](../CHANGE
 - **Windows fixes**: `daemon status` no longer fails with WinError 87 (#511). CLI `detect-changes` maps diff paths to absolute native paths, so it no longer reports 0 functions (#528).
 - **Provider-name validation**: an unknown embedding provider raises an error listing the valid names instead of falling back to the local model.
 - **Connection leaks fixed**: the five analysis MCP tools and the wiki-page tool close their SQLite connections (`try/finally store.close()`).
-- **`fastmcp<4` cap**: the next fastmcp major release cannot break the server silently.
+- **`fastmcp<4` cap**: the next fastmcp major release cannot break the server silently. Raised to `<5` once fastmcp 4 was tested (#970).
 - **Worktree-safe git hooks**: `install` resolves the hooks directory with `git rev-parse --git-path hooks`, so linked worktrees and `core.hooksPath` (husky) setups get a working pre-commit hook.
 
 ## v2.3.5

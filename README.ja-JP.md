@@ -99,6 +99,54 @@ Build the code review graph for this project
 
 ビルド時間はリポジトリの規模に比例します。約 3,000 ファイルのリポジトリのコールドビルドで約 40 秒でした（[計測値](docs/REPRODUCING.md#incremental-update-latency)）。その後はフックと watch モードがグラフを更新し続けます。一部のファイルの解析に失敗した場合、結果のステータスは `partial` になり、要約にそのファイル名が入ります。CLI は stderr に `Warning:` の行も出力し、それらのファイルは以前のグラフの行をそのまま保持します。
 
+### Docker または Podman で実行する
+
+プロジェクトのリポジトリルートからイメージをビルドします。
+
+```bash
+docker build -t code-review-graph:local .
+```
+
+解析するリポジトリのディレクトリで、次を実行します。
+
+```bash
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --env HOME=/tmp \
+  --volume "$PWD:/workspace" \
+  code-review-graph:local build
+```
+
+マウントするリポジトリには書き込み権限が必要です。
+上のコマンドはホストのユーザー ID とグループ ID を使用するため、
+生成される `.code-review-graph/` ディレクトリの所有者は自分のユーザーになります。
+これらのコマンドは、ホスト上の root 以外のユーザーで実行してください。
+
+Podman では、同じ Dockerfile をビルドし、ユーザーマッピングを維持します。
+
+```bash
+podman build -t code-review-graph:local .
+podman run --rm \
+  --userns=keep-id \
+  --env HOME=/tmp \
+  --volume "$PWD:/workspace" \
+  code-review-graph:local build
+```
+
+グラフはマウントしたリポジトリの `.code-review-graph/` に保存され、
+`/workspace/app.py` などのコンテナ内の絶対パスを記録します。
+`update` と `detect-changes` は、同じ `/workspace` マウントを使って Docker または Podman で実行してください。
+このグラフに対してホストで `update` を実行すると、"built with a different repository root"
+というエラーになる場合があります。ホストのコマンドに切り替えるには、ホストで
+`code-review-graph build` を実行し、ホストのパスでグラフを再構築してください。
+
+保存されたグラフを確認するには、`build` を `status` に置き換えます。
+イメージには Git が含まれ、デフォルトでは root 以外のユーザーで実行されます。
+イメージのビルド中にグラフは生成されません。
+
+これらの例は macOS/Linux のシェル構文を使用しています。
+macOS では、実行前に Docker 互換エンジンまたは Podman 仮想マシンを起動してください。
+Fedora など SELinux が有効なホストでは、マウントに `:z` を追加してください（`"$PWD:/workspace:z"`）。追加しないと、コンテナはリポジトリにアクセスできません。
 
 ## 仕組み
 
@@ -361,6 +409,7 @@ code-review-graph detect-changes --brief         # Risk panel + token savings (r
 code-review-graph detect-changes --brief --base main  # Against the merge base of main and HEAD
 code-review-graph update --brief                 # Refresh graph + same panel
 code-review-graph detect-changes --brief --verify  # Cross-check against tiktoken
+code-review-graph context-history  # Trend of the opt-in savings log (CRG_CONTEXT_HISTORY=1)
 code-review-graph register <path>  # Register repo in the multi-repo registry
 code-review-graph unregister <path|alias>  # Remove repo from the registry
 code-review-graph repos            # List registered repositories
@@ -370,6 +419,7 @@ code-review-graph daemon status    # Daemon status and repos
 code-review-graph eval             # Run evaluation benchmarks
 code-review-graph serve            # Start the MCP server (stdio)
 code-review-graph serve --http     # MCP over Streamable HTTP on localhost:5555
+code-review-graph serve --http --multi-repo  # One HTTP server for every registered repo
 ```
 
 これは抜粋です。`code-review-graph --help` がすべてのコマンドを並べ、[docs/COMMANDS.md](docs/COMMANDS.md) がそれぞれのフラグを説明します。
@@ -405,6 +455,8 @@ JSON のエクスポートはローカルのグラフデータディレクトリ
 どちらのコマンドにも `--verify` を付けると、数字を OpenAI の `cl100k_base` トークナイザと比べられます（`pip install tiktoken` が必要）。集計値で見た推定値は実トークンとの差が約 1% 以内です。[`docs/REPRODUCING.md`](docs/REPRODUCING.md#calibration-table) を参照してください。
 
 同じ `context_savings` メタデータは、`get_impact_radius`、`get_review_context`、`detect_changes`、`get_architecture_overview` の各 MCP ツールの JSON 応答にも付きます。
+
+推定値の推移を見るには `CRG_CONTEXT_HISTORY=1` を設定します（既定ではオフ）。推定値ごとに `graph.db` の隣のローカルログへ 1 行追加され、内容はトークン数とツール名だけです。`code-review-graph context-history` で日別またはツール別に表示できます。[docs/USAGE.md](docs/USAGE.md#context-history) を参照してください。
 
 </details>
 
@@ -513,7 +565,7 @@ git リポジトリでは追跡されているファイルだけがインデッ�
 pip install "code-review-graph[embeddings]"          # Local vector embeddings (sentence-transformers)
 pip install "code-review-graph[google-embeddings]"   # Google Gemini embeddings
 pip install "code-review-graph[communities]"         # Community detection (igraph)
-pip install "code-review-graph[enrichment]"          # Python call-resolution enrichment (Jedi)
+pip install "code-review-graph[enrichment]"          # Python call resolution with Jedi (then build --enrich)
 pip install "code-review-graph[eval]"                # Evaluation benchmarks and SVG export (matplotlib)
 pip install "code-review-graph[wiki]"                # ollama client (not used by the current wiki generator)
 pip install "code-review-graph[all]"                 # All optional dependencies
@@ -535,13 +587,17 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_MAX_IMPACT_DEPTH` | 影響範囲分析の探索の深さ | `2` |
 | `CRG_MAX_BFS_DEPTH` | グラフ探索の最大の深さ | `15` |
 | `CRG_MAX_CHANGED_FUNCS` | 1 回の変更レポートで分析する変更関数の最大数 | `500` |
+| `CRG_MAX_DELETION_FILES` | 差分で削除された関数とクラスを挙げるために、1 回の変更レポートで旧版を読むファイルの最大数 | `100` |
 | `CRG_MAX_TRANSITIVE_FRONTIER` | 推移的な呼び出し元・呼び出し先の展開における最大フロンティア数 | `50` |
 | `CRG_CALLER_TEST_ROUTE_DEPTH` | テストのない変更シンボルについて、テスト済みの呼び出し元を探して `CALLS` を遡るホップ数。カバレッジではなく注記として報告されます | `2` |
 | `CRG_CALLER_TEST_ROUTE_MAX_CALLERS` | そのテスト済み呼び出し元を探す際に調べる呼び出し元の最大数 | `500` |
 | `CRG_TOOL_TIMEOUT` | 読み取り専用 MCP ツールのタイムアウト（秒。`0` で無効）。書き込みを行うツール（build / postprocess / embed / wiki / apply-refactor）には適用されない | `0` |
 | `CRG_CHURN_WINDOW_DAYS` | `detect-changes --churn` のコミット数を数える期間 | `90` |
+| `CRG_CONTEXT_HISTORY` | `1` にすると、`context_savings` の推定値を毎回ローカルログ `.code-review-graph/context-history.jsonl` に記録します。`code-review-graph context-history` で表示します。記録するのはトークン数とツール名だけで、外部には送信しません | - |
 | `CRG_LEIDEN_SEED` | Leiden のコミュニティ検出のシード | `42` |
 | `CRG_RECURSE_SUBMODULES` | `1`、`true`、`yes` のとき git サブモジュールを含める | - |
+| `CRG_FOLLOW_SYMLINKS` | `1`、`true`、`yes`、`on` のとき、シンボリックリンクのフォルダ（リポジトリの内外）をたどる。`--follow-symlinks` と同じ。[シンボリックリンクのフォルダ](docs/USAGE.md#symlinked-folders) を参照 | - |
+| `CRG_MAX_FOLLOWED_FILES` | シンボリックリンクのフォルダから取り込むファイルの上限 | `10000` |
 | `CRG_TOOLS` | サーバー起動時に公開する MCP ツールのカンマ区切り許可リスト | - |
 | `GOOGLE_API_KEY` | Google Gemini 埋め込みの API キー | - |
 | `MINIMAX_API_KEY` | MiniMax 埋め込みの API キー | - |
@@ -559,6 +615,8 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_OPENAI_BATCH_SIZE` | OpenAI 互換のリクエストのバッチサイズ | `100` |
 | `NO_COLOR` | 端末の ANSI 色を無効化 | - |
 | `CRG_SERIAL_PARSE` | `1` にすると並列解析を無効化（デバッグ用） | - |
+| `CRG_ENABLE_ENRICHMENT` | `1` にすると毎回の build と update で Jedi により Python のメソッド呼び出しを解決（`enrichment` エクストラが必要、Python ファイル 1 つにつき約 1 秒増）。`build --enrich` と同じ | オフ |
+| `CRG_DISABLE_ENRICHMENT` | `1` にすると要求があっても Jedi を実行しない | - |
 
 OpenAI 互換の埋め込み（OpenAI、Azure、あるいは new-api、LiteLLM、vLLM、LocalAI、OpenAI モードの Ollama といった自前のゲートウェイ）に追加インストールは要りません。変数を設定し、`embed_graph` に `provider="openai"` を渡します。
 

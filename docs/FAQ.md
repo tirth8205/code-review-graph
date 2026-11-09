@@ -39,7 +39,7 @@ language server.
 **Trade-off.** CRG's call resolution is AST-level and heuristic, not
 compiler-backed. Dynamic dispatch, metaprogramming and duck typing produce
 inferred edges, so every edge carries a confidence tier
-(`EXTRACTED` or `INFERRED`). LSP is more precise per symbol; CRG is
+(`EXTRACTED`, `INFERRED`, `AMBIGUOUS` or `UNRESOLVED`). LSP is more precise per symbol; CRG is
 broader, persistent and cheaper to query across the repository.
 
 ## Isn't this just RAG?
@@ -85,7 +85,9 @@ of grep, read and reasoning:
   false hits the agent has to read to rule out.
 - Tests for: `query_graph_tool(pattern="tests_for")` maps code to tests through
   parsed edges and naming conventions; `detect_changes_tool` adds transitive
-  coverage. Grep only finds tests that mention the name literally.
+  coverage. A row found by name, or by a PHP call the graph could not pin to one
+  class, carries `inferred_by` and is a guess, not coverage. Grep only finds
+  tests that mention the name literally.
 - Affected flows: "which execution paths does this change touch?" has no grep
   equivalent.
 
@@ -149,6 +151,9 @@ The only network activity is opt-in:
   egress warning on stderr until you set `CRG_ACCEPT_CLOUD_EMBEDDINGS=1`; the
   warning is skipped when the endpoint is localhost.
 
+The context history log (`CRG_CONTEXT_HISTORY=1`) is off by default and is a
+local file only.
+
 See [LEGAL.md](LEGAL.md).
 
 ## How do I verify it is working?
@@ -209,9 +214,12 @@ code), or pass `--repo <path>` to point a command at a specific directory.
 `.code-review-graph/` matching its checkout. Do not share one database across
 worktrees at different commits. The pre-commit hook skips linked worktrees
 unless `CRG_HOOK_WORKTREES=1` is set, so a commit there does not build a second
-graph by accident. To keep the database outside the working tree (ephemeral
-workspaces, network shares), pass `--data-dir <path>` to `build`, `update`,
-`status` and the other graph commands, or set `CRG_DATA_DIR`.
+graph by accident. The edit hook updates the graph of the repository that
+holds the edited file, so a session in the main checkout that edits a worktree
+updates the worktree's graph, once you have built one there. To keep the
+database outside the working tree (ephemeral workspaces, network shares), pass
+`--data-dir <path>` to `build`, `update`, `status` and the other graph
+commands, or set `CRG_DATA_DIR`.
 
 For parallel PR reviews in one stdio MCP session, use the opt-in
 `code-review-graph serve --multi-worktree --repo <primary-root>` mode. Each
@@ -232,7 +240,11 @@ code-review-graph unregister api                    # remove by path or alias
 ```
 
 Once registered, `list_repos_tool` and `cross_repo_search_tool` work across
-all of them. To keep several graphs current, the daemon watches registered
+all of them. One HTTP server can also answer for all of them:
+`code-review-graph serve --http --multi-repo` serves every registered repository
+and loads the embedding model once. Each tool call must then pass `repo_root`,
+the absolute path of a registered repository; a call without one, or naming a
+repository that is not registered, is refused. To keep several graphs current, the daemon watches registered
 repositories as child processes:
 
 ```bash
@@ -243,3 +255,11 @@ crg-daemon status
 
 Also available as `code-review-graph daemon start|stop|status`. See
 [COMMANDS.md](COMMANDS.md) for the daemon reference.
+
+**A folder of sibling repos, or nested repos.** Build each repo you want a
+graph for, inside that repo. The edit hook that `install` writes for Claude
+Code, Qoder and CodeBuddy then updates the graph of the repo that holds each
+edited file, even when the session started in the outer folder. It never
+builds a graph for a repo that has none, unless the session started in that
+repo. MCP tool calls still act on the server's default repo unless they pass
+`repo_root`.

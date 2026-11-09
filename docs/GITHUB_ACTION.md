@@ -11,7 +11,9 @@ On each run the action:
 2. Restores the cached `.code-review-graph/` SQLite graph and re-parses the
    files changed by the PR, or builds the graph from scratch on a cache miss.
 3. Runs `code-review-graph detect-changes --base origin/<base-branch>` to get
-   risk-scored functions, affected execution flows and test gaps.
+   risk-scored functions, affected execution flows and test gaps. With the
+   `details` input set it adds `--details <sections>`, and nothing else
+   changes.
 4. Renders a markdown report with `scripts/render_pr_comment.py` and upserts
    one sticky PR comment. The same comment is updated on every push.
 5. Optionally fails the job when the overall risk score reaches a threshold
@@ -71,6 +73,7 @@ To turn the review into a merge gate:
 | `comment` | no | `true` | Post (and keep updated) the sticky PR comment. Set to `false` to run analysis and gating without commenting. |
 | `fail-on-risk` | no | `none` | Fail the job when the overall risk score reaches a level: `none` (never fail), `high` (risk >= 0.70), `critical` (risk >= 0.85). |
 | `python-version` | no | `3.12` | Python version used to run code-review-graph (3.10 or newer). |
+| `details` | no | empty | Extra graph context for the comment, as a comma-separated list of `risk`, `communities`, `hubs`, `coupling`, `impact`, `gaps`, `graph`, or `all`. Empty leaves the comment byte for byte as it is. See [Graph context](#graph-context-opt-in). |
 
 ## Outputs
 
@@ -81,7 +84,9 @@ To turn the review into a merge gate:
 ### Risk levels
 
 `detect-changes` produces an overall risk score from 0.0 to 1.0: the maximum
-across changed functions. `compute_risk_score` in
+across changed functions and removed functions that are still used, so
+`fail-on-risk` also stops a pull request that deletes code its callers still
+need. `compute_risk_score` in
 `code_review_graph/changes.py` adds up flow participation, community
 crossing, test coverage, security-sensitive names and caller count. The
 action maps the score to levels:
@@ -99,6 +104,9 @@ action maps the score to levels:
   affected flows and test gaps.
 - **Risk-scored changes**: a table of the top 10 changed symbols by risk,
   with `file:line` location and whether the symbol has a test.
+- **Removed symbols**: up to 10 functions or classes the pull request
+  deleted, with their risk, where they were, and what the graph says still
+  uses them.
 - **Affected execution flows**: up to 5 entry-point flows the change
   touches, ordered by criticality, with node and file counts.
 - **Test gaps**: up to 5 changed functions with no direct test coverage.
@@ -108,6 +116,38 @@ action maps the score to levels:
   `chars / 4` approximation labelled `estimated: true`; see
   [REPRODUCING.md](REPRODUCING.md) for the calibration method).
 - A `Powered by code-review-graph` footer.
+
+### Graph context (opt-in)
+
+The `details` input adds more of what the graph knows, under one folded
+`Graph context` heading after the report:
+
+```yaml
+      - uses: tirth8205/code-review-graph@v2.3.9
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          details: all          # or e.g. "risk,hubs,graph"
+```
+
+| Section | What it shows |
+|---------|---------------|
+| `risk` | For the riskiest symbols, each term of the score and what it counted: tests, flows, callers from other communities, a security-looking name, callers, churn. The terms add up to the score. |
+| `communities` | The communities the changed symbols belong to, out of how many in the graph. |
+| `hubs` | Changed production symbols by number of connections, their rank in the whole graph, and how many other communities their direct callers and callees sit in. |
+| `coupling` | Links from or to the changed symbols that cross a community or a language boundary. Links to or from tests are left out. |
+| `impact` | How many symbols and files depend on or test the changed files (2 hops by default, `CRG_MAX_IMPACT_DEPTH`), the most affected files, and the direct callers of the riskiest symbols. |
+| `gaps` | The test gaps, ranked by how many callers and flows depend on them. |
+| `graph` | Graph size and languages, the community count and the method that found the communities (Leiden through igraph, or file-based grouping when igraph is not installed), flow count, last build, versions. |
+
+Each list shows at most 5 rows. The whole block, note included, is capped at
+12,000 UTF-8 bytes, and never takes room the report itself needs. When the cap
+cuts it, the last line says so and names the sections cut short or not shown.
+Everything is read from the local graph on the runner; nothing is sent
+anywhere, and no model is asked anything.
+
+The community method is recorded each time communities are stored. A cached
+graph from an older release says "method not recorded" until its communities
+are next rebuilt; a full `build` always rebuilds them.
 
 If `detect-changes` capped the analysed functions (`CRG_MAX_CHANGED_FUNCS`,
 default 500), the comment says so. A body over 60,000 UTF-8 bytes is cut on a
@@ -130,11 +170,11 @@ someone else's.
 The action caches the `.code-review-graph/` directory (the SQLite graph
 database) with `actions/cache`:
 
-- **Key**: `code-review-graph-schema14-<runner.os>-<hashFiles(lockfiles)>`.
+- **Key**: `code-review-graph-schema15-<runner.os>-<hashFiles(lockfiles)>`.
   The lockfile hash covers `uv.lock`, `poetry.lock`, `requirements*.txt`,
   `Pipfile.lock`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`,
   `go.sum`, `Cargo.lock`, `Gemfile.lock` and `composer.lock`.
-- **Schema segment**: `schema14` tracks the database schema version
+- **Schema segment**: `schema15` tracks the database schema version
   (`LATEST_VERSION` in `code_review_graph/migrations.py`). It is bumped when
   the schema changes so a stale cache is not restored across incompatible
   versions.
@@ -225,12 +265,15 @@ code-review-graph detect-changes --base origin/main | \
 
 python scripts/render_pr_comment.py --input report.json \
   --fail-on-risk high --quiet                    # gate only: exit 3 on breach
+
+code-review-graph detect-changes --base origin/main --details all | \
+  python scripts/render_pr_comment.py --details all   # with graph context
 ```
 
 Options: `--input` (JSON file or `-` for stdin, default `-`), `--output`
 (file or `-` for stdout, default `-`), `--fail-on-risk none|high|critical`,
-`--max-functions` (default 10), `--max-flows` (default 5), `--quiet` (skip
-writing the body). Exit codes: 0 rendered and gate passed or disabled, 2 the
+`--max-functions` (default 10), `--max-flows` (default 5), `--details`
+(graph context sections, default none), `--quiet` (skip writing the body). Exit codes: 0 rendered and gate passed or disabled, 2 the
 input file could not be read, 3 risk gate breached, 4 `detect-changes`
 produced no analysis at all.
 

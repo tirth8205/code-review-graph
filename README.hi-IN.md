@@ -99,6 +99,53 @@ Build the code review graph for this project
 
 बिल्ड का समय रिपॉज़िटरी के आकार के साथ बढ़ता है; लगभग 3,000 फ़ाइलों वाली रिपॉज़िटरी के कोल्ड बिल्ड में लगभग 40 सेकंड लगे ([मापा गया](docs/REPRODUCING.md#incremental-update-latency))। उसके बाद हुक और watch मोड ग्राफ़ को अद्यतन रखते हैं। अगर कुछ फ़ाइलें पार्स नहीं हो पातीं तो परिणाम की स्थिति `partial` होती है और सारांश में उनके नाम आते हैं; CLI stderr पर एक `Warning:` पंक्ति भी छापता है, और उन फ़ाइलों की पुरानी ग्राफ़ पंक्तियाँ बनी रहती हैं।
 
+### Docker या Podman से चलाएँ
+
+प्रोजेक्ट की रिपॉज़िटरी के मूल फ़ोल्डर से इमेज बनाएँ:
+
+```bash
+docker build -t code-review-graph:local .
+```
+
+जिस रिपॉज़िटरी का विश्लेषण करना है, उसके फ़ोल्डर से चलाएँ:
+
+```bash
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --env HOME=/tmp \
+  --volume "$PWD:/workspace" \
+  code-review-graph:local build
+```
+
+माउंट की गई रिपॉज़िटरी में लिखने की अनुमति होनी चाहिए।
+ऊपर दिया गया कमांड आपके यूज़र और ग्रुप ID का उपयोग करता है,
+जिससे बनाई गई `.code-review-graph/` डायरेक्टरी का स्वामित्व आपके यूज़र के पास रहता है।
+इन कमांड को होस्ट पर गैर-root यूज़र के रूप में चलाएँ।
+
+Podman के लिए, उसी Dockerfile से इमेज बनाएँ और यूज़र मैपिंग बनाए रखें:
+
+```bash
+podman build -t code-review-graph:local .
+podman run --rm \
+  --userns=keep-id \
+  --env HOME=/tmp \
+  --volume "$PWD:/workspace" \
+  code-review-graph:local build
+```
+
+ग्राफ़ माउंट किए गए रिपॉज़िटरी की `.code-review-graph/` डायरेक्टरी में बना रहता है और
+`/workspace/app.py` जैसे कंटेनर के पूर्ण पथ सहेजता है। `update` और `detect-changes` को
+Docker या Podman से उसी `/workspace` माउंट के साथ चलाएँ। इस ग्राफ़ पर होस्ट से `update`
+चलाने पर "built with a different repository root" त्रुटि आ सकती है। होस्ट कमांड पर
+स्विच करने के लिए, होस्ट पर `code-review-graph build` चलाकर होस्ट के पथों के साथ ग्राफ़ फिर से बनाएँ।
+
+सहेजे गए ग्राफ़ को देखने के लिए `build` की जगह `status` लिखें।
+इमेज में Git शामिल है और यह डिफ़ॉल्ट रूप से गैर-root यूज़र के रूप में चलती है।
+इमेज बनाते समय ग्राफ़ नहीं बनाया जाता।
+
+इन उदाहरणों में macOS/Linux शेल सिंटैक्स का उपयोग किया गया है।
+macOS पर इन्हें चलाने से पहले अपना Docker-संगत इंजन या Podman वर्चुअल मशीन शुरू करें।
+Fedora जैसे SELinux चालू वाले होस्ट पर माउंट में `:z` जोड़ें (`"$PWD:/workspace:z"`), नहीं तो कंटेनर को रिपॉज़िटरी तक पहुँच नहीं मिलेगी।
 
 ## यह कैसे काम करता है
 
@@ -361,6 +408,7 @@ code-review-graph detect-changes --brief         # Risk panel + token savings (r
 code-review-graph detect-changes --brief --base main  # Against the merge base of main and HEAD
 code-review-graph update --brief                 # Refresh graph + same panel
 code-review-graph detect-changes --brief --verify  # Cross-check against tiktoken
+code-review-graph context-history  # Trend of the opt-in savings log (CRG_CONTEXT_HISTORY=1)
 code-review-graph register <path>  # Register repo in the multi-repo registry
 code-review-graph unregister <path|alias>  # Remove repo from the registry
 code-review-graph repos            # List registered repositories
@@ -370,6 +418,7 @@ code-review-graph daemon status    # Daemon status and repos
 code-review-graph eval             # Run evaluation benchmarks
 code-review-graph serve            # Start the MCP server (stdio)
 code-review-graph serve --http     # MCP over Streamable HTTP on localhost:5555
+code-review-graph serve --http --multi-repo  # One HTTP server for every registered repo
 ```
 
 यह एक चुनी हुई सूची है। `code-review-graph --help` हर कमांड दिखाता है, और [docs/COMMANDS.md](docs/COMMANDS.md) उनके फ़्लैग बताता है।
@@ -405,6 +454,8 @@ JSON निर्यात स्थानीय ग्राफ़ डेटा
 किसी भी कमांड में `--verify` जोड़कर आँकड़ों की तुलना OpenAI के `cl100k_base` टोकनाइज़र से करें (`pip install tiktoken` चाहिए)। कुल मिलाकर अनुमान असली टोकन से लगभग 1% के भीतर रहता है; देखें [`docs/REPRODUCING.md`](docs/REPRODUCING.md#calibration-table)।
 
 यही `context_savings` मेटाडेटा `get_impact_radius`, `get_review_context`, `detect_changes` और `get_architecture_overview` MCP टूल के JSON उत्तरों के साथ भी जुड़ता है।
+
+इन अनुमानों को समय के साथ देखने के लिए `CRG_CONTEXT_HISTORY=1` सेट करें (डिफ़ॉल्ट रूप से बंद)। हर अनुमान `graph.db` के पास एक स्थानीय लॉग में एक पंक्ति जोड़ता है, जिसमें केवल टोकन संख्या और टूल के नाम होते हैं, और `code-review-graph context-history` इसे दिन या टूल के हिसाब से दिखाता है। देखें [docs/USAGE.md](docs/USAGE.md#context-history)।
 
 </details>
 
@@ -513,7 +564,7 @@ git रिपॉज़िटरी में सिर्फ़ ट्रैक 
 pip install "code-review-graph[embeddings]"          # Local vector embeddings (sentence-transformers)
 pip install "code-review-graph[google-embeddings]"   # Google Gemini embeddings
 pip install "code-review-graph[communities]"         # Community detection (igraph)
-pip install "code-review-graph[enrichment]"          # Python call-resolution enrichment (Jedi)
+pip install "code-review-graph[enrichment]"          # Python call resolution with Jedi (then build --enrich)
 pip install "code-review-graph[eval]"                # Evaluation benchmarks and SVG export (matplotlib)
 pip install "code-review-graph[wiki]"                # ollama client (not used by the current wiki generator)
 pip install "code-review-graph[all]"                 # All optional dependencies
@@ -535,13 +586,17 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_MAX_IMPACT_DEPTH` | प्रभाव क्षेत्र विश्लेषण की खोज गहराई | `2` |
 | `CRG_MAX_BFS_DEPTH` | ग्राफ़ ट्रैवर्सल की अधिकतम गहराई | `15` |
 | `CRG_MAX_CHANGED_FUNCS` | एक बदलाव रिपोर्ट में विश्लेषित अधिकतम बदले हुए फ़ंक्शन | `500` |
+| `CRG_MAX_DELETION_FILES` | diff से हटाए गए फ़ंक्शन और क्लास बताने के लिए एक बदलाव रिपोर्ट में पुराना संस्करण पढ़ी जाने वाली अधिकतम फ़ाइलें | `100` |
 | `CRG_MAX_TRANSITIVE_FRONTIER` | सकर्मक कॉलर/कॉली विस्तार में अधिकतम फ़्रंटियर आकार | `50` |
 | `CRG_CALLER_TEST_ROUTE_DEPTH` | बिना टेस्ट वाले बदले हुए सिंबल का टेस्ट किया गया कॉलर खोजते समय आने वाले `CALLS` पर ऊपर की ओर कितने हॉप चलें। यह केवल सूचना है, कवरेज नहीं | `2` |
 | `CRG_CALLER_TEST_ROUTE_MAX_CALLERS` | उस टेस्ट किए गए कॉलर की खोज में अधिकतम कितने कॉलर देखे जाएँ | `500` |
 | `CRG_TOOL_TIMEOUT` | केवल-पठन MCP टूल की समय सीमा (सेकंड; `0` से बंद)। लिखने वाले टूल (build / postprocess / embed / wiki / apply-refactor) पर लागू नहीं | `0` |
 | `CRG_CHURN_WINDOW_DAYS` | `detect-changes --churn` की कमिट गिनती की अवधि | `90` |
+| `CRG_CONTEXT_HISTORY` | `1` करने पर हर `context_savings` अनुमान `.code-review-graph/context-history.jsonl` नाम के स्थानीय लॉग में लिखा जाता है; इसे `code-review-graph context-history` से पढ़ें। इसमें केवल टोकन संख्या और टूल के नाम होते हैं, यह कहीं भेजा नहीं जाता | - |
 | `CRG_LEIDEN_SEED` | Leiden कम्युनिटी पहचान का सीड | `42` |
 | `CRG_RECURSE_SUBMODULES` | `1`, `true` या `yes` होने पर git सबमॉड्यूल शामिल करें | - |
+| `CRG_FOLLOW_SYMLINKS` | `1`, `true`, `yes` या `on` होने पर symlink फ़ोल्डरों में जाएँ, रिपॉज़िटरी के अंदर या बाहर; `--follow-symlinks` जैसा। देखें [Symlink फ़ोल्डर](docs/USAGE.md#symlinked-folders) | - |
+| `CRG_MAX_FOLLOWED_FILES` | symlink फ़ोल्डरों से ली जाने वाली फ़ाइलों की अधिकतम संख्या | `10000` |
 | `CRG_TOOLS` | सर्व करते समय दिखाए जाने वाले MCP टूल की अल्पविराम से अलग सूची | - |
 | `GOOGLE_API_KEY` | Google Gemini एम्बेडिंग की API कुंजी | - |
 | `MINIMAX_API_KEY` | MiniMax एम्बेडिंग की API कुंजी | - |
@@ -559,6 +614,8 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_OPENAI_BATCH_SIZE` | OpenAI-संगत अनुरोधों का बैच आकार | `100` |
 | `NO_COLOR` | टर्मिनल में ANSI रंग बंद करें | - |
 | `CRG_SERIAL_PARSE` | `1` करने पर समानांतर पार्सिंग बंद (डिबगिंग के लिए) | - |
+| `CRG_ENABLE_ENRICHMENT` | `1` करने पर हर build और update में Jedi से Python मेथड कॉल हल होते हैं (`enrichment` एक्स्ट्रा चाहिए; हर Python फ़ाइल पर लगभग एक सेकंड ज़्यादा)। `build --enrich` जैसा | बंद |
+| `CRG_DISABLE_ENRICHMENT` | `1` करने पर माँगने पर भी Jedi नहीं चलता | - |
 
 OpenAI-संगत एम्बेडिंग (OpenAI, Azure, या new-api, LiteLLM, vLLM, LocalAI, या OpenAI मोड में Ollama जैसा स्व-होस्टेड गेटवे) के लिए अतिरिक्त इंस्टॉल नहीं चाहिए। चर सेट करें और `embed_graph` को `provider="openai"` दें:
 

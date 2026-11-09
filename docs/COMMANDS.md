@@ -27,7 +27,9 @@ Review a PR or branch diff.
 ## MCP Tools
 
 Every `repo_root` parameter is optional and auto-detected from the current
-directory when omitted.
+directory when omitted. The one exception is `serve --http --multi-repo`, where
+every call must pass the absolute path of a registered repository (see Server
+below).
 
 Where a tool takes `base`, a local or remote branch ref (for example
 `origin/main`) resolves to its merge base with `HEAD`, so the diff covers only
@@ -72,9 +74,12 @@ base: str = "HEAD~1"
 ```
 changed_files: list[str] | None  # Auto-detected from VCS
 max_depth: int = 2               # Hops in graph
+max_results: int                 # Nodes to traverse to; default CRG_MAX_IMPACT_NODES, or 500
 repo_root: str | None
 base: str = "HEAD~1"
-detail_level: str = "standard"   # "standard" or "minimal"
+detail_level: str = "standard"   # "standard", "minimal", or "compact"
+max_results: int = 500          # Traversal budget (nodes)
+max_files: int = 25             # Compact-mode display limit (hard ceiling 200)
 resolution: str = "all"          # "all" or "direct" (only calls bound to a node)
 ```
 An impacted node that calls or references the changed code in one hop carries
@@ -84,23 +89,70 @@ own `file_path`) and `call_site_count` when there is more than one.
 never bound to it, so an empty radius is not read as proof of absence.
 Responses may include estimated `context_savings` metadata.
 
+Use `detail_level="compact"` when the next step is opening affected files rather
+than inspecting individual call sites. It returns ranked repository-relative
+`changed_files` and `impacted_files`, with `changed_file_count`,
+`changed_files_omitted`, `impacted_file_count`, `impacted_files_omitted`,
+`total_impacted`, `truncated`, and `unresolved_call_sites`. `unmatched_files`
+(with `unmatched_files_total`) lists the changed files the graph has no nodes for.
+Paths outside the repository keep their absolute identity.
+Files follow the graph's best-first node ranking. Counts describe the traversed
+radius; `truncated` remains true when traversal or a file list was bounded.
+The mode omits node/edge records and repeated qualified names. `max_files` limits
+each displayed file list, independently of the `max_results` traversal budget.
+Standard output and its existing limits are unchanged; minimal output remains a
+summary without file paths.
+
+The CLI exposes the same controls:
+
+```bash
+code-review-graph impact --files src/auth.py --detail-level compact --max-files 20
+code-review-graph impact --files src/auth.py --detail-level minimal
+```
+
 #### `query_graph_tool`
 ```
 pattern: str    # callers_of, references_to, callees_of, imports_of, importers_of,
-                # children_of, tests_for, inheritors_of, file_summary
+                # children_of, tests_for, inheritors_of, file_summary, path_to
 target: str     # Node name, qualified name, or file path
 repo_root: str | None
 detail_level: str = "standard"   # "standard" or "minimal"
 max_results: int = 100           # Minimal mode also caps visible results at 5
 resolution: str = "all"          # "all", "direct", or "unresolved"
+to: str | None                   # path_to only: the node or file to reach
 ```
 `callers_of`, `callees_of` and `references_to` return one row per call site, not
 one per node. Each row carries `call_site` (`line`, plus `file` only when the
 call is written outside the row's own `file_path`), and rows whose target was
 matched by bare name alone carry `target_resolution: "unresolved"`. The response
-adds `distinct_nodes` and a `resolution_split` of the whole answer. Call sites
+adds `distinct_nodes` and a `resolution_split` of the whole answer. When some of
+the rows are only name matches and `resolution` is `"all"`, a short `confidence`
+sentence says how many. Call sites
 are ordered so every distinct node appears before any node's second call site,
 so truncation never costs a caller.
+
+`path_to` answers how `target` reaches `to`, with one row per hop through calls,
+references, inheritance, imports and containment. It picks the route whose weakest
+hop is strongest, and the shortest of those. Each hop's `certainty` says how it was
+bound: `direct` to that node, `unique_name` through a bare name only one symbol
+has, or `shared_name` through a name several share. `certainty` and `weakest_hop`
+on the response give the weakest one, which is the hop to check first. How a hop
+was bound ranks first and the edge's stored `confidence` only breaks ties, since
+graphs built before #984 was fixed store 1.0 even on an edge that names no node.
+In standard mode a hop shows `confidence` when it is below 1.0. When there is no
+route, `results` is empty, and `reverse_route_exists` is set if one runs the other
+way. If the search stops at its visit limit first, `search_incomplete` is set
+instead, as a route may still exist. Callbacks and dynamic dispatch are not in the
+graph, so no route does not prove there is none. An unclear end comes back as
+`not_found` or `ambiguous`, with `endpoint` saying which. Minimal mode names each
+hop by its qualified name from the repository root, and adds `file` only when the
+call is written outside the source's own file.
+
+`tests_for` rows that are guesses carry `inferred_by`, in minimal mode too:
+`naming_convention` for a test found by its name, and `ambiguous_call` for a PHP
+test whose call could mean this method or a same-named one in another class the
+test imports, as with `app(Service::class)->run()`. The summary says how many
+rows are guesses. A guess is never counted as coverage.
 
 #### `get_review_context_tool`
 ```
@@ -131,20 +183,24 @@ Responses may include estimated `context_savings` metadata.
 query: str
 depth: int = 3                  # Clamped to 1-6
 mode: str = "bfs"               # "bfs" or "dfs"
-token_budget: int = 2000
+token_budget: int = 2000        # At most 10000 approximate tokens; the walk stops there
 repo_root: str | None
 ```
+`truncated` means the budget ran out before the walk did.
 
 #### `semantic_search_nodes_tool`
 ```
 query: str           # Search string
-kind: str | None     # File, Class, Function, Type, Test, YamlPath
-limit: int = 20
+kind: str | None     # File, Class, Function, Type, Test, YamlPath, DocSection, JsonPath
+limit: int = 20      # At most 100; at most 5 with detail_level "minimal"
 repo_root: str | None
 model: str | None    # Embedding model (falls back to provider-specific env vars)
 provider: str | None # local, openai, google, minimax, voyage
 detail_level: str = "standard"
 ```
+Search ranks three times what it shows. `total` and `result_count` count the
+matches it ranked, `results_omitted` those not shown, and `total_is_lower_bound`
+says there may be more.
 
 #### `embed_graph_tool`
 ```
@@ -164,11 +220,13 @@ repo_root: str | None
 #### `find_large_functions_tool`
 ```
 min_lines: int = 50                # Minimum line count
-kind: str | None                   # File, Class, Function, Test, or YamlPath
+kind: str | None                   # File, Class, Function, Test, YamlPath, DocSection, or JsonPath
 file_path_pattern: str | None      # File path substring
-limit: int = 50
+limit: int = 50                    # At most 100; at most 25 with detail_level "minimal"
 repo_root: str | None
+detail_level: str = "standard"     # "minimal" gives fewer, smaller rows
 ```
+`total` and `result_count` count every match before the cut.
 
 #### `get_docs_section_tool`
 ```
@@ -263,7 +321,19 @@ repo_root: str | None
 max_per_category: int = 15       # Entries per gap category (max 50)
 detail_level: str = "standard"   # "minimal" drops file paths
 ```
-`summary` maps each category to its untruncated count.
+`summary` maps each category to its untruncated count. The categories are
+`isolated_nodes`, `thin_communities`, `untested_hotspots`,
+`single_file_communities` and `import_cycles`.
+
+An `import_cycles` row is one group of files that import each other: `size` is
+how many files, `name` and `cycle` spell out one loop with its import lines, and
+`load_time` says whether that loop can fail as the files load. `false` means every
+loop has an import that runs late: inside a function, a dynamic `import()` or a
+Ruby `autoload`. Imports that never run are left out: `if TYPE_CHECKING:` in
+Python and `import type` in TypeScript, and `import { type X }` unless
+`verbatimModuleSyntax` keeps it. Only imports that
+name a file are followed, so Go packages and C# namespaces are not. Graphs built
+before this release need `code-review-graph build` to tell these imports apart.
 
 #### `get_surprising_connections_tool`
 ```
@@ -290,12 +360,27 @@ detail_level: str = "standard"
 max_results: int = 25        # Changed functions, test gaps, changed files (max 100)
 max_flows: int = 20          # Affected flows embedded (max 200)
 ```
-Main tool for code review. Maps changed files to affected functions, YAML paths,
-flows, communities and test coverage gaps, returning `changed_yaml_paths` separately
-from function risk/test-gap scoring, plus risk scores and review priorities.
+Main tool for code review. Maps changed files to affected functions, YAML and JSON
+paths, flows, communities and test coverage gaps, returning `changed_yaml_paths` and
+`changed_json_paths` separately from function risk/test-gap scoring, plus risk scores
+and review priorities.
 Embedded flows carry per-flow metadata only; use `get_affected_flows_tool` for
 step detail. `changed_functions_total`, `test_gaps_total` and `affected_flows_total`
 report the untruncated counts. Responses may include estimated `context_savings` metadata.
+
+When the diff only deletes lines, the code around the gap did not change, so it
+is not listed as changed. The old version of the file is read instead: a
+function or class that lost some lines is listed as changed, and one that is
+gone is listed in `removed_symbols` (at most 25; `removed_symbols_total` has the
+full count) with up to three of the callers, subclasses, importers or tests that
+still use it (`used_by_total` has the full count). A removed symbol that is still
+used breaks its users, so it gets a `risk_score` on the same scale as a changed
+one (the flows it was part of, callers from other communities, test coverage,
+security names, caller count) and counts towards the overall `risk_score`; one
+that nothing uses scores 0. The summary names the ones still in use, and minimal
+mode reports `removed_symbol_count`. Up to 100 files
+are read per call (`CRG_MAX_DELETION_FILES`); the summary says when a file could
+not be read. A deleted file is not covered.
 
 #### `refactor_tool`
 ```
@@ -408,8 +493,11 @@ Run `code-review-graph <command> --help` for the full option list.
 ```bash
 # Setup
 code-review-graph install           # Configure detected AI coding platforms (alias: init)
-code-review-graph install --dry-run # Preview without writing files
+code-review-graph install --dry-run # Show each file's diff; write nothing
+code-review-graph install --gitignore  # Also add the files this run creates to .gitignore (off by default)
 code-review-graph install --platform codex  # Configure Codex MCP, hooks, and global Skill
+code-review-graph install --steering        # Opt in: graph context beside Claude Code searches and reads
+code-review-graph install --no-steering     # Remove only that hook
 code-review-graph uninstall                 # Remove CRG configs, hooks, skills, and data
 code-review-graph uninstall --platform codex  # Unbind one platform (keeps graph data and others)
 
@@ -417,21 +505,28 @@ code-review-graph uninstall --platform codex  # Unbind one platform (keeps graph
 code-review-graph build                        # Full build
 code-review-graph build --skip-flows           # Parse + signatures + FTS only
 code-review-graph build --skip-postprocess     # Raw parse only
+code-review-graph build --enrich               # Also resolve Python calls with Jedi (needs [enrichment])
 code-review-graph update                       # Incremental update from the last-built commit
 code-review-graph update --base origin/main    # Custom base ref
 code-review-graph update --brief               # Update graph, then show the risk panel
 code-review-graph update --brief --verify      # ...and cross-check against tiktoken
 code-review-graph update --wait                # Wait for a running build to finish, then update
+code-review-graph build --follow-symlinks      # Also follow symlinked folders, inside or outside the repo
+                                                #   (off by default; also on update and watch, or CRG_FOLLOW_SYMLINKS=1)
 code-review-graph postprocess                  # Re-run flows, communities, FTS
 code-review-graph forget PATH [PATH ...]       # Drop parsed files from the graph (no full rebuild)
 code-review-graph forget src/legacy --dry-run  # Preview which files would be forgotten
+code-review-graph forget PATH --wait           # Wait for a running write to finish, then forget
 code-review-graph embed --provider local       # Compute vector embeddings for semantic search
+code-review-graph embed --wait                 # Wait for a running write to finish, then embed
 code-review-graph update --embedding-provider local --embedding-model all-MiniLM-L6-v2
                                                 # Refresh an existing embedding index (default: off)
 
 # Monitor and inspect
 code-review-graph status                       # Graph statistics (no graph: exit 1, no DB created)
 code-review-graph status --json                # One JSON object
+code-review-graph context-history              # Per-day trend of the opt-in context savings log
+code-review-graph context-history --by tool --days 7  # Per tool, last 7 UTC days (--json for JSON)
 code-review-graph watch                        # Auto-update on file changes (needs an existing graph)
 code-review-graph visualize                    # Interactive HTML graph (needs an existing graph)
 code-review-graph visualize --format graphml   # Formats: html, json, graphml, cypher, obsidian, svg
@@ -464,12 +559,16 @@ code-review-graph detect-changes --churn       # Add opt-in change-frequency ris
                                                 #   recorded as unavailable for the life of the process, so the timeout is
                                                 #   paid once, and the response says so: `churn_status` is "unavailable"
                                                 #   and the summary carries a "Degraded" line.
+code-review-graph detect-changes --details all # Add bounded graph context under "details" (JSON only):
+                                                #   risk, communities, hubs, coupling, impact, gaps, graph.
+                                                #   Off by default; the GitHub Action's `details` input uses it.
 code-review-graph dead-code                    # Functions/classes with no callers or test references
 code-review-graph dead-code --kind Function --file-pattern src/ --json
 
 # Read-only graph queries (CLI mirrors of the MCP tools)
 code-review-graph query callers_of <target>    # Patterns: callers_of, callees_of, imports_of, importers_of,
                                                 #   children_of, tests_for, inheritors_of, file_summary
+code-review-graph query path_to <a> --to <b>  # How a reaches b, hop by hop
 code-review-graph impact [--files F ...] [--depth N] [--base REF]
 code-review-graph search <query> [--kind Function] [--limit N]
 code-review-graph flows [--sort criticality] [--limit N] [--kind KIND]
@@ -505,10 +604,24 @@ code-review-graph eval                         # Run evaluation benchmarks
 # Server
 code-review-graph serve                        # Start MCP server (stdio)
 code-review-graph serve --http                 # Streamable HTTP on 127.0.0.1:5555 (--host, --port)
+code-review-graph serve --http --multi-repo    # One HTTP server for every registered repository
 code-review-graph serve --tools query_graph_tool,detect_changes_tool  # Tool allowlist (or CRG_TOOLS)
 code-review-graph serve --multi-worktree --repo /path/to/repo  # One stdio session, one child per linked worktree
 code-review-graph mcp                          # Alias for serve; accepts --repo, --auto-watch and --multi-worktree
 ```
+
+`--multi-repo` lets one `serve --http` process serve several repositories, so
+the embedding model is loaded once. It serves the repositories in the registry
+(`code-review-graph register <path>`), read again on every call, so `register`
+and `unregister` take effect without a restart. Every tool call must pass
+`repo_root`, the absolute path of a registered repository; `list_repos_tool`
+lists them. A call with no `repo_root`, a relative path or a path that is not
+registered is refused with a message saying so. It never falls back to `--repo`
+or the server's working directory. The usual project-root check still applies.
+`--multi-repo` needs `--http` and cannot be combined with `--repo`,
+`--auto-watch`, `--multi-worktree` or `CRG_DATA_DIR`. To keep several graphs
+current, run the daemon (`code-review-graph daemon`). Without `--multi-repo`,
+`serve --http` keeps the old fallback.
 
 `--multi-worktree` is an opt-in stdio mode for parallel reviews. The server
 starts one regular `serve --repo <root>` child lazily for the primary checkout
@@ -582,6 +695,9 @@ Notes:
   the same worktree rule.
 - For an empty or incomplete graph, run `code-review-graph build`. See
   docs/TROUBLESHOOTING.md, "Empty or incomplete graph".
+- `context-history` reads a log that is off by default. Set
+  `CRG_CONTEXT_HISTORY=1` where the MCP server or the CLI runs to turn it on.
+  See [USAGE.md](USAGE.md#context-history).
 
 ## Standalone Daemon CLI (`crg-daemon`)
 

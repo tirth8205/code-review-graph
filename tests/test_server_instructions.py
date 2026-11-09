@@ -14,10 +14,13 @@ makes about graph answers.
 from __future__ import annotations
 
 import asyncio
+import importlib.metadata
+import json
 import os
 import re
+import subprocess
 import sys
-from datetime import timedelta
+import threading
 from pathlib import Path
 from unittest.mock import patch
 
@@ -29,10 +32,13 @@ from code_review_graph.tools.query import _QUERY_PATTERNS
 try:
     from mcp import ClientSession
     from mcp.client.stdio import StdioServerParameters, stdio_client
+
+    from tests.mcp_client_compat import read_timeout
 except ImportError:  # pragma: no cover - ``mcp`` is a hard runtime dependency
     ClientSession = None  # type: ignore[assignment,misc]
     StdioServerParameters = None  # type: ignore[assignment,misc]
     stdio_client = None  # type: ignore[assignment]
+    read_timeout = None  # type: ignore[assignment]
 
 # Claude Code truncates server instructions past this many characters.
 CLAUDE_CODE_INSTRUCTIONS_LIMIT = 2048
@@ -124,7 +130,7 @@ async def _handshake(
     )
     async with stdio_client(params) as (read, write):
         async with ClientSession(
-            read, write, read_timeout_seconds=timedelta(seconds=HANDSHAKE_TIMEOUT),
+            read, write, read_timeout_seconds=read_timeout(HANDSHAKE_TIMEOUT),
         ) as session:
             init = await asyncio.wait_for(session.initialize(), timeout=HANDSHAKE_TIMEOUT)
             listed = await asyncio.wait_for(session.list_tools(), timeout=HANDSHAKE_TIMEOUT)
@@ -142,6 +148,57 @@ async def test_initialize_handshake_delivers_the_routing_instructions(
     assert instructions == main.SERVER_INSTRUCTIONS
     named = set(_TOOL_NAME.findall(instructions))
     assert named and named <= listed, f"named but not served: {sorted(named - listed)}"
+
+
+FASTMCP_MAJOR = int(importlib.metadata.version("fastmcp").split(".")[0])
+
+
+def _read_line(proc: subprocess.Popen, timeout: float) -> dict | None:
+    box: list[str] = []
+    reader = threading.Thread(target=lambda: box.append(proc.stdout.readline()), daemon=True)
+    reader.start()
+    reader.join(timeout)
+    return json.loads(box[0]) if box and box[0] else None
+
+
+@pytest.mark.e2e
+@pytest.mark.skipif(FASTMCP_MAJOR < 4, reason="fastmcp 3 has no server/discover (#919)")
+def test_server_discover_delivers_the_routing_instructions(tmp_path: Path) -> None:
+    # A 2026-07-28 client skips ``initialize`` and asks ``server/discover``
+    # (#919). fastmcp 3 refused it with -32602, so such a client got neither
+    # the instructions nor the tools. fastmcp 4 answers it (#970).
+    repo = tmp_path / "repo"
+    (repo / ".code-review-graph").mkdir(parents=True)
+    home = tmp_path / "home"
+    home.mkdir()
+    proc = subprocess.Popen(  # noqa: S603 - list args, no shell
+        [sys.executable, "-m", "code_review_graph", "serve", "--repo", str(repo)],
+        cwd=str(repo), env=_server_env(home, None), text=True, bufsize=1,
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    )
+    envelope = {"_meta": {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {},
+        "io.modelcontextprotocol/clientInfo": {"name": "discover-test", "version": "0"},
+    }}
+    try:
+        for req_id, method in ((1, "server/discover"), (2, "tools/list")):
+            proc.stdin.write(json.dumps(
+                {"jsonrpc": "2.0", "id": req_id, "method": method, "params": envelope}
+            ) + "\n")
+            proc.stdin.flush()
+        found = _read_line(proc, HANDSHAKE_TIMEOUT)
+        listed = _read_line(proc, HANDSHAKE_TIMEOUT)
+    finally:
+        proc.kill()
+        proc.wait()
+    assert found is not None and "result" in found, found
+    assert "2026-07-28" in found["result"]["supportedVersions"]
+    assert found["result"]["instructions"] == main.SERVER_INSTRUCTIONS
+    assert listed is not None and "result" in listed, listed
+    names = {tool["name"] for tool in listed["result"]["tools"]}
+    named = set(_TOOL_NAME.findall(main.SERVER_INSTRUCTIONS))
+    assert named and named <= names, f"named but not served: {sorted(named - names)}"
 
 
 @pytest.mark.e2e

@@ -1,0 +1,26 @@
+{
+  "name": "sample",
+  "version": "1.0.0",
+  "scripts": {
+    "build": "tsc",
+    "test": "jest --ci"
+  },
+  "services": [
+    {
+      "id": "api",
+      "metadata": {
+        "tier": "frontend"
+      },
+      "secret-token": "never-index-this"
+    },
+    {
+      "id": "worker",
+      "metadata": {
+        "tier": "backend"
+      },
+      "replicas": 3
+    }
+  ],
+  "dotted.key": true,
+  "empty": null
+}

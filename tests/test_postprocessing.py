@@ -2,6 +2,7 @@
 
 import sqlite3
 import tempfile
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -481,13 +482,12 @@ class TestWatchCallbackIntegration:
         db_path = tmp_path / "test.db"
         store = GraphStore(db_path)
         callback = MagicMock()
+        stop = threading.Event()
+        stop.set()  # the loop ends at its first tick
 
         try:
-            with (
-                patch("watchdog.observers.Observer") as observer,
-                patch("time.sleep", side_effect=KeyboardInterrupt),
-            ):
-                watch(tmp_path, store, on_files_updated=callback)
+            with patch("watchdog.observers.Observer") as observer:
+                watch(tmp_path, store, on_files_updated=callback, stop_event=stop)
 
             callback.assert_not_called()
             observer.return_value.start.assert_called_once()
@@ -531,12 +531,13 @@ class TestWatchCallbackIntegration:
                 full_build(tmp_path, store)
             run_post_processing(store)
             duplicate.unlink()
+            # Not a patched time.sleep: subprocess.run(timeout=...) sleeps too,
+            # and on a busy machine a raising sleep stopped the whole run.
+            stop = threading.Event()
+            stop.set()  # the loop ends at its first tick
 
-            with (
-                patch("watchdog.observers.Observer", return_value=observer),
-                patch("time.sleep", side_effect=KeyboardInterrupt),
-            ):
-                watch(tmp_path, store, on_files_updated=run_post_processing)
+            with patch("watchdog.observers.Observer", return_value=observer):
+                watch(tmp_path, store, on_files_updated=run_post_processing, stop_event=stop)
 
             imported = store._conn.execute(
                 "SELECT target_qualified FROM edges "

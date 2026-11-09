@@ -125,6 +125,19 @@ def test_update_reports_a_failed_update(monkeypatch, tmp_path, capsys, outcome):
     assert "boom" in capsys.readouterr().err
 
 
+def test_update_skipped_by_another_writer_is_not_a_failure(monkeypatch, tmp_path, capsys):
+    """``update`` exits 75 when contended; the edit hook must just move on."""
+    from code_review_graph.tools import build
+
+    monkeypatch.setattr(
+        build,
+        "build_or_update_graph",
+        lambda **kwargs: {"status": "contended", "summary": "another write is running"},
+    )
+    hook_update._update_repo(tmp_path)
+    assert capsys.readouterr().err == ""
+
+
 def test_status_runs_executable_shim_and_emits_child_output(monkeypatch, tmp_path, capfd):
     repo = tmp_path / "repo-b"
     repo.mkdir()

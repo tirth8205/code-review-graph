@@ -5,6 +5,7 @@ notice that a requested refresh had no index to refresh: the graph update
 succeeded, so stopping the watch over it would only stop graph updates.
 """
 
+import threading
 from unittest.mock import patch
 
 import pytest
@@ -43,13 +44,16 @@ def test_startup_reconciliation_keeps_the_watch_running(tmp_path):
     incremental_update(tmp_path, store, changed_files=["offline.py"])
     deleted.unlink()
     results: list[dict] = []
+    stop = threading.Event()
+    stop.set()  # the loop ends at its first tick
     try:
         with (
             patch("code_review_graph.embeddings.get_provider") as get_provider,
             patch("watchdog.observers.Observer") as observer,
-            patch("time.sleep", side_effect=KeyboardInterrupt),
         ):
-            watch(tmp_path, store, on_files_updated=_recording_refresh(results))
+            watch(
+                tmp_path, store, on_files_updated=_recording_refresh(results), stop_event=stop
+            )
         get_provider.assert_not_called()
         assert [result.get("embeddings_refresh_skipped") for result in results] == [True]
         observer.return_value.start.assert_called_once()

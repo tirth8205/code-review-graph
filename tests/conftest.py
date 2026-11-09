@@ -9,9 +9,22 @@ not covered here — those tests patch ``Path.home()`` themselves.
 
 from __future__ import annotations
 
+import importlib
 import os
+import pkgutil
 
 import pytest
+
+import code_review_graph.tools
+
+# The tool modules load on first use (#1139). A test that patches a name such
+# as ``code_review_graph.graph.GraphStore`` while one of them loads for the
+# first time leaves its mock bound there for every later test. Load them before
+# any test runs, as importing the package used to.
+for _module in ("incremental", "postprocessing"):
+    importlib.import_module(f"code_review_graph.{_module}")
+for _info in pkgutil.iter_modules(code_review_graph.tools.__path__):
+    importlib.import_module(f"code_review_graph.tools.{_info.name}")
 
 
 @pytest.fixture(autouse=True)
@@ -50,6 +63,9 @@ def isolated_crg_home(tmp_path_factory, monkeypatch):
     # the developer's real web-profile manifest. Pin it here, before any DSH
     # lookup, exactly as the Hermes variable above.
     monkeypatch.setenv("DSH_HOME", str(tmp_path_factory.mktemp("dsh-home")))
+    # A developer who records their own context history (#813) must not
+    # have the suite append lines to every scratch repository it builds.
+    monkeypatch.delenv("CRG_CONTEXT_HISTORY", raising=False)
     return home
 
 

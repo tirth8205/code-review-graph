@@ -11,10 +11,11 @@ resulting CALLS edges to the graph database.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 from .parser import CodeParser, EdgeInfo, normalize_file_path
 from .parser import _is_test_file as _parser_is_test_file
@@ -24,12 +25,22 @@ logger = logging.getLogger(__name__)
 _SELF_NAMES = frozenset({"self", "cls", "super"})
 
 
-def enrich_jedi_calls(store, repo_root: Path) -> dict:
+def enrich_jedi_calls(
+    store, repo_root: Path, files: Optional[Iterable[str]] = None,
+) -> dict:
     """Resolve untracked Python method calls via Jedi.
 
-    Walks Python files, finds ``receiver.method()`` calls that tree-sitter
-    dropped (lowercase receiver, not self/cls), resolves them with Jedi,
-    and inserts new CALLS edges.
+    Walks Python files, finds ``receiver.method()`` calls on lowercase
+    receivers (not self/cls), and resolves them with Jedi. The parser keeps
+    most of them as a CALLS edge to the bare method name; that edge gets the
+    resolved target. A call the parser dropped gets a new CALLS edge.
+
+    *files* limits which files are read and scanned for calls. ``None``
+    (a full build) scans every Python file in the graph. An incremental
+    update passes only the files it re-parsed: re-parsing replaces a file's
+    edges, so those are the only files that lost their Jedi edges, and
+    reading every other Python file again on each update is wasted work.
+    Jedi still resolves call targets across the whole project.
 
     Returns stats dict with ``resolved`` count.
     """
@@ -39,7 +50,8 @@ def enrich_jedi_calls(store, repo_root: Path) -> dict:
         logger.info("Jedi not installed, skipping Python enrichment")
         return {"skipped": True, "reason": "jedi not installed"}
 
-    repo_root = Path(repo_root).resolve()
+    repo_root_given = Path(repo_root)
+    repo_root = repo_root_given.resolve()
 
     # Get Python files from the graph — skip early if none
     all_files = store.get_all_files()
@@ -47,6 +59,16 @@ def enrich_jedi_calls(store, repo_root: Path) -> dict:
 
     if not py_files:
         return {"resolved": 0, "files": 0}
+
+    # Files to read and scan. The Jedi project below is still built from
+    # every Python file so that targets in unchanged files resolve.
+    if files is None:
+        scan_files = py_files
+    else:
+        wanted = {normalize_file_path(f) for f in files}
+        scan_files = [f for f in py_files if normalize_file_path(f) in wanted]
+        if not scan_files:
+            return {"resolved": 0, "files": 0}
 
     # Scope the Jedi project to Python-only directories to avoid scanning
     # non-Python files (e.g. node_modules, TS sources).  This matters for
@@ -81,7 +103,7 @@ def enrich_jedi_calls(store, repo_root: Path) -> dict:
 
     files_with_pending: list[tuple[str, bytes, list]] = []
     total_skipped = 0
-    for file_path in py_files:
+    for file_path in scan_files:
         try:
             source = Path(file_path).read_bytes()
         except (OSError, PermissionError):
@@ -101,20 +123,22 @@ def enrich_jedi_calls(store, repo_root: Path) -> dict:
 
     logger.debug(
         "Jedi: %d/%d Python files have pending calls (%d calls skipped — no project target)",
-        len(files_with_pending), len(py_files), total_skipped,
+        len(files_with_pending), len(scan_files), total_skipped,
     )
 
     resolved_count = 0
+    refined_count = 0
     files_enriched = 0
     errors = 0
 
     for file_path, source, pending in files_with_pending:
         source_text = source.decode("utf-8", errors="replace")
 
-        # Get existing CALLS edges for this file to skip duplicates
-        existing = set()
+        # Existing CALLS edges of this file, by (source, line), so a call
+        # already resolved is skipped and a bare one is refined in place.
+        existing: dict[tuple[str, int], list] = {}
         for edge in _get_file_call_edges(store, file_path):
-            existing.add((edge.source_qualified, edge.line))
+            existing.setdefault((edge.source_qualified, edge.line), []).append(edge)
 
         # Get function nodes from DB for enclosing-function lookup
         func_nodes = [
@@ -131,15 +155,18 @@ def enrich_jedi_calls(store, repo_root: Path) -> dict:
             continue
 
         file_resolved = 0
-        for jedi_line, col, _method_name, _enclosing_name in pending:
+        for jedi_line, col, method_name, _enclosing_name in pending:
             # Find enclosing function qualified name
             enclosing = _find_enclosing(func_nodes, jedi_line)
             if not enclosing:
                 enclosing = file_path  # module-level
 
-            # Skip if we already have a CALLS edge from this source at this line
-            if (enclosing, jedi_line) in existing:
+            same_line = existing.get((enclosing, jedi_line), [])
+            if any(_is_resolved_call(e.target_qualified, method_name) for e in same_line):
                 continue
+            bare = next(
+                (e for e in same_line if e.target_qualified == method_name), None,
+            )
 
             # Ask Jedi to resolve
             try:
@@ -158,26 +185,49 @@ def enrich_jedi_calls(store, repo_root: Path) -> dict:
 
             # Only emit edges for project-internal definitions
             try:
-                module_path.relative_to(repo_root)
+                rel_path = module_path.relative_to(repo_root)
             except ValueError:
                 continue
 
-            # Build qualified target: file_path::Class.method or file_path::func
-            target_file = normalize_file_path(module_path)
+            # Build the target in the same path form the graph stores nodes
+            # under. Nodes are stored relative to the repo root as handed to
+            # full_build, which may be non-canonical (e.g. macOS /var vs
+            # /private/var symlinks); rebase the resolved module path back
+            # onto that root instead of emitting a canonicalized absolute
+            # path — otherwise the edge target never matches a node
+            # qualified name and neighbor/impact lookups miss it.
+            target_file = normalize_file_path(repo_root_given / rel_path)
             parent = name.parent()
             if parent and parent.type == "class":
                 target = f"{target_file}::{parent.name}.{name.name}"
             else:
                 target = f"{target_file}::{name.name}"
+            # Never point an edge at a node the graph does not hold.
+            if store.get_node(target) is None:
+                continue
 
-            store.upsert_edge(EdgeInfo(
-                kind="CALLS",
-                source=enclosing,
-                target=target,
-                file_path=file_path,
-                line=jedi_line,
-            ))
-            existing.add((enclosing, jedi_line))
+            if bare is not None:
+                extra = dict(bare.extra)
+                extra["call_resolution"] = "jedi"
+                store._conn.execute(
+                    "UPDATE edges SET target_qualified = ?, extra = ?,"
+                    " target_resolution = NULL WHERE id = ?",
+                    (target, json.dumps(extra, sort_keys=True), bare.id),
+                )
+                same_line.remove(bare)
+                refined_count += 1
+            else:
+                store.upsert_edge(EdgeInfo(
+                    kind="CALLS",
+                    source=enclosing,
+                    target=target,
+                    file_path=file_path,
+                    line=jedi_line,
+                    extra={"call_resolution": "jedi"},
+                ))
+            existing.setdefault((enclosing, jedi_line), []).append(
+                _ResolvedCall(target),
+            )
             file_resolved += 1
 
         if file_resolved:
@@ -186,6 +236,7 @@ def enrich_jedi_calls(store, repo_root: Path) -> dict:
 
     if resolved_count:
         store.commit()
+        store._invalidate_cache()
         logger.info(
             "Jedi enrichment: resolved %d calls in %d files",
             resolved_count, files_enriched,
@@ -193,9 +244,25 @@ def enrich_jedi_calls(store, repo_root: Path) -> dict:
 
     return {
         "resolved": resolved_count,
+        "refined": refined_count,
         "files": files_enriched,
         "errors": errors,
     }
+
+
+class _ResolvedCall:
+    """A call resolved in this pass, standing in for its edge row."""
+
+    def __init__(self, target: str) -> None:
+        self.target_qualified = target
+
+
+def _is_resolved_call(target: str, method_name: str) -> bool:
+    """Whether a CALLS target already names *method_name* in a file."""
+    if "::" not in target:
+        return False
+    tail = target.rsplit("::", 1)[1]
+    return tail == method_name or tail.endswith("." + method_name)
 
 
 def _get_file_call_edges(store, file_path: str):
@@ -212,10 +279,18 @@ def _get_file_call_edges(store, file_path: str):
             source_qualified=r["source_qualified"],
             target_qualified=r["target_qualified"],
             file_path=r["file_path"], line=r["line"],
-            extra={},
+            extra=_edge_extra(r["extra"]),
         )
         for r in rows
     ]
+
+
+def _edge_extra(raw: Optional[str]) -> dict:
+    try:
+        extra = json.loads(raw or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return extra if isinstance(extra, dict) else {}
 
 
 def _find_enclosing(func_nodes, line: int) -> Optional[str]:

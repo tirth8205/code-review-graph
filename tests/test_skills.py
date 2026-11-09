@@ -247,8 +247,10 @@ class TestGenerateHooksConfig:
         assert entry["matcher"] == "Edit|Write"
         inner = entry["hooks"][0]
         assert inner["type"] == "command"
-        assert "update" in inner["command"]
-        assert inner["command"].startswith("cat >/dev/null || true; ")
+        # The event JSON goes to hook-update, which reads the edited file's
+        # path from it; whatever is left is drained afterwards (#311, #493).
+        assert "code-review-graph hook-update" in inner["command"]
+        assert inner["command"].endswith("; cat >/dev/null || true")
         assert 0 < inner["timeout"] <= 600
 
     def test_has_session_start(self):
@@ -292,17 +294,16 @@ class TestGenerateHooksConfig:
     def test_hooks_use_dynamic_repo_root(self):
         """Regression test for #558: hooks must not embed absolute paths.
 
-        The repo root should be resolved at runtime via git rev-parse so
-        settings.json is shareable across collaborators.
+        The repo root should be resolved at runtime so settings.json is
+        shareable across collaborators: the session hook through git
+        rev-parse, the edit hook from the edited file in the event JSON (#311).
         """
         config = generate_hooks_config(Path("/my/specific/checkout/path"))
-        for hook_type, entries in config["hooks"].items():
-            for entry in entries:
-                for hook in entry["hooks"]:
-                    assert "git rev-parse --show-toplevel" in hook["command"], (
-                        f"{hook_type} hook should use git rev-parse --show-toplevel"
-                        " to resolve repo root dynamically"
-                    )
+        session = config["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        assert "git rev-parse --show-toplevel" in session
+        update = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+        assert "code-review-graph hook-update" in update
+        assert "--repo" not in update
 
     def test_hooks_no_absolute_path_embedded(self):
         """Regression test for #558: no absolute path should appear in commands."""
@@ -375,8 +376,13 @@ class TestShippedHooksFiles:
         ]
         assert commands, "hooks/hooks.json should define at least one command hook"
         for command in commands:
-            assert command.startswith(self.STDIN_DRAIN), (
-                f"hooks.json command lacks the stdin drain prefix: {command!r}"
+            # The edit hook needs the event JSON, so it hands stdin to
+            # hook-update and drains the rest afterwards instead.
+            forwards = "code-review-graph hook-update;" in command and command.endswith(
+                "; cat >/dev/null || true"
+            )
+            assert command.startswith(self.STDIN_DRAIN) or forwards, (
+                f"hooks.json command does not drain stdin: {command!r}"
             )
 
     def _shipped_hooks(self) -> dict:
@@ -407,9 +413,12 @@ class TestShippedHooksFiles:
     @pytest.mark.parametrize(
         ("in_git", "cli", "called"),
         [
-            pytest.param(True, None, False, id="cli-not-on-path"),
-            pytest.param(False, "exit 0", False, id="outside-git"),
-            pytest.param(True, "exit 7", True, id="cli-fails"),
+            pytest.param(True, None, set(), id="cli-not-on-path"),
+            # hook-update decides for itself outside Git, from the event JSON.
+            pytest.param(False, "exit 0", {"hook-update"}, id="outside-git"),
+            pytest.param(True, "exit 7", {"status", "hook-update"}, id="cli-fails"),
+            # A CLI from before hook-update rejects the subcommand with 2.
+            pytest.param(True, "exit 2", {"status", "hook-update"}, id="older-cli"),
         ],
     )
     def test_hooks_json_commands_never_report_an_error(self, tmp_path, in_git, cli, called):
@@ -433,7 +442,7 @@ class TestShippedHooksFiles:
         shipped = self._shipped_hooks()
         for command, expected in (
             (shipped["SessionStart"][0]["hooks"][0]["command"], "status"),
-            (shipped["PostToolUse"][1]["hooks"][0]["command"], "update --skip-flows"),
+            (shipped["PostToolUse"][1]["hooks"][0]["command"], "hook-update"),
         ):
             log.unlink(missing_ok=True)
             proc = subprocess.run(
@@ -450,10 +459,54 @@ class TestShippedHooksFiles:
             )
             assert proc.returncode == 0, proc.stderr
             assert proc.stderr == ""
-            if called:
+            if expected in called:
                 assert log.read_text(encoding="utf-8").startswith(expected)
             else:
                 assert not log.exists()
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="runs the POSIX hook commands")
+    @pytest.mark.parametrize(
+        "cli",
+        [
+            pytest.param(None, id="cli-not-on-path"),
+            pytest.param("exit 2", id="cli-reads-nothing"),
+            pytest.param("cat >/dev/null", id="cli-reads-everything"),
+        ],
+    )
+    def test_update_hook_takes_a_large_payload_without_a_broken_pipe(self, tmp_path, cli):
+        """The edit hook reads stdin itself now, so #493 must still hold."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        for tool in ("cat", "sh"):
+            (bin_dir / tool).symlink_to(shutil.which(tool))
+        if cli is not None:
+            fake = bin_dir / "code-review-graph"
+            fake.write_text(f"#!/bin/sh\n{cli}\n", encoding="utf-8")
+            fake.chmod(0o755)
+        command = generate_hooks_config(Path("."))["hooks"]["PostToolUse"][0]["hooks"][0][
+            "command"
+        ]
+        payload = ("x" * 1024 + "\n") * 20000
+        proc = subprocess.Popen(
+            ["/bin/sh", "-c", command],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=tmp_path,
+            env={"PATH": str(bin_dir), "HOME": str(tmp_path)},
+        )
+        broken_pipe = None
+        try:
+            assert proc.stdin is not None
+            proc.stdin.write(payload)
+            proc.stdin.close()
+        except BrokenPipeError as exc:  # pragma: no cover - regression guard
+            broken_pipe = exc
+        proc.stdin = None
+        _stdout, stderr = proc.communicate()
+        assert broken_pipe is None, f"hook command raised BrokenPipeError: {stderr}"
+        assert proc.returncode == 0, stderr
 
     def test_session_start_script_drains_stdin(self):
         script = (self.HOOKS_DIR / "session-start.sh").read_text(encoding="utf-8")
@@ -597,6 +650,38 @@ class TestInstallHooks:
     def test_creates_claude_directory(self, tmp_path):
         install_hooks(tmp_path)
         assert (tmp_path / ".claude").is_dir()
+
+    def test_reinstall_replaces_the_v2_3_9_edit_hook(self, tmp_path):
+        """One edit hook after the upgrade to hook-update (#311), not two."""
+        released = (
+            "cat >/dev/null || true; command -v code-review-graph >/dev/null 2>&1 || exit 0;"
+            " git rev-parse --git-dir >/dev/null 2>&1 && code-review-graph update"
+            ' --skip-flows --repo "$(git rev-parse --show-toplevel 2>/dev/null)" || true'
+        )
+        settings_path = tmp_path / ".claude" / "settings.json"
+        settings_path.parent.mkdir()
+        settings_path.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "PostToolUse": [
+                            {
+                                "matcher": "Edit|Write",
+                                "hooks": [
+                                    {"type": "command", "command": released, "timeout": 30}
+                                ],
+                            }
+                        ]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        install_hooks(tmp_path)
+
+        hooks = json.loads(settings_path.read_text(encoding="utf-8"))["hooks"]
+        assert hooks == generate_hooks_config(tmp_path)["hooks"]
 
 
 class TestGenerateCodexHooksConfig:
@@ -1393,7 +1478,10 @@ class TestCodeBuddyPlatform:
         for hook in installed:
             command = hook["command"]
             assert "command -v code-review-graph" in command
-            assert "git rev-parse --show-toplevel" in command
+            assert (
+                "git rev-parse --show-toplevel" in command
+                or "code-review-graph hook-update" in command
+            )
             assert str(repo_root) not in command
 
         crg_entry = next(
@@ -1960,17 +2048,19 @@ class TestInstallCursorHooks:
             crg_hooks = [h for h in entries if "crg-" in h.get("command", "")]
             assert len(crg_hooks) == 1, f"{event} has {len(crg_hooks)} crg hooks after reinstall"
 
-    def test_handles_corrupt_existing_json(self, tmp_path):
+    def test_leaves_corrupt_existing_json_alone(self, tmp_path, capsys):
+        """Overwriting it would destroy whatever the user was part way through."""
         cursor_dir = tmp_path / ".cursor"
         cursor_dir.mkdir(parents=True)
-        (cursor_dir / "hooks.json").write_text("not valid json{{{")
+        hooks_path = cursor_dir / "hooks.json"
+        hooks_path.write_text("not valid json{{{")
 
         with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
             result = install_cursor_hooks()
 
-        assert result.exists()
-        data = json.loads(result.read_text())
-        assert data["version"] == 1
+        assert result is None
+        assert hooks_path.read_text() == "not valid json{{{"
+        assert "unparseable JSON" in capsys.readouterr().out
 
 
 class TestKiroPlatform:
@@ -2946,14 +3036,35 @@ class TestGeneratedHooksGuardGitRepo:
     no-ops silently instead of erroring on every tool call.
     """
 
-    def test_post_tool_use_command_guarded_by_git_check(self):
-        config = generate_hooks_config(Path("/repo"))
-        cmd = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
-        # Must short-circuit on the git check before calling update.
-        assert "git rev-parse --git-dir" in cmd
-        idx_guard = cmd.index("git rev-parse --git-dir")
-        idx_update = cmd.index("code-review-graph update")
-        assert idx_guard < idx_update, "git guard must precede the update call"
+    @pytest.mark.skipif(sys.platform == "win32", reason="runs the POSIX hook command")
+    def test_post_tool_use_command_is_silent_outside_git(self, tmp_path):
+        """hook-update does the Git check now, from the event JSON (#311)."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        shim = bin_dir / "code-review-graph"
+        shim.write_text(f'#!/bin/sh\nexec "{sys.executable}" -m code_review_graph "$@"\n')
+        shim.chmod(0o755)
+        cmd = generate_hooks_config(Path("/repo"))["hooks"]["PostToolUse"][0]["hooks"][0][
+            "command"
+        ]
+        for tool_input in ({}, {"file_path": str(workspace / "x.py")}):
+            proc = subprocess.run(
+                ["/bin/sh", "-c", cmd],
+                input=json.dumps({"cwd": str(workspace), "tool_input": tool_input}),
+                capture_output=True,
+                text=True,
+                cwd=workspace,
+                env={
+                    **os.environ,
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                    "GIT_CEILING_DIRECTORIES": str(tmp_path),
+                },
+            )
+            assert proc.returncode == 0, proc.stderr
+            assert proc.stdout == "" and proc.stderr == ""
+        assert not (workspace / ".code-review-graph").exists()
 
     def test_session_start_command_guarded_by_git_check(self):
         config = generate_hooks_config(Path("/repo"))

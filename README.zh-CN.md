@@ -100,6 +100,52 @@ Build the code review graph for this project
 构建时间随仓库规模增长；一个约 3,000 个文件的仓库冷构建约需 40 秒（[实测](docs/REPRODUCING.md#incremental-update-latency)）。之后由钩子和 watch 模式保持图谱更新。如果部分文件解析失败，结果状态为 `partial` 并在摘要中列出这些文件；CLI 还会在 stderr 上打印一行 `Warning:`，这些文件保留原有的图谱记录。
 
 
+### 使用 Docker 或 Podman 运行
+
+在项目仓库根目录构建镜像：
+
+```bash
+docker build -t code-review-graph:local .
+```
+
+在要分析的仓库目录中运行：
+
+```bash
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --env HOME=/tmp \
+  --volume "$PWD:/workspace" \
+  code-review-graph:local build
+```
+
+挂载的仓库必须可写。上述命令使用你的用户 ID 和组 ID，
+使生成的 `.code-review-graph/` 目录仍归你的用户所有。
+请以非 root 主机用户运行这些命令。
+
+使用 Podman 时，构建同一个 Dockerfile 并保留用户映射：
+
+```bash
+podman build -t code-review-graph:local .
+podman run --rm \
+  --userns=keep-id \
+  --env HOME=/tmp \
+  --volume "$PWD:/workspace" \
+  code-review-graph:local build
+```
+
+图会保存在挂载仓库的 `.code-review-graph/` 中，并记录 `/workspace/app.py` 等容器内的绝对路径。
+请通过 Docker 或 Podman 使用相同的 `/workspace` 挂载路径运行 `update` 和 `detect-changes`。
+在宿主机上对该图运行 `update` 可能会报错 "built with a different repository root"。
+如需改用宿主机命令，请先在宿主机上运行 `code-review-graph build`，使用宿主机路径重新构建图。
+
+将 `build` 替换为 `status` 可查看已保存的图。
+镜像包含 Git，默认以非 root 用户运行。
+构建镜像时不会生成图。
+
+这些示例使用 macOS/Linux shell 语法。在 macOS 上，
+运行前请启动兼容 Docker 的容器引擎或 Podman 虚拟机。
+在启用 SELinux 的主机（如 Fedora）上，请在挂载中加上 `:z`（`"$PWD:/workspace:z"`），否则容器无法访问仓库。
+
 ## 工作原理
 
 <p align="center">
@@ -361,6 +407,7 @@ code-review-graph detect-changes --brief         # Risk panel + token savings (r
 code-review-graph detect-changes --brief --base main  # Against the merge base of main and HEAD
 code-review-graph update --brief                 # Refresh graph + same panel
 code-review-graph detect-changes --brief --verify  # Cross-check against tiktoken
+code-review-graph context-history  # Trend of the opt-in savings log (CRG_CONTEXT_HISTORY=1)
 code-review-graph register <path>  # Register repo in the multi-repo registry
 code-review-graph unregister <path|alias>  # Remove repo from the registry
 code-review-graph repos            # List registered repositories
@@ -370,6 +417,7 @@ code-review-graph daemon status    # Daemon status and repos
 code-review-graph eval             # Run evaluation benchmarks
 code-review-graph serve            # Start the MCP server (stdio)
 code-review-graph serve --http     # MCP over Streamable HTTP on localhost:5555
+code-review-graph serve --http --multi-repo  # One HTTP server for every registered repo
 ```
 
 这是一份精选列表。`code-review-graph --help` 会列出全部命令，[docs/COMMANDS.md](docs/COMMANDS.md) 记录了它们的参数。
@@ -405,6 +453,8 @@ JSON 导出写在本地图谱数据目录中，该目录默认被 Git 忽略。�
 给任一命令加上 `--verify`，可以把数字与 OpenAI 的 `cl100k_base` 分词器做对比（需要 `pip install tiktoken`）。总体估算与真实 token 的偏差约在 1% 以内；见 [`docs/REPRODUCING.md`](docs/REPRODUCING.md#calibration-table)。
 
 同样的 `context_savings` 元数据也附在 `get_impact_radius`、`get_review_context`、`detect_changes` 和 `get_architecture_overview` 这几个 MCP 工具的 JSON 响应上。
+
+若想查看这些估算随时间的变化，设置 `CRG_CONTEXT_HISTORY=1`（默认关闭）。之后每次估算都会在 `graph.db` 旁的本地日志中追加一行，只含 token 数和工具名；`code-review-graph context-history` 按天或按工具打印。见 [docs/USAGE.md](docs/USAGE.md#context-history)。
 
 </details>
 
@@ -513,7 +563,7 @@ node_modules/**
 pip install "code-review-graph[embeddings]"          # Local vector embeddings (sentence-transformers)
 pip install "code-review-graph[google-embeddings]"   # Google Gemini embeddings
 pip install "code-review-graph[communities]"         # Community detection (igraph)
-pip install "code-review-graph[enrichment]"          # Python call-resolution enrichment (Jedi)
+pip install "code-review-graph[enrichment]"          # Python call resolution with Jedi (then build --enrich)
 pip install "code-review-graph[eval]"                # Evaluation benchmarks and SVG export (matplotlib)
 pip install "code-review-graph[wiki]"                # ollama client (not used by the current wiki generator)
 pip install "code-review-graph[all]"                 # All optional dependencies
@@ -535,13 +585,17 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_MAX_IMPACT_DEPTH` | 影响半径分析的搜索深度 | `2` |
 | `CRG_MAX_BFS_DEPTH` | 图谱遍历的最大深度 | `15` |
 | `CRG_MAX_CHANGED_FUNCS` | 单份变更报告中分析的最大变更函数数 | `500` |
+| `CRG_MAX_DELETION_FILES` | 单份变更报告中读取旧版本的最大文件数，用于列出差异删除的函数和类 | `100` |
 | `CRG_MAX_TRANSITIVE_FRONTIER` | 传递性调用者/被调用者扩展的最大前沿规模 | `50` |
 | `CRG_CALLER_TEST_ROUTE_DEPTH` | 为没有测试的变更符号向上回溯 `CALLS` 寻找已测试调用者的跳数。仅作为提示报告，不计为覆盖率 | `2` |
 | `CRG_CALLER_TEST_ROUTE_MAX_CALLERS` | 寻找该已测试调用者时检查的调用者数量上限 | `500` |
 | `CRG_TOOL_TIMEOUT` | 只读 MCP 工具的超时秒数（`0` 表示禁用）。不限制写入类工具：build、postprocess、embed、wiki 和 apply-refactor | `0` |
 | `CRG_CHURN_WINDOW_DAYS` | `detect-changes --churn` 统计提交数的时间窗口 | `90` |
+| `CRG_CONTEXT_HISTORY` | 设为 `1` 时，把每次 `context_savings` 估算记入本地日志 `.code-review-graph/context-history.jsonl`；用 `code-review-graph context-history` 查看。只记录 token 数和工具名，从不外发 | - |
 | `CRG_LEIDEN_SEED` | Leiden 社区检测的随机种子 | `42` |
 | `CRG_RECURSE_SUBMODULES` | 设为 `1`、`true` 或 `yes` 时包含 git 子模块 | - |
+| `CRG_FOLLOW_SYMLINKS` | 设为 `1`、`true`、`yes` 或 `on` 时跟随符号链接文件夹（仓库内外均可），与 `--follow-symlinks` 相同。见 [符号链接文件夹](docs/USAGE.md#symlinked-folders) | - |
+| `CRG_MAX_FOLLOWED_FILES` | 通过符号链接文件夹最多读取的文件数 | `10000` |
 | `CRG_TOOLS` | 提供服务时暴露的 MCP 工具白名单，逗号分隔 | - |
 | `GOOGLE_API_KEY` | Google Gemini 嵌入的 API 密钥 | - |
 | `MINIMAX_API_KEY` | MiniMax 嵌入的 API 密钥 | - |
@@ -559,6 +613,8 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_OPENAI_BATCH_SIZE` | OpenAI 兼容请求的批大小 | `100` |
 | `NO_COLOR` | 关闭终端中的 ANSI 颜色 | - |
 | `CRG_SERIAL_PARSE` | 设为 `1` 可关闭并行解析（用于调试） | - |
+| `CRG_ENABLE_ENRICHMENT` | 设为 `1` 后每次 build 和 update 都用 Jedi 解析 Python 方法调用（需要 `enrichment` 附加包，每个 Python 文件约多 1 秒）。等同 `build --enrich` | 关闭 |
+| `CRG_DISABLE_ENRICHMENT` | 设为 `1` 后即使请求也不运行 Jedi | - |
 
 OpenAI 兼容嵌入（OpenAI、Azure，或自建网关如 new-api、LiteLLM、vLLM、LocalAI，或 OpenAI 模式下的 Ollama）无需额外安装。设置变量并给 `embed_graph` 传入 `provider="openai"`：
 

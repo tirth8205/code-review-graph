@@ -475,6 +475,46 @@ def test_removes_codex_hooks_every_release_wrote(fake_home: Path, fake_repo: Pat
     assert _read_jsonc(path) == {}
 
 
+@pytest.mark.parametrize("settings_dir", [".claude", ".qoder", ".codebuddy"])
+def test_removes_project_edit_hooks_every_release_wrote(
+    fake_home: Path, fake_repo: Path, settings_dir: str
+):
+    """The edit hook moved to hook-update (#311); older ones must still go."""
+    repo_arg = json.dumps(fake_repo.resolve().as_posix())
+    released = [
+        # v2.3.3
+        "git rev-parse --git-dir >/dev/null 2>&1"
+        f" && code-review-graph update --skip-flows --repo {repo_arg} || true",
+        # v2.3.4 - v2.3.6
+        "cat >/dev/null || true; git rev-parse --git-dir >/dev/null 2>&1"
+        f" && code-review-graph update --skip-flows --repo {repo_arg} || true",
+        # v2.3.7 - v2.3.9
+        "cat >/dev/null || true; command -v code-review-graph >/dev/null 2>&1 || exit 0;"
+        " git rev-parse --git-dir >/dev/null 2>&1 && code-review-graph update"
+        ' --skip-flows --repo "$(git rev-parse --show-toplevel 2>/dev/null)" || true',
+    ]
+    path = fake_repo / settings_dir / "settings.json"
+    for command in released:
+        _write_json(
+            path,
+            {
+                "model": "kept",
+                "hooks": {
+                    "PostToolUse": [
+                        {
+                            "matcher": "Edit|Write",
+                            "hooks": [{"type": "command", "command": command}],
+                        }
+                    ]
+                },
+            },
+        )
+
+        uninstall.run(repo=fake_repo, keep_data=True)
+
+        assert _read_jsonc(path) == {"model": "kept"}, command
+
+
 def test_shared_skill_directories_keep_user_files_and_unrelated_skills(
     fake_repo: Path,
     fake_home: Path,

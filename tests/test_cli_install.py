@@ -287,6 +287,25 @@ def test_handle_init_cursor_installs_cursor_hooks(monkeypatch, tmp_path, capsys)
     assert "Installed Cursor hooks" in out
 
 
+def test_handle_init_does_not_claim_hooks_it_refused_to_write(
+    monkeypatch, tmp_path, capsys
+):
+    (tmp_path / ".git").mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: home)
+    settings = tmp_path / ".claude" / "settings.json"
+    settings.parent.mkdir()
+    settings.write_text('{"model": "opus", oops}\n', encoding="utf-8")
+
+    _handle_init(_args(tmp_path, "claude"))
+    out = capsys.readouterr().out
+
+    assert settings.read_text(encoding="utf-8") == '{"model": "opus", oops}\n'
+    assert "contains unparseable JSON" in out
+    assert "Installed hooks" not in out
+
+
 def test_handle_init_codebuddy_installs_only_codebuddy_native_files(
     monkeypatch, tmp_path, capsys
 ):

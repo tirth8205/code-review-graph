@@ -12,7 +12,7 @@ detail_level="minimal" first patterns with get_minimal_context_tool entry point.
 
 from __future__ import annotations
 
-from fastmcp.prompts.prompt import Message
+from fastmcp.prompts import Message
 
 _TOKEN_EFFICIENCY_PREAMBLE = (  # nosec B105 — prompt template, not a password
     """\
