@@ -101,7 +101,7 @@ action maps the score to levels:
 ## What the comment contains
 
 - **Overall risk** score and level, with counts of changed functions,
-  affected flows and test gaps.
+  removed symbols (when there are any), affected flows and test gaps.
 - **Risk-scored changes**: a table of the top 10 changed symbols by risk,
   with `file:line` location and whether the symbol has a test.
 - **Removed symbols**: up to 10 functions or classes the pull request
@@ -110,6 +110,9 @@ action maps the score to levels:
 - **Affected execution flows**: up to 5 entry-point flows the change
   touches, ordered by criticality, with node and file counts.
 - **Test gaps**: up to 5 changed functions with no direct test coverage.
+- **Reached only through a caller**: up to 5 more gaps that no test names
+  directly but a tested caller reaches along the call graph. They still count
+  as gaps and are scored as untested.
 - **Token savings**: how many tokens the graph-backed report saved compared
   with reading every changed file in full. This is the same
   `context_savings` estimate the CLI's Token Savings panel shows (a

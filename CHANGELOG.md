@@ -4,6 +4,12 @@
 
 ### Added
 
+- DeepSeek Harness is a supported platform (#1100, #1101, thanks @sumingwang233).
+  `install --platform dsh` adds one `insert` entry for DSH's own MCP client to
+  `~/.dsh/cordis.patch.yml` (or `$DSH_HOME/cordis.patch.yml`), which every DSH
+  profile reads, and the graph block to `AGENTS.md`. Comments, `!!js` values and
+  other entries in the file are kept byte for byte, and `uninstall` takes the
+  entry out again. Plain `install` picks DSH up when its home folder exists.
 - HTML pages (`.html`, `.htm`) are indexed (#521). They used to give nothing at
   all. Inline scripts are parsed as JavaScript or TypeScript with the page's own
   line numbers, and a `<script src>` becomes an import of the local file, so
@@ -209,6 +215,12 @@
   escaped to a lone surrogate, such as `"\ud800"`, is left out; before, a
   YAML one stopped the whole build. Run `build` to add JSON to a graph you
   already have.
+- MiMo Code is a supported platform (#593, PR #688 by @Aditya-Tripuraneni).
+  `install --platform mimo` adds the server under `mcp` in
+  `.mimocode/mimocode.jsonc` if that file exists, otherwise in
+  `.mimocode/mimocode.json`, and writes the graph instructions to `AGENTS.md`.
+  Other servers, settings and comments are kept. MiMo reads both files, so
+  `uninstall` removes the entry from both.
 
 ### Changed
 
@@ -268,6 +280,22 @@
 
 ### Fixed
 
+- The docs match the code again. `docs/`, the reference `get_docs_section_tool`
+  serves, `CONTRIBUTING.md`, `SECURITY.md`, `AGENTS.md`, the Copilot
+  instructions, two skills and the VS Code README now cover what the last two
+  release trains added: all 19 query patterns, the search source options, the
+  write lock and exit `75`, the new git and steering hooks, untracked files,
+  Liquid and the other new node kinds, confidence tiers and schema v15. They also
+  drop claims the code no longer backs.
+- The read-only query script in the bundled skill (`crg_readonly.py`) now
+  takes `path_to` with `--to`, so it offers every pattern the CLI `query`
+  command accepts. It stops before running the CLI when `path_to` has no
+  `--to`. A test now fails if the script's list drifts from `tools/query.py`
+  or the CLI again; the patterns the CLI does not take yet are listed there
+  with the reason.
+- The VS Code `codeReviewGraph.cliPath` setting no longer talks about a bundled
+  version. The extension does not include the CLI; left empty, it runs
+  `code-review-graph` from your `PATH` (#369).
 - `install --dry-run` shows what each file would become, and `install` writes
   nothing until you have answered its question (#173). The dry run used to list
   file names only, and a real install wrote the MCP config before it asked

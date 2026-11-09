@@ -1,5 +1,7 @@
 """The Codex fallback only forwards supported, read-only CLI commands."""
 
+import argparse
+import importlib.util
 import json
 import os
 import sqlite3
@@ -9,15 +11,144 @@ from pathlib import Path
 
 import pytest
 
+from code_review_graph import cli
 from code_review_graph.graph import GraphStore
 from code_review_graph.parser import NodeInfo
 from code_review_graph.search import rebuild_fts_index
+from code_review_graph.tools.query import _QUERY_PATTERNS
 
 PROJECT_ROOT = Path(__file__).parents[1]
 WRAPPER = (
     PROJECT_ROOT
     / "code_review_graph/assets/code-review-graph/scripts/crg_readonly.py"
 )
+
+
+_NOT_IN_CLI = "the CLI query command does not accept it, and the wrapper only runs the CLI"
+
+#: Query patterns the MCP tool has but the wrapper leaves out, each with why.
+#: A new pattern in tools/query.py must go in the wrapper or here.
+LEFT_OUT = {
+    "references_to": _NOT_IN_CLI,
+    "triggers_of": _NOT_IN_CLI,
+    "triggered_by": _NOT_IN_CLI,
+    "publishers_of": _NOT_IN_CLI,
+    "listeners_of": _NOT_IN_CLI,
+    "advises": _NOT_IN_CLI,
+    "advised_by": _NOT_IN_CLI,
+    "handlers_of": _NOT_IN_CLI,
+    "endpoints_for": _NOT_IN_CLI,
+    "consumers_of": _NOT_IN_CLI,
+}
+
+
+def _load_wrapper():
+    spec = importlib.util.spec_from_file_location("crg_readonly", WRAPPER)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _query_subparser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            return action.choices["query"]
+    raise AssertionError("no query subcommand")
+
+
+def _pattern_choices(query: argparse.ArgumentParser) -> set[str]:
+    for action in query._actions:
+        if action.dest == "pattern":
+            return set(action.choices)
+    raise AssertionError("query has no pattern argument")
+
+
+def _options(query: argparse.ArgumentParser) -> set[str]:
+    return {
+        option
+        for action in query._actions
+        for option in action.option_strings
+        if option not in ("-h", "--help")
+    }
+
+
+def _capture_cli(tmp_path: Path) -> tuple[Path, Path]:
+    captured = tmp_path / "argv.json"
+    fake_cli = tmp_path / "fake crg"
+    fake_cli.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        "with open(os.environ['CAPTURE_ARGV'], 'w') as out:\n"
+        "    json.dump(sys.argv[1:], out)\n",
+        encoding="utf-8",
+    )
+    fake_cli.chmod(0o755)
+    return fake_cli, captured
+
+
+def test_wrapper_query_patterns_match_the_tool_and_the_cli():
+    """The wrapper's list must not drift from tools/query.py or the CLI again."""
+    wrapper = _load_wrapper()
+    offered = set(wrapper.QUERY_PATTERNS)
+    tool = set(_QUERY_PATTERNS)
+    cli_query = _query_subparser(cli.build_parser())
+    accepted = _pattern_choices(cli_query)
+
+    assert len(offered) == len(wrapper.QUERY_PATTERNS), "a pattern is listed twice"
+    assert offered <= tool, f"not tool patterns: {sorted(offered - tool)}"
+    assert offered <= accepted, f"the CLI rejects: {sorted(offered - accepted)}"
+    assert not offered & set(LEFT_OUT), f"offered and left out: {sorted(offered & set(LEFT_OUT))}"
+    assert tool - offered == set(LEFT_OUT), (
+        "add each new pattern to QUERY_PATTERNS in crg_readonly.py, or to LEFT_OUT "
+        f"with a reason. Missing from both: {sorted(tool - offered - set(LEFT_OUT))}. "
+        f"Stale in LEFT_OUT: {sorted(set(LEFT_OUT) - tool)}"
+    )
+    now_in_cli = {
+        pattern
+        for pattern, reason in LEFT_OUT.items()
+        if reason == _NOT_IN_CLI and pattern in accepted
+    }
+    assert not now_in_cli, f"the CLI accepts these now, so offer them: {sorted(now_in_cli)}"
+    assert _options(_query_subparser(wrapper._build_parser())) == _options(cli_query)
+
+
+def test_path_to_forwards_its_to_argument(tmp_path):
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    fake_cli, captured = _capture_cli(tmp_path)
+
+    result = subprocess.run(
+        [
+            sys.executable, str(WRAPPER), "query", "path_to", "start",
+            "--to", "finish", "--repo", str(repo),
+        ],
+        env={**os.environ, "CRG_BIN": str(fake_cli), "CAPTURE_ARGV": str(captured)},
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(captured.read_text()) == [
+        "query", "path_to", "start", "--to", "finish", "--repo", str(repo.resolve())
+    ]
+
+
+def test_path_to_without_to_stops_before_the_cli_runs(tmp_path):
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    fake_cli, captured = _capture_cli(tmp_path)
+
+    result = subprocess.run(
+        [sys.executable, str(WRAPPER), "query", "path_to", "start", "--repo", str(repo)],
+        env={**os.environ, "CRG_BIN": str(fake_cli), "CAPTURE_ARGV": str(captured)},
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "--to" in result.stderr
+    assert not captured.exists()
 
 
 def _wrapper_cli(tmp_path: Path) -> Path:

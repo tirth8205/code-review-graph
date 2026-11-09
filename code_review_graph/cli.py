@@ -66,8 +66,8 @@ logger = logging.getLogger(__name__)
 # Shared platform choices for install and init commands
 _PLATFORM_CHOICES = [
     "codex", "claude", "claude-code", "cursor", "windsurf", "zed",
-    "continue", "opencode", "antigravity", "gemini-cli", "qwen", "kiro", "qoder",
-    "copilot", "copilot-cli", "codebuddy", "hermes", "all",
+    "continue", "opencode", "mimo", "antigravity", "gemini-cli", "qwen", "kiro", "qoder",
+    "copilot", "copilot-cli", "codebuddy", "hermes", "dsh", "all",
 ]
 
 _GITIGNORE_HELP = (

@@ -11,7 +11,8 @@ from unittest.mock import patch
 import pytest
 
 from code_review_graph import cli, skills, uninstall
-from code_review_graph.cli import _handle_init
+from code_review_graph.cli import _PLATFORM_CHOICES, _handle_init
+from code_review_graph.skills import _detect_serve_command
 
 
 def _args(tmp_path: Path, platform: str) -> argparse.Namespace:
@@ -47,6 +48,38 @@ def test_codex_skill_install_failure_is_reported_without_traceback(
     assert "Could not install Codex skill" in out.err
     assert "Traceback" not in out.err
     assert "Installed Codex skill" not in out.out
+
+
+def test_dsh_install_reinstall_uninstall_lifecycle(monkeypatch, tmp_path):
+    """DSH gets its MCP row in the home patch layer and AGENTS.md (PR #1101)."""
+    from code_review_graph import dsh
+
+    repo = tmp_path / "repo"
+    (repo / ".git" / "hooks").mkdir(parents=True)
+    dsh_home = tmp_path / "dsh"
+    dsh_home.mkdir()
+    monkeypatch.setenv("DSH_HOME", str(dsh_home))
+    config = dsh_home / "cordis.patch.yml"
+    user_layer = "# mine\n- id: model\n  config: {temperature: 1}\n"
+    config.write_text(user_layer, encoding="utf-8")
+    args = _args(repo, "dsh")
+    args.no_instructions = False
+
+    _handle_init(args)
+    first = config.read_bytes()
+    _handle_init(args)
+
+    assert config.read_bytes() == first
+    document = dsh.load(config.read_text(encoding="utf-8"))
+    assert document[0] == {"id": "model", "config": {"temperature": 1}}
+    assert document[1]["insert"][0]["id"] == dsh.ENTRY_ID
+    assert skills._CLAUDE_MD_SECTION_MARKER in (repo / "AGENTS.md").read_text(encoding="utf-8")
+    assert not (repo / "CLAUDE.md").exists()
+
+    report = uninstall.run(repo=repo, platforms=["dsh"])
+
+    assert not report.errors
+    assert config.read_text(encoding="utf-8") == user_layer
 
 
 def test_copilot_cli_install_reinstall_uninstall_lifecycle(
@@ -123,6 +156,42 @@ def test_copilot_cli_install_reinstall_uninstall_lifecycle(
     }
     assert legacy_instruction.read_text(encoding="utf-8") == "# User notes\n"
     assert not current_instruction.exists()
+
+
+def test_handle_init_mimo_registers_only_the_mimo_platform(monkeypatch, tmp_path, capsys):
+    assert "mimo" in _PLATFORM_CHOICES
+    monkeypatch.setattr(
+        "code_review_graph.incremental.ensure_repo_gitignore_excludes_crg",
+        lambda repo_root: "created",
+    )
+    targets: list[str] = []
+    monkeypatch.setattr(
+        "code_review_graph.skills.install_platform_configs",
+        lambda repo_root, target, dry_run=False: targets.append(target) or ["MiMo Code"],
+    )
+
+    _handle_init(_args(tmp_path, "mimo"))
+
+    assert targets == ["mimo"]
+    assert "Configured 1 platform(s): MiMo Code" in capsys.readouterr().out
+
+
+def test_handle_init_mimo_writes_a_runnable_project_config(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "code_review_graph.incremental.ensure_repo_gitignore_excludes_crg",
+        lambda repo_root: "created",
+    )
+
+    _handle_init(_args(tmp_path, "mimo"))
+
+    config = json.loads(
+        (tmp_path / ".mimocode" / "mimocode.json").read_text(encoding="utf-8")
+    )
+    command, args = _detect_serve_command()
+    assert config["mcp"]["code-review-graph"] == {
+        "type": "local",
+        "command": [command, *args, "--repo", str(tmp_path)],
+    }
 
 
 def test_handle_init_codex_skips_claude_skills(monkeypatch, tmp_path, capsys):

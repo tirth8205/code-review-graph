@@ -92,10 +92,9 @@ uv run code-review-graph eval --embed \
   --benchmark token_efficiency,impact_accuracy,agent_baseline,multi_hop_retrieval
 ```
 
-`--embed` is required for `agent_baseline` and `multi_hop_retrieval`; without it their
-natural-language questions hit FTS5 only and return nothing. `code-review-graph eval --help`
-lists the remaining benchmarks (`flow_completeness`, `search_quality`, `build_performance`,
-`incremental_fidelity`) and flags.
+`--embed` is required for `agent_baseline`, `multi_hop_retrieval` and `search_quality`;
+without it their natural-language questions hit FTS5 only and return nothing. `code-review-graph eval --help` lists the remaining benchmarks (`flow_completeness`,
+`search_quality`, `build_performance`, `incremental_fidelity`) and flags.
 
 A thrown tool call is not a measurement. The row stays in the CSV with `status=error` and is
 excluded from every aggregate. Regression tests for this are in `tests/test_eval.py`.
@@ -220,10 +219,13 @@ The predictor over-predicts on some commits. The worst case is flask `fbb6f0bc`:
 flagged for a 10-file change, precision 0.303. That trade-off is deliberate: a missed
 dependency costs more than an extra reviewed file.
 
-The co-change rows are not usable yet: all 11 graded commits came back with
-`predicted_files = 0`, so their F1 of 0.000 measures a harness fault, not the predictor. No
-co-change number is quoted until that is fixed. The two single-file commits (express) are
-recorded with `status=skipped` because there is nothing independent to grade against.
+The co-change rows in this capture are not usable: all 11 graded commits came back with
+`predicted_files = 0`, so their F1 of 0.000 measures a fault in the benchmark, not the
+predictor. `git diff` gives repo-relative paths and the graph stores absolute ones, so the
+seed never matched a node. PR #823 fixed that, and the graph-derived ground truth now counts
+real neighbour files too, so both tables will change when the benchmark is run again. No
+co-change number is quoted until then. The two single-file commits (express) are recorded
+with `status=skipped` because there is nothing independent to grade against.
 
 ### Multi-hop retrieval (`code_review_graph/eval/benchmarks/multi_hop_retrieval.py`)
 
@@ -471,8 +473,9 @@ file reorders it. Same set, different order, so the graph is not byte-reproducib
 
 Every edit kind is listed in `incremental_fidelity.KNOWN_FAILURES`, which keeps the run from
 reporting them as unexpected. `tests/test_incremental_fidelity.py` guards against a kind that
-currently passes starting to diverge, and carries two `xfail` tests, now passing, that pin
-defects 1 and 2 at the level of the defect.
+currently passes starting to diverge, and pins defects 1 and 2 at the level of the defect.
+Defect 2 has plain tests, one of them for a file that an update adds (#1122). Defect 1's test
+is still marked `xfail` but now passes.
 
 ## Weekly CI run (report-only)
 
@@ -541,10 +544,10 @@ python -m tests.real_repo_corpus --record   # re-record after an intentional cha
 ```
 
 The normal suite skips it: `tests/conftest.py` skips every `corpus`-marked item unless the
-run's `-m` expression names the marker, so neither `pytest tests/` nor CI's `-m "not browser"`
-job pays for it. Clones are shallow single-commit fetches (~115 MB total). A cold run takes
-about 1 minute on a warm network and roughly 40 seconds once the clones are cached; budget a
-few minutes on CI hardware.
+run's `-m` expression names the marker, so neither `pytest tests/` nor CI's
+`-m "not browser and not upgrade"` job pays for it. Clones are shallow single-commit fetches
+(~115 MB total). A cold run takes about 1 minute on a warm network and roughly 40 seconds
+once the clones are cached; budget a few minutes on CI hardware.
 
 `fastapi` and `gin` reuse the pins in `code_review_graph/eval/configs/`, so the project keeps
 one answer to "which commit of fastapi do we measure". `tests/test_real_repo_corpus_guard.py`

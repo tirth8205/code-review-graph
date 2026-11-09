@@ -717,8 +717,12 @@ class TestGenerateCodexHooksConfig:
         cmd = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
 
         payload = ("x" * 1024 + "\n") * 20000
+        # Resolve PATH explicitly: Windows CreateProcess can prefer the
+        # System32 WSL launcher over Git Bash when passed a bare executable name.
+        bash = shutil.which("bash")
+        assert bash is not None, "Bash is required for the shell hook regression"
         proc = subprocess.Popen(
-            ["bash", "-lc", cmd],
+            [bash, "-lc", cmd],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -1719,6 +1723,132 @@ class TestInstallPlatformConfigs:
         entry = data["mcpServers"]["code-review-graph"]
         assert "type" not in entry
         assert entry["args"][-1] == "serve"
+
+    def test_install_mimo_config_preserves_existing_servers(self, tmp_path):
+        """MiMo uses a local command array under its top-level ``mcp`` key."""
+        mimo_config = tmp_path / ".mimocode" / "mimocode.json"
+        mimo_config.parent.mkdir()
+        mimo_config.write_text(
+            json.dumps(
+                {
+                    "$schema": "https://mimo.xiaomi.com/mimocode/config.json",
+                    "mcp": {
+                        "other-server": {
+                            "type": "local",
+                            "command": ["other-server", "serve"],
+                        }
+                    },
+                    "theme": "dark",
+                }
+            ),
+            encoding="utf-8",
+        )
+        with patch.dict(
+            PLATFORMS,
+            {
+                "mimo": {
+                    **PLATFORMS["mimo"],
+                    "config_path": lambda root: mimo_config,
+                    "detect": lambda: True,
+                },
+            },
+        ):
+            configured = install_platform_configs(tmp_path, target="mimo")
+
+        assert configured == ["MiMo Code"]
+        data = json.loads(mimo_config.read_text(encoding="utf-8"))
+        assert data["$schema"] == "https://mimo.xiaomi.com/mimocode/config.json"
+        assert data["theme"] == "dark"
+        assert data["mcp"]["other-server"]["command"] == ["other-server", "serve"]
+        command, args = _detect_serve_command()
+        assert data["mcp"]["code-review-graph"] == {
+            "type": "local",
+            "command": [command, *args, "--repo", str(tmp_path)],
+        }
+
+    def test_install_mimo_prefers_existing_jsonc_and_is_idempotent(self, tmp_path):
+        config_path = tmp_path / ".mimocode" / "mimocode.jsonc"
+        config_path.parent.mkdir()
+        config_path.write_text(
+            "{\n  // keep these MiMo settings\n"
+            '  "$schema": "https://mimo.xiaomi.com/mimocode/config.json",\n'
+            '  "theme": "dark",\n  "mcp": {\n'
+            '    "other": {"type": "local", "command": ["other", "serve"]},\n'
+            "  },\n}\n",
+            encoding="utf-8",
+        )
+        json_config = config_path.with_suffix(".json")
+        json_config.write_text('{"theme": "light"}\n', encoding="utf-8")
+
+        configured = install_platform_configs(tmp_path, target="mimo")
+        first_install = config_path.read_bytes()
+        install_platform_configs(tmp_path, target="mimo")
+
+        assert configured == ["MiMo Code"]
+        assert config_path.read_bytes() == first_install
+        assert json_config.read_text(encoding="utf-8") == '{"theme": "light"}\n'
+        # The file keeps its comment, so it is read as JSONC (review of #688).
+        text = config_path.read_text(encoding="utf-8")
+        assert "// keep these MiMo settings" in text
+        data = json.loads(_strip_jsonc(text))
+        assert data["$schema"] == "https://mimo.xiaomi.com/mimocode/config.json"
+        assert data["theme"] == "dark"
+        assert data["mcp"]["other"] == {
+            "type": "local",
+            "command": ["other", "serve"],
+        }
+        assert "code-review-graph" in data["mcp"]
+
+    def test_install_mimo_is_idempotent_and_dry_run_does_not_write(self, tmp_path):
+        mimo_config = tmp_path / ".mimocode" / "mimocode.json"
+        with patch.dict(
+            PLATFORMS,
+            {
+                "mimo": {
+                    **PLATFORMS["mimo"],
+                    "config_path": lambda root: mimo_config,
+                    "detect": lambda: True,
+                },
+            },
+        ):
+            configured = install_platform_configs(tmp_path, target="mimo", dry_run=True)
+            assert configured == ["MiMo Code"]
+            assert not mimo_config.exists()
+
+            install_platform_configs(tmp_path, target="mimo")
+            first = mimo_config.read_text(encoding="utf-8")
+            install_platform_configs(tmp_path, target="mimo")
+
+        assert mimo_config.read_text(encoding="utf-8") == first
+
+    @pytest.mark.parametrize(
+        "variable, folder",
+        [("MIMOCODE_HOME", "mimo-home/config"), ("XDG_CONFIG_HOME", "xdg/mimocode")],
+    )
+    def test_mimo_is_detected_where_mimo_keeps_its_config(
+        self, tmp_path, monkeypatch, variable, folder
+    ):
+        """MiMo Code moves its config folder with MIMOCODE_HOME or XDG_CONFIG_HOME."""
+        monkeypatch.setattr(skills_module.shutil, "which", lambda name: None)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+        monkeypatch.delenv("MIMOCODE_HOME", raising=False)
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        detect = PLATFORMS["mimo"]["detect"]
+        assert detect() is False
+
+        root = tmp_path / folder.split("/", 1)[0]
+        monkeypatch.setenv(variable, str(root))
+        assert detect() is False
+        (tmp_path / folder).mkdir(parents=True)
+        assert detect() is True
+
+    def test_mimo_install_writes_agents_md(self, tmp_path):
+        """MiMo Code reads AGENTS.md, as OpenCode does."""
+        outcomes = skills_module.inject_instruction_files(tmp_path, target="mimo")
+
+        assert outcomes == {"AGENTS.md": "created"}
+        agents = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+        assert skills_module._CLAUDE_MD_SECTION_MARKER in agents
 
     def test_install_qwen_config(self, tmp_path):
         """Qwen Code uses ~/.qwen/settings.json with mcpServers (see #83)."""

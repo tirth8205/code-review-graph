@@ -65,10 +65,10 @@ code-review-graph build                # parse the codebase
 `install` 会检测你安装了哪些 AI 编码工具，为每个工具写入一条 MCP 服务器配置，在平台支持的地方安装钩子和技能，并把图谱说明加入平台的规则文件。在 Poetry 或 uv 项目环境中，MCP 配置使用 `poetry run` 或 `uv run`；当 PATH 上有 `uvx` 时使用 `uvx code-review-graph serve`；否则使用当前的 Python 解释器。`install` 会先列出要改动的文件，并在你回答它关于说明文件的问题之后才写入任何内容；`install --dry-run` 把每处改动显示为 diff，什么都不写。安装后请重启编辑器或工具。
 
 <p align="center">
-  <img src="diagrams/diagram8_supported_platforms.png" alt="一次安装，覆盖所有平台：检测 Codex、Claude Code、CodeBuddy Code、Cursor、Windsurf、Zed、Continue、OpenCode、Antigravity、Gemini CLI、Qwen、Qoder、Kiro、GitHub Copilot、GitHub Copilot CLI 和 Hermes Agent" width="85%" />
+  <img src="diagrams/diagram8_supported_platforms.png" alt="一次安装，覆盖所有平台：检测 Codex、Claude Code、CodeBuddy Code、Cursor、Windsurf、Zed、Continue、OpenCode、MiMo Code、Antigravity、Gemini CLI、Qwen、Qoder、Kiro、GitHub Copilot、GitHub Copilot CLI 和 Hermes Agent" width="85%" />
 </p>
 
-只配置一个平台时，给 `--platform` 传入 `codex`、`claude-code`、`cursor`、`windsurf`、`zed`、`continue`、`opencode`、`antigravity`、`gemini-cli`、`qwen`、`kiro`、`qoder`、`copilot`、`copilot-cli`、`codebuddy` 或 `hermes` 之一：
+只配置一个平台时，给 `--platform` 传入 `codex`、`claude-code`、`cursor`、`windsurf`、`zed`、`continue`、`opencode`、`mimo`、`antigravity`、`gemini-cli`、`qwen`、`kiro`、`qoder`、`copilot`、`copilot-cli`、`codebuddy`、`hermes` 或 `dsh` 之一：
 
 ```bash
 code-review-graph install --platform cursor
