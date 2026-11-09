@@ -358,6 +358,7 @@ code-review-graph detect-changes --brief         # Risk panel + token savings (r
 code-review-graph detect-changes --brief --base main  # Against the merge base of main and HEAD
 code-review-graph update --brief                 # Refresh graph + same panel
 code-review-graph detect-changes --brief --verify  # Cross-check against tiktoken
+code-review-graph context-history  # Trend of the opt-in savings log (CRG_CONTEXT_HISTORY=1)
 code-review-graph register <path>  # Register repo in the multi-repo registry
 code-review-graph unregister <path|alias>  # Remove repo from the registry
 code-review-graph repos            # List registered repositories
@@ -402,6 +403,8 @@ JSON のエクスポートはローカルのグラフデータディレクトリ
 どちらのコマンドにも `--verify` を付けると、数字を OpenAI の `cl100k_base` トークナイザと比べられます（`pip install tiktoken` が必要）。集計値で見た推定値は実トークンとの差が約 1% 以内です。[`docs/REPRODUCING.md`](docs/REPRODUCING.md#calibration-table) を参照してください。
 
 同じ `context_savings` メタデータは、`get_impact_radius`、`get_review_context`、`detect_changes`、`get_architecture_overview` の各 MCP ツールの JSON 応答にも付きます。
+
+推定値の推移を見るには `CRG_CONTEXT_HISTORY=1` を設定します（既定ではオフ）。推定値ごとに `graph.db` の隣のローカルログへ 1 行追加され、内容はトークン数とツール名だけです。`code-review-graph context-history` で日別またはツール別に表示できます。[docs/USAGE.md](docs/USAGE.md#context-history) を参照してください。
 
 </details>
 
@@ -537,6 +540,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_CALLER_TEST_ROUTE_MAX_CALLERS` | そのテスト済み呼び出し元を探す際に調べる呼び出し元の最大数 | `500` |
 | `CRG_TOOL_TIMEOUT` | 読み取り専用 MCP ツールのタイムアウト（秒。`0` で無効）。書き込みを行うツール（build / postprocess / embed / wiki / apply-refactor）には適用されない | `0` |
 | `CRG_CHURN_WINDOW_DAYS` | `detect-changes --churn` のコミット数を数える期間 | `90` |
+| `CRG_CONTEXT_HISTORY` | `1` にすると、`context_savings` の推定値を毎回ローカルログ `.code-review-graph/context-history.jsonl` に記録します。`code-review-graph context-history` で表示します。記録するのはトークン数とツール名だけで、外部には送信しません | - |
 | `CRG_LEIDEN_SEED` | Leiden のコミュニティ検出のシード | `42` |
 | `CRG_RECURSE_SUBMODULES` | `1`、`true`、`yes` のとき git サブモジュールを含める | - |
 | `CRG_TOOLS` | サーバー起動時に公開する MCP ツールのカンマ区切り許可リスト | - |
