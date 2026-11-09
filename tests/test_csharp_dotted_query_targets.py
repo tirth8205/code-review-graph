@@ -2,8 +2,6 @@
 
 from pathlib import Path
 
-import pytest
-
 from code_review_graph.graph import GraphStore
 from code_review_graph.incremental import full_build
 from code_review_graph.tools.query import query_graph
@@ -16,13 +14,6 @@ def _write(root: Path, files: dict[str, str]) -> None:
         path.write_text(source, encoding="utf-8")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "C# symbols now carry the namespace, so a Type.Member target "
-        "no longer matches exactly and the Java guard blocks the fallback (#964)"
-    ),
-)
 def test_dotted_type_member_target_finds_namespaced_csharp_symbol(tmp_path):
     # ``Type.Member`` is the natural way to name a C# method, and query_graph
     # resolves exact qualified tails for C# (#934). A type declared inside a
@@ -42,3 +33,33 @@ def test_dotted_type_member_target_finds_namespaced_csharp_symbol(tmp_path):
 
     assert result["status"] == "ok", result.get("summary")
     assert [row["name"] for row in result["results"]] == ["Go"]
+
+
+def test_dotted_target_shared_by_two_namespaces_is_ambiguous(tmp_path):
+    # The namespace-tail fallback must not pick one of two same-named types.
+    (tmp_path / ".git").mkdir()
+    _write(tmp_path, {
+        "A.cs": "namespace A { public class Service { public static void Run() {} } }\n",
+        "B.cs": "namespace B { public class Service { public static void Run() {} } }\n",
+    })
+    with GraphStore(tmp_path / ".code-review-graph" / "graph.db") as store:
+        full_build(tmp_path, store)
+
+    result = query_graph("callers_of", "Service.Run", str(tmp_path))
+
+    assert result["status"] == "ambiguous"
+    assert {c["qualified_name"].rsplit("::", 1)[-1] for c in result["candidates"]} == {
+        "A.Service.Run", "B.Service.Run",
+    }
+
+
+def test_dotted_target_does_not_match_a_longer_type_name(tmp_path):
+    # ``Service.Run`` must not match ``MyService.Run``: the tail is whole segments.
+    (tmp_path / ".git").mkdir()
+    _write(tmp_path, {
+        "A.cs": "namespace A { public class MyService { public static void Run() {} } }\n",
+    })
+    with GraphStore(tmp_path / ".code-review-graph" / "graph.db") as store:
+        full_build(tmp_path, store)
+
+    assert query_graph("callers_of", "Service.Run", str(tmp_path))["status"] == "not_found"
