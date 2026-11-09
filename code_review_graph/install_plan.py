@@ -37,7 +37,8 @@ class FileChange:
 
     ``before`` and ``after`` are ``None`` when the file does not exist on that
     side. ``mode`` holds permission bits the plan sets, or ``None`` to leave
-    them as they are.
+    them as they are. ``link`` is set when the plan removes a symlink itself
+    rather than the file it points to, and holds where the link pointed.
     """
 
     path: Path
@@ -45,9 +46,10 @@ class FileChange:
     after: bytes | None
     before_mode: int | None
     mode: int | None
+    link: str | None = None
 
     def is_change(self) -> bool:
-        if self.after != self.before:
+        if self.link is not None or self.after != self.before:
             return True
         return self.after is not None and _mode_changes(self.before_mode, self.mode)
 
@@ -61,6 +63,12 @@ def _mode_changes(before: int | None, after: int | None) -> bool:
 
 def _key(path: PathLike) -> Path:
     return Path(os.path.abspath(os.fspath(path)))
+
+
+def _real_key(path: PathLike) -> Path:
+    # One entry per file, so a write through one name (CLAUDE.md linked to
+    # AGENTS.md) is seen through the other and written once.
+    return Path(os.path.realpath(os.fspath(path)))
 
 
 def _disk_state(path: Path) -> tuple[bytes | None, int | None]:
@@ -96,8 +104,12 @@ class Plan:
 
     # -- reads ---------------------------------------------------------------
 
+    def _link_entry(self, path: PathLike) -> FileChange | None:
+        entry = self._files.get(_key(path))
+        return entry if entry is not None and entry.link is not None else None
+
     def _planned(self, path: PathLike) -> FileChange | None:
-        return self._files.get(_key(path))
+        return self._link_entry(path) or self._files.get(_real_key(path))
 
     def exists(self, path: PathLike) -> bool:
         planned = self._planned(path)
@@ -123,7 +135,7 @@ class Plan:
         """Return the permission bits ``path`` will have, if known."""
         planned = self._planned(path)
         if planned is None:
-            return _disk_state(_key(path))[1]
+            return _disk_state(_real_key(path))[1]
         if planned.after is None:
             return None
         return planned.mode if planned.mode is not None else planned.before_mode
@@ -131,7 +143,10 @@ class Plan:
     # -- writes --------------------------------------------------------------
 
     def _entry(self, path: PathLike) -> FileChange:
-        key = _key(path)
+        link_entry = self._link_entry(path)
+        if link_entry is not None:
+            return link_entry
+        key = _real_key(path)
         entry = self._files.get(key)
         if entry is None:
             before, before_mode = _disk_state(key)
@@ -156,7 +171,7 @@ class Plan:
                 raise NotADirectoryError(errno.ENOTDIR, os.strerror(errno.ENOTDIR), str(parent))
 
     def write_bytes(self, path: PathLike, data: bytes, mode: int | None = None) -> None:
-        self._check_can_create(_key(path))
+        self._check_can_create(_real_key(path))
         entry = self._entry(path)
         entry.after = data
         if mode is not None:
@@ -170,6 +185,13 @@ class Plan:
     def unlink(self, path: PathLike) -> None:
         if not self.is_file(path):
             raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), str(path))
+        key = _key(path)
+        if self._link_entry(path) is None and os.path.islink(key):
+            # Removing a symlink removes the link, never the file it points to.
+            before, before_mode = _disk_state(key)
+            self._files[key] = FileChange(
+                key, before, before, before_mode, None, link=os.readlink(key)
+            )
         entry = self._entry(path)
         entry.after = None
         entry.mode = None
@@ -180,24 +202,50 @@ class Plan:
         """Return every file the plan changes, in the order first touched."""
         return [entry for entry in self._files.values() if entry.is_change()]
 
+    def checkpoint(self) -> dict[Path, tuple[bytes | None, int | None]]:
+        """Return the plan as it stands, for :meth:`changes_since` and :meth:`rollback`."""
+        return {key: (entry.after, entry.mode) for key, entry in self._files.items()}
+
+    def changes_since(
+        self, saved: dict[Path, tuple[bytes | None, int | None]]
+    ) -> list[FileChange]:
+        """Return the changes made to the plan after ``saved`` was taken."""
+        return [
+            entry
+            for key, entry in self._files.items()
+            if entry.is_change() and saved.get(key) != (entry.after, entry.mode)
+        ]
+
+    def rollback(self, saved: dict[Path, tuple[bytes | None, int | None]]) -> None:
+        """Drop every change made to the plan after ``saved`` was taken."""
+        for key in list(self._files):
+            if key in saved:
+                self._files[key].after, self._files[key].mode = saved[key]
+            else:
+                del self._files[key]
+
     def apply(self) -> list[tuple[Path, str]]:
         """Write the plan to disk and return ``(path, reason)`` for each failure.
 
-        A file that changed on disk after the plan was made is left alone, so
-        an edit made while the user read the preview is never overwritten.
+        A file whose content or permissions changed on disk after the plan was
+        made is left alone, so an edit made while the user read the preview is
+        never overwritten.
         """
         failures: list[tuple[Path, str]] = []
         for change in self.changes():
             try:
-                if _disk_state(change.path)[0] != change.before:
+                if not _unchanged_on_disk(change):
                     failures.append(
                         (change.path, "it changed after the preview, so it was left alone")
                     )
                     continue
-                if change.after is None:
+                if change.link is not None:
+                    os.unlink(change.path)
+                elif change.after is None:
                     change.path.unlink()
+                if change.after is None:
                     continue
-                if change.after != change.before:
+                if change.after != change.before or change.link is not None:
                     change.path.parent.mkdir(parents=True, exist_ok=True)
                     change.path.write_bytes(change.after)
                 if change.mode is not None:
@@ -205,6 +253,12 @@ class Plan:
             except OSError as exc:
                 failures.append((change.path, str(exc)))
         return failures
+
+
+def _unchanged_on_disk(change: FileChange) -> bool:
+    if change.link is not None:
+        return os.path.islink(change.path) and os.readlink(change.path) == change.link
+    return _disk_state(change.path) == (change.before, change.before_mode)
 
 
 _ACTIVE: ContextVar[Plan | None] = ContextVar("code_review_graph_install_plan", default=None)

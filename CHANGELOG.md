@@ -98,10 +98,11 @@
   lines a file with a note saying how many lines were left out, and writes
   nothing. A real install lists the files it will change, asks about the
   instruction files, and only then writes exactly the plan it showed. Ctrl-C
-  at the question stops the install with nothing written, and a file edited
-  while the question was open is left alone and reported. Commented JSONC
-  configs are previewed and written through the same splice, so their
-  comments are kept.
+  at the question stops the install with nothing written, and a file whose
+  content or permissions change while the question is open is left alone and
+  reported. A file reached by two names, such as `CLAUDE.md` linked to
+  `AGENTS.md`, is planned and written once. Commented JSONC configs are
+  previewed and written through the same splice, so their comments are kept.
 - TypeScript and JavaScript imports resolve against `compilerOptions.baseUrl`
   when no `paths` pattern matches them, as `tsc` does. A tsconfig that sets
   `baseUrl` without `paths` resolved no non-relative import at all: on a

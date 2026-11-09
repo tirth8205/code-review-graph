@@ -152,12 +152,12 @@ def _print_banner() -> None:
 def _instruction_files_to_modify(
     repo_root: Path,
     target: str,
-) -> list[str]:
-    """Return the list of instruction files that ``install`` would write
-    or modify, given the current state of the repo and the selected
-    platform target. Shown before the question about them (#173).
+) -> list[tuple[str, str]]:
+    """Return ``(filename, how)`` for each instruction file that ``install``
+    would write or modify, given the current state of the repo and the
+    selected platform target. Shown before the question about them (#173).
 
-    A file holding a section from an older release is listed as ``(update)``:
+    A file holding a section from an older release is listed as ``update``:
     install replaces that block in place rather than leaving it stale (#314).
     """
     from .skills import (
@@ -169,17 +169,17 @@ def _instruction_files_to_modify(
         _upgrade_managed_block,
     )
 
-    targets: list[str] = []
+    targets: list[tuple[str, str]] = []
 
     def _describe(filename: str, path: Path, section: str) -> None:
         if not install_plan.exists(path):
-            targets.append(f"{filename} (new)")
+            targets.append((filename, "new"))
             return
         content = install_plan.read_text(path, encoding="utf-8", errors="replace")
         if _CLAUDE_MD_SECTION_MARKER not in content:
-            targets.append(f"{filename} (append)")
+            targets.append((filename, "append"))
         elif _upgrade_managed_block(content, section) is not None:
-            targets.append(f"{filename} (update)")
+            targets.append((filename, "update"))
 
     if target in ("claude", "all"):
         _describe("CLAUDE.md", repo_root / "CLAUDE.md", _CLAUDE_MD_SECTION)
@@ -317,25 +317,39 @@ def _handle_init(args: argparse.Namespace) -> None:
             with contextlib.redirect_stdout(io.StringIO() if dry_run else report):
                 codex_skill_error = _plan_integrations(args, repo_root, target)
 
+            # Instruction files are planned before the question too, so the
+            # same plan is shown in both modes and an edit made while the
+            # question is open is left alone, as for every other file.
+            instr_targets: list[tuple[str, str]] = []
+            outcomes: dict[str, str] = {}
+            before_instructions = plan.checkpoint()
+            if not skip_instructions:
+                instr_targets = _instruction_files_to_modify(repo_root, target)
+                outcomes = inject_instruction_files(repo_root, target=target)
+            instr_changes = plan.changes_since(before_instructions)
+
             if dry_run:
-                if not skip_instructions:
-                    _print_instruction_conflicts(
-                        inject_instruction_files(repo_root, target=target)
-                    )
+                _print_instruction_conflicts(outcomes)
                 if codex_skill_error and target == "codex":
                     # With --platform all the error was already printed above.
                     print(f"[dry-run] {codex_skill_error}", file=sys.stderr)
                 _print_dry_run(plan, repo_root)
                 return
 
-            instr_targets = _instruction_files_to_modify(repo_root, target)
-            _print_planned_files(plan, repo_root)
+            _print_planned_files(plan, repo_root, skip=instr_changes)
             inject = False
-            if not skip_instructions and instr_targets:
+            if instr_changes:
+                # An old copy that install removes is listed too.
+                named = {(repo_root / name).resolve() for name, _ in instr_targets}
+                for change in instr_changes:
+                    if change.path not in named:
+                        shown = install_plan.display_path(change.path, repo_root)
+                        how = "old file removed" if change.after is None else "old section removed"
+                        instr_targets.append((shown, how))
                 print()
                 print("Graph instructions will be injected into:")
-                for t in instr_targets:
-                    print(f"  {t}")
+                for name, how in instr_targets:
+                    print(f"  {name} ({how})")
                 try:
                     inject = auto_yes or _confirm_yes_no(
                         "Inject graph instructions into these files?",
@@ -346,9 +360,10 @@ def _handle_init(args: argparse.Namespace) -> None:
                     # Nothing has been written yet, so stopping here leaves no trace.
                     print("Install cancelled. No files were written.")
                     raise SystemExit(130) from None
+            if not inject:
+                plan.rollback(before_instructions)
             with contextlib.redirect_stdout(report):
                 if inject:
-                    outcomes = inject_instruction_files(repo_root, target=target)
                     for label, wording in (
                         ("created", "Injected graph instructions into"),
                         ("updated", "Updated graph instructions in"),
@@ -359,22 +374,33 @@ def _handle_init(args: argparse.Namespace) -> None:
                     _print_instruction_conflicts(outcomes)
                 elif skip_instructions:
                     print("Skipped instruction injection (--no-instructions).")
-                elif instr_targets:
+                elif instr_changes:
                     print("Skipped instruction injection (user declined).")
+                else:
+                    _print_instruction_conflicts(outcomes)
     except Exception:
         # A step failed while planning, before any file reached the disk.
         print("Install stopped before writing any file.", file=sys.stderr)
         raise
+    planned = plan.changes()
     failures = plan.apply()
 
     print()
-    sys.stdout.write(report.getvalue())
-    for path, reason in failures:
-        print(f"Could not write {path}: {reason}", file=sys.stderr)
     if failures:
+        # The progress messages would claim files that were left alone, so
+        # name only what was written.
+        failed = {path for path, _ in failures}
+        written = [change for change in planned if change.path not in failed]
+        if written:
+            print("These files were written:")
+            for change in written:
+                print(f"  {install_plan.display_path(change.path, repo_root)}")
+        for path, reason in failures:
+            print(f"Could not write {path}: {reason}", file=sys.stderr)
         raise CodeReviewGraphError(
             f"install could not write {len(failures)} file(s); see the messages above"
         )
+    sys.stdout.write(report.getvalue())
     if codex_skill_error and target == "codex":
         raise CodeReviewGraphError(codex_skill_error)
     print()
@@ -545,10 +571,19 @@ def _print_instruction_conflicts(outcomes: dict[str, str]) -> None:
         )
 
 
-def _print_planned_files(plan: install_plan.Plan, repo_root: Path) -> None:
-    """List each file a real install is about to write, before it writes any."""
+def _print_planned_files(
+    plan: install_plan.Plan,
+    repo_root: Path,
+    skip: Iterable[install_plan.FileChange] = (),
+) -> None:
+    """List each file a real install is about to write, before it writes any.
 
-    changes = plan.changes()
+    ``skip`` holds the instruction changes, listed apart because they wait on
+    the question.
+    """
+
+    skipped = {change.path for change in skip}
+    changes = [change for change in plan.changes() if change.path not in skipped]
     print()
     if not changes:
         print("No config, hook or skill files need changing.")

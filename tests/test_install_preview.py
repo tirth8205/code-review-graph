@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 
 from code_review_graph import cli, install_plan, skills
+from code_review_graph.errors import CodeReviewGraphError
 
 PLATFORM_KEYS = sorted(skills.PLATFORMS)
 
@@ -392,3 +393,128 @@ def test_helpers_write_straight_to_disk_without_a_plan(tmp_path):
     assert stat.S_IMODE(target.stat().st_mode) == 0o700
     install_plan.unlink(target)
     assert not target.exists()
+
+
+_LINKS = pytest.mark.skipif(os.name == "nt", reason="symlinks need extra rights on Windows")
+
+
+def test_instruction_file_deleted_at_the_question_stays_deleted(sandbox, monkeypatch, capsys):
+    # Instruction files are planned before the question, so an edit made while
+    # it is open is left alone like any other file (Copilot on #1173).
+    notes = sandbox.repo / "CLAUDE.md"
+    notes.write_text("# Team notes\n", encoding="utf-8")
+
+    def answer(prompt: str, default_yes: bool = True, **_: object) -> bool:
+        notes.unlink()
+        return True
+
+    monkeypatch.setattr(cli, "_confirm_yes_no", answer)
+    with pytest.raises(CodeReviewGraphError):
+        cli._handle_init(_args(sandbox, "claude", yes=False))
+
+    assert not notes.exists()
+    assert "CLAUDE.md" in capsys.readouterr().err
+
+
+@_POSIX_ONLY
+def test_apply_leaves_a_file_whose_mode_changed_after_the_preview(tmp_path):
+    hook = tmp_path / "pre-commit"
+    hook.write_text("#!/bin/sh\n", encoding="utf-8")
+    hook.chmod(0o755)
+    with install_plan.planning() as plan:
+        install_plan.write_text(hook, "#!/bin/sh\necho graph\n")
+        install_plan.chmod(hook, 0o755)
+    hook.chmod(0o644)  # the user turns the hook off while the question is open
+
+    failures = plan.apply()
+
+    assert [path for path, _ in failures] == [hook]
+    assert stat.S_IMODE(hook.stat().st_mode) == 0o644
+    assert hook.read_text(encoding="utf-8") == "#!/bin/sh\n"
+
+
+def test_install_removes_the_old_copilot_file_the_dry_run_showed(sandbox, plans):
+    cli._handle_init(_args(sandbox, "copilot"))
+    legacy = sandbox.repo / ".github" / "code-review-graph.instruction.md"
+    legacy.write_text(skills._COPILOT_SECTION, encoding="utf-8")
+
+    cli._handle_init(_args(sandbox, "copilot", dry_run=True))
+    assert legacy in {change.path for change in plans[1].changes()}
+
+    cli._handle_init(_args(sandbox, "copilot"))
+
+    assert not legacy.exists()
+
+
+def test_no_success_message_for_a_file_that_was_left_alone(sandbox, monkeypatch, capsys):
+    mcp = sandbox.repo / ".mcp.json"
+
+    def answer(prompt: str, default_yes: bool = True, **_: object) -> bool:
+        mcp.write_text('{"mine": true}\n', encoding="utf-8")
+        return True
+
+    monkeypatch.setattr(cli, "_confirm_yes_no", answer)
+    with pytest.raises(CodeReviewGraphError):
+        cli._handle_init(_args(sandbox, "claude", yes=False))
+
+    captured = capsys.readouterr()
+    assert "Configured" not in captured.out
+    assert "Could not write" in captured.err and ".mcp.json" in captured.err
+    assert mcp.read_text(encoding="utf-8") == '{"mine": true}\n'
+    # What did reach the disk is still named.
+    assert "CLAUDE.md" in captured.out.split("Inject graph")[-1]
+
+
+def test_progress_messages_follow_a_clean_install(sandbox, capsys):
+    cli._handle_init(_args(sandbox, "claude"))
+
+    out = capsys.readouterr().out
+    assert "Configured 1 platform(s): Claude Code" in out
+    assert "Injected graph instructions into: CLAUDE.md" in out
+
+
+@_LINKS
+def test_claude_md_linked_to_agents_md_gets_one_block(sandbox, capsys):
+    agents = sandbox.repo / "AGENTS.md"
+    agents.write_text("# Agents\n", encoding="utf-8")
+    (sandbox.repo / "CLAUDE.md").symlink_to("AGENTS.md")
+
+    cli._handle_init(_args(sandbox, "all"))
+
+    assert (sandbox.repo / "CLAUDE.md").is_symlink()
+    assert agents.read_text(encoding="utf-8").count(skills._CLAUDE_MD_SECTION_MARKER) == 1
+    assert "Could not write" not in capsys.readouterr().err
+
+
+@_LINKS
+def test_plan_sees_one_file_through_each_of_its_names(tmp_path):
+    real = tmp_path / "AGENTS.md"
+    real.write_text("# Agents\n", encoding="utf-8")
+    link = tmp_path / "CLAUDE.md"
+    link.symlink_to("AGENTS.md")
+    with install_plan.planning() as plan:
+        install_plan.write_text(link, "# Agents\nmore\n")
+        assert install_plan.read_text(real) == "# Agents\nmore\n"
+    assert len(plan.changes()) == 1
+
+    assert plan.apply() == []
+
+    assert link.is_symlink()
+    assert real.read_text(encoding="utf-8") == "# Agents\nmore\n"
+
+
+@_LINKS
+def test_unlinking_a_symlink_removes_the_link_not_its_target(tmp_path):
+    real = tmp_path / "shared.md"
+    real.write_text("shared\n", encoding="utf-8")
+    link = tmp_path / "legacy.md"
+    link.symlink_to("shared.md")
+    with install_plan.planning() as plan:
+        install_plan.unlink(link)
+        assert not install_plan.exists(link)
+        assert install_plan.read_text(real) == "shared\n"
+
+    assert plan.apply() == []
+
+    assert not os.path.lexists(link)
+    assert real.read_text(encoding="utf-8") == "shared\n"
