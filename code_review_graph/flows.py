@@ -516,6 +516,15 @@ def detect_entry_points(
     # Scan all nodes for entry-point candidates.
     candidate_nodes = store.get_nodes_by_kind(["Function", "Test"])
 
+    # Ruby and Java test calls did not bind to the methods they call until
+    # recently, so a method used only by its tests was an entry point. Keep it
+    # one: being well tested must not hide a method from flow analysis.
+    called_outside_tests = (
+        store.get_call_targets_outside_tests()
+        if any(node.language in ("ruby", "java") for node in candidate_nodes)
+        else set()
+    )
+
     entry_points: list[GraphNode] = []
     seen_qn: set[str] = set()
 
@@ -532,8 +541,14 @@ def detect_entry_points(
         if node.extra.get("verilog_kind"):
             continue
 
+        # True root: no one calls this function.
+        called = (
+            called_outside_tests
+            if node.language in ("ruby", "java")
+            else called_qnames
+        )
         is_entry = (
-            node.qualified_name not in called_qnames
+            node.qualified_name not in called
             or _has_framework_decorator(node)
             or _matches_entry_name(node)
         )

@@ -129,6 +129,8 @@ _QUERY_PATTERNS = {
 }
 
 _JAVA_FQN_PART = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
+#: A test block's name, such as ``it:adds@L12``, which ends in its line number.
+_TEST_BLOCK_NAME = re.compile(r"@L\d+$")
 _MAX_DOTTED_TARGET_CANDIDATES = 100
 _MAX_BARE_TARGET_CANDIDATES = 20
 
@@ -186,6 +188,20 @@ def _interleave_call_sites(
         keyed.append((round_index, is_guess, seen_order[key], index, result, edge))
     keyed.sort(key=lambda item: item[:4])
     return [(result, edge) for _, _, _, _, result, edge in keyed]
+
+
+def _test_is_named_after(test: GraphNode, name: str) -> bool:
+    """Whether a naming-convention hit really is named after *name*.
+
+    A test block's name holds free text, so ``it "tests json output"`` also hits
+    a search for ``test_json``. Only its file can speak for a block.
+    """
+    if not _TEST_BLOCK_NAME.search(test.name):
+        return True
+    word = re.escape(name.lower())
+    return bool(
+        re.search(rf"(?:^|[^a-z0-9]){word}(?:[^a-z0-9]|$)", Path(test.file_path).name.lower())
+    )
 
 
 def _looks_like_java_method_fqn(target: str) -> bool:
@@ -1518,8 +1534,22 @@ def query_graph(
             if not cpp_overload_set:
                 test_nodes = store.search_nodes(f"test_{name}", limit=10)
                 test_nodes += store.search_nodes(f"Test{name}", limit=10)
+                # Java, Kotlin and Ruby name a test class after the class it
+                # tests, with the word last. The search also hits every method of
+                # such a class, and a method called ``Query`` says nothing about
+                # a struct called ``QueryTest``, so this holds for classes alone.
+                if node and node.kind == "Class":
+                    for suffix in ("Test", "Tests", "IT", "Spec"):
+                        test_nodes += [
+                            t for t in store.search_nodes(f"{name}{suffix}", limit=10)
+                            if t.name == f"{name}{suffix}" and t.kind == "Class"
+                        ]
             for t in test_nodes:
-                if t.qualified_name not in seen and t.is_test:
+                if (
+                    t.qualified_name not in seen
+                    and t.is_test
+                    and _test_is_named_after(t, name)
+                ):
                     result = node_to_dict(t)
                     result["indirect"] = False
                     result["inferred_by"] = "naming_convention"

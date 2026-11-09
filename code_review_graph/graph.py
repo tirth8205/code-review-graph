@@ -839,6 +839,7 @@ class GraphStore:
             dict[str, str | None],
             dict[str, set[str]],
             dict[str, set[str]],
+            set[str],
         ] | None = None
         self._cache_lock = threading.Lock()
         self._cache_epoch = 0
@@ -2015,11 +2016,27 @@ class GraphStore:
             class_file = edge_extra.get("receiver_class_file")
             if class_file is not None and not isinstance(class_file, str):
                 return []
-            return [
-                candidate for candidate in candidates
-                if parent_lookup.get(candidate[0]) == class_name
-                and (not class_file or candidate[1] == class_file)
+            # A relative Ruby constant is looked up in the modules written
+            # around it first: ``Cart`` inside ``module Shop`` is
+            # ``Shop::Cart`` when that exists, and the top-level one if not.
+            scopes = edge_extra.get("receiver_scopes")
+            lookup = [
+                *(
+                    f"{scope}.{class_name}"
+                    for scope in (scopes if isinstance(scopes, list) else [])
+                    if isinstance(scope, str) and scope
+                ),
+                class_name,
             ]
+            for path in lookup:
+                matched = [
+                    candidate for candidate in candidates
+                    if parent_lookup.get(candidate[0]) == path
+                    and (not class_file or candidate[1] == class_file)
+                ]
+                if matched:
+                    return matched
+            return []
         return []
 
     @classmethod
@@ -2399,6 +2416,7 @@ class GraphStore:
         dict[str, str | None],
         dict[str, set[str]],
         dict[str, set[str]],
+        set[str],
     ]:
         cached = getattr(self, "_bare_endpoint_context_cache", None)
         if cached is not None:
@@ -2410,14 +2428,18 @@ class GraphStore:
         # qualified_name -> owning class, so a receiver known to be an
         # instance of one class cannot be answered by another class's method.
         parent_lookup: dict[str, str | None] = {}
+        # A Ruby constant can only name a Ruby class.
+        ruby_nodes: set[str] = set()
         for row in conn.execute(
-            "SELECT name, qualified_name, file_path, parent_name FROM nodes "
+            "SELECT name, qualified_name, file_path, parent_name, language FROM nodes "
             "WHERE kind IN ('Function', 'Test', 'Class')"
         ).fetchall():
             node_lookup.setdefault(row["name"], []).append(
                 (row["qualified_name"], row["file_path"]),
             )
             parent_lookup[row["qualified_name"]] = row["parent_name"]
+            if row["language"] == "ruby":
+                ruby_nodes.add(row["qualified_name"])
 
         # call-site file -> explicitly imported files
         import_targets: dict[str, set[str]] = {}
@@ -2523,6 +2545,7 @@ class GraphStore:
             parent_lookup,
             import_targets,
             ambiguous_import_targets,
+            ruby_nodes,
         )
         with self._cache_lock:
             # Publish only if no write invalidated the context meanwhile.
@@ -2577,6 +2600,7 @@ class GraphStore:
             parent_lookup,
             import_targets,
             ambiguous_import_targets,
+            ruby_nodes,
         ) = self._get_bare_endpoint_context(conn)
 
         # Stream candidate rows lazily instead of materialising the full set
@@ -2597,6 +2621,7 @@ class GraphStore:
                 if not candidates:
                     continue
                 edge_extra = {}
+                receiver_constant = False
             else:
                 try:
                     edge_extra = json.loads(raw_extra)
@@ -2612,7 +2637,16 @@ class GraphStore:
                 bare_name = edge_extra.get(raw_key, edge[endpoint])
                 if not isinstance(bare_name, str):
                     continue
-                candidates = node_lookup.get(bare_name, [])
+                # ``Shop::Cart.new`` runs ``Shop::Cart#initialize``.
+                receiver_constant = edge_extra.get("receiver_constant") is True
+                lookup_name = (
+                    "initialize" if receiver_constant and bare_name == "new" else bare_name
+                )
+                candidates = node_lookup.get(lookup_name, [])
+                if receiver_constant:
+                    candidates = [
+                        candidate for candidate in candidates if candidate[0] in ruby_nodes
+                    ]
                 if "receiver_binding" in edge_extra:
                     candidates = self._receiver_backed_candidates(
                         candidates, edge_extra, parent_lookup,
@@ -2636,6 +2670,9 @@ class GraphStore:
                 or candidate_file in imported_files
                 or candidate_file == receiver_file
                 or candidate_file == receiver_class_file
+                # A Ruby constant path names its class wherever it is defined,
+                # and the receiver check above already held the candidate to it.
+                or receiver_constant
             ]
             ambiguous_files = ambiguous_import_targets.get(context_file, set())
             ambiguity_supported = [
@@ -3906,6 +3943,16 @@ class GraphStore:
                 "WHERE e.kind = 'CALLS' "
                 "AND (n.kind IS NULL OR n.kind != 'File')"
             ).fetchall()
+        return {r["target_qualified"] for r in rows}
+
+    def get_call_targets_outside_tests(self) -> set[str]:
+        """Return CALLS targets with a caller that is neither test code nor a File."""
+        rows = self._conn.execute(
+            "SELECT DISTINCT e.target_qualified FROM edges e "
+            "LEFT JOIN nodes n ON n.qualified_name = e.source_qualified "
+            "WHERE e.kind = 'CALLS' "
+            "AND (n.kind IS NULL OR (n.kind != 'File' AND n.is_test = 0))"
+        ).fetchall()
         return {r["target_qualified"] for r in rows}
 
     def get_communities_list(
