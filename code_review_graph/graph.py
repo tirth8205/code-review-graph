@@ -17,9 +17,12 @@ from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
-import networkx as nx
+if TYPE_CHECKING:
+    import networkx as nx
+
+    from .parser import EdgeInfo, NodeInfo
 
 from .constants import (
     BFS_ENGINE,
@@ -40,7 +43,9 @@ from .constants import (
     MAX_IMPACT_DEPTH,
     MAX_IMPACT_NODES,
     env_int,
+    normalize_file_path,
     read_only_requested,
+    release_os_memory,
 )
 from .errors import GraphStoreError, is_lock_error
 from .migrations import (
@@ -51,7 +56,6 @@ from .migrations import (
     run_migrations,
     target_resolution_expr,
 )
-from .parser import EdgeInfo, NodeInfo, is_test_file, normalize_file_path
 
 logger = logging.getLogger(__name__)
 
@@ -744,6 +748,10 @@ class GraphStore:
             if not self.read_only:
                 conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("PRAGMA cache_size=-2000")
+            # FILE keeps the impact-radius working tables reclaimable; the
+            # compile-time default is memory on some SQLite builds.
+            conn.execute("PRAGMA temp_store=FILE")
             _assert_usable_database(conn, self.db_path)
             if self.read_only and conn.execute(
                 "SELECT 1 FROM sqlite_master "
@@ -826,7 +834,14 @@ class GraphStore:
         except (sqlite3.NotSupportedError, TypeError):  # pragma: no cover
             self._conn.create_function("crg_parent_dir", 1, _parent_dir)
         self._nxg_cache: nx.DiGraph | None = None
+        self._bare_endpoint_context_cache: tuple[
+            dict[str, list[tuple[str, str]]],
+            dict[str, str | None],
+            dict[str, set[str]],
+            dict[str, set[str]],
+        ] | None = None
         self._cache_lock = threading.Lock()
+        self._cache_epoch = 0
         # Identifies the read transaction currently open on this connection,
         # so a reader cannot roll back a transaction a writer took from it.
         self._active_read_txn: object | None = None
@@ -857,9 +872,29 @@ class GraphStore:
     def _invalidate_cache(self) -> None:
         """Invalidate the cached NetworkX graph after write operations."""
         with self._cache_lock:
+            self._cache_epoch += 1
             self._nxg_cache = None
+            self._bare_endpoint_context_cache = None
+
+    def shrink_memory(self, clear_nx_cache: bool = True) -> None:
+        """Release cached in-memory structures and shrink SQLite page cache."""
+        if clear_nx_cache:
+            self._invalidate_cache()
+        try:
+            self._conn.execute("PRAGMA shrink_memory")
+        except sqlite3.Error:
+            pass
+        release_os_memory()
 
     def close(self) -> None:
+        # No gc.collect() here: every MCP tool call opens and closes a store,
+        # and a full collection costs ~10 ms or more per call. Builds release
+        # memory once, through shrink_memory(), when they finish.
+        self._invalidate_cache()
+        try:
+            self._conn.execute("PRAGMA shrink_memory")
+        except sqlite3.Error:
+            pass
         self._conn.close()
 
     # --- Write operations ---
@@ -903,6 +938,7 @@ class GraphStore:
         row = self._conn.execute(
             "SELECT id FROM nodes WHERE qualified_name = ?", (qualified,)
         ).fetchone()
+        self._invalidate_cache()
         return row["id"]
 
     def upsert_edge(self, edge: EdgeInfo) -> int:
@@ -927,6 +963,7 @@ class GraphStore:
                 " updated_at=? WHERE id=?",
                 (edge.line, extra, confidence, confidence_tier, now, existing["id"]),
             )
+            self._invalidate_cache()
             return existing["id"]
 
         self._conn.execute(
@@ -937,7 +974,9 @@ class GraphStore:
             (edge.kind, edge.source, edge.target, edge.file_path, edge.line, extra,
              confidence, confidence_tier, now),
         )
-        return self._conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        edge_id = self._conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        self._invalidate_cache()
+        return edge_id
 
     def remove_file_data(self, file_path: str) -> None:
         """Remove all nodes and edges associated with a file."""
@@ -1239,10 +1278,12 @@ class GraphStore:
 
     def commit(self) -> None:
         self._conn.commit()
+        self._invalidate_cache()
 
     def rollback(self) -> None:
         """Rollback the current transaction."""
         self._conn.rollback()
+        self._invalidate_cache()
 
     # --- Read operations ---
 
@@ -1297,6 +1338,30 @@ class GraphStore:
 
     def get_edges_by_target(self, qualified_name: str) -> list[GraphEdge]:
         return list(self.iter_edges_by_target(qualified_name))
+
+    def get_direct_dependent_files(self, file_path: str) -> set[str]:
+        """Files that import *file_path* or point an edge at a node in it.
+
+        One indexed query instead of one lookup per node in the file. The
+        node edges counted are CALLS, IMPORTS_FROM, INHERITS and IMPLEMENTS;
+        *file_path* itself is never its own dependent.
+        """
+        norm_fp = normalize_file_path(file_path)
+        rows = self._conn.execute(
+            "SELECT file_path FROM edges INDEXED BY idx_edges_target_kind "
+            "WHERE target_qualified IN (?, ?) AND kind = 'IMPORTS_FROM' "
+            "UNION "
+            "SELECT e.file_path FROM nodes n "
+            "JOIN edges e INDEXED BY idx_edges_target_kind "
+            "ON e.target_qualified = n.qualified_name "
+            "WHERE n.file_path = ? "
+            "AND e.kind IN ('CALLS', 'IMPORTS_FROM', 'INHERITS', 'IMPLEMENTS')",
+            (file_path, norm_fp, norm_fp),
+        ).fetchall()
+        dependents = {row[0] for row in rows}
+        dependents.discard(file_path)
+        dependents.discard(norm_fp)
+        return dependents
 
     def iter_edges_by_target(self, qualified_name: str) -> Iterator[GraphEdge]:
         """Yield incoming edges without first materializing the complete set."""
@@ -1596,6 +1661,8 @@ class GraphStore:
         TESTED_BY edges. Only reaching a real Test declaration supplies evidence;
         a fixture's is_test flag alone cannot vouch for production code.
         """
+        from .parser import is_test_file
+
         routes: dict[str, dict[str, Any]] = {}
         frontier = {qn: {qn} for qn in seeds if "::" in qn}
         expanded = {qn: set(origins) for qn, origins in frontier.items()}
@@ -1796,6 +1863,8 @@ class GraphStore:
             # production symbol through one lets a fixture vouch for the code
             # it sets up -- 20% of this graph's TESTED_BY edges start at a
             # test-file symbol, so the laundering is not hypothetical.
+            from .parser import is_test_file
+
             caller_names = sorted(callers)
             for start in range(0, len(caller_names), 450):
                 batch = caller_names[start:start + 450]
@@ -1999,6 +2068,10 @@ class GraphStore:
 
         Returns the number of resolved edges.
         """
+        # This pass and resolve_bare_tested_by_sources share one evidence
+        # context. Fill it fresh here so a write that bypassed the store's
+        # invalidation (a resolver using the raw connection) is never missed.
+        self._drop_bare_endpoint_context()
         return self._resolve_bare_endpoints("CALLS", "target_qualified")
 
     # -- Target-resolution certainty --------------------------------------
@@ -2011,14 +2084,16 @@ class GraphStore:
         stale for exactly the edges the distinction is about. One set-based
         UPDATE over the edge table, not a per-row query.
 
-        Returns the number of rows classified.
+        Returns the number of rows whose classification changed; rows that
+        are already right are not rewritten.
         """
         placeholders = ", ".join("?" for _ in TARGET_RESOLUTION_KINDS)
         self._begin_immediate()
         try:
             cursor = self._conn.execute(
                 "UPDATE edges SET target_resolution = "  # noqa: S608
-                f"{TARGET_RESOLUTION_EXPR} WHERE kind IN ({placeholders})",
+                f"{TARGET_RESOLUTION_EXPR} WHERE kind IN ({placeholders}) "
+                f"AND target_resolution IS NOT ({TARGET_RESOLUTION_EXPR})",
                 TARGET_RESOLUTION_KINDS,
             )
             self._conn.commit()
@@ -2278,7 +2353,17 @@ class GraphStore:
 
         Returns the number of resolved edges.
         """
-        return self._resolve_bare_endpoints("TESTED_BY", "source_qualified")
+        try:
+            return self._resolve_bare_endpoints("TESTED_BY", "source_qualified")
+        finally:
+            # The pair is done: do not keep a copy of every node name alive
+            # for the rest of the store's life (watch mode keeps one open).
+            self._drop_bare_endpoint_context()
+
+    def _drop_bare_endpoint_context(self) -> None:
+        with self._cache_lock:
+            self._cache_epoch += 1
+            self._bare_endpoint_context_cache = None
 
     @staticmethod
     def _directory_member_files(
@@ -2301,51 +2386,18 @@ class GraphStore:
                     members.setdefault(directory, set()).add(file_path)
         return members
 
-    def _resolve_bare_endpoints(self, kind: str, endpoint: str) -> int:
-        """Resolve a bare edge endpoint only when one candidate has evidence."""
-        if endpoint == "target_qualified":
-            raw_key = "bare_call_target"
-            endpoint_column = "target_qualified"
-            bare_condition = (
-                "target_qualified NOT LIKE '%::%' "
-                "OR extra LIKE '%\"bare_call_target\"%'"
-            )
-            select_sql = (
-                "SELECT id, source_qualified, target_qualified, file_path, extra "
-                "FROM edges WHERE kind = ? AND (" + bare_condition + ")"
-            )
-        elif endpoint == "source_qualified":
-            raw_key = "bare_tested_by_source"
-            endpoint_column = "source_qualified"
-            bare_condition = (
-                "source_qualified NOT LIKE '%::%' "
-                "OR extra LIKE '%\"bare_tested_by_source\"%'"
-            )
-            select_sql = (
-                "SELECT id, source_qualified, target_qualified, file_path, extra "
-                "FROM edges WHERE kind = ? AND (" + bare_condition + ")"
-            )
-        else:
-            raise ValueError(f"Invalid edge endpoint column: {endpoint!r}")
-
-        conn = self._conn
-
-        # Cheap no-op guard: avoid materialising the full candidate set when
-        # nothing needs resolving. EXISTS stops at the first matching row, so
-        # the common case exits immediately while the empty case pays a single
-        # scan instead of materialising an empty list (issue #721).
-        has_bare = conn.execute(
-            "SELECT EXISTS(SELECT 1 FROM edges WHERE kind = ? AND ("
-            + bare_condition
-            + "))",
-            (kind,),
-        ).fetchone()[0]
-        if not has_bare:
-            return 0
-
-        # Stream candidate rows lazily instead of materialising the full set
-        # into memory (millions of rows on large graphs, issue #721).
-        bare_edges = conn.execute(select_sql, (kind,))
+    def _get_bare_endpoint_context(
+        self, conn: sqlite3.Connection
+    ) -> tuple[
+        dict[str, list[tuple[str, str]]],
+        dict[str, str | None],
+        dict[str, set[str]],
+        dict[str, set[str]],
+    ]:
+        cached = getattr(self, "_bare_endpoint_context_cache", None)
+        if cached is not None:
+            return cached
+        epoch = self._cache_epoch
 
         # bare_name -> [(qualified_name, defining_file)]
         node_lookup: dict[str, list[tuple[str, str]]] = {}
@@ -2380,25 +2432,29 @@ class GraphStore:
             target = row["target_qualified"]
             target_file = target.split("::", 1)[0] if "::" in target else target
             import_targets.setdefault(row["file_path"], set()).add(target_file)
-            scope = _edge_import_scope(row["extra"])
+            raw_extra = row["extra"]
+            if not raw_extra or raw_extra == "{}":
+                continue
+            scope = _edge_import_scope(raw_extra)
             if scope is not None:
                 scoped_dirs[target] = scope
-            try:
-                import_extra = json.loads(row["extra"] or "{}")
-            except (TypeError, json.JSONDecodeError):
-                import_extra = {}
-            if (
-                isinstance(import_extra, dict)
-                and import_extra.get("import_resolution") == "ambiguous"
-                and isinstance(import_extra.get("import_candidates"), list)
-            ):
-                ambiguous_import_targets.setdefault(
-                    row["file_path"], set(),
-                ).update(
-                    candidate
-                    for candidate in import_extra["import_candidates"]
-                    if isinstance(candidate, str)
-                )
+            if "ambiguous" in raw_extra:
+                try:
+                    import_extra = json.loads(raw_extra)
+                except (TypeError, json.JSONDecodeError):
+                    import_extra = {}
+                if (
+                    isinstance(import_extra, dict)
+                    and import_extra.get("import_resolution") == "ambiguous"
+                    and isinstance(import_extra.get("import_candidates"), list)
+                ):
+                    ambiguous_import_targets.setdefault(
+                        row["file_path"], set(),
+                    ).update(
+                        candidate
+                        for candidate in import_extra["import_candidates"]
+                        if isinstance(candidate, str)
+                    )
 
         # C# `using X.Y;` directives store IMPORTS_FROM targets as raw
         # namespace strings rather than file paths, so the path-keyed
@@ -2456,31 +2512,105 @@ class GraphStore:
                         expanded.add(resolved_file)
                 imported |= expanded
 
+        result = (
+            node_lookup,
+            parent_lookup,
+            import_targets,
+            ambiguous_import_targets,
+        )
+        with self._cache_lock:
+            # Publish only if no write invalidated the context meanwhile.
+            if self._cache_epoch == epoch:
+                self._bare_endpoint_context_cache = result
+        return result
+
+    def _resolve_bare_endpoints(self, kind: str, endpoint: str) -> int:
+        """Resolve a bare edge endpoint only when one candidate has evidence."""
+        if endpoint == "target_qualified":
+            raw_key = "bare_call_target"
+            endpoint_column = "target_qualified"
+            bare_condition = (
+                "target_qualified NOT LIKE '%::%' "
+                "OR extra LIKE '%\"bare_call_target\"%'"
+            )
+            select_sql = (
+                "SELECT id, source_qualified, target_qualified, file_path, extra "
+                "FROM edges WHERE kind = ? AND (" + bare_condition + ")"
+            )
+        elif endpoint == "source_qualified":
+            raw_key = "bare_tested_by_source"
+            endpoint_column = "source_qualified"
+            bare_condition = (
+                "source_qualified NOT LIKE '%::%' "
+                "OR extra LIKE '%\"bare_tested_by_source\"%'"
+            )
+            select_sql = (
+                "SELECT id, source_qualified, target_qualified, file_path, extra "
+                "FROM edges WHERE kind = ? AND (" + bare_condition + ")"
+            )
+        else:
+            raise ValueError(f"Invalid edge endpoint column: {endpoint!r}")
+
+        conn = self._conn
+
+        # Cheap no-op guard: avoid materialising the full candidate set when
+        # nothing needs resolving. EXISTS stops at the first matching row, so
+        # the common case exits immediately while the empty case pays a single
+        # scan instead of materialising an empty list (issue #721).
+        has_bare = conn.execute(
+            "SELECT EXISTS(SELECT 1 FROM edges WHERE kind = ? AND ("
+            + bare_condition
+            + "))",
+            (kind,),
+        ).fetchone()[0]
+        if not has_bare:
+            return 0
+
+        (
+            node_lookup,
+            parent_lookup,
+            import_targets,
+            ambiguous_import_targets,
+        ) = self._get_bare_endpoint_context(conn)
+
+        # Stream candidate rows lazily instead of materialising the full set
+        # into memory (millions of rows on large graphs, issue #721).
+        bare_edges = conn.execute(select_sql, (kind,))
+
         resolved = 0
         # Collect every mutation, then apply them in one transaction at the
         # end of the loop (see below).
         updates: list[tuple[str, str, int]] = []
         for edge in bare_edges:
-            try:
-                edge_extra = json.loads(edge["extra"] or "{}")
-            except (TypeError, json.JSONDecodeError):
+            raw_extra = edge["extra"]
+            if not raw_extra or raw_extra == "{}":
+                bare_name = edge[endpoint]
+                if not isinstance(bare_name, str):
+                    continue
+                candidates = node_lookup.get(bare_name)
+                if not candidates:
+                    continue
                 edge_extra = {}
-            if not isinstance(edge_extra, dict):
-                edge_extra = {}
-            if raw_key not in edge_extra and (
-                "ambiguous_targets" in edge_extra
-                or "unresolved_targets" in edge_extra
-            ):
-                continue
-
-            bare_name = edge_extra.get(raw_key, edge[endpoint])
-            if not isinstance(bare_name, str):
-                continue
-            candidates = node_lookup.get(bare_name, [])
-            if "receiver_binding" in edge_extra:
-                candidates = self._receiver_backed_candidates(
-                    candidates, edge_extra, parent_lookup,
-                )
+            else:
+                try:
+                    edge_extra = json.loads(raw_extra)
+                except (TypeError, json.JSONDecodeError):
+                    edge_extra = {}
+                if not isinstance(edge_extra, dict):
+                    edge_extra = {}
+                if raw_key not in edge_extra and (
+                    "ambiguous_targets" in edge_extra
+                    or "unresolved_targets" in edge_extra
+                ):
+                    continue
+                bare_name = edge_extra.get(raw_key, edge[endpoint])
+                if not isinstance(bare_name, str):
+                    continue
+                candidates = node_lookup.get(bare_name, [])
+                if "receiver_binding" in edge_extra:
+                    candidates = self._receiver_backed_candidates(
+                        candidates, edge_extra, parent_lookup,
+                    )
 
             context_file = edge["file_path"]
             imported_files = import_targets.get(context_file, set())
@@ -2566,12 +2696,12 @@ class GraphStore:
                     ),
                 })
 
-            serialized_extra = json.dumps(desired_extra, sort_keys=True)
             if (
                 edge[endpoint] == desired_endpoint
                 and edge_extra == desired_extra
             ):
                 continue
+            serialized_extra = json.dumps(desired_extra, sort_keys=True)
             updates.append((desired_endpoint, serialized_extra, edge["id"]))
             if len(supported) == 1 and edge[endpoint] != desired_endpoint:
                 resolved += 1
@@ -2946,14 +3076,20 @@ class GraphStore:
                 f"INSERT OR IGNORE INTO _impact_seed_names (name) VALUES {placeholders}",
                 batch,
             )
-        row = self._conn.execute(
-            "SELECT COUNT(*) FROM edges "  # noqa: S608
-            "JOIN _impact_seed_names s ON s.name = edges.target_qualified "
-            "WHERE edges.kind IN ('CALLS', 'REFERENCES') "
-            f"AND COALESCE(edges.target_resolution, {TARGET_RESOLUTION_EXPR}) "
-            "= 'unresolved'",
-        ).fetchone()
-        return int(row[0]) if row else 0
+        try:
+            row = self._conn.execute(
+                "SELECT COUNT(*) FROM edges "  # noqa: S608
+                "JOIN _impact_seed_names s ON s.name = edges.target_qualified "
+                "WHERE edges.kind IN ('CALLS', 'REFERENCES') "
+                f"AND COALESCE(edges.target_resolution, {TARGET_RESOLUTION_EXPR}) "
+                "= 'unresolved'",
+            ).fetchone()
+            return int(row[0]) if row else 0
+        finally:
+            try:
+                self._conn.execute("DELETE FROM _impact_seed_names")
+            except sqlite3.Error:
+                pass
 
     def get_impact_radius(
         self,
@@ -2962,7 +3098,7 @@ class GraphStore:
         max_nodes: int = MAX_IMPACT_NODES,
         resolution: str = "all",
     ) -> dict[str, Any]:
-        """Find dependents and tests impacted by changed files within depth N.
+        """Calculate the impact radius (dependents and tests) of changed files within depth N.
 
         Delegates to ``get_impact_radius_sql()`` by default (faster for
         large graphs).  Set ``CRG_BFS_ENGINE=networkx`` to use the legacy
@@ -3160,29 +3296,43 @@ class GraphStore:
         # Fetch one sentinel beyond the public cap. Ghost endpoints remain in
         # the frontier as bridges but cannot consume a result slot because the
         # final selection joins the canonical nodes table.
-        rows = self._conn.execute(
-            "SELECT b.node_qn, b.score "
-            "FROM _impact_best b "
-            "JOIN nodes n ON n.qualified_name = b.node_qn "
-            "LEFT JOIN _impact_seeds s ON s.qn = b.node_qn "
-            "WHERE s.qn IS NULL "
-            "AND n.extra NOT LIKE '%\"verilog_kind\"%' "
-            "ORDER BY b.score DESC, b.node_qn "
-            "LIMIT ?",
-            (max_nodes + 1,),
-        ).fetchall()
-        truncated = len(rows) > max_nodes
-        if truncated:
-            total_impacted = self._conn.execute(
-                "SELECT COUNT(*) "
+        try:
+            rows = self._conn.execute(
+                "SELECT b.node_qn, b.score "
                 "FROM _impact_best b "
                 "JOIN nodes n ON n.qualified_name = b.node_qn "
                 "LEFT JOIN _impact_seeds s ON s.qn = b.node_qn "
                 "WHERE s.qn IS NULL "
-                "AND n.extra NOT LIKE '%\"verilog_kind\"%'"
-            ).fetchone()[0]
-        else:
-            total_impacted = len(rows)
+                "AND n.extra NOT LIKE '%\"verilog_kind\"%' "
+                "ORDER BY b.score DESC, b.node_qn "
+                "LIMIT ?",
+                (max_nodes + 1,),
+            ).fetchall()
+            truncated = len(rows) > max_nodes
+            if truncated:
+                total_impacted = self._conn.execute(
+                    "SELECT COUNT(*) "
+                    "FROM _impact_best b "
+                    "JOIN nodes n ON n.qualified_name = b.node_qn "
+                    "LEFT JOIN _impact_seeds s ON s.qn = b.node_qn "
+                    "WHERE s.qn IS NULL "
+                    "AND n.extra NOT LIKE '%\"verilog_kind\"%'"
+                ).fetchone()[0]
+            else:
+                total_impacted = len(rows)
+        finally:
+            for _tbl in (
+                "_impact_seeds",
+                "_impact_policies",
+                "_impact_best",
+                "_impact_frontier",
+                "_impact_next",
+                "_impact_frontier_dirs",
+            ):
+                try:
+                    self._conn.execute(f"DELETE FROM {_tbl}")  # nosec B608
+                except sqlite3.Error:
+                    pass
         kept_rows = rows[:max_nodes]
         score_by_qn = {row[0]: float(row[1]) for row in kept_rows}
 
@@ -3911,6 +4061,8 @@ class GraphStore:
 
     def _build_networkx_graph(self) -> nx.DiGraph:
         """Build a directed graph with impact weights for both policies."""
+        import networkx as nx
+
         with self._cache_lock:
             if self._nxg_cache is not None:
                 return self._nxg_cache
@@ -3985,6 +4137,7 @@ class GraphStore:
         return f"{node.file_path}::{identity_name}"
 
     def _row_to_node(self, row: sqlite3.Row) -> GraphNode:
+        raw_extra = row["extra"]
         return GraphNode(
             id=row["id"],
             kind=row["kind"],
@@ -3999,14 +4152,23 @@ class GraphStore:
             return_type=row["return_type"],
             is_test=bool(row["is_test"]),
             file_hash=row["file_hash"],
-            extra=json.loads(row["extra"]) if row["extra"] else {},
+            extra=(
+                json.loads(raw_extra)
+                if raw_extra and raw_extra != "{}"
+                else {}
+            ),
         )
 
     def _row_to_edge(self, row: sqlite3.Row) -> GraphEdge:
-        extra = json.loads(row["extra"]) if row["extra"] else {}
-        confidence = row["confidence"] if "confidence" in row.keys() else 1.0
-        confidence_tier = row["confidence_tier"] if "confidence_tier" in row.keys() else "EXTRACTED"
+        raw_extra = row["extra"]
+        extra = (
+            json.loads(raw_extra)
+            if raw_extra and raw_extra != "{}"
+            else {}
+        )
         keys = row.keys()
+        confidence = row["confidence"] if "confidence" in keys else 1.0
+        confidence_tier = row["confidence_tier"] if "confidence_tier" in keys else "EXTRACTED"
         target_resolution = (
             row["target_resolution"] if "target_resolution" in keys else None
         )
@@ -4163,3 +4325,18 @@ def edge_to_dict(e: GraphEdge) -> dict:
                 or count > len(result[key])
             )
     return result
+
+
+def __getattr__(name: str) -> Any:
+    if name in ("EdgeInfo", "NodeInfo", "is_test_file"):
+        from . import parser as _parser
+
+        val = getattr(_parser, name)
+        globals()[name] = val
+        return val
+    if name == "nx":
+        import networkx as _nx
+
+        globals()["nx"] = _nx
+        return _nx
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

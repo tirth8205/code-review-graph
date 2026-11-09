@@ -29,11 +29,29 @@ from .constants import (
     discovery_timeout,
     env_float,
     env_int,
+    normalize_file_path,
     read_only_requested,
 )
 from .errors import ChangeDiscoveryError, GraphRootMismatchError, GraphStoreError
 from .graph import GraphStore
-from .parser import CodeParser, normalize_file_path
+
+
+def _get_code_parser_cls():
+    cls = globals().get("CodeParser")
+    if cls is None:
+        from .parser import CodeParser
+
+        globals()["CodeParser"] = CodeParser
+        return CodeParser
+    return cls
+
+
+def __getattr__(name: str):
+    if name == "CodeParser":
+        from .parser import CodeParser
+        globals()["CodeParser"] = CodeParser
+        return CodeParser
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 _MAX_PARSE_WORKERS = env_int("CRG_PARSE_WORKERS", min(os.cpu_count() or 4, 8))
 
@@ -1722,7 +1740,7 @@ def collect_all_files(
             When *None*, falls back to ``CRG_RECURSE_SUBMODULES`` env var.
     """
     ignore_patterns = _load_ignore_patterns(repo_root)
-    parser = CodeParser(repo_root)
+    parser = _get_code_parser_cls()(repo_root)
     files = []
 
     # Prefer Git's tracked-file inventory, augmented with untracked files so
@@ -1791,7 +1809,7 @@ def _reconcile_stale_files(
         }
     else:
         ignore_patterns = _load_ignore_patterns(repo_root)
-        parser = CodeParser(repo_root)
+        parser = _get_code_parser_cls()(repo_root)
         current_paths = set()
         for stored_file in stored_files:
             path = Path(stored_file)
@@ -1915,21 +1933,65 @@ _MAX_DEPENDENT_FILES = 500
 
 
 def _single_hop_dependents(store: GraphStore, file_path: str) -> set[str]:
-    """Find files that directly depend on *file_path* (single hop)."""
-    dependents: set[str] = set()
-    edges = store.get_edges_by_target(file_path)
-    for e in edges:
-        if e.kind == "IMPORTS_FROM":
-            dependents.add(e.file_path)
+    """Find files that directly depend on *file_path* (single hop).
 
-    nodes = store.get_nodes_by_file(file_path)
-    for node in nodes:
-        for e in store.get_edges_by_target(node.qualified_name):
-            if e.kind in ("CALLS", "IMPORTS_FROM", "INHERITS", "IMPLEMENTS"):
-                dependents.add(e.file_path)
+    A file depends on *file_path* when it imports it, or when one of its
+    edges calls, imports, inherits or implements a node defined in it.
+    """
+    return store.get_direct_dependent_files(file_path)
 
-    dependents.discard(file_path)
-    return dependents
+
+# These languages are parsed by bounded fallbacks or config readers, so no
+# grammar package is loaded for them and probing one only costs a subprocess.
+_NO_GRAMMAR_LANGUAGES = frozenset({"rescript", "vbnet", "yaml", "properties"})
+
+
+def _prewarm_parser_probes(parser: Any, rel_paths: list[str]) -> None:
+    """Pre-warm grammar load probes concurrently before spawning worker pool."""
+    try:
+        from . import parser as parser_mod
+    except Exception:
+        return
+    probe_fn = getattr(parser_mod, "_parser_load_probe_succeeds", None)
+    if getattr(probe_fn, "__qualname__", "") != "_parser_load_probe_succeeds":
+        return
+    ext_map = getattr(parser, "_extension_map", None)
+    if not isinstance(ext_map, dict):
+        return
+    grammars: set[str] = set()
+    for rel_path in rel_paths:
+        suffix = Path(rel_path).suffix.lower()
+        lang = ext_map.get(suffix)
+        if not lang:
+            continue
+        if lang == "notebook":
+            grammars.add("python")
+        elif lang in ("vue", "svelte"):
+            grammars.update(("javascript", "typescript", "html"))
+        elif lang == "blade":
+            grammars.update(("php", "html"))
+        elif lang == "c" and suffix == ".h":
+            grammars.update(("c", "cpp"))
+        elif lang in _NO_GRAMMAR_LANGUAGES:
+            continue
+        else:
+            grammars.add(lang)
+    custom = getattr(parser, "_custom_languages", None) or {}
+    grammars = {
+        getattr(custom.get(g), "grammar", None) or g for g in grammars
+    }
+    unprobed = [
+        g for g in grammars if g not in parser_mod._PARSER_PROBE_RESULTS
+    ]
+    if not unprobed:
+        return
+    if len(unprobed) == 1:
+        probe_fn(unprobed[0])
+        return
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=min(len(unprobed), _MAX_PARSE_WORKERS)
+    ) as pool:
+        list(pool.map(probe_fn, unprobed))
 
 
 class DependentList(list):
@@ -2010,7 +2072,7 @@ def _parse_single_file(
         parser = getattr(_PARSE_WORKER_STATE, "parser", None)
         parser_repo_root = getattr(_PARSE_WORKER_STATE, "repo_root", None)
         if parser is None or parser_repo_root != repo_root_str:
-            parser = CodeParser(Path(repo_root_str))
+            parser = _get_code_parser_cls()(Path(repo_root_str))
             _PARSE_WORKER_STATE.parser = parser
             _PARSE_WORKER_STATE.repo_root = repo_root_str
         nodes, edges = parser.parse_bytes(abs_path, raw)
@@ -2047,7 +2109,7 @@ def full_build(
             ``CRG_ENABLE_ENRICHMENT``. Off by default.
     """
     repo_root = _canonical_repo_root(repo_root)
-    parser = CodeParser(repo_root)
+    parser = _get_code_parser_cls()(repo_root)
     files = collect_all_files(repo_root, recurse_submodules)
     stale_files = _reconcile_stale_files(repo_root, store, files)
 
@@ -2098,6 +2160,7 @@ def full_build(
         # thread for MCP stdio to avoid pipe-handle inheritance deadlocks and
         # orphan workers (issues #46, #136, PR #615). Override via
         # CRG_PARSE_EXECUTOR env.
+        _prewarm_parser_probes(parser, files)
         args_list = [(rel_path, str(repo_root)) for rel_path in files]
         with _make_executor(_MAX_PARSE_WORKERS) as executor:
             for i, (rel_path, nodes, edges, error, fhash) in enumerate(
@@ -2203,7 +2266,7 @@ def incremental_update(
     repo_root = _canonical_repo_root(repo_root)
     if reconcile_stale:
         _assert_graph_matches_root(repo_root, store)
-    parser = CodeParser(repo_root)
+    parser = _get_code_parser_cls()(repo_root)
     ignore_patterns = _load_ignore_patterns(repo_root)
     vcs = detect_vcs(repo_root)
     stored_git_sha = store.get_metadata("git_head_sha") if vcs == "git" else None
@@ -2466,6 +2529,7 @@ def incremental_update(
             total_edges += len(edges)
     else:
         # See full-build comment above for executor kind rationale.
+        _prewarm_parser_probes(parser, to_parse)
         args_list = [(rel_path, str(repo_root)) for rel_path in to_parse]
         with _make_executor(_MAX_PARSE_WORKERS) as executor:
             for rel_path, nodes, edges, error, fhash in executor.map(
@@ -2517,14 +2581,17 @@ def incremental_update(
         _store_cpp_identity_pending(store, remaining_identity)
         store.commit()
 
-    # Only re-run language-specific resolvers when the relevant files changed.
-    python_changed = any(
-        path.endswith(".py")
-        for path in set(all_files) | set(stale_files) | missing_paths
+    has_graph_changes = bool(files_updated or stale_files)
+    candidate_paths = set(all_files) | set(stale_files) | missing_paths
+
+    # Only re-run language-specific resolvers when the graph actually changed
+    # and the relevant language files were involved.
+    python_changed = has_graph_changes and any(
+        path.endswith(".py") for path in candidate_paths
     )
     python_stats = _run_python_resolver(store) if python_changed else None
 
-    rescript_changed = any(
+    rescript_changed = has_graph_changes and any(
         rp.endswith((".res", ".resi")) for rp in all_files
     )
     rescript_stats = (
@@ -2534,9 +2601,8 @@ def incremental_update(
     # Like python_changed above, include stale/missing paths so a deletion
     # that only surfaces through reconciliation still clears derived state
     # (e.g. virtual Spring Event nodes — issue #474).
-    spring_changed = any(
-        path.endswith(".java")
-        for path in set(all_files) | set(stale_files) | missing_paths
+    spring_changed = has_graph_changes and any(
+        path.endswith(".java") for path in candidate_paths
     )
     spring_stats = _run_spring_resolver(store) if spring_changed else None
     aop_stats = _run_aop_resolver(store) if spring_changed else None
@@ -2544,16 +2610,20 @@ def incremental_update(
         _run_spring_event_resolver(store) if spring_changed else None
     )
     temporal_stats = _run_temporal_resolver(store) if spring_changed else None
-    hcl_changed = any(rp.endswith((".tf", ".hcl")) for rp in all_files)
+    hcl_changed = has_graph_changes and any(
+        rp.endswith((".tf", ".hcl")) for rp in all_files
+    )
     hcl_stats = _run_hcl_resolver(store) if hcl_changed else None
-    scoped_changed = any(rp.endswith((".php", ".rs", ".cs")) for rp in all_files)
+    scoped_changed = has_graph_changes and any(
+        rp.endswith((".php", ".rs", ".cs")) for rp in all_files
+    )
     scoped_stats = _run_scoped_resolver(store) if scoped_changed else None
     reparsed_py = [p for p in reparsed_paths if p.endswith(".py")]
     jedi_stats = (
         _run_jedi_enrichment(store, repo_root, files=reparsed_py, enrich=enrich)
         if reparsed_py else None
     )
-    if files_updated or stale_files:
+    if has_graph_changes:
         _refresh_target_resolution(store)
 
     # Freshness follows what was stored. A file that failed to parse is
@@ -2575,6 +2645,12 @@ def incremental_update(
         advance_to_postprocess_pending(store)
         freshness_advanced = _store_vcs_metadata(repo_root, store)
         store.commit()
+
+    if parsed_files >= 20 and hasattr(parser, "clear_caches"):
+        parser.clear_caches(include_parsers=True, release_memory=(parsed_files >= 50))
+    _PARSE_WORKER_STATE.__dict__.clear()
+    if hasattr(store, "_invalidate_cache"):
+        store._invalidate_cache()
 
     return {
         "files_updated": files_updated,
@@ -3533,7 +3609,7 @@ def _create_watch_handler(
     from watchdog.events import FileSystemEvent, FileSystemEventHandler
 
     ignore_patterns = _load_ignore_patterns(repo_root)
-    parser = CodeParser(repo_root)
+    parser = _get_code_parser_cls()(repo_root)
     lexical_root = Path(os.path.abspath(repo_root))
     resolved_root = lexical_root.resolve()
     manifest_names = set().union(*NESTED_OUTPUT_DIR_MARKERS.values())

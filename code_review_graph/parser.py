@@ -36,6 +36,8 @@ from .constants import (
     IMPORT_SCOPE_KEY,
     IMPORT_SCOPE_PACKAGE,
     IMPORT_SCOPE_TREE,
+    normalize_file_path,
+    release_os_memory,
 )
 from .custom_languages import CustomLanguage, load_custom_languages
 from .npm_alias_resolver import NpmAliasResolver
@@ -268,6 +270,19 @@ def _python_type_checking_aliases(
     tree: ast.Module,
 ) -> tuple[frozenset[str], frozenset[str]]:
     """Return unshadowed aliases for ``typing.TYPE_CHECKING``."""
+    has_typing_import = False
+    for statement in tree.body:
+        if isinstance(statement, ast.Import):
+            if any(alias.name == "typing" for alias in statement.names):
+                has_typing_import = True
+                break
+        elif isinstance(statement, ast.ImportFrom) and statement.module == "typing":
+            if any(alias.name == "TYPE_CHECKING" for alias in statement.names):
+                has_typing_import = True
+                break
+    if not has_typing_import:
+        return frozenset(), frozenset()
+
     names: set[str] = set()
     modules: set[str] = set()
     shadowed: set[str] = set()
@@ -337,6 +352,14 @@ def _python_static_truth(
     return None
 
 
+_TRY_STMT_TYPES: tuple[type[ast.AST], ...] = (
+    (ast.Try, ast.TryStar) if hasattr(ast, "TryStar") else (ast.Try,)
+)
+_MATCH_STMT_TYPES: tuple[type[ast.AST], ...] = (
+    (ast.Match,) if hasattr(ast, "Match") else ()
+)
+
+
 class _PythonUnreachableCallVisitor(ast.NodeVisitor):
     """Collect calls and attribute loads in statically unreachable branches."""
 
@@ -350,6 +373,9 @@ class _PythonUnreachableCallVisitor(ast.NodeVisitor):
         self._type_checking_names = type_checking_names
         self._typing_modules = typing_modules
 
+    def visit_Module(self, node: ast.Module) -> None:  # noqa: N802
+        self._visit_statements(node.body, dead=False)
+
     def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
         if self._dead:
             self.positions.add((node.lineno, node.col_offset))
@@ -361,7 +387,8 @@ class _PythonUnreachableCallVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_If(self, node: ast.If) -> None:  # noqa: N802
-        self.visit(node.test)
+        if self._dead:
+            self.visit(node.test)
         truth = _python_static_truth(
             node.test,
             self._type_checking_names,
@@ -380,20 +407,22 @@ class _PythonUnreachableCallVisitor(ast.NodeVisitor):
         self._visit_function(node)
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:  # noqa: N802
-        for decorator in node.decorator_list:
-            self.visit(decorator)
-        for base in node.bases:
-            self.visit(base)
-        for keyword in node.keywords:
-            self.visit(keyword.value)
+        if self._dead:
+            for decorator in node.decorator_list:
+                self.visit(decorator)
+            for base in node.bases:
+                self.visit(base)
+            for keyword in node.keywords:
+                self.visit(keyword.value)
 
-        bindings = _PythonScopeBindingVisitor()
-        for statement in node.body:
-            bindings.visit(statement)
         outer_names = self._type_checking_names
         outer_modules = self._typing_modules
-        self._type_checking_names = outer_names - bindings.names
-        self._typing_modules = outer_modules - bindings.names
+        if outer_names or outer_modules:
+            bindings = _PythonScopeBindingVisitor()
+            for statement in node.body:
+                bindings.visit(statement)
+            self._type_checking_names = outer_names - bindings.names
+            self._typing_modules = outer_modules - bindings.names
         self._visit_statements(node.body, dead=False)
         self._type_checking_names = outer_names
         self._typing_modules = outer_modules
@@ -402,42 +431,49 @@ class _PythonUnreachableCallVisitor(ast.NodeVisitor):
         self,
         node: ast.FunctionDef | ast.AsyncFunctionDef,
     ) -> None:
-        for decorator in node.decorator_list:
-            self.visit(decorator)
-        for default in (*node.args.defaults, *node.args.kw_defaults):
-            if default is not None:
-                self.visit(default)
-        all_args = (
-            *node.args.posonlyargs,
-            *node.args.args,
-            *node.args.kwonlyargs,
-        )
-        for argument in all_args:
-            if argument.annotation is not None:
-                self.visit(argument.annotation)
-        for optional_argument in (node.args.vararg, node.args.kwarg):
-            if (
-                optional_argument is not None
-                and optional_argument.annotation is not None
-            ):
-                self.visit(optional_argument.annotation)
-        if node.returns is not None:
-            self.visit(node.returns)
-
-        bindings = _PythonScopeBindingVisitor()
-        for statement in node.body:
-            bindings.visit(statement)
-        bindings.names.update(argument.arg for argument in all_args)
-        bindings.names.update(
-            argument.arg
-            for argument in (node.args.vararg, node.args.kwarg)
-            if argument is not None
-        )
+        if self._dead:
+            for decorator in node.decorator_list:
+                self.visit(decorator)
+            for default in (*node.args.defaults, *node.args.kw_defaults):
+                if default is not None:
+                    self.visit(default)
+            all_args = (
+                *node.args.posonlyargs,
+                *node.args.args,
+                *node.args.kwonlyargs,
+            )
+            for argument in all_args:
+                if argument.annotation is not None:
+                    self.visit(argument.annotation)
+            for optional_argument in (node.args.vararg, node.args.kwarg):
+                if (
+                    optional_argument is not None
+                    and optional_argument.annotation is not None
+                ):
+                    self.visit(optional_argument.annotation)
+            if node.returns is not None:
+                self.visit(node.returns)
+        else:
+            all_args = (
+                *node.args.posonlyargs,
+                *node.args.args,
+                *node.args.kwonlyargs,
+            )
 
         outer_names = self._type_checking_names
         outer_modules = self._typing_modules
-        self._type_checking_names = outer_names - bindings.names
-        self._typing_modules = outer_modules - bindings.names
+        if outer_names or outer_modules:
+            bindings = _PythonScopeBindingVisitor()
+            for statement in node.body:
+                bindings.visit(statement)
+            bindings.names.update(argument.arg for argument in all_args)
+            bindings.names.update(
+                argument.arg
+                for argument in (node.args.vararg, node.args.kwarg)
+                if argument is not None
+            )
+            self._type_checking_names = outer_names - bindings.names
+            self._typing_modules = outer_modules - bindings.names
         self._visit_statements(node.body, dead=False)
         self._type_checking_names = outer_names
         self._typing_modules = outer_modules
@@ -449,9 +485,43 @@ class _PythonUnreachableCallVisitor(ast.NodeVisitor):
         dead: bool,
     ) -> None:
         outer_dead = self._dead
-        self._dead = outer_dead or dead
-        for statement in statements:
-            self.visit(statement)
+        is_dead = outer_dead or dead
+        self._dead = is_dead
+        if is_dead:
+            for statement in statements:
+                self.visit(statement)
+        else:
+            for statement in statements:
+                if isinstance(
+                    statement,
+                    (ast.If, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef),
+                ):
+                    self.visit(statement)
+                elif isinstance(statement, (ast.For, ast.AsyncFor, ast.While)):
+                    self._visit_statements(statement.body, dead=False)
+                    if statement.orelse:
+                        self._visit_statements(statement.orelse, dead=False)
+                elif isinstance(statement, (ast.With, ast.AsyncWith)):
+                    self._visit_statements(statement.body, dead=False)
+                elif isinstance(statement, _TRY_STMT_TYPES):
+                    try_body = getattr(statement, "body", None)
+                    if try_body:
+                        self._visit_statements(try_body, dead=False)
+                    for handler in getattr(statement, "handlers", ()):
+                        handler_body = getattr(handler, "body", None)
+                        if handler_body:
+                            self._visit_statements(handler_body, dead=False)
+                    try_orelse = getattr(statement, "orelse", None)
+                    if try_orelse:
+                        self._visit_statements(try_orelse, dead=False)
+                    try_finalbody = getattr(statement, "finalbody", None)
+                    if try_finalbody:
+                        self._visit_statements(try_finalbody, dead=False)
+                elif _MATCH_STMT_TYPES and isinstance(statement, _MATCH_STMT_TYPES):
+                    for case in getattr(statement, "cases", ()):
+                        case_body = getattr(case, "body", None)
+                        if case_body:
+                            self._visit_statements(case_body, dead=False)
         self._dead = outer_dead
 
 
@@ -639,6 +709,7 @@ _DEFAULT_PARSER_LOAD_TIMEOUT_SECONDS = 5.0
 _PARSER_PROBE_RESULTS: dict[str, bool] = {}
 _PARSER_PROBE_FAILURE_DETAILS: dict[str, str] = {}
 _PARSER_PROBE_LOCK = threading.Lock()
+_PARSER_PROBE_GRAMMAR_LOCKS: dict[str, threading.Lock] = {}
 _EXPECTED_PARSER_LOAD_ERRORS = (ImportError, LookupError, OSError, ValueError)
 
 
@@ -755,23 +826,34 @@ def _parser_load_probe_succeeds(
 ) -> bool:
     """Return a process-cached result for one bounded grammar probe.
 
-    The lock deliberately covers the subprocess call: parallel parser users
-    must not start duplicate probes for the same grammar while the first one
-    is still running.
+    A per-grammar lock covers the subprocess call so parallel parser users
+    never start duplicate probes for the same grammar while distinct grammars
+    can probe concurrently.
     """
     with _PARSER_PROBE_LOCK:
         cached = _PARSER_PROBE_RESULTS.get(grammar)
         if cached is not None:
             return cached
+        grammar_lock = _PARSER_PROBE_GRAMMAR_LOCKS.get(grammar)
+        if grammar_lock is None:
+            grammar_lock = threading.Lock()
+            _PARSER_PROBE_GRAMMAR_LOCKS[grammar] = grammar_lock
+
+    with grammar_lock:
+        with _PARSER_PROBE_LOCK:
+            cached = _PARSER_PROBE_RESULTS.get(grammar)
+            if cached is not None:
+                return cached
         timeout = (
             _parser_load_timeout_seconds()
             if timeout_seconds is None
             else timeout_seconds
         )
         result = _run_parser_load_probe(grammar, timeout)
-        _PARSER_PROBE_RESULTS[grammar] = result
+        with _PARSER_PROBE_LOCK:
+            _PARSER_PROBE_RESULTS[grammar] = result
+            detail = _PARSER_PROBE_FAILURE_DETAILS.get(grammar) if not result else None
         if not result:
-            detail = _PARSER_PROBE_FAILURE_DETAILS.get(grammar)
             if detail:
                 hint = _install_hint_for_probe_failure(detail)
                 if hint:
@@ -806,6 +888,7 @@ def _clear_parser_probe_cache() -> None:
     with _PARSER_PROBE_LOCK:
         _PARSER_PROBE_RESULTS.clear()
         _PARSER_PROBE_FAILURE_DETAILS.clear()
+        _PARSER_PROBE_GRAMMAR_LOCKS.clear()
 
 
 def _load_tree_sitter_parser(grammar: str):
@@ -1037,23 +1120,6 @@ def _read_php_composer_psr4(
 # ---------------------------------------------------------------------------
 # Data models for extracted entities
 # ---------------------------------------------------------------------------
-
-
-def normalize_file_path(path: "str | PurePath") -> str:
-    """Return *path* as a forward-slash (POSIX) string for graph identity.
-
-    ``file_path`` values and the path component of qualified names are graph
-    identity: they must be separator-stable across operating systems so a
-    graph built on Windows produces the same identifiers as one built on
-    Linux/macOS, and so consumers that reconstruct identifiers from ``Path``
-    objects always agree with the parser. See issue #774.
-
-    Only apply this to file *paths* — never to symbol names: PHP namespace
-    identifiers (``App\\Domain\\Job``) legitimately contain backslashes.
-    """
-    if isinstance(path, PurePath):
-        return path.as_posix()
-    return str(path).replace("\\", "/")
 
 
 @dataclass
@@ -3591,6 +3657,42 @@ class CodeParser:
                 return None
             self._parsers[language] = parser
         return self._parsers[language]
+
+    def clear_caches(
+        self, include_parsers: bool = False, release_memory: bool = True
+    ) -> None:
+        """Clear per-instance and module-level caches and optionally release free heap pages."""
+        self._dbt_model_paths_cache.clear()
+        self._module_file_cache.clear()
+        self._ignore_patterns_cache.clear()
+        self._indexed_path_cache.clear()
+        self._dir_entries_cache.clear()
+        self._go_module_cache.clear()
+        self._ruby_load_roots_cache.clear()
+        self._python_reexport_cache.clear()
+        self._export_symbol_cache.clear()
+        self._dart_pubspec_cache.clear()
+        self._rust_project_cache.clear()
+        self._tsconfig_resolver = TsconfigResolver()
+        if include_parsers:
+            self._parsers.clear()
+        with _PYTHON_STAR_EXPORT_CACHE_LOCK:
+            _PYTHON_STAR_EXPORT_CACHE.clear()
+        with _PYTHON_RETURN_ANNOTATION_CACHE_LOCK:
+            _PYTHON_RETURN_ANNOTATION_CACHE.clear()
+        for _cached_fn in (
+            _read_cargo_manifest,
+            _python_unreachable_call_positions,
+            _read_go_mod,
+            _read_gemspec_require_paths,
+            _read_php_composer_psr4,
+            _repo_root_prefixes,
+            _resolved_dir,
+            _is_python_package_dir,
+        ):
+            _cached_fn.cache_clear()
+        if release_memory:
+            release_os_memory()
 
     def detect_language(self, path: Path, source: Optional[bytes] = None) -> Optional[str]:
         """Map a file path to its language name.

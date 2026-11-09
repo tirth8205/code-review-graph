@@ -18,6 +18,7 @@ from ..build_state import (
     graph_contents_are_complete,
     read_build_state,
 )
+from ..constants import normalize_file_path
 from ..incremental import (
     VERIFIED_FILE_COUNT_KEY,
     _prepare_db_path,
@@ -30,7 +31,6 @@ from ..incremental import (
     resolve_incremental_base,
 )
 from ..locking import WriteLock, write_lock_path
-from ..parser import normalize_file_path
 from ._common import _get_store, _resolve_root
 
 logger = logging.getLogger(__name__)
@@ -279,18 +279,30 @@ def _run_postprocess(
             )
         return warnings
 
+    noop_incremental = (
+        not full_rebuild
+        and changed_files is not None
+        and build_result.get("files_updated") == 0
+        and not build_result.get("stale_files_removed")
+    )
+
     # Resolve bare and C++ scoped call targets before derived graph steps.
     if not skip_resolvers:
         try:
-            resolved = store.resolve_bare_call_targets()
-            resolved += store.resolve_bare_tested_by_sources()
-            build_result["bare_edges_resolved"] = resolved
-            build_result["cpp_scoped_edges_resolved"] = (
-                store.resolve_cpp_scoped_call_targets()
-            )
-            # Resolvers rewrite bare targets into qualified ones, so the stored
-            # certainty column is only correct once they have all run.
-            store.refresh_target_resolution()
+            if noop_incremental and not store.get_nodes_without_signature():
+                build_result["bare_edges_resolved"] = 0
+                build_result["cpp_scoped_edges_resolved"] = 0
+            else:
+                noop_incremental = False
+                resolved = store.resolve_bare_call_targets()
+                resolved += store.resolve_bare_tested_by_sources()
+                build_result["bare_edges_resolved"] = resolved
+                build_result["cpp_scoped_edges_resolved"] = (
+                    store.resolve_cpp_scoped_call_targets()
+                )
+                # Resolvers rewrite bare targets into qualified ones, so the stored
+                # certainty column is only correct once they have all run.
+                store.refresh_target_resolution()
         except sqlite3.OperationalError as e:
             logger.warning("Call-target resolution failed: %s", e)
             _note_contention(build_result, e)
@@ -375,13 +387,21 @@ def _run_postprocess(
     # Incremental mode also triggers when pre-replacement capture preserved
     # entry-point QNs even if the relative changed_files list alone would
     # miss absolute graph paths (#569).
-    use_incremental = not full_rebuild and (
-        bool(changed_files) or bool(entry_point_qns) or communities_were_affected
+    use_incremental = (
+        not full_rebuild
+        and not build_result.get("identity_rebuild")
+        and (
+            bool(changed_files)
+            or bool(entry_point_qns)
+            or communities_were_affected
+        )
     )
 
     stage_started = time.perf_counter()
     try:
-        if use_incremental:
+        if noop_incremental:
+            count = 0
+        elif use_incremental:
             from code_review_graph.flows import incremental_trace_flows
 
             count = incremental_trace_flows(
@@ -408,7 +428,9 @@ def _run_postprocess(
 
     stage_started = time.perf_counter()
     try:
-        if use_incremental:
+        if noop_incremental:
+            count = store._conn.execute("SELECT COUNT(*) FROM communities").fetchone()[0]
+        elif use_incremental:
             from code_review_graph.communities import (
                 incremental_detect_communities,
             )
@@ -453,6 +475,8 @@ def _run_postprocess(
         time.strftime("%Y-%m-%dT%H:%M:%S"),
     )
     store.set_metadata("postprocess_level", postprocess)
+    if hasattr(store, "shrink_memory"):
+        store.shrink_memory()
 
     return warnings
 

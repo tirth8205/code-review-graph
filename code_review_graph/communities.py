@@ -6,15 +6,21 @@ optional) with a file-based grouping fallback when igraph is not installed.
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 import random
 import re
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, namedtuple
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 from .constants import env_int
 from .graph import GraphEdge, GraphNode, GraphStore, _sanitize_name
+
+_CommunityEdge = namedtuple(
+    "_CommunityEdge", ("kind", "source_qualified", "target_qualified")
+)
 
 # Fixed seed for igraph's RNG so Leiden community detection is reproducible
 # across runs. Without this, two builds of the same graph produce different
@@ -32,13 +38,8 @@ _SLUG_MAX_LEN = 30
 # Optional igraph import
 # ---------------------------------------------------------------------------
 
-try:
-    import igraph as ig  # type: ignore[import-untyped]
-
-    IGRAPH_AVAILABLE = True
-except ImportError:
-    ig = None  # type: ignore[assignment]
-    IGRAPH_AVAILABLE = False
+IGRAPH_AVAILABLE = importlib.util.find_spec("igraph") is not None
+ig: Any = None
 
 # ---------------------------------------------------------------------------
 # Edge weight mapping
@@ -188,7 +189,7 @@ def _to_slug(s: str) -> str:
 
 def _compute_cohesion_batch(
     community_member_qns: list[set[str]],
-    all_edges: list[GraphEdge],
+    all_edges: Sequence[GraphEdge | _CommunityEdge],
 ) -> list[float]:
     """Compute cohesion for multiple communities in a single O(edges) pass.
 
@@ -233,7 +234,7 @@ def _compute_cohesion_batch(
     return results
 
 
-def _build_adjacency(edges: list[GraphEdge]) -> dict[str, list[str]]:
+def _build_adjacency(edges: Sequence[GraphEdge | _CommunityEdge]) -> dict[str, list[str]]:
     """Build adjacency list from edges (one pass over all edges)."""
     adj: dict[str, list[str]] = defaultdict(list)
     for e in edges:
@@ -244,7 +245,7 @@ def _build_adjacency(edges: list[GraphEdge]) -> dict[str, list[str]]:
 
 def _compute_cohesion(
     member_qns: set[str],
-    all_edges: list[GraphEdge],
+    all_edges: Sequence[GraphEdge | _CommunityEdge],
     adj: dict[str, list[str]] | None = None,
 ) -> float:
     """Compute cohesion: internal_edges / (internal_edges + external_edges).
@@ -264,7 +265,7 @@ def _reassign_test_nodes(
     clusters: list[list[int]],
     idx_to_node: dict[int, GraphNode],
     qn_to_idx: dict[str, int],
-    edges: list[GraphEdge],
+    edges: Sequence[GraphEdge | _CommunityEdge],
     resolution_nodes: list[GraphNode] | None = None,
 ) -> list[list[int]]:
     """Move tests to the community containing most unique tested subjects.
@@ -352,9 +353,36 @@ def _reassign_test_nodes(
     return reassigned
 
 
+def _load_igraph() -> bool:
+    """Import igraph lazily; a failed import disables the package for good.
+
+    ``find_spec("igraph")`` only proves the package directory exists. The
+    import itself can still fail when a native dependency is missing, so the
+    flag is cleared here and every caller falls back to file-based grouping
+    instead of returning an empty community set.
+    """
+    global ig, IGRAPH_AVAILABLE
+    if not IGRAPH_AVAILABLE:
+        return False
+    if ig is not None:
+        return True
+    try:
+        import igraph as _ig  # type: ignore[import-untyped]
+        # A native build can import and still fail on first attribute access,
+        # so touch the type we need while the handlers are still in scope.
+        _ig.Graph
+    except (ImportError, OSError, AttributeError) as exc:
+        # A missing native library surfaces as OSError, not ImportError.
+        logger.warning("igraph import failed (%s); using file-based communities", exc)
+        IGRAPH_AVAILABLE = False
+        return False
+    ig = _ig
+    return True
+
+
 def _detect_leiden(
     nodes: list[GraphNode],
-    edges: list[GraphEdge],
+    edges: Sequence[GraphEdge | _CommunityEdge],
     min_size: int,
     adj: dict[str, list[str]] | None = None,
 ) -> list[dict[str, Any]]:
@@ -364,7 +392,7 @@ def _detect_leiden(
     and skips the recursive sub-community splitting pass that caused
     exponential blow-up on large repos (>100k nodes).
     """
-    if ig is None:
+    if not _load_igraph():
         return []
 
     qn_to_idx: dict[str, int] = {}
@@ -474,7 +502,7 @@ def _detect_leiden(
 
 def _detect_file_based(
     nodes: list[GraphNode],
-    edges: list[GraphEdge],
+    edges: Sequence[GraphEdge | _CommunityEdge],
     min_size: int,
     adj: dict[str, list[str]] | None = None,
 ) -> list[dict[str, Any]]:
@@ -566,7 +594,7 @@ def _detect_file_based(
 def _split_oversized(
     communities: list[dict],
     nodes: list[GraphNode],
-    edges: list[GraphEdge],
+    edges: Sequence[GraphEdge | _CommunityEdge],
     threshold_pct: float = 0.25,
     min_split_size: int = 10,
 ) -> list[dict]:
@@ -575,7 +603,7 @@ def _split_oversized(
     Uses Leiden on the subgraph of oversized communities. If igraph is
     not available, returns communities unchanged.
     """
-    if not IGRAPH_AVAILABLE:
+    if not _load_igraph():
         return communities
 
     total = sum(
@@ -811,24 +839,28 @@ def detect_communities(
         List of community dicts with keys: name, level, size, cohesion,
         dominant_language, description, members, member_qns.
     """
+    # Detection reads only kind and endpoints, so skip building a GraphEdge
+    # (and decoding its JSON extra) for every edge in the graph.
+    all_edges: Sequence[GraphEdge | _CommunityEdge] = [
+        _CommunityEdge(row[0], row[1], row[2])
+        for row in store._conn.execute(
+            "SELECT kind, source_qualified, target_qualified FROM edges"
+        ).fetchall()
+    ]
     # Gather all nodes (exclude File nodes to focus on code entities)
-    all_edges = store.get_all_edges()
     unique_nodes = store.get_all_nodes(exclude_files=True)
-
-    # Build adjacency index once for fast cohesion computation
-    adj = _build_adjacency(all_edges)
 
     logger.info(
         "Loaded %d unique nodes, %d edges",
         len(unique_nodes), len(all_edges),
     )
 
-    if IGRAPH_AVAILABLE:
+    if _load_igraph():
         logger.info("Detecting communities with Leiden algorithm (igraph)")
-        results = _detect_leiden(unique_nodes, all_edges, min_size, adj=adj)
+        results = _detect_leiden(unique_nodes, all_edges, min_size)
     else:
         logger.info("igraph not available, using file-based community detection")
-        results = _detect_file_based(unique_nodes, all_edges, min_size, adj=adj)
+        results = _detect_file_based(unique_nodes, all_edges, min_size)
 
     # Split oversized communities
     results = _split_oversized(
