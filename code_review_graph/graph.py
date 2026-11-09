@@ -1,6 +1,7 @@
 """SQLite-backed knowledge graph storage and query engine.
 
-Stores code structure as nodes (File, Class, Function, Type, Test, YamlPath, DocSection) and
+Stores code structure as nodes (File, Class, Function, Type, Test, YamlPath, DocSection,
+JsonPath) and
 edges (CALLS, IMPORTS_FROM, INHERITS, IMPLEMENTS, CONTAINS, TESTED_BY, DEPENDS_ON, REFERENCES).
 Supports impact-radius queries and subgraph extraction.
 """
@@ -5633,7 +5634,7 @@ def node_to_dict(n: GraphNode) -> dict:
         "parent_name": _sanitize_name(n.parent_name) if n.parent_name else n.parent_name,
         "is_test": n.is_test,
     }
-    if n.kind == "YamlPath":
+    if n.kind in ("YamlPath", "JsonPath"):
         yaml_metadata: dict[str, Any] = {}
         for key in (
             "schema_path",
@@ -5682,7 +5683,17 @@ def node_to_dict(n: GraphNode) -> dict:
                     0,
                     occurrence_count - len(yaml_metadata["line_samples"]),
                 )
-        result["yaml"] = yaml_metadata
+        result["json" if n.kind == "JsonPath" else "yaml"] = yaml_metadata
+    elif n.kind == "File" and n.language == "json":
+        json_metadata: dict[str, Any] = {
+            "truncated": bool(n.extra.get("json_truncated")),
+            "values_indexed": False,
+        }
+        if n.extra.get("json_locale_file"):
+            json_metadata["locale_file"] = True
+        if n.extra.get("json_data_file"):
+            json_metadata["data_file"] = True
+        result["json"] = json_metadata
     elif n.kind == "File" and "values_indexed" in n.extra:
         file_yaml_metadata: dict[str, Any] = {
             "document_count": n.extra.get("yaml_document_count", 0),

@@ -70,6 +70,12 @@ _TEST_INTENT_WORDS = frozenset({
     "fixtures", "mock", "mocks", "stub", "stubs", "coverage",
 })
 
+# JSON shares words with code: ``package.json`` names ``cookie`` as a
+# dependency, and ``locales/en/translation.json`` matches "translation" by its
+# path alone. Rank JSON files and paths below code unless the caller asks for
+# them: by kind, by a ``$`` path, or by naming a ``.json`` file.
+_JSON_RANK_PENALTY = 0.25
+
 
 # ---------------------------------------------------------------------------
 # FTS5 index management
@@ -742,6 +748,7 @@ def _fts_search(
     query: str,
     limit: int = 50,
     kind: str | None = None,
+    skip_json: bool = False,
 ) -> list[tuple[int, float]]:
     """Run an FTS5 BM25 search against the nodes_fts table.
 
@@ -750,6 +757,8 @@ def _fts_search(
     the widened one is only a fallback. *kind* filters inside the statement, so
     rows of another kind neither use up *limit* nor count as an answer. Without
     *kind*, ``_UNSEARCHED_KIND`` rows are left out there for the same reason.
+    With *skip_json*, JSON rows are left out, so an expression that matches
+    only JSON falls through as it did before JSON was indexed.
 
     Returns list of ``(node_id, bm25_score)`` tuples. The BM25 score is
     negated so higher = better (FTS5 returns negative BM25).
@@ -767,25 +776,27 @@ def _fts_search(
     # The weights are floats formatted from a module constant, never from the
     # query, so there is no user-controlled text in this statement. The MATCH
     # expression itself stays a bound parameter.
+    # Each filter is a fixed fragment; only its values are bound parameters.
+    conditions = ["nodes_fts MATCH ?"]
     filters: tuple[Any, ...] = ()
     if kind:
-        # CROSS JOIN keeps the full-text index as the outer loop.
-        sql = (  # nosec B608
-            f"SELECT nodes_fts.rowid, bm25(nodes_fts, {weights}) AS score FROM nodes_fts "
-            "CROSS JOIN nodes ON nodes.id = nodes_fts.rowid "
-            "WHERE nodes_fts MATCH ? AND nodes.kind = ? ORDER BY score LIMIT ?"
-        )
+        conditions.append("nodes.kind = ?")
         filters = (kind,)
     # Most graphs hold no unsearched rows, and they keep the plain statement.
     elif conn.execute(
         "SELECT 1 FROM nodes WHERE kind = ? LIMIT 1", (_UNSEARCHED_KIND,),
     ).fetchone():
+        conditions.append("nodes.kind != ?")
+        filters = (_UNSEARCHED_KIND,)
+    if skip_json:
+        conditions.append("nodes.language IS NOT 'json'")
+    if len(conditions) > 1:
+        # CROSS JOIN keeps the full-text index as the outer loop.
         sql = (  # nosec B608
             f"SELECT nodes_fts.rowid, bm25(nodes_fts, {weights}) AS score FROM nodes_fts "
             "CROSS JOIN nodes ON nodes.id = nodes_fts.rowid "
-            "WHERE nodes_fts MATCH ? AND nodes.kind != ? ORDER BY score LIMIT ?"
+            f"WHERE {' AND '.join(conditions)} ORDER BY score LIMIT ?"
         )
-        filters = (_UNSEARCHED_KIND,)
     else:
         sql = (  # nosec B608
             f"SELECT rowid, bm25(nodes_fts, {weights}) AS score FROM nodes_fts "
@@ -934,6 +945,53 @@ def _keyword_search(
 # ---------------------------------------------------------------------------
 
 
+def _has_json_intent(query: str, kind: Optional[str]) -> bool:
+    """Whether the caller asked for JSON: by kind, a ``$`` path or a file name."""
+    return (
+        kind == "JsonPath"
+        or query.lstrip().startswith("$")
+        or ".json" in query.lower()
+    )
+
+
+def _fts_search_past_json(
+    conn: sqlite3.Connection,
+    query: str,
+    results: list[tuple[int, float]],
+    limit: int,
+    kind: Optional[str] = None,
+) -> list[tuple[int, float]]:
+    """Add the best other matches when JSON rows take places in a full window.
+
+    On next-i18next, six ``translation.json`` files filled the window for
+    "translation" and pushed ``appWithTranslation`` out of the results. The
+    other rows are fetched on their own, up to *limit* of them, and merged in
+    by score, so no number of JSON rows ahead of the code can hide it.
+    """
+    if len(results) < limit:
+        return results
+    ids = [node_id for node_id, _ in results]
+    json_rows = 0
+    for start in range(0, len(ids), 450):
+        batch = ids[start:start + 450]
+        placeholders = ",".join("?" for _ in batch)
+        json_rows += conn.execute(
+            "SELECT count(*) FROM nodes WHERE language = 'json' "  # nosec B608
+            f"AND id IN ({placeholders})",
+            batch,
+        ).fetchone()[0]
+    if not json_rows:
+        return results
+    seen = set(ids)
+    others = [
+        row for row in _fts_search(conn, query, limit=limit, kind=kind, skip_json=True)
+        if row[0] not in seen
+    ]
+    if not others:
+        return results
+    return sorted(results + others, key=lambda row: row[1], reverse=True)
+
+
 def hybrid_search(
     store: GraphStore,
     query: str,
@@ -992,6 +1050,11 @@ def hybrid_search(
         store, query, limit=fetch_limit, model=model, provider=provider, kind=kind,
     )
 
+    # JSON rows rank below code (``_JSON_RANK_PENALTY``), so they must not use
+    # up the window that code would otherwise fill, whatever the kind filter.
+    if fts_results and not _has_json_intent(query, kind):
+        fts_results = _fts_search_past_json(conn, query, fts_results, fetch_limit, kind)
+
     # ------ Phase 2: Merge via RRF or fallback ------
     if fts_results or emb_results:
         lists_to_merge = []
@@ -1032,6 +1095,7 @@ def hybrid_search(
     test_intent = kind == "Test" or bool(
         {w.lower() for w in query_words} & _TEST_INTENT_WORDS
     )
+    json_intent = _has_json_intent(query, kind)
 
     # Batch-fetch all candidate nodes in one query
     candidate_ids = [node_id for node_id, _ in merged]
@@ -1086,6 +1150,8 @@ def hybrid_search(
                 boost *= _EXACT_SYMBOL_BOOST
         if context_set and file_path in context_set:
             boost *= 1.5
+        if row["language"] == "json" and not json_intent:
+            boost *= _JSON_RANK_PENALTY
 
         if not test_intent:
             row_keys = row.keys()

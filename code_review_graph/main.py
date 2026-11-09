@@ -708,8 +708,8 @@ async def semantic_search_nodes_tool(
     Args:
         query: Search string to match against node names.
         kind: Optional filter: File, Class, Function, Type, Test, YamlPath,
-              DocSection, Variable, or Output. Liquid Output nodes are found
-              only by asking for that kind.
+              DocSection, Variable, Output, or JsonPath. Liquid Output nodes
+              are found only by asking for that kind.
         limit: Maximum results. Default: 20. At most 100, or 5 with
                detail_level "minimal". ``total`` counts the matches ranked.
         repo_root: Repository root path. Auto-detected if omitted.
@@ -846,7 +846,8 @@ async def find_large_functions_tool(
 
     Args:
         min_lines: Minimum line count to flag. Default: 50.
-        kind: Optional filter: Function, Class, File, Test, YamlPath, or DocSection.
+        kind: Optional filter: Function, Class, File, Test, YamlPath, DocSection,
+            or JsonPath.
         file_path_pattern: Filter by file path substring (e.g. "components/").
         limit: Maximum results. Default: 50. At most 100, or 25 with
             detail_level "minimal". ``total`` always counts every match.
@@ -1480,7 +1481,8 @@ async def cross_repo_search_tool(
 
     Args:
         query: Search string to match against node names.
-        kind: Optional filter: File, Class, Function, Type, Test, YamlPath, or DocSection.
+        kind: Optional filter: File, Class, Function, Type, Test, YamlPath,
+            DocSection, or JsonPath.
         limit: Maximum results per repo. Default: 20.
         max_results: Maximum merged results across searched repos; total
             reports the untruncated merged count. Default: 50.

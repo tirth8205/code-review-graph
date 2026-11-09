@@ -583,7 +583,7 @@ def map_changes_to_nodes(
                 continue
             yaml_ranges = node.extra.get("range_samples")
             if (
-                node.kind == "YamlPath"
+                node.kind in ("YamlPath", "JsonPath")
                 and isinstance(yaml_ranges, list)
                 and not node.extra.get("lines_truncated")
             ):
@@ -795,6 +795,7 @@ def analyze_changes(
         and not n.extra.get("verilog_kind")
     ]
     changed_yaml_paths = [n for n in changed_nodes if n.kind == "YamlPath"]
+    changed_json_paths = [n for n in changed_nodes if n.kind == "JsonPath"]
 
     # Cap to prevent O(N*M) query explosion on large PRs.
     _max_funcs = env_int("CRG_MAX_CHANGED_FUNCS", 500)
@@ -806,10 +807,14 @@ def analyze_changes(
     yaml_paths_truncated = len(changed_yaml_paths) > _max_yaml_paths
     if yaml_paths_truncated:
         changed_yaml_paths = changed_yaml_paths[:_max_yaml_paths]
+    json_paths_truncated = len(changed_json_paths) > _max_yaml_paths
+    if json_paths_truncated:
+        changed_json_paths = changed_json_paths[:_max_yaml_paths]
 
     # Keep one public YAML metadata contract. ``node_to_dict`` owns
     # sanitization and output limits for query and change analysis.
     yaml_path_results = [node_to_dict(node) for node in changed_yaml_paths]
+    json_path_results = [node_to_dict(node) for node in changed_json_paths]
 
     churn_counts: dict[str, int] | None = None
     churn_status = CHURN_OFF
@@ -947,6 +952,7 @@ def analyze_changes(
         f"Analyzed {len(changed_files)} changed file(s):",
         f"  - {len(changed_funcs)} changed function(s)/class(es)",
         *([f"  - {len(changed_yaml_paths)} changed YAML path(s)"] if changed_yaml_paths else []),
+        *([f"  - {len(changed_json_paths)} changed JSON path(s)"] if changed_json_paths else []),
         f"  - {affected['total']} affected flow(s)",
         gap_line,
         f"  - Overall risk score: {overall_risk:.2f}",
@@ -997,6 +1003,11 @@ def analyze_changes(
             f"  - Warning: analysis capped at {_max_yaml_paths} YAML paths "
             f"(set CRG_MAX_CHANGED_YAML_PATHS to adjust)"
         )
+    if json_paths_truncated:
+        summary_parts.append(
+            f"  - Warning: analysis capped at {_max_yaml_paths} JSON paths "
+            f"(set CRG_MAX_CHANGED_YAML_PATHS to adjust)"
+        )
     if ranges_unavailable:
         summary_parts.append(
             "  - Warning: line-level diff unavailable, whole files scored "
@@ -1018,6 +1029,7 @@ def analyze_changes(
         "risk_score": overall_risk,
         "changed_functions": node_risks,
         "changed_yaml_paths": yaml_path_results,
+        "changed_json_paths": json_path_results,
         "affected_flows": affected["affected_flows"],
         "test_gaps": test_gaps,
         # Counts, not just the list: every consumer bounds ``test_gaps``, and
@@ -1031,6 +1043,7 @@ def analyze_changes(
         "review_priorities": review_priorities,
         "functions_truncated": funcs_truncated,
         "yaml_paths_truncated": yaml_paths_truncated,
+        "json_paths_truncated": json_paths_truncated,
         "diff_ranges_unavailable": ranges_unavailable,
         "churn_status": churn_status,
     }

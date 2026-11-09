@@ -1867,7 +1867,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--kind",
         choices=[
             "File", "Class", "Function", "Type", "Test", "YamlPath", "DocSection",
-            "Variable", "Output",
+            "Variable", "Output", "JsonPath",
         ],
         default=None,
     )
