@@ -77,6 +77,14 @@ code-review-graph install --platform codebuddy
 
 Config file locations are listed in [docs/USAGE.md](docs/USAGE.md#supported-platforms). Requires Python 3.10+.
 
+For Codex, the installer also places a global `code-review-graph` Skill under
+`$CODEX_HOME/skills/code-review-graph/` (default:
+`~/.codex/skills/code-review-graph/`). It prefers CRG MCP tools and falls back
+to the bundled read-only CLI when MCP is unavailable; a missing, empty, or
+stale graph never triggers an implicit build or update. WSL and Windows Codex
+runtimes have separate `CODEX_HOME` directories and tool inventories, so
+install and refresh the runtime that will execute the task.
+
 `uninstall` removes CRG-owned files and entries from a Git or SVN working tree and leaves other MCP servers, hooks, skills and JSONC comments alone. Run it from anywhere inside the tree. Shared config files are replaced atomically, so a failed write leaves the original intact.
 
 ```bash
@@ -119,7 +127,7 @@ When a file changes, the graph traces every caller, dependent and test that coul
 
 ### Incremental updates
 
-Hooks, the pre-commit hook and watch mode trigger incremental updates. The update diffs changed files, finds their dependents through the graph's import and call edges, and re-parses only the files whose SHA-256 hash changed. On a ~3,000-file project (django) a two-file edit re-indexes in about 2.5 seconds on the path the hooks use, of which ~1.4 s is process start-up; a no-op update costs only that start-up. See [Incremental update latency](docs/REPRODUCING.md#incremental-update-latency).
+Hooks, the git hooks (pre-commit, post-checkout, post-merge, post-rewrite) and watch mode trigger incremental updates. The update diffs changed files, finds their dependents through the graph's import and call edges, and re-parses only the files whose SHA-256 hash changed. On a ~3,000-file project (django) a two-file edit re-indexes in about 2.5 seconds on the path the hooks use, of which ~1.4 s is process start-up; a no-op update costs only that start-up. See [Incremental update latency](docs/REPRODUCING.md#incremental-update-latency).
 
 <p align="center">
   <img src="diagrams/diagram4_incremental_update.png" alt="Incremental update flow: a hook or watch update triggers a git diff, dependents are found through graph edges, and only files whose SHA-256 hash changed are re-parsed" width="90%" />
@@ -139,9 +147,12 @@ Instead of feeding a whole corpus to the model, the graph returns a slice shaped
   <img src="diagrams/diagram9_language_coverage.png" alt="Language coverage by category: Web, Backend, Systems, Mobile, Scripting, Shells, Domain, and Other, plus Jupyter and Databricks notebooks" width="90%" />
 </p>
 
-The parser extracts functions, classes, imports, call sites, inheritance and tests, using Tree-sitter where a grammar exists and targeted fallbacks elsewhere. Supported: Python, JavaScript/TypeScript/TSX, Go, Rust, Java, C/C++, C#, VB.NET, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL, Terraform/OpenTofu (`.tf`; other `.hcl` files become file nodes only), Ansible YAML (playbooks, roles, tasks), Spring Boot application config (`application.properties`, `application.yml`, `application.yaml` and their `application-<profile>` variants; key names and value types only, never values), Vue/Svelte SFCs, Astro files (parsed with the TypeScript grammar), Jupyter and Databricks notebooks (`.ipynb`), and Perl XS files (`.xs`). Other YAML and other `.properties` files are not treated as source code.
+The parser extracts functions, classes, imports, call sites, inheritance and tests, using Tree-sitter where a grammar exists and targeted fallbacks elsewhere. Supported: Python, JavaScript/TypeScript/TSX, Go, Rust, Java, C/C++, C#, VB.NET, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL/PL/SQL (Oracle), Terraform/OpenTofu (`.tf`; other `.hcl` files become file nodes only), Ansible YAML (playbooks, roles, tasks), Spring Boot application config (`application.properties`, `application.yml`, `application.yaml` and their `application-<profile>` variants; key names and value types only, never values), value-free generic YAML structure, Vue/Svelte SFCs, Astro files (parsed with the TypeScript grammar), Jupyter and Databricks notebooks (`.ipynb`), Perl XS files (`.xs`), and Robot Framework files (`.robot`, `.resource`). Other `.properties` files are not treated as source code.
 
-PHP projects also get repository-bounded Composer PSR-4 resolution, Blade template references, and Laravel Route and Eloquent edges when the source shows explicit framework imports, model inheritance and receiver evidence.
+PHP projects also get repository-bounded Composer PSR-4 resolution, Blade template references,
+and Laravel Route and Eloquent edges when the source shows explicit framework imports, model
+inheritance and receiver evidence. Static Laravel routes in `routes/*.php` emit Endpoint nodes
+and controller HANDLES edges, including literal group prefixes.
 
 Java projects get Spring dependency-injection call resolution, request endpoints and WebFlux routes, scheduled triggers, application-event publisher-to-listener edges, and Temporal workflow and activity edges. Each resolver runs after the parse and needs the injected field, published event or workflow stub to be visible in the repository.
 
@@ -219,7 +230,9 @@ For a typical agent question (`"how does authentication work"`, `"what is the ma
 >
 > The `code-review-graph` row is a snapshot, not a current measurement. The repository has grown since `84bde354`, so its corpus and graph are both much larger today.
 
-The whole-corpus baseline is an upper bound no real agent pays; an agent greps for identifiers and reads the best-matching files. The `agent_baseline` eval benchmark measures that case (a pure-Python grep over the corpus, top-3 files by match count, token-counted against the graph query cost). It writes `evaluate/results/<repo>_agent_baseline_<date>.csv`; no canonical capture has been published yet.
+The whole-corpus baseline is an upper bound no real agent pays; an agent greps for identifiers and reads the best-matching files. The `agent_baseline` eval benchmark measures that case (a pure-Python grep over the corpus, top-3 files by match count, token-counted against the graph query cost). Against that realistic baseline the median across 18 questions on 6 repositories is **6.65x** (mean 14.8x, range 4.2x to 72.6x), captured 2026-09-22, before search and this baseline began ranking test files lower, so `code-review-graph eval --benchmark agent_baseline --embed` now gives different numbers until the capture is redone. The full table is in `docs/REPRODUCING.md`, under "Canonical capture, 2026-09-22".
+
+The ratio tracks repository size, because the graph answer stays flat (2,432 to 4,021 tokens across every repo measured) while the grep baseline grows with the corpus: 4.5x on express, 52x on fastapi. Both figures measure **retrieval** cost, the tokens needed to locate an answer. An agent that then opens the files the graph named pays the graph on top of its usual reads rather than instead of them; `semantic_search_nodes_tool(include_source=True)` returns the code with the locations so it does not have to, and measuring that path end-to-end is open work.
 
 The formal `token_efficiency` benchmark measures a different scenario, the full `get_review_context()` JSON against only the changed-file content of a commit, and reports ratios below 1 for small commits because the response carries impact-radius edges and source snippets. The two benchmarks answer different questions; see [`docs/REPRODUCING.md`](docs/REPRODUCING.md#which-benchmark-measures-what).
 
@@ -283,7 +296,7 @@ From the same 2026-08-02 clean-room build at the pinned SHAs above. Embedding co
 | **Framework-aware PHP parsing** | Repository-bounded Composer PSR-4 imports, Blade template references, evidence-gated Laravel Route-to-controller and Eloquent relationship edges |
 | **Framework-aware Java parsing** | Spring dependency-injection call resolution, request endpoints and WebFlux routes, scheduled triggers, application-event publisher-to-listener edges, Temporal workflow and activity edges, and Spring Boot config keys indexed without their values |
 | **Blast-radius analysis** | Which functions, classes and files are likely affected by a change |
-| **Auto-update hooks** | Editor hooks, a git pre-commit hook and watch mode update the graph as you work |
+| **Auto-update hooks** | Editor hooks, git hooks (before each commit, after checkout, merge and rebase) and watch mode update the graph as you work |
 | **Semantic search** | Optional vector embeddings via sentence-transformers, Google Gemini, MiniMax, Voyage AI, or any OpenAI-compatible endpoint (OpenAI, Azure, new-api, LiteLLM, vLLM, LocalAI) |
 | **Interactive visualisation** | D3.js force-directed graph with search, community legend toggles and degree-scaled nodes |
 | **Hub and bridge detection** | Most-connected nodes and chokepoints (betweenness centrality) |
@@ -299,7 +312,7 @@ From the same 2026-08-02 clean-room build at the pinned SHAs above. Embedding co
 | **Execution flows** | Call chains from entry points, sorted by weighted criticality |
 | **Community detection** | Leiden clustering with resolution scaled to graph size |
 | **Architecture overview** | Community-based architecture map with coupling warnings |
-| **Risk-scored reviews** | `detect_changes` maps diffs to affected functions, flows and test gaps |
+| **Risk-scored reviews** | `detect_changes` maps diffs to affected functions, YAML paths, flows and test gaps |
 | **Custom languages** | New languages via `.code-review-graph/languages.toml`, no fork needed |
 | **GitHub Action** | Sticky risk-scored PR review comments in CI, with an optional `fail-on-risk` merge gate |
 | **Refactoring tools** | Rename preview, framework-aware dead code detection, community-driven suggestions |
@@ -521,10 +534,11 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_GIT_TIMEOUT` | Timeout in seconds for Git operations (build, update, watch) | `30` |
 | `CRG_DISCOVERY_TIMEOUT` | Timeout in seconds for each Git command that discovers what changed, when a review tool or command was not given an explicit file list. Running out reports an error, never "no changes" | `5`, or `CRG_GIT_TIMEOUT` when you set that explicitly |
 | `CRG_DATA_DIR` | Directory for graph databases and generated artefacts | - |
-| `CRG_HOOK_WORKTREES` | Set to `1` to let the pre-commit hook run in linked git worktrees | - |
+| `CRG_HOOK_WORKTREES` | Set to `1` to let the generated git hooks run in linked git worktrees | - |
 | `CRG_EMBEDDING_MODEL` | Default model for local vector embeddings | `all-MiniLM-L6-v2` |
 | `CRG_ACCEPT_CLOUD_EMBEDDINGS` | Set to `1` to suppress the cloud embedding egress warning | - |
 | `CRG_ALLOW_REMOTE_CODE` | Allow HuggingFace models that require `trust_remote_code=True` | `0` |
+| `CRG_VECTOR_CACHE` | Set to `1` to keep the decoded embedding vectors in memory between semantic searches instead of reading them all back from SQLite on every query. Costs RAM (vectors × dimensions × 4 bytes per cached index) and one open read connection per cached database for the life of the process: on Windows, `graph.db` cannot be deleted or replaced while it is open | - |
 | `CRG_MAX_IMPACT_NODES` | Maximum nodes in impact analysis | `500` |
 | `CRG_MAX_IMPACT_DEPTH` | Search depth for blast-radius analysis | `2` |
 | `CRG_MAX_BFS_DEPTH` | Maximum depth for graph traversal | `15` |

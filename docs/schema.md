@@ -3,7 +3,7 @@
 The graph is one SQLite database, `.code-review-graph/graph.db`, opened in WAL mode.
 The base tables and indexes come from `_SCHEMA_SQL` in `code_review_graph/graph.py`.
 Everything else is added by the versioned migrations in `code_review_graph/migrations.py`.
-The current schema version is 13, the highest key in `MIGRATIONS`. A database
+The current schema version is 14, the highest key in `MIGRATIONS`. A database
 below that is migrated on open, in order, by every migration above its own
 version.
 
@@ -68,8 +68,11 @@ A type alias, interface, enum or similar construct where the language parser emi
 Columns as for Class.
 
 ### Endpoint
-A synthesised routed entry point, emitted for Spring request mappings and WebFlux functional
-routes. Linked to the handling method by a `HANDLES` edge.
+A synthesised routed entry point, emitted for Spring request mappings, WebFlux functional
+routes, and static Laravel routes in `routes/*.php`. Metadata includes `http_method`, `route`,
+and `handler`. Controller routes link to the handling method by a `HANDLES` edge. Laravel
+closures have an Endpoint without that edge; resource routes are not expanded yet, and a prefix
+set outside the routes file (`bootstrap/app.php`, `RouteServiceProvider`) is not seen.
 
 ### Scheduler
 A synthesised node for a `@Scheduled` method. Linked to the method it fires by a `TRIGGERS`
@@ -84,6 +87,24 @@ Values are discarded; only the key is stored. Linked to the code that binds it b
 A synthesised node for a Spring application event, created after the build by
 `event_resolver.py` from `PUBLISHES` and `HANDLES` edges. Its `file_path` is the placeholder
 `event` and `extra` carries `{"event_type": ..., "virtual": true}`.
+
+### YamlPath
+A path-addressable mapping key or sequence shape parsed from generic `.yml` / `.yaml` files. Repeated sequence entries are aggregated under `[*]` paths with bounded occurrence/range samples, allowing similarly shaped files to be compared without one graph node per list item. Scalar values are deliberately discarded.
+
+The persisted `extra` JSON is the internal source of truth. Query and change-analysis responses expose its safe public subset under one nested `yaml` object:
+
+| Property | Type | Description |
+|----------|------|-------------|
+| schema_path | string | Aggregated structural path, such as `$.services[*].metadata.tier` |
+| example_path | string | One concrete occurrence used as a navigation example |
+| value_type / value_types | string / string[] | Structural or scalar YAML tag types; never scalar values |
+| document_index | int | Zero-based YAML document index |
+| occurrence_count | int | Number of occurrences represented by this node |
+| line_samples | int[] | Bounded occurrence-line samples |
+| duplicate_key / duplicate_group_count | bool / int | Mapping-scoped duplicate-key diagnostics |
+| is_alias / anchor_definition / yaml_merge | bool | Alias, anchor, and merge relationship metadata |
+
+`CONTAINS` connects files and nested paths. Alias nodes use `REFERENCES` with canonical qualified endpoints. Generic YAML `File` responses use the same `yaml` object for document, duplicate-key, unsupported-key, truncation, and `values_indexed: false` metadata.
 
 ## Edge Types
 
@@ -106,7 +127,7 @@ was seen), `line`, `extra` (JSON), `confidence`, `confidence_tier` and, for
 | PRODUCES | Kafka producer -> `kafka:<topic>` | Spring Kafka enrichment |
 | TEMPORAL_STUB | class -> declared Temporal workflow or activity interface of a stub field | Used by `temporal_resolver.py` to resolve calls made through the stub |
 | DEPENDS_ON_CONFIG | `@ConfigurationProperties` class -> `ConfigProperty` | Spring enrichment |
-| HANDLES | `Endpoint` -> controller method; `@EventListener` method -> event | Spring enrichment |
+| HANDLES | handler -> `Endpoint`; listener -> event | Spring and Laravel enrichment |
 | TRIGGERS | `Scheduler` -> `@Scheduled` method | Spring enrichment |
 | PUBLISHES | method -> Spring application event | Spring enrichment |
 
@@ -115,10 +136,12 @@ was seen), `line`, `extra` (JSON), `confidence`, `confidence_tier` and, for
 ## Qualified Name Format
 
 ```text
-/absolute/path/to/file.py                                  # File
-/absolute/path/to/file.py::function_name                   # top-level function
-/absolute/path/to/file.py::ClassName.method_name           # method
-/absolute/path/to/file.py::OuterClass.InnerClass.method    # nested class method
+/absolute/path/to/file.py                                      # File
+/absolute/path/to/file.py::function_name                       # top-level function
+/absolute/path/to/file.py::ClassName.method_name               # method
+/absolute/path/to/file.py::OuterClass.InnerClass.method        # nested class method
+/absolute/path/to/file.yml::yaml:0:$.services[*].metadata.tier # aggregated YAML path in document 0
+/absolute/path/to/file.yml::yaml:0:alias:$.service["<<"]@12    # alias or anchor identity
 ```
 
 `nodes.symbol` stores the part after the first `::` (or the whole name when there is none)
@@ -295,7 +318,7 @@ CREATE TABLE embeddings (
 
 | Key | Set by |
 |---|---|
-| `schema_version` | `migrations.py`; `13` on a current database |
+| `schema_version` | `migrations.py`; `14` on a current database |
 | `fts_state_synced` | `search.rebuild_fts_index`; mirror-shape version |
 | `last_updated` | Full and incremental builds |
 | `last_build_type` | Full and incremental builds |
@@ -345,3 +368,4 @@ Each migration runs in its own transaction and updates `schema_version` on succe
 | 11 | `edges.target_resolution`, back-filled for `CALLS`/`REFERENCES`, and `idx_edges_kind_target_resolution` |
 | 12 | `nodes_fts_state`, the mirror of the FTS index, and `idx_nodes_fts_state_file` |
 | 13 | `nodes.docstring`, `nodes.name_tokens`, both back-filled; `nodes_fts` and `nodes_fts_state` widened to carry them |
+| 14 | No schema change: `file_hash` cleared on Ruby `File` nodes so the next update re-parses them under the new namespaced class identities |

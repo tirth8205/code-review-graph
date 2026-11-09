@@ -245,6 +245,23 @@ class TestChanges:
         # Untested gets 0.30, tested gets 0.05 for test coverage component.
         assert untested_score > tested_score
 
+    def test_risk_score_test_lifecycle_method_has_no_untested_penalty(self):
+        """A lifecycle method in test code has no coverage to lack (#865)."""
+        self._add_func("setUp", path="tests/test_a.py", line_start=1, line_end=10)
+        node = self.store.get_node("tests/test_a.py::setUp")
+        assert node is not None
+
+        assert compute_risk_score(self.store, node) == 0.0
+
+    def test_risk_score_production_lifecycle_name_keeps_untested_penalty(self):
+        """The exemption is a name, so production code keeps its coverage risk."""
+        for name, path in (("__init__", "service.py"), ("setUp", "installer.py")):
+            self._add_func(name, path=path, line_start=1, line_end=10)
+            node = self.store.get_node(f"{path}::{name}")
+            assert node is not None
+
+            assert compute_risk_score(self.store, node) == pytest.approx(0.30)
+
     def test_risk_score_security_keywords_boost(self):
         """Functions with security keywords score higher."""
         self._add_func("process_data", path="a.py")
@@ -353,9 +370,48 @@ class TestChanges:
         assert "summary" in result
         assert "risk_score" in result
         assert "changed_functions" in result
+        assert "changed_yaml_paths" in result
         assert "affected_flows" in result
         assert "test_gaps" in result
         assert "review_priorities" in result
+
+    def test_yaml_changes_use_occurrence_ranges_without_test_gap_scoring(self):
+        node = NodeInfo(
+            kind="YamlPath",
+            name="$.services[*].metadata.tier",
+            file_path="config.yml",
+            line_start=2,
+            line_end=100,
+            language="yaml",
+            identity_name="yaml:0:$.services[*].metadata.tier",
+            extra={
+                "schema_path": "$.services[*].metadata.tier",
+                "value_type": "str",
+                "occurrence_count": 2,
+                "range_samples": [[2, 10], [90, 100]],
+                "lines_truncated": False,
+            },
+        )
+        self.store.upsert_node(node, file_hash="yaml")
+        self.store.commit()
+
+        assert map_changes_to_nodes(self.store, {"config.yml": [(50, 50)]}) == []
+        result = analyze_changes(
+            self.store,
+            changed_files=["config.yml"],
+            changed_ranges={"config.yml": [(95, 95)]},
+        )
+
+        assert result["changed_functions"] == []
+        assert result["test_gaps"] == []
+        yaml_path = result["changed_yaml_paths"][0]
+        assert yaml_path["name"] == "$.services[*].metadata.tier"
+        assert yaml_path["yaml"]["schema_path"] == "$.services[*].metadata.tier"
+        assert yaml_path["yaml"]["value_type"] == "str"
+        assert yaml_path["yaml"]["occurrence_count"] == 2
+        assert "schema_path" not in yaml_path
+        assert "value_type" not in yaml_path
+        assert "1 changed YAML path(s)" in result["summary"]
 
     def test_analyze_changes_risk_score_range(self):
         """Overall risk score is between 0 and 1."""
@@ -469,9 +525,11 @@ class TestChanges:
             changed_ranges={"app.py": [(1, 20)]},
         )
         priorities = result["review_priorities"]
-        if len(priorities) >= 2:
-            for i in range(len(priorities) - 1):
-                assert priorities[i]["risk_score"] >= priorities[i + 1]["risk_score"]
+
+        assert len(priorities) >= 2
+
+        risk_scores = [priority["risk_score"] for priority in priorities]
+        assert risk_scores == sorted(risk_scores, reverse=True)
 
     def test_analyze_changes_fallback_no_ranges(self):
         """Falls back to all nodes in files when no ranges provided."""

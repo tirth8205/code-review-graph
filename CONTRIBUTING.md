@@ -59,7 +59,7 @@ feature branch --PR--> staging --PR--> testing --PR--> main --tag--> PyPI
 | Branch    | Purpose                                                        | Who merges into it                      |
 | --------- | -------------------------------------------------------------- | --------------------------------------- |
 | `staging` | Default branch. Every feature and fix PR lands here first.     | Maintainers, once CI is green.          |
-| `testing` | Candidate for the next release. Gets a longer soak and manual QA. | The `Auto promote` workflow, once a day, when `staging` is green. |
+| `testing` | Candidate for the next release. Gets a longer soak and manual QA. | Maintainer only, by hand, via a promotion PR from `staging`. |
 | `main`    | Released code. Nothing reaches `main` without passing QA on `testing`. | Maintainer only, by hand, via a promotion PR from `testing`. |
 
 Rules that apply to all three branches (enforced by repository rulesets):
@@ -85,55 +85,15 @@ allow no other merge method. Opening a promotion PR re-queues every required che
 commit that already had them green from the push run, so the PR sits blocked for a
 quarter of an hour or so before it can be merged. That is normal.
 
-`staging` → `testing` happens by itself. `testing` → `main` never does.
+**No promotion is automatic.** Green checks are necessary but not sufficient: a person
+reviews and merges every promotion, and no workflow may merge a pull request.
+`tests/test_promotion_is_manual.py` fails if one tries.
 
-### Automatic promotion to `testing`
-
-`.github/workflows/auto-promote.yml` runs once a day. If `staging` has commits `testing`
-does not, every required status check is green on the `staging` tip, and the promotion
-gate has not failed on the current `testing` tip, it opens the promotion PR and merges it
-with a merge commit. It writes a summary on every run, including the runs that decide to
-do nothing, so "nothing to promote" is never indistinguishable from "did not run".
-
-**One repository setting is required.** Settings → Actions → General → Workflow
-permissions → tick **Allow GitHub Actions to create and approve pull requests** → Save.
-Without it `gh pr create` is refused and no promotion PR can be opened — by this workflow
-or by the manual `Promote` one. Leave *Workflow permissions* itself on **Read repository
-contents and packages permissions**: both workflows ask for the writes they need in their
-own `permissions:` block. If the tick is missing, the run goes red and the job summary
-gives that click path.
-
-It merges only a PR it opened itself: same repository, `staging` → `testing`, carrying the
-`auto-promotion` label, and at the commit whose checks were read. `gh pr list --head
-staging` matches a branch of that name in any of this repository's forks, and a PR's base
-branch can be changed by its author at any time without re-running a single check, so all
-of that is verified again immediately before the merge, and the merge itself is pinned
-with `--match-head-commit`. **A promotion PR you opened by hand is never touched** — it
-has no `auto-promotion` label, so the daily run refuses it by number and says so.
-
-It stops, without failing, when there is nothing to promote, when CI is still running,
-when a required check failed or was skipped, when the promotion gate is still running on
-`testing`, when the gate failed there, or when `staging` moved mid-run. Those states are
-reported elsewhere already and tomorrow's run looks again. Three things turn the run red,
-because nothing else reports them:
-
-- **GitHub refused the merge.** The PR is left open and the refusal is quoted in the job
-  summary, with the causes listed in the order they actually occur; merge it by hand with
-  a merge commit.
-- **The workflow is stuck on its own PR** — it conflicts, it is a draft, or GitHub holds
-  it for a rule with every required check green. A stalled promotion that reported itself
-  as a green warning every morning would stay stalled for ever.
-- **A PR it was about to merge is not the one it decided on**, or the release gate could
-  not be started after the merge.
-
-Every rule lives in `scripts/auto_promote.py` and is covered by
-`tests/test_auto_promote.py`; the workflow fetches facts and obeys. The required contexts
-are read from the `testing` ruleset at run time, so a renamed CI job cannot silently drop
-out of the gate. The workflow has no input, variable or code path that can target `main`,
-the PR it merges is re-checked at the door, and the tests assert both.
-
-To see what it would decide without it doing anything, run the `Auto promote` workflow
-from the Actions tab: a hand-started run defaults to a dry run.
+**Promotion to `testing`.** Open it with `gh pr create --base testing --head staging`, read
+what it brings in, wait for the required checks, and merge it yourself with a merge commit.
+The `Promote` workflow in the Actions tab can open the PR instead, but it needs Settings →
+Actions → General → Workflow permissions → **Allow GitHub Actions to create and approve pull
+requests**, which is off here on purpose. Merging into `testing` starts the promotion gate.
 
 **Promotion to `main` is never automatic.** Open it from the Actions tab (`Promote`
 workflow, pick `testing -> main`) or by hand with
@@ -202,8 +162,7 @@ it). The report names every check, whether it passed, and for a failure the exac
 assertion that moved: for example the property, its baseline and the measured delta.
 
 The gate opens no pull request and merges nothing. Promotion to `main` stays the
-maintainer's decision, made with the `Promote` workflow as before. `Auto promote` cannot
-reach `main` either: it promotes `staging` to `testing` and nothing else.
+maintainer's decision, made with the `Promote` workflow as before.
 
 To run any of these by hand:
 
@@ -249,6 +208,12 @@ If you only need a language for your own repository, you may not need to change 
 2. Add the tree-sitter node types to `_CLASS_TYPES`, `_FUNCTION_TYPES`, `_IMPORT_TYPES` and `_CALL_TYPES`.
 3. Add a sample file in `tests/fixtures/`.
 4. Add parsing tests in `tests/test_multilang.py`.
+
+Robot Framework is a built-in structural fallback rather than a Tree-sitter
+grammar. Its `.robot` and `.resource` files are handled in `parser.py`, where
+tests, user keywords, keyword calls, and `Resource`/`Library`/`Variables`
+settings are extracted. Changes to this support should include focused tests
+for both extensions in `tests/test_parser.py`.
 
 ## Adding a Platform Target
 
