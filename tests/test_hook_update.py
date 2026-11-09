@@ -18,6 +18,36 @@ def test_payload_cwd_selects_repo_root(monkeypatch, tmp_path):
     assert hook_update._hook_repo() == repo
 
 
+def test_payload_and_git_root_are_read_as_utf8_on_any_code_page(monkeypatch, tmp_path):
+    """Windows decodes a text-mode pipe with the ANSI code page, not UTF-8 (#877).
+
+    Codex writes the event JSON as UTF-8 and git prints the root as UTF-8, so
+    a home folder such as ``José`` made both into a path that does not exist.
+    """
+    repo = tmp_path / "Jos\u00e9" / "repo"
+    nested = repo / "pkg"
+    nested.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    raw = json.dumps({"cwd": str(nested)}, ensure_ascii=False).encode("utf-8")
+    monkeypatch.setattr(
+        hook_update.sys, "stdin", io.TextIOWrapper(io.BytesIO(raw), encoding="cp1252")
+    )
+    real_run = subprocess.run
+
+    def run_like_windows(*args, **kwargs):
+        # A text-mode pipe on Windows decodes with the ANSI code page.
+        encoding = kwargs.pop("encoding", None)
+        text = kwargs.pop("text", False)
+        text = kwargs.pop("universal_newlines", False) or text
+        result = real_run(*args, **kwargs)
+        if encoding or text:
+            result.stdout = result.stdout.decode(encoding or "cp1252", errors="replace")
+        return result
+
+    monkeypatch.setattr(hook_update.subprocess, "run", run_like_windows)
+    assert hook_update._hook_repo() == repo.resolve()
+
+
 def test_missing_or_invalid_payload_cwd_fails_closed(monkeypatch, tmp_path):
     repo = tmp_path / "repo-b"
     repo.mkdir()

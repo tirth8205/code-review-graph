@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -21,9 +22,19 @@ def _payload_cwd(payload: Any) -> Path | None:
     return path.resolve()
 
 
+def _read_payload() -> Any:
+    """Read the event JSON as bytes and let ``json`` find their encoding.
+
+    Hosts write UTF-8, but a text-mode stdin on Windows decodes a pipe with the
+    ANSI code page. A ``cwd`` such as ``C:\\Users\\José\\repo`` then names a
+    folder that does not exist, and the hook quietly did nothing.
+    """
+    return json.loads(getattr(sys.stdin, "buffer", sys.stdin).read())
+
+
 def _hook_repo() -> Path | None:
     try:
-        payload = json.load(sys.stdin)
+        payload = _read_payload()
     except (json.JSONDecodeError, OSError, ValueError):
         return None
     cwd = _payload_cwd(payload)
@@ -35,12 +46,13 @@ def _hook_repo() -> Path | None:
             cwd=cwd,
             check=True,
             capture_output=True,
-            text=True,
             timeout=5,
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    root = result.stdout.strip()
+    # Git writes the path as file-system bytes (UTF-8 on Windows), not in the
+    # code page a text-mode pipe would decode with.
+    root = os.fsdecode(result.stdout).strip()
     return Path(root).resolve() if root else None
 
 
