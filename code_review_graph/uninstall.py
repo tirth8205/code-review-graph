@@ -419,9 +419,9 @@ def _commands(value: Any) -> set[str]:
 
 
 def _legacy_repo_hook_commands(repo_root: Path) -> set[str]:
-    """Exact project hook commands written by the source #491-era installer."""
+    """Exact project hook commands earlier releases wrote and install no longer does."""
     repo_arg = json.dumps(repo_root.resolve().as_posix())
-    return {
+    pinned = {
         (
             "git rev-parse --git-dir >/dev/null 2>&1"
             " && code-review-graph update --skip-flows"
@@ -434,6 +434,19 @@ def _legacy_repo_hook_commands(repo_root: Path) -> set[str]:
             " || echo 'Not a git repo, skipping'"
         ),
     }
+    # v2.3.4 - v2.3.6 drained stdin in front of the pinned commands.
+    drained = {"cat >/dev/null || true; " + command for command in pinned}
+    # v2.3.7 - v2.3.9 resolved the repository from the session's directory,
+    # which #311 replaced with the edited file's repository.
+    from_cwd = (
+        "cat >/dev/null || true; "
+        "command -v code-review-graph >/dev/null 2>&1 || exit 0; "
+        "git rev-parse --git-dir >/dev/null 2>&1"
+        " && code-review-graph update --skip-flows"
+        ' --repo "$(git rev-parse --show-toplevel 2>/dev/null)"'
+        " || true"
+    )
+    return pinned | drained | {from_cwd}
 
 
 def _legacy_codex_hook_commands() -> set[str]:

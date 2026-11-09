@@ -27,7 +27,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cat >/dev/null || true; command -v code-review-graph >/dev/null 2>&1 || exit 0; git rev-parse --git-dir >/dev/null 2>&1 && code-review-graph update --skip-flows --repo \"$(git rev-parse --show-toplevel 2>/dev/null)\" || true",
+            "command": "command -v code-review-graph >/dev/null 2>&1 && code-review-graph hook-update; cat >/dev/null || true",
             "timeout": 30
           }
         ]

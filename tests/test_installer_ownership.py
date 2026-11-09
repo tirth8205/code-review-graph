@@ -54,6 +54,9 @@ def _hook_commands(settings: dict, event: str) -> list[str]:
         "code-review-graph update",
         "code-review-graph detect-changes",
         "code-review-graph update --skip-flows --verbose",
+        # The edit hook's shape with someone's own command added after it.
+        "command -v code-review-graph >/dev/null 2>&1 && code-review-graph hook-update;"
+        " cat >/dev/null || true; notify-team",
         # One of our scripts handed to someone else's script as an argument is
         # their command, not ours: the program being run is ``run.sh``.
         "bash /opt/acrg-tools/run.sh /home/u/.cursor/hooks/crg-update.sh",
@@ -87,6 +90,9 @@ def test_user_hook_commands_are_not_claimed(command: str) -> None:
         'cat >/dev/null || true; command -v code-review-graph >/dev/null 2>&1 || exit 0;'
         ' git rev-parse --git-dir >/dev/null 2>&1 && code-review-graph update'
         ' --skip-flows --repo "$(git rev-parse --show-toplevel 2>/dev/null)" || true',
+        # The edit hook that forwards the event JSON to hook-update (#311).
+        "command -v code-review-graph >/dev/null 2>&1 && code-review-graph hook-update;"
+        " cat >/dev/null || true",
         "bash .gemini/hooks/crg-update.sh",
         "/home/u/.cursor/hooks/crg-session-start.sh",
         "bash /previous/checkout/.gemini/hooks/crg-update.sh",

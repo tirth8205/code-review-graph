@@ -209,9 +209,12 @@ code), or pass `--repo <path>` to point a command at a specific directory.
 `.code-review-graph/` matching its checkout. Do not share one database across
 worktrees at different commits. The pre-commit hook skips linked worktrees
 unless `CRG_HOOK_WORKTREES=1` is set, so a commit there does not build a second
-graph by accident. To keep the database outside the working tree (ephemeral
-workspaces, network shares), pass `--data-dir <path>` to `build`, `update`,
-`status` and the other graph commands, or set `CRG_DATA_DIR`.
+graph by accident. The edit hook updates the graph of the repository that
+holds the edited file, so a session in the main checkout that edits a worktree
+updates the worktree's graph, once you have built one there. To keep the
+database outside the working tree (ephemeral workspaces, network shares), pass
+`--data-dir <path>` to `build`, `update`, `status` and the other graph
+commands, or set `CRG_DATA_DIR`.
 
 For parallel PR reviews in one stdio MCP session, use the opt-in
 `code-review-graph serve --multi-worktree --repo <primary-root>` mode. Each
@@ -243,3 +246,11 @@ crg-daemon status
 
 Also available as `code-review-graph daemon start|stop|status`. See
 [COMMANDS.md](COMMANDS.md) for the daemon reference.
+
+**A folder of sibling repos, or nested repos.** Build each repo you want a
+graph for, inside that repo. The edit hook that `install` writes for Claude
+Code, Qoder and CodeBuddy then updates the graph of the repo that holds each
+edited file, even when the session started in the outer folder. It never
+builds a graph for a repo that has none, unless the session started in that
+repo. MCP tool calls still act on the server's default repo unless they pass
+`repo_root`.

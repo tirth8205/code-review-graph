@@ -88,6 +88,21 @@
 
 ### Fixed
 
+- The edit hook updates the graph of the repository that holds the edited
+  file, not the one the session started in (#311). From a folder of sibling
+  repos it updated nothing, from an outer repo it updated the outer graph and
+  never the nested one, and from a main checkout it never updated a linked
+  worktree's graph. The Claude Code, Qoder and CodeBuddy hooks (and the plugin
+  `hooks/hooks.json`) now pass the event JSON to `hook-update`, which reads
+  the file path from it. That repository is updated if it already has a graph
+  or is the session's own repository, which is still built on first edit as
+  before; an edit anywhere else on disk changes no graph, and a submodule with
+  no graph of its own passes the edit to its superproject. Without a file path
+  in the event, the hook uses the event's `cwd` as before. Upgrade the package
+  before running `install` again: an older CLI has no `hook-update`, so its
+  edit hook does nothing (it still never fails the edit). `install` replaces
+  the hook earlier releases wrote, and `uninstall` removes it, including the
+  v2.3.4 to v2.3.6 form it used to leave behind.
 - TypeScript and JavaScript imports resolve against `compilerOptions.baseUrl`
   when no `paths` pattern matches them, as `tsc` does. A tsconfig that sets
   `baseUrl` without `paths` resolved no non-relative import at all: on a
