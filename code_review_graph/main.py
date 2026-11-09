@@ -1573,6 +1573,12 @@ def main(
                 "multi_repo cannot auto-watch; the daemon "
                 "(code-review-graph daemon) watches several repositories"
             )
+        if os.environ.get("CRG_DATA_DIR", "").strip():
+            raise ValueError(
+                "multi_repo cannot be combined with CRG_DATA_DIR, which would put "
+                "every repository's graph in one database; use per-repository "
+                "Registry data_dir entries instead"
+            )
         _default_repo_root = None
         if not Registry().list_repos():
             logger.warning(

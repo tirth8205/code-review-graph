@@ -183,6 +183,10 @@ class TestServeMainOptions:
 
         monkeypatch.setattr(crg_main.mcp, "run", fake_run)
         monkeypatch.setattr(crg_main, "_default_repo_root", None)
+        # main() applies CRG_TOOLS to the shared mcp object for good, and
+        # refuses CRG_DATA_DIR in multi_repo mode: keep both out of the test.
+        monkeypatch.delenv("CRG_TOOLS", raising=False)
+        monkeypatch.delenv("CRG_DATA_DIR", raising=False)
         return calls
 
     def test_http_multi_repo_runs_with_no_default_repo(self, monkeypatch, tmp_path):
@@ -224,6 +228,18 @@ class TestServeMainOptions:
         calls = self._fake_run(monkeypatch)
         with pytest.raises(ValueError, match=message):
             crg_main.main(multi_repo=True, **kwargs)
+        assert calls == []
+        assert crg_main._multi_repo is False
+
+    def test_a_shared_data_dir_is_refused(self, monkeypatch, tmp_path):
+        """CRG_DATA_DIR would put every registered repo in one graph.db."""
+        calls = self._fake_run(monkeypatch)
+        monkeypatch.setenv("CRG_DATA_DIR", str(tmp_path / "shared"))
+        with pytest.raises(ValueError, match="CRG_DATA_DIR"):
+            crg_main.main(
+                transport="streamable-http", host="127.0.0.1", port=5555,
+                multi_repo=True,
+            )
         assert calls == []
         assert crg_main._multi_repo is False
 
