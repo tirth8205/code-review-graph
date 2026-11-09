@@ -2296,3 +2296,34 @@ class TestQualifiedNameCollisionLifecycle:
 
         assert [e.source_qualified for e in self.store.get_edges_by_target(
             "/test/lib.py::log")] == [survivor]
+
+    def test_bulk_store_looks_up_each_other_file_endpoint_once(self):
+        """The bulk path (#721) must not seek the index for every endpoint:
+        bare names and the file's own symbols need no lookup, and a repeated
+        cross-file target is looked up once.
+        """
+        path = "/test/app.py"
+        nodes = [
+            NodeInfo(kind="Function", name=f"f{i}", file_path=path,
+                     line_start=i * 3 + 1, line_end=i * 3 + 2, language="python")
+            for i in range(50)
+        ]
+        edges = []
+        for i, node in enumerate(nodes):
+            line = node.line_start
+            edges.append(EdgeInfo(kind="CALLS", source=f"{path}::f{i}",
+                                  target=f"{path}::f{(i + 1) % 50}", file_path=path, line=line))
+            edges.append(EdgeInfo(kind="CALLS", source=f"{path}::f{i}", target="print",
+                                  file_path=path, line=line))
+            edges.append(EdgeInfo(kind="CALLS", source=f"{path}::f{i}",
+                                  target="/test/lib.py::log", file_path=path, line=line))
+        statements = []
+        self.store._conn.set_trace_callback(statements.append)
+        try:
+            self.store.store_file_nodes_edges(path, nodes, edges)
+        finally:
+            self.store._conn.set_trace_callback(None)
+
+        seeks = [s for s in statements if "qualified_name >=" in s]
+        assert len(seeks) == 1
+        assert "/test/lib.py::log" in seeks[0]

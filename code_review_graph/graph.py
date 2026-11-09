@@ -1210,8 +1210,7 @@ class GraphStore:
     def upsert_edge(self, edge: EdgeInfo) -> int:
         """Insert or update an edge."""
         now = time.time()
-        source = self._resolve_stored_identity(edge.source)
-        target = self._resolve_stored_identity(edge.target)
+        edge = self._resolve_edge_identities(edge)
         extra_dict = edge.extra if edge.extra else {}
         confidence = float(extra_dict.get("confidence", 1.0))
         confidence_tier = str(extra_dict.get("confidence_tier", "EXTRACTED"))
@@ -1222,7 +1221,7 @@ class GraphStore:
             """SELECT id FROM edges
                WHERE kind=? AND source_qualified=? AND target_qualified=?
                      AND file_path=? AND line=?""",
-            (edge.kind, source, target, edge.file_path, edge.line),
+            (edge.kind, edge.source, edge.target, edge.file_path, edge.line),
         ).fetchone()
 
         if existing:
@@ -1238,14 +1237,19 @@ class GraphStore:
                (kind, source_qualified, target_qualified, file_path, line, extra,
                 confidence, confidence_tier, updated_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (edge.kind, source, target, edge.file_path, edge.line, extra,
+            (edge.kind, edge.source, edge.target, edge.file_path, edge.line, extra,
              confidence, confidence_tier, now),
         )
         return self._conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
     def _resolve_stored_identity(self, qualified_name: str) -> str:
-        """Resolve a bare edge endpoint to one lone historical suffix."""
-        if self.get_node(qualified_name) is not None:
+        """Resolve a bare edge endpoint to one lone historical suffix.
+
+        Only a qualified (``path::symbol``) name can be a collision base. The
+        index range seek is tried first because it is almost always empty;
+        the exact lookup runs only when exactly one suffixed row exists.
+        """
+        if "::" not in qualified_name:
             return qualified_name
         lower = f"{qualified_name}:S"
         upper = f"{qualified_name}:T"
@@ -1263,14 +1267,34 @@ class GraphStore:
             matches.append(candidate)
             if len(matches) == 2:
                 break
-        if len(matches) == 1:
+        if len(matches) == 1 and self._conn.execute(
+            "SELECT 1 FROM nodes WHERE qualified_name = ?", (qualified_name,),
+        ).fetchone() is None:
             return matches[0]
         return qualified_name
 
-    def _resolve_edge_identities(self, edge: EdgeInfo) -> EdgeInfo:
-        """Apply :meth:`_resolve_stored_identity` to both edge endpoints."""
-        source = self._resolve_stored_identity(edge.source)
-        target = self._resolve_stored_identity(edge.target)
+    def _resolve_edge_identities(
+        self,
+        edge: EdgeInfo,
+        local_prefix: str | None = None,
+        cache: dict[str, str] | None = None,
+    ) -> EdgeInfo:
+        """Apply :meth:`_resolve_stored_identity` to both edge endpoints.
+
+        Endpoints under *local_prefix* (``"<file>::"``) belong to the file
+        being stored, whose identities the caller has already aligned.
+        """
+        resolved: list[str] = []
+        for endpoint in (edge.source, edge.target):
+            if local_prefix is not None and endpoint.startswith(local_prefix):
+                resolved.append(endpoint)
+            elif cache is None:
+                resolved.append(self._resolve_stored_identity(endpoint))
+            else:
+                if endpoint not in cache:
+                    cache[endpoint] = self._resolve_stored_identity(endpoint)
+                resolved.append(cache[endpoint])
+        source, target = resolved
         if source == edge.source and target == edge.target:
             return edge
         return EdgeInfo(
@@ -1450,13 +1474,7 @@ class GraphStore:
             )
             self._conn.execute("DELETE FROM edges WHERE file_path = ?", (normalized,))
             self._insert_edges(
-                [
-                    self._resolve_edge_identities(
-                        self._align_edge_with_collisions(edge, collisions),
-                    )
-                    for edge in edges
-                ],
-                time.time(),
+                self._aligned_edges(normalized, edges, collisions), time.time(),
             )
             self._conn.commit()
         except BaseException:
@@ -1529,15 +1547,7 @@ class GraphStore:
             (self._make_qualified(node), node.line_start, node.line_end, qualified)
             for node, qualified in zip(nodes, identities)
         )
-        self._insert_edges(
-            [
-                self._resolve_edge_identities(
-                    self._align_edge_with_collisions(edge, collisions),
-                )
-                for edge in edges
-            ],
-            now,
-        )
+        self._insert_edges(self._aligned_edges(normalized, edges, collisions), now)
         self._invalidate_cache()
 
     def _insert_edges(self, edges: list[EdgeInfo], now: float) -> None:
@@ -1569,15 +1579,45 @@ class GraphStore:
             list(edge_by_site.values()),
         )
 
+    def _aligned_edges(
+        self,
+        file_path: str,
+        edges: list[EdgeInfo],
+        collisions: dict[str, list[tuple[int, int, str]]],
+    ) -> list[EdgeInfo]:
+        """Align one file's parsed edges with its own and stored identities.
+
+        The file's own endpoints are settled by *collisions*; only endpoints
+        in other files can need the index lookup, once per distinct name.
+        """
+        local_prefix = f"{file_path}::"
+        cache: dict[str, str] = {}
+        return [
+            self._resolve_edge_identities(
+                self._align_edge_with_collisions(edge, collisions)
+                if collisions else edge,
+                local_prefix,
+                cache,
+            )
+            for edge in edges
+        ]
+
     @staticmethod
     def _collision_map(
         entries: Iterable[tuple[str, int, int, str]],
     ) -> dict[str, list[tuple[int, int, str]]]:
-        """Group ``(base, line_start, line_end, identity)`` by colliding base."""
+        """Group ``(base, line_start, line_end, identity)`` by colliding base.
+
+        A base is kept when it has several definitions, or one whose identity
+        is suffixed (the survivor of a collision that shrank).
+        """
         by_base: dict[str, list[tuple[int, int, str]]] = {}
         for base, line_start, line_end, qualified in entries:
             by_base.setdefault(base, []).append((line_start, line_end, qualified))
-        return {base: found for base, found in by_base.items() if len(found) > 1}
+        return {
+            base: found for base, found in by_base.items()
+            if len(found) > 1 or found[0][2] != base
+        }
 
     def _align_edge_with_collisions(
         self,
@@ -1601,6 +1641,8 @@ class GraphStore:
             )
         source = edge.source
         source_candidates = collisions.get(source, [])
+        if len(source_candidates) == 1:
+            source = source_candidates[0][2]
         containing_sources = [
             (line_start, line_end, qualified)
             for line_start, line_end, qualified in source_candidates
@@ -1611,7 +1653,9 @@ class GraphStore:
 
         target = edge.target
         target_candidates = collisions.get(target, [])
-        if edge.kind == "CONTAINS" and target_candidates:
+        if len(target_candidates) == 1:
+            target = target_candidates[0][2]
+        elif edge.kind == "CONTAINS" and target_candidates:
             starting_targets = [
                 qualified
                 for line_start, _, qualified in target_candidates
