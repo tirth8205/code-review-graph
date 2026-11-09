@@ -28,6 +28,7 @@ from .constants import env_int
 from .graph import GraphStore
 from .incremental import find_project_root, get_db_path, start_watch_thread
 from .prompts import (
+    Message,
     architecture_map_prompt,
     debug_issue_prompt,
     onboard_developer_prompt,
@@ -1345,7 +1346,7 @@ async def cross_repo_search_tool(
 
 
 @mcp.prompt()
-def review_changes(base: str = "HEAD~1") -> list[dict]:
+def review_changes(base: str = "HEAD~1") -> list[Message]:
     """Pre-commit review workflow using detect_changes, affected_flows, and test gaps.
 
     Produces a structured code review with risk levels and actionable findings.
@@ -1357,7 +1358,7 @@ def review_changes(base: str = "HEAD~1") -> list[dict]:
 
 
 @mcp.prompt()
-def architecture_map() -> list[dict]:
+def architecture_map() -> list[Message]:
     """Architecture documentation using communities, flows, and Mermaid diagrams.
 
     Generates a comprehensive architecture map with module summaries and coupling warnings.
@@ -1366,7 +1367,7 @@ def architecture_map() -> list[dict]:
 
 
 @mcp.prompt()
-def debug_issue(description: str = "") -> list[dict]:
+def debug_issue(description: str = "") -> list[Message]:
     """Guided debugging using search, flow tracing, and recent changes.
 
     Systematic debugging workflow that traces execution paths and identifies root causes.
@@ -1378,7 +1379,7 @@ def debug_issue(description: str = "") -> list[dict]:
 
 
 @mcp.prompt()
-def onboard_developer() -> list[dict]:
+def onboard_developer() -> list[Message]:
     """New developer orientation using stats, architecture, and critical flows.
 
     Creates an onboarding guide covering codebase structure, key modules, and patterns.
@@ -1387,7 +1388,7 @@ def onboard_developer() -> list[dict]:
 
 
 @mcp.prompt()
-def pre_merge_check(base: str = "HEAD~1") -> list[dict]:
+def pre_merge_check(base: str = "HEAD~1") -> list[Message]:
     """PR readiness check with risk scoring, test gaps, and dead code detection.
 
     Produces a merge readiness report with risk assessment and recommendations.
