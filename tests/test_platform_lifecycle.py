@@ -167,6 +167,16 @@ EXPECTATIONS: dict[str, PlatformExpectation] = {
         expects_cwd=False,
         command_is_list=True,
     ),
+    "mimo": PlatformExpectation(
+        key="mimo",
+        scope="repo",
+        relative_config=".mimocode/mimocode.json",
+        server_key="mcp",
+        fmt="object",
+        entry_type="local",
+        expects_cwd=False,
+        command_is_list=True,
+    ),
     "antigravity": PlatformExpectation(
         key="antigravity",
         scope="home",
@@ -263,6 +273,7 @@ EXPECTED_INSTRUCTION_FILES: dict[str, tuple[str, ...]] = {
     "zed": (),
     "continue": (),
     "opencode": ("AGENTS.md",),
+    "mimo": ("AGENTS.md",),
     "antigravity": ("AGENTS.md", "GEMINI.md"),
     "gemini-cli": ("GEMINI.md",),
     "qwen": (),
@@ -295,6 +306,7 @@ EXPECTED_EXTRA_ARTIFACTS: dict[str, tuple[str, ...]] = {
     "zed": (),
     "continue": (),
     "opencode": ("home:.config/opencode/plugins/crg-plugin.ts",),
+    "mimo": (),
     "antigravity": (),
     "gemini-cli": (
         "repo:.gemini/skills/explore-codebase/SKILL.md",
@@ -333,6 +345,7 @@ HOME_SUBDIRS = (
     ".kiro",
     ".copilot",
     ".config/opencode",
+    ".config/mimocode",
     str(Path(_zed_relative()).parent),
 )
 
@@ -1182,8 +1195,8 @@ def test_platform_list_does_not_drift() -> None:
     cli_surface = _cli_platform_keys()
     expected = set(EXPECTATIONS)
 
-    assert len(installer) == 16, (
-        f"the installer now supports {len(installer)} platforms, not 16: "
+    assert len(installer) == 17, (
+        f"the installer now supports {len(installer)} platforms, not 17: "
         f"{sorted(installer)}"
     )
 
@@ -1231,10 +1244,13 @@ def test_every_platform_has_a_reachable_config_path(sandbox: Sandbox) -> None:
     """
     offenders = []
     for name, spec in skills.PLATFORMS.items():
-        path = Path(os.path.abspath(spec["config_path"](sandbox.repo)))
-        scope = uninstall._scope_for_config(path, sandbox.repo, sandbox.home)
-        if scope is None:
-            offenders.append(f"{name} -> {path}")
+        paths = [spec["config_path"](sandbox.repo)]
+        paths.extend(spec.get("config_paths", lambda root: ())(sandbox.repo))
+        for candidate in paths:
+            path = Path(os.path.abspath(candidate))
+            scope = uninstall._scope_for_config(path, sandbox.repo, sandbox.home)
+            if scope is None:
+                offenders.append(f"{name} -> {path}")
     assert not offenders, f"configs outside every uninstall boundary: {offenders}"
 
 

@@ -490,6 +490,64 @@ def test_opencode_reinstall_keeps_comments_when_replacing_a_stale_entry(
     assert data["mcp"]["code-review-graph"]["command"][-1] == str(tmp_path)
 
 
+MIMO_JSONC = (
+    "{\n"
+    "  // the whole team reads this file\n"
+    '  "$schema": "https://mimo.xiaomi.com/mimocode/config.json",\n'
+    '  "mcp": {\n'
+    "    // DO NOT REMOVE: the deploy bot depends on this one\n"
+    '    "deploy-bot": {"type": "local", "command": ["deploy-bot"], "enabled": true},\n'
+    "  },\n"
+    "}\n"
+)
+
+
+def test_mimo_install_and_uninstall_keep_comments(tmp_path: Path) -> None:
+    """MiMo's JSONC config keeps the user's comments through install and uninstall."""
+    (tmp_path / ".git").mkdir()
+    config = tmp_path / ".mimocode" / "mimocode.jsonc"
+    config.parent.mkdir()
+    config.write_text(MIMO_JSONC, encoding="utf-8")
+
+    assert skills.install_platform_configs(tmp_path, target="mimo") == ["MiMo Code"]
+
+    text = config.read_text(encoding="utf-8")
+    assert "// the whole team reads this file" in text
+    assert "// DO NOT REMOVE: the deploy bot depends on this one" in text
+    assert "code-review-graph" in _read_jsonc(config)["mcp"]
+    assert not (tmp_path / ".mimocode" / "mimocode.json").exists()
+
+    report = uninstall.run(repo=tmp_path, keep_data=True, platforms=["mimo"])
+
+    assert not report.errors
+    text = config.read_text(encoding="utf-8")
+    assert "// the whole team reads this file" in text
+    assert "// DO NOT REMOVE: the deploy bot depends on this one" in text
+    assert _read_jsonc(config) == {
+        "$schema": "https://mimo.xiaomi.com/mimocode/config.json",
+        "mcp": {"deploy-bot": {"type": "local", "command": ["deploy-bot"], "enabled": True}},
+    }
+
+
+def test_mimo_install_leaves_a_hand_tuned_entry_alone(tmp_path: Path, capsys) -> None:
+    """An entry the user shaped by hand under our name is theirs to keep."""
+    config = tmp_path / ".mimocode" / "mimocode.json"
+    config.parent.mkdir()
+    entry = {
+        "type": "local",
+        "command": ["uvx", "code-review-graph", "serve"],
+        "environment": {"CRG_LOG": "debug"},
+    }
+    original = json.dumps({"mcp": {"code-review-graph": entry}}, indent=2) + "\n"
+    config.write_text(original, encoding="utf-8")
+
+    configured = skills.install_platform_configs(tmp_path, target="mimo")
+
+    assert config.read_text(encoding="utf-8") == original
+    assert configured == []
+    assert "hand-written" in capsys.readouterr().out
+
+
 # ---------------------------------------------------------------------------
 # Hook settings the installer cannot read as strict JSON
 # ---------------------------------------------------------------------------
