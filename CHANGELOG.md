@@ -141,6 +141,13 @@
   ignore a missing, relative or non-repository `cwd`. Upgrade the package before
   running `install --platform codex` again; `install` and `uninstall` both
   recognise the hooks earlier releases wrote.
+- Codex hooks work on Windows. Each Codex hook now has a `commandWindows`
+  beside its `command`, so Codex on Windows runs a PowerShell form instead of
+  the `sh` one, which failed every time with `hook exited with code 1`. It
+  passes the event JSON to `hook-update` or `hook-status` in the same way, and
+  does nothing but succeed when `code-review-graph` is not on `PATH`. Run
+  `install --platform codex` again to add it to existing hooks; Codex on
+  Windows then asks you once to review the two changed hooks (#620, #877).
 - `**/vendor/**` applies only when a root manifest shows `vendor/` holds
   dependencies (`composer.json`, `go.mod`, `go.work`, `Gemfile`, `Rakefile`,
   `Cargo.toml` or `*.gemspec`), and a nested one excludes its sibling
