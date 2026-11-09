@@ -3156,8 +3156,6 @@ _HTML_JAVASCRIPT_TYPES = frozenset({
     "text/jsx",
 })
 _HTML_TYPESCRIPT_TYPES = frozenset({"application/typescript", "text/typescript"})
-# ``alert(1); known(2)``: a name being called, not a method on something else.
-_HTML_HANDLER_CALL_RE = re.compile(r"(?<![\w$.])([A-Za-z_$][\w$]*)\s*\(")
 
 
 def _html_start_tag(element: Any) -> Any:
@@ -3228,16 +3226,23 @@ def _html_first_heading(element: Any, max_chars: int) -> Optional[str]:
         start_tag = _html_start_tag(node)
         tag = _html_tag_name(start_tag) if start_tag is not None else ""
         if tag in _HTML_HEADING_TAGS:
-            words: list[str] = []
+            # Entities are leaves of their own: ``Caf&eacute;`` is two pieces
+            # with no gap between them, so pieces join with a space only where
+            # the page had one or a tag.
+            pieces: list[str] = []
+            last_end: Optional[int] = None
             parts = list(reversed(node.children))
             while parts:
                 part = parts.pop()
-                if part.type == "text":
-                    words.append(part.text.decode("utf-8", errors="replace"))
+                if part.type in ("text", "entity"):
+                    if last_end is not None and part.start_byte != last_end:
+                        pieces.append(" ")
+                    pieces.append(part.text.decode("utf-8", errors="replace"))
+                    last_end = part.end_byte
                 else:
                     parts.extend(reversed(part.children))
-            heading = " ".join(" ".join(words).split())
-            return html.unescape(heading)[:max_chars] or None
+            heading = " ".join(html.unescape("".join(pieces)).split())
+            return heading[:max_chars] or None
         if tag in _HTML_SECTION_TAGS and start_tag is not None and (
             _html_attributes(start_tag).get("id", "").strip()
         ):
@@ -4320,18 +4325,21 @@ class CodeParser:
                 line=section.line_start,
             ))
 
-        self._extract_html_scripts(scripts, file_path_str, all_nodes, all_edges)
+        classic_nodes = self._extract_html_scripts(
+            scripts, file_path_str, all_nodes, all_edges,
+        )
 
         # An inline handler is how a page reaches its own functions. Only names
         # the page defines are linked: ``alert`` and ``obj.run`` say nothing.
+        # A handler runs in global scope, so a module's functions are out of reach.
         page_functions = {
             node.name: self._qualify(node.name, file_path_str, None)
-            for node in all_nodes
+            for node in classic_nodes
             if node.kind in ("Function", "Test") and not node.parent_name
         }
-        for event, value, line in handlers:
+        for event, value, line in handlers if page_functions else []:
             seen: set[str] = set()
-            for called in _HTML_HANDLER_CALL_RE.findall(value):
+            for called in self._html_handler_calls(value):
                 if called in page_functions and called not in seen:
                     seen.add(called)
                     all_edges.append(EdgeInfo(
@@ -4343,12 +4351,14 @@ class CodeParser:
                         extra={"html_event": event},
                     ))
 
-        if test_file:
-            test_qnames = {
-                self._qualify(n.name, n.file_path, n.parent_name)
-                for n in all_nodes
-                if n.is_test and n.kind != "File"
-            }
+        # Not only on test pages: a ``test_`` function is a test anywhere, as in
+        # a ``.js`` file.
+        test_qnames = {
+            self._qualify(n.name, n.file_path, n.parent_name)
+            for n in all_nodes
+            if n.is_test and n.kind != "File"
+        }
+        if test_qnames:
             for edge in list(all_edges):
                 if edge.kind == "CALLS" and edge.source in test_qnames:
                     all_edges.append(EdgeInfo(
@@ -4412,9 +4422,12 @@ class CodeParser:
         file_path: str,
         all_nodes: list[NodeInfo],
         all_edges: list[EdgeInfo],
-    ) -> None:
-        """Extract a page's scripts, in page order, into the node and edge lists."""
-        blocks: list[tuple[Any, bytes, str, int, dict[str, str], set[str]]] = []
+    ) -> list[NodeInfo]:
+        """Extract a page's scripts, in page order, into the node and edge lists.
+
+        Returns the nodes of the classic scripts: the page's globals.
+        """
+        blocks: list[tuple[Any, bytes, str, int, dict[str, str], set[str], bool]] = []
         shared_imports: dict[str, str] = {}
         shared_names: set[str] = set()
         for script in scripts:
@@ -4440,23 +4453,27 @@ class CodeParser:
             import_map, defined_names = self._collect_file_scope(
                 script_tree.root_node, script_lang, raw_text.text, file_path,
             )
+            is_module = attributes.get("type", "").strip().lower() == "module"
             blocks.append((
                 script_tree.root_node, raw_text.text, script_lang,
-                raw_text.start_point[0], import_map, defined_names,
+                raw_text.start_point[0], import_map, defined_names, is_module,
             ))
             # Classic scripts on a page share one global scope, so a block can
             # call what another defines. A module's names stay inside it.
-            if attributes.get("type", "").strip().lower() != "module":
+            if not is_module:
                 shared_imports.update(import_map)
                 shared_names |= defined_names
 
-        for root, text, script_lang, line_offset, import_map, defined_names in blocks:
+        extracted: list[tuple[list[NodeInfo], list[EdgeInfo], dict[str, str], bool]] = []
+        classic_nodes: list[NodeInfo] = []
+        for root, text, script_lang, line_offset, import_map, defined_names, is_module in blocks:
             nodes: list[NodeInfo] = []
             edges: list[EdgeInfo] = []
             self._extract_from_tree(
                 root, text, script_lang, file_path, nodes, edges,
                 import_map={**shared_imports, **import_map},
-                defined_names=shared_names | defined_names,
+                # A name a module imports shadows a page global of that name.
+                defined_names=(shared_names - import_map.keys()) | defined_names,
             )
             for node in nodes:
                 node.line_start += line_offset
@@ -4464,8 +4481,41 @@ class CodeParser:
                 node.language = "html"
             for edge in edges:
                 edge.line += line_offset
+            extracted.append((nodes, edges, import_map, is_module))
+            if not is_module:
+                classic_nodes.extend(nodes)
+
+        # Same-file resolution, as for a script file (``app.handle()`` to the
+        # ``app.handle`` the page assigns), over what each block can see.
+        for nodes, edges, import_map, is_module in extracted:
+            visible = classic_nodes
+            if is_module:
+                visible = nodes + [
+                    node for node in classic_nodes if node.name not in import_map
+                ]
             all_nodes.extend(nodes)
-            all_edges.extend(edges)
+            all_edges.extend(self._resolve_call_targets(visible, edges, file_path))
+        return classic_nodes
+
+    def _html_handler_calls(self, handler: str) -> list[str]:
+        """Names an inline handler calls, read with the JavaScript grammar.
+
+        Only a call of a plain name counts: not ``obj.run()``, and nothing in a
+        string or a comment.
+        """
+        js_parser = self._get_parser("javascript")
+        if not js_parser:
+            return []
+        called: list[str] = []
+        stack = [js_parser.parse(handler.encode("utf-8", errors="replace")).root_node]
+        while stack:
+            node = stack.pop()
+            if node.type == "call_expression":
+                function = node.child_by_field_name("function")
+                if function is not None and function.type == "identifier":
+                    called.append(function.text.decode("utf-8", errors="replace"))
+            stack.extend(reversed(node.children))
+        return called
 
     def _add_html_script_import(
         self, src: str, file_path: str, line: int, edges: list[EdgeInfo],
@@ -4480,9 +4530,23 @@ class CodeParser:
         resolved: Optional[str] = None
         if relative.startswith("/"):
             if self._repo_root is not None:
-                candidate = self._repo_root / relative.lstrip("/")
-                if candidate.is_file():
-                    resolved = normalize_file_path(candidate)
+                # As a browser reads the path: ``..`` stops at the root.
+                parts: list[str] = []
+                for part in relative.split("/"):
+                    if part == "..":
+                        if parts:
+                            parts.pop()
+                    elif part not in ("", "."):
+                        parts.append(part)
+                try:
+                    candidate = self._repo_root.joinpath(*parts).resolve()
+                    found = bool(parts) and candidate.is_file()
+                except (OSError, RuntimeError):
+                    found = False
+                if found:
+                    canonical = normalize_file_path(candidate)
+                    if canonical not in self._excluded_files:
+                        resolved = canonical
         else:
             module = relative if relative.startswith(".") else f"./{relative}"
             resolved = self._resolve_module_to_file(module, file_path, "javascript")

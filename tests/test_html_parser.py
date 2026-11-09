@@ -81,6 +81,32 @@ def test_module_script_names_stay_inside_the_module():
     assert calls == ["inner"]
 
 
+def test_a_module_import_shadows_a_classic_global(tmp_path):
+    util = tmp_path / "util.js"
+    util.write_text("export function helper() {}\n")
+    source = b"""<script>function helper() {}</script>
+<script type="module">import { helper } from './util.js'; helper();</script>"""
+
+    _, edges = CodeParser(repo_root=tmp_path).parse_bytes(tmp_path / "page.html", source)
+
+    calls = [edge.target for edge in edges if edge.kind == "CALLS"]
+    assert calls == [f"{normalize_file_path(util)}::helper"]
+
+
+def test_member_call_resolves_to_a_member_assigned_function_on_the_page():
+    source = b"""<script>
+app.handle = function () {};
+function start() { app.handle(); }
+</script>"""
+    _, edges = _parse(source)
+
+    calls = [
+        edge.target for edge in edges
+        if edge.kind == "CALLS" and edge.source == "/repo/page.html::start"
+    ]
+    assert calls == ["/repo/page.html::app.handle"]
+
+
 def test_line_numbers_are_those_of_the_html_file():
     nodes, edges = CodeParser().parse_file(FIXTURE)
     lines = FIXTURE.read_text().splitlines()
@@ -139,6 +165,15 @@ def test_long_headings_are_capped():
     sections = _sections(_parse(source)[0])
 
     assert len(sections["#a"].extra["docstring"]) <= 200
+
+
+def test_headings_keep_their_entities():
+    source = b"""<div id="a"><h2>Caf&eacute; au lait</h2></div>
+<div id="b"><h2>&amp;</h2></div>"""
+    sections = _sections(_parse(source)[0])
+
+    assert sections["#a"].extra["docstring"] == "Caf\u00e9 au lait"
+    assert sections["#b"].extra["docstring"] == "&"
 
 
 def test_elements_outside_the_whitelist_are_not_sections():
@@ -281,6 +316,31 @@ def test_root_relative_script_resolves_against_the_repo_root(tmp_path):
     ]
 
 
+def test_root_relative_script_path_is_canonical(tmp_path):
+    (tmp_path / "static").mkdir()
+    site = tmp_path / "site.js"
+    site.write_text("")
+
+    _, edges = CodeParser(repo_root=tmp_path).parse_bytes(
+        tmp_path / "page.html", b'<script src="/static/../site.js"></script>',
+    )
+
+    assert [edge.target for edge in edges if edge.kind == "IMPORTS_FROM"] == [
+        normalize_file_path(site.resolve()),
+    ]
+
+
+def test_root_relative_script_that_was_forgotten_stays_bare(tmp_path):
+    site = tmp_path / "site.js"
+    site.write_text("")
+    parser = CodeParser(repo_root=tmp_path)
+    parser.exclude_files({str(site)})
+
+    _, edges = parser.parse_bytes(tmp_path / "page.html", b'<script src="/site.js"></script>')
+
+    assert [edge.target for edge in edges if edge.kind == "IMPORTS_FROM"] == ["/site.js"]
+
+
 def test_module_import_inside_a_script_resolves_from_the_page(tmp_path):
     helper = tmp_path / "util.js"
     helper.write_text("export function helper() {}\n")
@@ -320,6 +380,26 @@ def test_inline_handler_ignores_names_the_page_does_not_define():
 
     handler = [edge.target for edge in edges if edge.extra.get("html_event")]
     assert handler == ["/repo/page.html::known"]
+
+
+def test_inline_handler_ignores_strings_comments_and_members():
+    source = b"""<button onclick="console.log('known()'); /* known() */ alert(1); obj . known()">
+</button>
+<form onsubmit="return checked()"></form>
+<script>function known() {} function checked() {}</script>"""
+    _, edges = _parse(source)
+
+    handler = [edge.target for edge in edges if edge.extra.get("html_event")]
+    assert handler == ["/repo/page.html::checked"]
+
+
+def test_inline_handler_cannot_reach_a_module_function():
+    """A module's functions are not globals, and a handler runs in global scope."""
+    source = b"""<button onclick="init()"></button>
+<script type="module">function init() {}</script>"""
+    _, edges = _parse(source)
+
+    assert [edge for edge in edges if edge.extra.get("html_event")] == []
 
 
 @pytest.mark.parametrize(
@@ -370,6 +450,20 @@ function helper() {}
     assert all(node.is_test for node in nodes)
     assert any(
         edge.kind == "TESTED_BY" and edge.source.endswith("::helper")
+        for edge in edges
+    )
+
+
+def test_a_test_function_on_a_plain_page_links_what_it_calls():
+    """As in a ``.js`` file, a ``test_`` function is a test wherever it lives."""
+    source = b"""<script>function test_thing() { helper(); } function helper() {}</script>"""
+    nodes, edges = _parse(source)
+
+    assert _named(nodes, "test_thing").kind == "Test"
+    assert any(
+        edge.kind == "TESTED_BY"
+        and edge.source == "/repo/page.html::helper"
+        and edge.target == "/repo/page.html::test_thing"
         for edge in edges
     )
 
