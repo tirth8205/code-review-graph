@@ -949,8 +949,11 @@ def incremental_detect_communities(
     """Re-detect communities only if changed files affect existing communities.
 
     If no existing communities contain nodes from changed files, skips
-    re-detection entirely (the common case for small changes). Otherwise
-    re-runs full community detection.
+    re-detection unless changed files contain unassigned code nodes. That
+    happens for a file new to the graph, which was in no community to be
+    affected, and for a re-parsed file whose nodes were inserted without
+    their old assignment. In that case, re-run full community detection to
+    assign the new nodes, as a clean build would.
 
     Args:
         store: The GraphStore instance.
@@ -974,18 +977,22 @@ def incremental_detect_communities(
 
     # Check if any communities are affected (batch to stay under SQLite limit)
     affected_count = 0
+    unassigned_count = 0
     for i in range(0, len(expanded), _SQL_BATCH):
         batch = expanded[i:i + _SQL_BATCH]
         placeholders = ",".join("?" * len(batch))
         row = conn.execute(
-            f"SELECT COUNT(DISTINCT community_id) FROM nodes "  # nosec B608
-            f"WHERE community_id IS NOT NULL AND file_path IN ({placeholders})",
+            f"SELECT COUNT(DISTINCT community_id), "  # nosec B608
+            f"SUM(CASE WHEN community_id IS NULL AND kind != 'File' "
+            f"THEN 1 ELSE 0 END) FROM nodes "
+            f"WHERE file_path IN ({placeholders})",
             batch,
         ).fetchone()
         if row:
-            affected_count += row[0]
+            affected_count += row[0] or 0
+            unassigned_count += row[1] or 0
 
-    if not force and affected_count == 0:
+    if not force and affected_count == 0 and unassigned_count == 0:
         return 0  # No communities affected, skip
 
     # Re-run full community detection (correct and fast enough)

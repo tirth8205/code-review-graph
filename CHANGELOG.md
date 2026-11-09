@@ -213,6 +213,10 @@
   over a workspace member with the same name, because npm installs the
   aliased package under it. `update` does not re-parse importers when only a
   `package.json` changes; run `build` after changing an alias.
+- A file added by `update` now gets a community, as it does after `build`.
+  It was in no community, so the update saw nothing affected, skipped
+  community detection and left the file's nodes without one until the next
+  full build (#1058, PR #1122 by @jay23606).
 - TypeScript and JavaScript imports resolve against `compilerOptions.baseUrl`
   when no `paths` pattern matches them, as `tsc` does. A tsconfig that sets
   `baseUrl` without `paths` resolved no non-relative import at all: on a
