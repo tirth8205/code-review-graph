@@ -284,6 +284,8 @@ def _run_postprocess(
         and changed_files is not None
         and build_result.get("files_updated") == 0
         and not build_result.get("stale_files_removed")
+        # A C# rebind with no source change still owes the flows a rebuild.
+        and store.get_metadata("csharp_flows_dirty") != "1"
     )
 
     # Resolve bare and C++ scoped call targets before derived graph steps.
