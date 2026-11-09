@@ -2327,3 +2327,20 @@ class TestQualifiedNameCollisionLifecycle:
         seeks = [s for s in statements if "qualified_name >=" in s]
         assert len(seeks) == 1
         assert "/test/lib.py::log" in seeks[0]
+
+    def test_symbol_tail_lookup_sees_every_duplicate(self):
+        """``query_graph`` resolves ``Class.method`` targets through the indexed
+        ``symbol`` column. A suffixed duplicate must share its base symbol, or a
+        tail lookup reports one confident match and hides the other definition.
+        """
+        path = "/test/handlers.py"
+        nodes = [
+            NodeInfo(kind="Function", name="process", file_path=path, parent_name="Handler",
+                     line_start=line, line_end=line + 2, language="python")
+            for line in (10, 20)
+        ]
+        self.store.store_file_nodes_edges(path, nodes, [])
+
+        found = self.store.search_nodes_by_qualified_tail("Handler.process")
+        assert sorted(n.line_start for n in found) == [10, 20]
+        assert self.store.count_nodes_by_qualified_tail("Handler.process") == 2
