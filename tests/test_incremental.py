@@ -3057,14 +3057,16 @@ def _jedi_repo(root: Path, returned: str = "OldService") -> None:
 def _authenticate_edges(store: GraphStore, root: Path) -> list[tuple[str, dict, str]]:
     import json
 
+    # Match on the file name: on Windows the stored path and ``root.resolve()``
+    # can spell the same temp folder differently (short names, drive case).
     rows = store._conn.execute(
-        "SELECT target_qualified, extra, target_resolution FROM edges"
-        " WHERE kind = 'CALLS' AND file_path = ? AND line = 5",
-        (str(root.resolve() / "app.py"),),
+        "SELECT file_path, target_qualified, extra, target_resolution FROM edges"
+        " WHERE kind = 'CALLS' AND line = 5",
     ).fetchall()
     return [
         (r["target_qualified"].rsplit("/", 1)[-1], json.loads(r["extra"]), r["target_resolution"])
         for r in rows
+        if Path(r["file_path"]).name == "app.py"
     ]
 
 
