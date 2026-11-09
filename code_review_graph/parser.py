@@ -6719,12 +6719,12 @@ class CodeParser:
             for node in nodes
             if node.language == "go" and "go_receiver" in node.extra
         }
-        # A dot in a member's parent scope proves nesting for Python and for
-        # the languages that accumulate the lexical scope chain (#934); Ruby
-        # and Julia always dot, so they are handled by their own rules below.
+        # A dot in a Python member's parent scope proves nesting; Ruby and
+        # Julia always dot, so they are handled by their own rules below. C#
+        # never reaches here: its namespace-aware binder owns every call (#964).
         disambiguated_leaves = {
             node.parent_name.rsplit(".", 1)[-1] for node in nodes
-            if node.language in ("python", "csharp") and node.parent_name
+            if node.language == "python" and node.parent_name
             and "." in node.parent_name and node.kind in ("Function", "Test")
         }
         # Every nested Ruby class has a dotted scope, so a dot proves nothing
@@ -6740,7 +6740,7 @@ class CodeParser:
         )
         disambiguated_scopes = {
             node.parent_name for node in nodes
-            if node.language in ("python", "ruby", "csharp") and node.parent_name
+            if node.language in ("python", "ruby") and node.parent_name
             and node.kind in ("Function", "Test")
             and node.parent_name.rsplit(".", 1)[-1] in disambiguated_leaves
         }

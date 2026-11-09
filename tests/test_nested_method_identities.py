@@ -683,21 +683,25 @@ public class Beta
 
 
 def test_csharp_same_leaf_classes_keep_methods_in_their_enclosing_scope(tmp_path):
-    """Two same-named nested classes must not collapse their methods (#934)."""
-    path = Path('S.cs')
-    nodes, edges = CodeParser().parse_bytes(path, CSHARP_SAME_LEAF.encode())
-    with GraphStore(tmp_path / 'graph.db') as store:
-        store.store_file_nodes_edges(path.as_posix(), nodes, edges)
-        methods = [n for n in store.get_nodes_by_file(path.as_posix()) if n.kind == 'Function']
+    """Two same-named nested classes must not collapse their methods (#934).
+
+    C# identities carry the namespace (#964), and its namespace-aware binder,
+    not the parse-time retargeting, binds the local ``Helper()`` calls.
+    """
+    (tmp_path / 'S.cs').write_text(CSHARP_SAME_LEAF, encoding='utf-8')
+    with GraphStore(tmp_path / '.code-review-graph' / 'graph.db') as store:
+        full_build(tmp_path, store)
+        path = (tmp_path / 'S.cs').as_posix()
+        methods = [n for n in store.get_nodes_by_file(path) if n.kind == 'Function']
         assert {n.qualified_name for n in methods} == {
-            f'{path}::{scope}.Same.{method}'
+            f'{path}::App.{scope}.Same.{method}'
             for scope in ['Alpha', 'Beta'] for method in ['Run', 'Helper']
         }
         for scope in ['Alpha', 'Beta']:
-            run = f'{path}::{scope}.Same.Run'
+            run = f'{path}::App.{scope}.Same.Run'
             assert {e.target_qualified for e in store.get_edges_by_source(run)
-                    if e.kind == 'CALLS'} == {f'{path}::{scope}.Same.Helper'}
-            assert any(e.source_qualified == f'{path}::{scope}.Same'
+                    if e.kind == 'CALLS'} == {f'{path}::App.{scope}.Same.Helper'}
+            assert any(e.source_qualified == f'{path}::App.{scope}.Same'
                        for e in store.get_edges_by_target(run) if e.kind == 'CONTAINS')
 
 
@@ -708,13 +712,14 @@ public class A { public class B { public class C { public void M() { } } } }
 ''')
     qualified = {parser._node_qualified(n) for n in nodes if n.kind != 'File'}
     assert qualified == {
-        'Deep.cs::A', 'Deep.cs::A.B', 'Deep.cs::A.B.C', 'Deep.cs::A.B.C.M',
+        'Deep.cs::App.A', 'Deep.cs::App.A.B', 'Deep.cs::App.A.B.C', 'Deep.cs::App.A.B.C.M',
     }
     # The containment tree follows the same chain: each class is contained by
     # its enclosing class, and the method by the innermost class.
-    assert _contains_sources(edges, 'Deep.cs::A.B') == {'Deep.cs::A'}
-    assert _contains_sources(edges, 'Deep.cs::A.B.C') == {'Deep.cs::A.B'}
-    assert _contains_sources(edges, 'Deep.cs::A.B.C.M') == {'Deep.cs::A.B.C'}
+    assert _contains_sources(edges, 'Deep.cs::App.A') == {'Deep.cs'}
+    assert _contains_sources(edges, 'Deep.cs::App.A.B') == {'Deep.cs::App.A'}
+    assert _contains_sources(edges, 'Deep.cs::App.A.B.C') == {'Deep.cs::App.A.B'}
+    assert _contains_sources(edges, 'Deep.cs::App.A.B.C.M') == {'Deep.cs::App.A.B.C'}
 
 
 def test_csharp_single_nested_class_carries_full_scope():
@@ -728,4 +733,4 @@ public class Outer
     }
 }
 ''')
-    assert _methods(parser, nodes) == {'One.cs::Outer.Inner.Handle'}
+    assert _methods(parser, nodes) == {'One.cs::App.Outer.Inner.Handle'}
