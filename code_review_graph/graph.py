@@ -2242,6 +2242,21 @@ class GraphStore:
             ).fetchall())
         return [self._row_to_edge(row) for row in rows]
 
+    def get_edges_claiming(self, qualified_name: str) -> list[GraphEdge]:
+        """Edges whose settled endpoint once named *qualified_name*.
+
+        ``_settle_unbound_endpoints`` turns an endpoint that names no node back
+        into the plain name and keeps the qualified one under
+        ``CLAIMED_ENDPOINT_KEY``, so a symbol a diff deleted is still found by
+        the calls written against it.
+        """
+        rows = self._conn.execute(
+            "SELECT * FROM edges WHERE extra LIKE ? "
+            "AND json_valid(extra) AND json_extract(extra, ?) = ? ORDER BY id",
+            (f'%"{CLAIMED_ENDPOINT_KEY}"%', f"$.{CLAIMED_ENDPOINT_KEY}", qualified_name),
+        ).fetchall()
+        return [self._row_to_edge(row) for row in rows]
+
     def search_edges_by_target_name(
         self, name: str, kind: str = "CALLS", language: str | None = None,
     ) -> list[GraphEdge]:

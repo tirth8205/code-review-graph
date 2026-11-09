@@ -934,8 +934,19 @@ def _removed_symbol_users(store: GraphStore, removed: GraphNode) -> _RemovedUser
     for edge in store.get_edges_by_source(qualified_name):
         if edge.kind == "TESTED_BY":
             add(edge.target_qualified, edge.kind, edge.line)
+    bare_reached: set[int] = set()
     for edge in store.search_edges_by_target_name(removed.name, kind="CALLS"):
         if _bare_call_reaches(edge, removed):
+            bare_reached.add(edge.id)
+            add(edge.source_qualified, edge.kind, edge.line)
+    # Once the symbol is gone, an edge that named it is settled back to the
+    # plain name with the old name kept as its claim (#984).
+    for edge in store.get_edges_claiming(qualified_name):
+        if edge.id in bare_reached:
+            continue
+        if edge.kind == "TESTED_BY":
+            add(edge.target_qualified, edge.kind, edge.line)
+        elif edge.kind != "CONTAINS":
             add(edge.source_qualified, edge.kind, edge.line)
     found.users = sorted(
         users.values(), key=lambda u: (u["qualified_name"], u["line"] or 0),
