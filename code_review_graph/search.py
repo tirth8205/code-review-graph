@@ -27,6 +27,11 @@ from .parser import is_test_file, normalize_file_path
 
 logger = logging.getLogger(__name__)
 
+# A Liquid output's name is the text it prints, and a theme prints thousands of
+# them: on Shopify's Dawn all ten top hits for "product" were outputs. They stay
+# in the graph and ``kind="Output"`` still finds them, but no other search does.
+_UNSEARCHED_KIND = "Output"
+
 # Per-column BM25 weights for the FTS5 index, looked up by column name so the
 # weight vector follows the table's real shape (see NODES_FTS_DDL). A name hit
 # is the strongest evidence; a docstring hit is the weakest, which is what
@@ -736,12 +741,14 @@ def _fts_search(
     conn: sqlite3.Connection,
     query: str,
     limit: int = 50,
+    kind: str | None = None,
 ) -> list[tuple[int, float]]:
     """Run an FTS5 BM25 search against the nodes_fts table.
 
     Tries each expression from :func:`build_fts_queries` in turn and returns
     the first non-empty result, so the precise reading of a query wins and
-    the widened one is only a fallback.
+    the widened one is only a fallback. Without *kind*, ``_UNSEARCHED_KIND``
+    rows are left out inside the statement, so they cannot use up *limit*.
 
     Returns list of ``(node_id, bm25_score)`` tuples. The BM25 score is
     negated so higher = better (FTS5 returns negative BM25).
@@ -763,9 +770,21 @@ def _fts_search(
         f"SELECT rowid, bm25(nodes_fts, {weights}) AS score FROM nodes_fts "
         "WHERE nodes_fts MATCH ? ORDER BY score LIMIT ?"
     )
+    params: tuple[Any, ...] = (limit,)
+    # Most graphs hold no such rows, and they keep the plain statement.
+    if not kind and conn.execute(
+        "SELECT 1 FROM nodes WHERE kind = ? LIMIT 1", (_UNSEARCHED_KIND,),
+    ).fetchone():
+        # CROSS JOIN keeps the full-text index as the outer loop.
+        sql = (  # nosec B608
+            f"SELECT nodes_fts.rowid, bm25(nodes_fts, {weights}) AS score FROM nodes_fts "
+            "CROSS JOIN nodes ON nodes.id = nodes_fts.rowid "
+            "WHERE nodes_fts MATCH ? AND nodes.kind != ? ORDER BY score LIMIT ?"
+        )
+        params = (_UNSEARCHED_KIND, limit)
     for expression in expressions:
         try:
-            rows = conn.execute(sql, (expression, limit)).fetchall()
+            rows = conn.execute(sql, (expression, *params)).fetchall()
         except sqlite3.OperationalError as e:
             logger.warning("FTS5 search failed for %r: %s", expression, e)
             return []
@@ -830,10 +849,12 @@ def _keyword_search(
     conn: sqlite3.Connection,
     query: str,
     limit: int = 50,
+    kind: str | None = None,
 ) -> list[tuple[int, float]]:
     """Fall back to simple LIKE keyword matching.
 
-    Each word in the query must match independently (AND logic).
+    Each word in the query must match independently (AND logic). Without
+    *kind*, ``_UNSEARCHED_KIND`` rows are left out before *limit* cuts them.
     Returns ``(node_id, score)`` tuples with a basic relevance score.
     """
     words = query.lower().split()
@@ -847,6 +868,9 @@ def _keyword_search(
             "(LOWER(name) LIKE ? OR LOWER(qualified_name) LIKE ?)"
         )
         params.extend([f"%{word}%", f"%{word}%"])
+    if not kind:
+        conditions.append("kind != ?")
+        params.append(_UNSEARCHED_KIND)
 
     where = " AND ".join(conditions)
     params.append(limit)
@@ -928,7 +952,7 @@ def hybrid_search(
 
     # Try FTS5 search
     try:
-        fts_results = _fts_search(conn, query, limit=fetch_limit)
+        fts_results = _fts_search(conn, query, limit=fetch_limit, kind=kind)
     except Exception as e:
         logger.warning("FTS5 unavailable, will use fallback: %s", e)
 
@@ -954,7 +978,7 @@ def hybrid_search(
                 _out_mode.append("semantic")
     else:
         # Fallback: keyword LIKE matching
-        keyword_results = _keyword_search(conn, query, limit=fetch_limit)
+        keyword_results = _keyword_search(conn, query, limit=fetch_limit, kind=kind)
         if not keyword_results:
             if _out_mode is not None:
                 _out_mode.append("none")
@@ -1058,6 +1082,8 @@ def hybrid_search(
 
         node_kind = row["kind"]
         if kind and node_kind != kind:
+            continue
+        if not kind and node_kind == _UNSEARCHED_KIND:
             continue
 
         results.append({

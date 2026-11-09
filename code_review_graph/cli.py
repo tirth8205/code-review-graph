@@ -1665,7 +1665,10 @@ def build_parser() -> argparse.ArgumentParser:
     search_cmd.add_argument("query", help="Search string")
     search_cmd.add_argument(
         "--kind",
-        choices=["File", "Class", "Function", "Type", "Test", "YamlPath", "DocSection"],
+        choices=[
+            "File", "Class", "Function", "Type", "Test", "YamlPath", "DocSection",
+            "Variable", "Output",
+        ],
         default=None,
     )
     search_cmd.add_argument("--limit", type=_positive_int, default=20)
