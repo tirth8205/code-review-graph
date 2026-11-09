@@ -456,3 +456,110 @@ def test_alias_declaration_hides_a_same_named_workspace_member(
     )
 
     assert _import_from_app(tmp_path, member_name) == [member_name]
+
+
+def test_node_modules_and_dot_directory_copies_are_not_packages(tmp_path: Path) -> None:
+    package_root = _aliased_package(tmp_path, {}, {"index.ts": "export const a = 1;\n"})
+    for copy in (
+        tmp_path / "node_modules" / "@scope" / "shared",
+        tmp_path / "app" / "node_modules" / "sharedLib",
+        tmp_path / ".cache" / "shared",
+    ):
+        _write_json(copy / "package.json", {"name": "@scope/shared", "version": "1.0.0"})
+        (copy / "index.js").write_text("exports.a = 1;\n", encoding="utf-8")
+
+    assert _import_from_app(tmp_path, "sharedLib") == [
+        (package_root / "index.ts").resolve().as_posix(),
+    ]
+
+
+_BROKEN_MANIFESTS = {
+    "invalid json": "{not json",
+    "non-object json": json.dumps(["@scope/shared"]),
+    "over one megabyte": json.dumps({"name": "@scope/shared", "pad": "x" * 1_100_000}),
+}
+
+
+@pytest.mark.parametrize("text", _BROKEN_MANIFESTS.values(), ids=_BROKEN_MANIFESTS.keys())
+def test_broken_manifest_of_the_package_stays_external(tmp_path: Path, text: str) -> None:
+    package_root = _aliased_package(tmp_path, {}, {"index.ts": "export const a = 1;\n"})
+    (package_root / "package.json").write_text(text, encoding="utf-8")
+
+    assert _import_from_app(tmp_path, "sharedLib") == ["sharedLib"]
+
+
+@pytest.mark.parametrize("text", _BROKEN_MANIFESTS.values(), ids=_BROKEN_MANIFESTS.keys())
+def test_broken_manifest_of_the_importer_stays_external(tmp_path: Path, text: str) -> None:
+    # The root declares the alias, but the importer's own manifest is unreadable,
+    # so whether it declares the name too cannot be known.
+    _aliased_package(tmp_path, {}, {"index.ts": "export const a = 1;\n"})
+    _write_json(
+        tmp_path / "package.json",
+        {"dependencies": {"sharedLib": "npm:@scope/shared@^1.0.0"}},
+    )
+    (tmp_path / "app" / "package.json").write_text(text, encoding="utf-8")
+
+    assert _import_from_app(tmp_path, "sharedLib") == ["sharedLib"]
+
+
+def _symlink(link: Path, target: Path, *, directory: bool = False) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=directory)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are not available here")
+
+
+def test_file_symlinked_out_of_the_package_stays_external(tmp_path: Path) -> None:
+    package_root = _aliased_package(tmp_path, {}, {"index.ts": "export const a = 1;\n"})
+    secret = tmp_path / "secret.ts"
+    secret.write_text("export const secret = 1;\n", encoding="utf-8")
+    _symlink(package_root / "leak.ts", secret)
+
+    assert _import_from_app(tmp_path, "sharedLib/leak") == ["sharedLib/leak"]
+
+
+def test_symlinked_package_directory_is_not_a_second_copy(tmp_path: Path) -> None:
+    package_root = _aliased_package(tmp_path, {}, {"index.ts": "export const a = 1;\n"})
+    _symlink(tmp_path / "mirror", package_root, directory=True)
+
+    assert _import_from_app(tmp_path, "sharedLib") == [
+        (package_root / "index.ts").resolve().as_posix(),
+    ]
+
+
+def test_package_without_entry_fields_falls_back_to_index(tmp_path: Path) -> None:
+    package_root = _aliased_package(tmp_path, {}, {"index.tsx": "export const a = 1;\n"})
+
+    assert _import_from_app(tmp_path, "sharedLib") == [
+        (package_root / "index.tsx").resolve().as_posix(),
+    ]
+    (package_root / "lib").mkdir()
+    (package_root / "lib" / "index.js").write_text("exports.b = 1;\n", encoding="utf-8")
+    assert _import_from_app(tmp_path, "sharedLib/lib") == [
+        (package_root / "lib" / "index.js").resolve().as_posix(),
+    ]
+
+
+def test_alias_matches_whole_package_names_only(tmp_path: Path) -> None:
+    package_root = _aliased_package(
+        tmp_path, {}, {"some/module.ts": "export const a = 1;\n"},
+    )
+    _write_json(
+        tmp_path / "app" / "package.json",
+        {
+            "dependencies": {
+                "sharedLib": "npm:@scope/shared@^1.0.0",
+                "@alias/lib": "npm:@scope/shared@^1.0.0",
+            },
+        },
+    )
+
+    assert _import_from_app(tmp_path, "sharedLib-x/some/module") == [
+        "sharedLib-x/some/module",
+    ]
+    assert _import_from_app(tmp_path, "@alias/lib/some/module") == [
+        (package_root / "some" / "module.ts").resolve().as_posix(),
+    ]
+    assert _import_from_app(tmp_path, "@alias/library/some/module") == [
+        "@alias/library/some/module",
+    ]

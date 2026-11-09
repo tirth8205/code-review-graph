@@ -145,7 +145,12 @@ class NpmAliasResolver:
         declared: dict[str, str] = {}
         current = start
         while True:
-            manifest = self._read_manifest(current / "package.json")
+            manifest_path = current / "package.json"
+            manifest = self._read_manifest(manifest_path)
+            if manifest is None and manifest_path.is_file():
+                # A manifest that cannot be read might declare the name, so
+                # nothing further up may be trusted to decide it.
+                break
             if manifest is not None:
                 for section_name in _DEPENDENCY_SECTIONS:
                     section = manifest.get(section_name)
