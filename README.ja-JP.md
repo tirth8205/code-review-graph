@@ -501,7 +501,7 @@ alias = "project-b"
 </details>
 
 <details>
-<summary><strong>31 個の MCP ツール</strong></summary>
+<summary><strong>30 個の MCP ツール</strong></summary>
 <br>
 
 グラフを構築すると、アシスタントはこれらを使います。
@@ -646,7 +646,7 @@ code-review-graph embed --provider voyage --model voyage-code-3
 
 #### ツールの絞り込み
 
-CRG は既定で 31 個の MCP ツールを公開します。サーバーを一部に限定するには、`--tools` か `CRG_TOOLS` 環境変数を使います。
+CRG は既定で 30 個の MCP ツールを公開します。サーバーを一部に限定するには、`--tools` か `CRG_TOOLS` 環境変数を使います。
 
 ```bash
 # CLI flag

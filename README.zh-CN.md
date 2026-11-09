@@ -499,7 +499,7 @@ alias = "project-b"
 </details>
 
 <details>
-<summary><strong>31 个 MCP 工具</strong></summary>
+<summary><strong>30 个 MCP 工具</strong></summary>
 <br>
 
 图谱构建完成后，助手会使用这些工具。
@@ -644,7 +644,7 @@ code-review-graph embed --provider voyage --model voyage-code-3
 
 #### 工具过滤
 
-CRG 默认暴露 31 个 MCP 工具。要把服务器限制到一个子集，使用 `--tools` 或 `CRG_TOOLS` 环境变量：
+CRG 默认暴露 30 个 MCP 工具。要把服务器限制到一个子集，使用 `--tools` 或 `CRG_TOOLS` 环境变量：
 
 ```bash
 # CLI flag

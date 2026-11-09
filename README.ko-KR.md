@@ -502,7 +502,7 @@ alias = "project-b"
 </details>
 
 <details>
-<summary><strong>MCP 도구 31개</strong></summary>
+<summary><strong>MCP 도구 30개</strong></summary>
 <br>
 
 그래프를 만들고 나면 어시스턴트가 이 도구들을 씁니다.
@@ -647,7 +647,7 @@ code-review-graph embed --provider voyage --model voyage-code-3
 
 #### 도구 필터링
 
-CRG는 기본으로 MCP 도구 31개를 노출합니다. 서버를 일부로 제한하려면 `--tools`나 `CRG_TOOLS` 환경 변수를 쓰세요.
+CRG는 기본으로 MCP 도구 30개를 노출합니다. 서버를 일부로 제한하려면 `--tools`나 `CRG_TOOLS` 환경 변수를 쓰세요.
 
 ```bash
 # CLI flag

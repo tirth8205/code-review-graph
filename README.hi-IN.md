@@ -500,7 +500,7 @@ alias = "project-b"
 </details>
 
 <details>
-<summary><strong>31 MCP टूल</strong></summary>
+<summary><strong>30 MCP टूल</strong></summary>
 <br>
 
 ग्राफ़ बन जाने के बाद असिस्टेंट इनका उपयोग करता है।
@@ -645,7 +645,7 @@ code-review-graph embed --provider voyage --model voyage-code-3
 
 #### टूल फ़िल्टरिंग
 
-CRG डिफ़ॉल्ट रूप से 31 MCP टूल दिखाता है। सर्वर को एक उपसमूह तक सीमित करने के लिए `--tools` या `CRG_TOOLS` पर्यावरण चर का उपयोग करें:
+CRG डिफ़ॉल्ट रूप से 30 MCP टूल दिखाता है। सर्वर को एक उपसमूह तक सीमित करने के लिए `--tools` या `CRG_TOOLS` पर्यावरण चर का उपयोग करें:
 
 ```bash
 # CLI flag
