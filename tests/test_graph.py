@@ -2157,3 +2157,41 @@ class TestQualifiedNameCollisionLifecycle:
         assert [self._identity_at(path, line) for line in (10, 27)] == [
             identities[0], identities[2],
         ]
+
+    def test_edited_duplicate_keeps_its_identity_beside_an_unchanged_one(self):
+        """``render(a)`` at 10 becomes ``render(a, b)`` at 12 while ``render(c)``
+        shifts 20 -> 22. The edited definition matches nothing semantically, but
+        it is the only old and only new one left, so it keeps its identity
+        rather than taking a suffix and stranding its caller on the bare name.
+        """
+        path = "/test/target.py"
+        self.store.store_file_nodes_edges(
+            path, [self._render(path, 10, "(a)"), self._render(path, 20, "(c)")], [],
+        )
+        edited, unchanged = self._identity_at(path, 10), self._identity_at(path, 20)
+        assert edited == f"{path}::render"
+        self._call("/test/caller_a.py", "go_a", edited)
+        self._call("/test/caller_c.py", "go_c", unchanged)
+
+        self.store.store_file_nodes_edges(
+            path, [self._render(path, 12, "(a, b)"), self._render(path, 22, "(c)")], [],
+        )
+
+        assert self._identity_at(path, 12) == edited
+        assert self._identity_at(path, 22) == unchanged
+        for identity in (edited, unchanged):
+            [caller] = self.store.get_edges_by_target(identity)
+            assert self.store.get_node(caller.target_qualified) is not None
+
+    def test_every_edited_duplicate_keeps_its_identity_in_order(self):
+        path = "/test/target.py"
+        self.store.store_file_nodes_edges(
+            path, [self._render(path, 10, "(a)"), self._render(path, 20, "(c)")], [],
+        )
+        before = [self._identity_at(path, 10), self._identity_at(path, 20)]
+
+        self.store.store_file_nodes_edges(
+            path, [self._render(path, 14, "(a, x)"), self._render(path, 24, "(c, y)")], [],
+        )
+
+        assert [self._identity_at(path, 14), self._identity_at(path, 24)] == before

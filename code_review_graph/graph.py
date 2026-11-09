@@ -1112,13 +1112,6 @@ class GraphStore:
         for base, indices in new_by_base.items():
             candidates = old_by_base.get(base, [])
             used_old_ids: set[int] = set()
-            if len(indices) == 1 and len(candidates) == 1:
-                index = indices[0]
-                row = candidates[0]
-                planned[index] = row["qualified_name"]
-                assigned.add(row["qualified_name"])
-                used_old_ids.add(row["id"])
-
             # Semantically identical definitions are told apart only by their
             # order. Nearest-line pairing swaps twins once enough lines are
             # inserted above them, so pair each signature group in order.
@@ -1146,6 +1139,24 @@ class GraphStore:
                 ):
                     row = old_group[old_pos]
                     planned[group[new_pos]] = row["qualified_name"]
+                    assigned.add(row["qualified_name"])
+                    used_old_ids.add(row["id"])
+
+            # Definitions edited in place match nothing semantically. When as
+            # many old as new are left (a lone definition whose signature and
+            # line both changed, or one edited beside an unchanged twin), pair
+            # them in order instead of suffixing and stranding their callers.
+            left_new = sorted(
+                (index for index in indices if planned[index] is None),
+                key=lambda index: (nodes[index].line_start, index),
+            )
+            left_old = sorted(
+                (row for row in candidates if row["id"] not in used_old_ids),
+                key=lambda row: (row["line_start"], row["id"]),
+            )
+            if left_new and len(left_new) == len(left_old):
+                for index, row in zip(left_new, left_old):
+                    planned[index] = row["qualified_name"]
                     assigned.add(row["qualified_name"])
                     used_old_ids.add(row["id"])
 
