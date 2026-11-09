@@ -60,14 +60,19 @@ def _windows_console_handle(fileno: int) -> bool:
     """
     if sys.platform != "win32":
         return False
+    # Any failure means "not shown to be a console", which picks threads: a
+    # slower build at worst, never a crash. A Python built without ctypes, or
+    # a handle too large for ctypes to pass as a C int, must not stop a build.
     try:
         import ctypes
         import msvcrt
-
+    except ImportError:
+        return False
+    try:
         handle = msvcrt.get_osfhandle(fileno)
         mode = ctypes.c_uint32()
         return bool(ctypes.windll.kernel32.GetConsoleMode(handle, ctypes.byref(mode)))
-    except (AttributeError, OSError, ValueError):
+    except (AttributeError, OSError, ValueError, ctypes.ArgumentError):
         return False
 
 

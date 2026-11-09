@@ -110,6 +110,69 @@ class TestParseExecutorSelection:
 
         assert result.stdout.split() == ["True", "False", "thread"]
 
+    @staticmethod
+    def _fake_windows_console(monkeypatch, get_console_mode):
+        """Stand in for msvcrt and kernel32 so the console check runs anywhere."""
+        import ctypes
+        import types
+
+        monkeypatch.setattr(incremental_module.sys, "platform", "win32")
+        monkeypatch.setitem(
+            sys.modules, "msvcrt",
+            types.SimpleNamespace(get_osfhandle=lambda fileno: 1000 + fileno),
+        )
+        monkeypatch.setattr(
+            ctypes, "windll",
+            types.SimpleNamespace(
+                kernel32=types.SimpleNamespace(GetConsoleMode=get_console_mode),
+            ),
+            raising=False,
+        )
+
+    @pytest.mark.parametrize("console_mode_result, expected", [(1, True), (0, False)])
+    def test_console_check_reads_get_console_mode(
+        self, monkeypatch, console_mode_result, expected,
+    ):
+        seen = []
+
+        def get_console_mode(handle, mode):
+            seen.append(handle)
+            return console_mode_result
+
+        self._fake_windows_console(monkeypatch, get_console_mode)
+
+        assert incremental_module._windows_console_handle(3) is expected
+        assert seen == [1003]
+
+    def test_console_check_without_ctypes_or_msvcrt_is_not_a_console(self, monkeypatch):
+        # Before the check existed, nothing here could raise; it must not now.
+        monkeypatch.setattr(incremental_module.sys, "platform", "win32")
+        monkeypatch.setitem(sys.modules, "msvcrt", None)
+
+        assert incremental_module._windows_console_handle(0) is False
+
+    def test_console_check_survives_a_handle_ctypes_cannot_pass(self, monkeypatch):
+        import ctypes
+
+        def get_console_mode(handle, mode):
+            raise ctypes.ArgumentError("int too long to convert")
+
+        self._fake_windows_console(monkeypatch, get_console_mode)
+
+        assert incremental_module._windows_console_handle(0) is False
+
+    def test_windows_without_stdin_uses_threads(self, monkeypatch):
+        # pythonw and some service hosts start with sys.stdin set to None.
+        monkeypatch.delenv("CRG_PARSE_EXECUTOR", raising=False)
+        monkeypatch.setattr(
+            incremental_module, "_MCP_STDIO_ACTIVE", False, raising=False,
+        )
+        monkeypatch.setattr(incremental_module.sys, "platform", "win32")
+        monkeypatch.setattr(incremental_module.sys, "stdin", None)
+
+        assert incremental_module._stdin_is_interactive() is False
+        assert incremental_module._select_executor_kind() == "thread"
+
     def test_explicit_process_override_wins_in_stdio_mcp(self, monkeypatch):
         monkeypatch.setenv("CRG_PARSE_EXECUTOR", "process")
         monkeypatch.setattr(
