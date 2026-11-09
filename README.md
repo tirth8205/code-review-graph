@@ -569,6 +569,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_OPENAI_BATCH_SIZE` | Batch size for OpenAI-compatible requests | `100` |
 | `NO_COLOR` | Disable ANSI colours in the terminal | - |
 | `CRG_SERIAL_PARSE` | Set to `1` to disable parallel parsing (for debugging) | - |
+| `CRG_DISABLE_ENRICHMENT` | Set to `1` to skip Jedi call resolution when the `enrichment` extra is installed | - |
 
 OpenAI-compatible embeddings (OpenAI, Azure, or a self-hosted gateway such as new-api, LiteLLM, vLLM, LocalAI, or Ollama in OpenAI mode) need no extra install. Set the variables and pass `provider="openai"` to `embed_graph`:
 

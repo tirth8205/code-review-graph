@@ -4,6 +4,17 @@
 
 ### Added
 
+- The `enrichment` extra now does something: with Jedi installed, `build`
+  and `update` resolve Python method calls on a local variable (PR #823). For
+  `s = make()` then `s.authenticate()`, the CALLS edge to the bare name
+  `authenticate` now names `svc.py::OldService.authenticate`, so
+  `callers_of` and the impact radius find the call. Jedi was a declared
+  extra that no build ever ran. `update` scans only the Python files it
+  re-parses, plus their dependents, whose edges it rewrites. A target with no
+  node in the graph is never written. Jedi is slow: on an 88-file Python
+  repository a full build went from 26 to 104 seconds and resolved 44 more
+  calls. Without the extra nothing runs and builds cost the same;
+  `CRG_DISABLE_ENRICHMENT=1` turns the step off when Jedi is installed.
 - Python modules that replace themselves in `sys.modules` are followed to the
   module they install. A compatibility shim such as
   `sys.modules[__name__] = importlib.import_module("app.services.billing")`
@@ -88,6 +99,12 @@
 
 ### Fixed
 
+- The impact-accuracy benchmark's co-change mode no longer reports
+  `predicted_files = 0` on every commit (PR #823). `git diff` gives
+  repo-relative paths and the graph stores absolute ones under the resolved
+  root, so the seed never matched a node. The graph-derived ground truth now
+  counts real neighbour files too, and `seed_file` stays relative to the
+  repository.
 - TypeScript and JavaScript imports resolve against `compilerOptions.baseUrl`
   when no `paths` pattern matches them, as `tsc` does. A tsconfig that sets
   `baseUrl` without `paths` resolved no non-relative import at all: on a

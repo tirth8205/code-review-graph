@@ -556,6 +556,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_OPENAI_BATCH_SIZE` | OpenAI-संगत अनुरोधों का बैच आकार | `100` |
 | `NO_COLOR` | टर्मिनल में ANSI रंग बंद करें | - |
 | `CRG_SERIAL_PARSE` | `1` करने पर समानांतर पार्सिंग बंद (डिबगिंग के लिए) | - |
+| `CRG_DISABLE_ENRICHMENT` | `1` करने पर `enrichment` एक्स्ट्रा होने पर भी Jedi कॉल रिज़ॉल्यूशन बंद | - |
 
 OpenAI-संगत एम्बेडिंग (OpenAI, Azure, या new-api, LiteLLM, vLLM, LocalAI, या OpenAI मोड में Ollama जैसा स्व-होस्टेड गेटवे) के लिए अतिरिक्त इंस्टॉल नहीं चाहिए। चर सेट करें और `embed_graph` को `provider="openai"` दें:
 

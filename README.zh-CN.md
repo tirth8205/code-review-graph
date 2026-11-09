@@ -556,6 +556,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_OPENAI_BATCH_SIZE` | OpenAI 兼容请求的批大小 | `100` |
 | `NO_COLOR` | 关闭终端中的 ANSI 颜色 | - |
 | `CRG_SERIAL_PARSE` | 设为 `1` 可关闭并行解析（用于调试） | - |
+| `CRG_DISABLE_ENRICHMENT` | 设为 `1` 可在装有 `enrichment` 附加包时跳过 Jedi 调用解析 | - |
 
 OpenAI 兼容嵌入（OpenAI、Azure，或自建网关如 new-api、LiteLLM、vLLM、LocalAI，或 OpenAI 模式下的 Ollama）无需额外安装。设置变量并给 `embed_graph` 传入 `provider="openai"`：
 
