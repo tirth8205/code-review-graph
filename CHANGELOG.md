@@ -26,6 +26,11 @@
   supported Python, and runs the test suite there. `tests/test_dependency_floors.py`
   keeps `pyproject.toml` and the pinned list in step in both directions. (#896)
 
+- A `Dockerfile` that works with Docker and Podman, so the tool can run from a
+  container. It installs this source, includes Git, and runs as a non-root user.
+  Mount a repository at `/workspace`; the graph stays in that repository. It
+  stores `/workspace` paths, so use the container for later commands or rebuild
+  on the host. No image is published. See the README. (#1037)
 - Python modules that replace themselves in `sys.modules` are followed to the
   module they install. A compatibility shim such as
   `sys.modules[__name__] = importlib.import_module("app.services.billing")`
