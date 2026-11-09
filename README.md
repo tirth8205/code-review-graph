@@ -223,7 +223,7 @@ The generic tree-sitter walker does the extraction. Built-in languages cannot be
 
 ### Risk-scored PR reviews in CI (GitHub Action)
 
-The same analysis runs as a composite GitHub Action. The graph is built and queried on your CI runner; no source code is sent to an external service. On each pull request the action posts one sticky comment with risk-scored functions, affected execution flows and test gaps, updated in place on every push. The optional `fail-on-risk` input turns it into a merge gate.
+The same analysis runs as a composite GitHub Action. The graph is built and queried on your CI runner; no source code is sent to an external service. On each pull request the action posts one sticky comment with risk-scored functions, affected execution flows and test gaps, updated in place on every push. The optional `fail-on-risk` input turns it into a merge gate. The optional `details` input adds more graph context, folded away and capped in size: why each top symbol scored what it did, the communities, hubs and cross-boundary links the change touches, its impact radius, its untested hotspots, and where the graph came from.
 
 ```yaml
 # .github/workflows/code-review-graph.yml

@@ -606,6 +606,16 @@ def _positive_int(value: str) -> int:
     return parsed
 
 
+def _detail_sections_arg(value: str) -> tuple[str, ...]:
+    """Parse ``detect-changes --details``; an unknown name is a usage error."""
+    from .change_details import parse_detail_sections
+
+    try:
+        return parse_detail_sections(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
 _GRAPH_TOOL_COMMANDS = {
     "query",
     "impact",
@@ -1891,6 +1901,15 @@ def build_parser() -> argparse.ArgumentParser:
              "second row to the panel with the real token counts. Requires "
              "`pip install tiktoken`.",
     )
+    detect_cmd.add_argument(
+        "--details",
+        type=_detail_sections_arg,
+        default=(),
+        metavar="SECTIONS",
+        help="Add bounded graph context to the JSON under 'details': a "
+             "comma-separated list of risk, communities, hubs, coupling, "
+             "impact, gaps, graph, or all. Not used with --brief.",
+    )
 
     # enrich (Claude Code PreToolUse hook; reads one JSON object from stdin)
     sub.add_parser("enrich", help="Enrich hook input with graph context")
@@ -2201,6 +2220,7 @@ def build_parser() -> argparse.ArgumentParser:
         "serve": serve_cmd,
         "daemon": daemon_cmd,
         "visualize": vis_cmd,
+        "detect-changes": detect_cmd,
     })
     return ap
 
@@ -2227,6 +2247,13 @@ def _dispatch() -> None:
         and (not args.old_name or not args.new_name)
     ):
         _SUBCOMMANDS["refactor"].error("rename requires --old-name and --new-name")
+
+    if args.command == "detect-changes" and args.details and args.brief:
+        # The extra sections are JSON for a renderer; the panel has no room
+        # for them, and dropping them without a word would look like a bug.
+        _SUBCOMMANDS["detect-changes"].error(
+            "--details adds to the JSON output; it cannot be used with --brief"
+        )
 
     if args.command == "visualize":
         # Before the graph is opened: a nonsense flag pair is a usage error,
@@ -2981,6 +3008,27 @@ def _dispatch() -> None:
                     include_churn=getattr(args, "churn", False),
                     require_vcs=True,
                 )
+                sections = getattr(args, "details", ())
+                if sections:
+                    # Opt-in only: without --details the report is exactly
+                    # what it was. Built before the savings estimate so the
+                    # estimate measures the larger response it describes.
+                    from .change_details import build_change_details
+                    from .changes import review_churn_counts
+                    from .parser import normalize_file_path
+
+                    churn_counts, _ = review_churn_counts(
+                        str(repo_root), getattr(args, "churn", False),
+                    )
+                    result["details"] = build_change_details(
+                        store,
+                        result,
+                        sections,
+                        changed_files=[
+                            normalize_file_path(repo_root / fp) for fp in changed
+                        ],
+                        churn_counts=churn_counts,
+                    )
                 original_tokens = estimate_file_tokens(repo_root, changed)
                 attach_context_savings(
                     result,

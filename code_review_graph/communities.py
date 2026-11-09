@@ -41,6 +41,13 @@ _SLUG_MAX_LEN = 30
 IGRAPH_AVAILABLE = importlib.util.find_spec("igraph") is not None
 ig: Any = None
 
+#: Metadata key naming the algorithm behind the stored communities, and its
+#: values. Risk scores weigh callers from other communities, so a report has
+#: to be able to say which grouping it was scored against.
+DETECTOR_METADATA_KEY = "community_detector"
+DETECTOR_LEIDEN = "leiden"
+DETECTOR_FILE = "file"
+
 # ---------------------------------------------------------------------------
 # Edge weight mapping
 # ---------------------------------------------------------------------------
@@ -422,7 +429,10 @@ def _detect_leiden(
                 weights.append(EDGE_WEIGHTS.get(e.kind, 0.5))
 
     if not edge_list:
-        return _detect_file_based(nodes, edges, min_size, adj=adj)
+        fallback = _detect_file_based(nodes, edges, min_size, adj=adj)
+        for comm in fallback:
+            comm["detector"] = DETECTOR_FILE
+        return fallback
 
     g.add_edges(edge_list)
     g.es["weight"] = weights
@@ -858,15 +868,22 @@ def detect_communities(
     if _load_igraph():
         logger.info("Detecting communities with Leiden algorithm (igraph)")
         results = _detect_leiden(unique_nodes, all_edges, min_size)
+        detector = DETECTOR_LEIDEN
     else:
         logger.info("igraph not available, using file-based community detection")
         results = _detect_file_based(unique_nodes, all_edges, min_size)
+        detector = DETECTOR_FILE
 
     # Split oversized communities
     results = _split_oversized(
         results, unique_nodes, all_edges,
     )
     _dedupe_community_names(results, unique_nodes)
+    # Which algorithm made each community, for store_communities to record.
+    # Leiden falls back to file grouping on a graph with no usable edges and
+    # tags those itself; the parts of a split community are Leiden's.
+    for comm in results:
+        comm.setdefault("detector", detector)
 
     # Convert member_qns (internal set) to a list for serialization safety,
     # then strip it from the returned dicts to avoid leaking internal state.
@@ -1089,6 +1106,20 @@ def store_communities(
                     [community_id] + batch,
                 )
             count += 1
+
+        # Recorded in the same transaction as the communities it describes,
+        # so the two cannot disagree. Communities from a caller that does not
+        # say how they were made leave no record rather than a guessed one.
+        tags = [comm.get("detector") for comm in communities]
+        if tags and all(tags):
+            conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                (DETECTOR_METADATA_KEY, "+".join(sorted({str(t) for t in tags}))),
+            )
+        else:
+            conn.execute(
+                "DELETE FROM metadata WHERE key = ?", (DETECTOR_METADATA_KEY,),
+            )
 
         conn.commit()
     except BaseException:

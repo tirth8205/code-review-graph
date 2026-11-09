@@ -5527,10 +5527,6 @@ class GraphStore:
             "FROM nodes ORDER BY file_path, id"
         ))
 
-    def get_nodes_by_qualified_names(self, qualified_names: set[str]) -> list[GraphNode]:
-        """Return the nodes with these qualified names, in no particular order."""
-        return self._batch_get_nodes(qualified_names)
-
     def _batch_get_nodes(self, qualified_names: set[str]) -> list[GraphNode]:
         """Batch-fetch nodes by qualified name, staying under SQLite variable limits."""
         if not qualified_names:
@@ -5547,6 +5543,53 @@ class GraphStore:
             ).fetchall()
             results.extend(self._row_to_node(r) for r in rows)
         return results
+
+    def get_nodes_by_qualified_names(
+        self, qualified_names: Iterable[str],
+    ) -> list[GraphNode]:
+        """Fetch the nodes with these qualified names; unknown names are skipped."""
+        return self._batch_get_nodes(set(qualified_names))
+
+    def get_node_degrees(
+        self, *, include_tests: bool = True,
+    ) -> dict[str, tuple[int, int]]:
+        """``qualified_name -> (in_degree, out_degree)`` for every non-File node.
+
+        Counts edges of every kind, which is the measure
+        :func:`~code_review_graph.analysis.find_hub_nodes` ranks hubs by,
+        without loading every edge into Python. ``include_tests=False``
+        leaves out nodes marked as test code.
+        """
+        sql = (
+            "SELECT n.qualified_name, "
+            "(SELECT COUNT(*) FROM edges e WHERE e.target_qualified = n.qualified_name), "
+            "(SELECT COUNT(*) FROM edges e WHERE e.source_qualified = n.qualified_name) "
+            "FROM nodes n WHERE n.kind != 'File'"
+        )
+        if not include_tests:
+            sql += " AND n.is_test = 0 AND n.kind != 'Test'"
+        rows = self._conn.execute(sql).fetchall()
+        return {row[0]: (int(row[1]), int(row[2])) for row in rows}
+
+    def get_communities_by_ids(self, ids: Iterable[int]) -> dict[int, sqlite3.Row]:
+        """``id -> row`` with ``id``, ``name`` and ``size`` for these communities."""
+        wanted = sorted({int(i) for i in ids})
+        found: dict[int, sqlite3.Row] = {}
+        batch_size = 450
+        for i in range(0, len(wanted), batch_size):
+            batch = wanted[i:i + batch_size]
+            placeholders = ",".join("?" for _ in batch)
+            rows = self._conn.execute(  # nosec B608
+                f"SELECT id, name, size FROM communities WHERE id IN ({placeholders})",
+                batch,
+            ).fetchall()
+            for row in rows:
+                found[int(row["id"])] = row
+        return found
+
+    def count_flows(self) -> int:
+        """Number of stored execution flows."""
+        return int(self._conn.execute("SELECT COUNT(*) FROM flows").fetchone()[0])
 
     def load_flow_adjacency(self) -> "FlowAdjacency":
         """Load all nodes and CALLS/TESTED_BY edges into memory for fast traversal.

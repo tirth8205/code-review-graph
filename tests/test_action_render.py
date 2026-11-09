@@ -1106,3 +1106,375 @@ def test_cli_subprocess_stdout():
     assert result.returncode == 0
     assert result.stdout.startswith(render.MARKER)
     assert "Powered by [code-review-graph]" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# Opt-in graph context (issue #882)
+# ---------------------------------------------------------------------------
+#
+# ``detect-changes --details`` adds a ``details`` object to the report, and
+# ``--details`` on the renderer turns it into extra sections. Off by default:
+# the comment a workflow posts today must not change by a single byte.
+
+
+def _details() -> dict:
+    """A ``details`` object shaped like ``detect-changes --details all``."""
+    return {
+        "sections": [
+            "risk", "communities", "hubs", "coupling", "impact", "gaps", "graph",
+        ],
+        "risk": [
+            {
+                "qualified_name": "auth/session.py::rotate_token",
+                "file_path": "auth/session.py",
+                "line_start": 42,
+                "risk_score": 0.72,
+                "signals": {
+                    "flows": {"score": 0.17, "count": 2},
+                    "cross_community": {"score": 0.05, "count": 1},
+                    "tests": {"score": 0.3, "count": 0},
+                    "security": {"score": 0.2, "count": 1},
+                    "callers": {"score": 0.0, "count": 0},
+                    "churn": {"score": 0.0, "count": 0},
+                },
+            },
+        ],
+        "communities": {
+            "in_graph": 12,
+            "touched_total": 2,
+            "unassigned": 1,
+            "touched": [
+                {"id": 3, "name": "auth-session", "size": 14, "changed": 2},
+                {"id": 5, "name": "auth-display", "size": 4, "changed": 1},
+            ],
+        },
+        "hubs": {
+            "ranked": 340,
+            "total": 1,
+            "nodes": [
+                {
+                    "qualified_name": "auth/session.py::validate_session",
+                    "file_path": "auth/session.py",
+                    "line_start": 80,
+                    "degree": 31,
+                    "rank": 2,
+                    "communities_linked": 3,
+                },
+            ],
+        },
+        "coupling": {
+            "total": 4,
+            "cross_community": 4,
+            "cross_language": 1,
+            "edges": [
+                {
+                    "source": "web/client.ts::refresh",
+                    "target": "auth/session.py::rotate_token",
+                    "kind": "CALLS",
+                    "reasons": ["cross-language", "cross-community"],
+                    "source_language": "typescript",
+                    "target_language": "python",
+                    "source_community": "web-client",
+                    "target_community": "auth-session",
+                },
+            ],
+        },
+        "impact": {
+            "depth": 2,
+            "impacted_nodes": 37,
+            "impacted_files": 9,
+            "truncated": False,
+            "top_files": [{"file_path": "auth/routes.py", "nodes": 6}],
+            "callers": [
+                {
+                    "qualified_name": "auth/session.py::rotate_token",
+                    "total": 4,
+                    "callers": [
+                        "auth/routes.py::login_handler",
+                        "auth/routes.py::refresh_handler",
+                    ],
+                },
+            ],
+        },
+        "gaps": {
+            "total": 1,
+            "hotspots": [
+                {
+                    "qualified_name": "auth/session.py::rotate_token",
+                    "file_path": "auth/session.py",
+                    "line_start": 42,
+                    "callers": 4,
+                    "flows": 2,
+                    "coverage": "none",
+                },
+            ],
+        },
+        "graph": {
+            "nodes": 1234,
+            "edges": 5678,
+            "files": 90,
+            "languages": ["python", "typescript"],
+            "communities": 12,
+            "community_detector": "leiden",
+            "igraph_installed": True,
+            "flows": 30,
+            "last_updated": "2026-11-09T10:00:00",
+            "build_type": "incremental",
+            "version": "2.3.9",
+            "schema_version": 14,
+        },
+    }
+
+
+@pytest.fixture()
+def detailed(report) -> dict:
+    report = json.loads(json.dumps(report))
+    report["details"] = _details()
+    return report
+
+
+def _details_block(body: str) -> str:
+    start = body.index("<details>")
+    end = body.index("</details>") + len("</details>")
+    return body[start:end]
+
+
+def test_details_off_renders_the_exact_comment_of_today(report, detailed):
+    # The report carries graph context, but nobody asked for it: the comment
+    # is the one every existing workflow posts, byte for byte.
+    assert render.render_markdown(detailed) == render.render_markdown(report)
+    assert render.render_markdown(detailed, details=()) == render.render_markdown(report)
+
+
+def test_details_off_main_writes_the_same_bytes(tmp_path, report, detailed):
+    plain_in = tmp_path / "plain.json"
+    rich_in = tmp_path / "rich.json"
+    plain_in.write_text(json.dumps(report), encoding="utf-8")
+    rich_in.write_text(json.dumps(detailed), encoding="utf-8")
+    plain_out = tmp_path / "plain.md"
+    rich_out = tmp_path / "rich.md"
+    assert render.main(["--input", str(plain_in), "--output", str(plain_out)]) == 0
+    assert render.main(["--input", str(rich_in), "--output", str(rich_out)]) == 0
+    assert rich_out.read_bytes() == plain_out.read_bytes()
+    # An empty --details, which is what the Action passes through when the
+    # input is left alone, is the same as no flag at all.
+    empty_out = tmp_path / "empty.md"
+    assert render.main(
+        ["--input", str(rich_in), "--output", str(empty_out), "--details", ""]
+    ) == 0
+    assert empty_out.read_bytes() == plain_out.read_bytes()
+
+
+def test_details_all_renders_every_section(detailed):
+    body = render.render_markdown(detailed, details=render.DETAIL_SECTIONS)
+    block = _details_block(body)
+    for heading in (
+        "#### Why these risk scores",
+        "#### Communities touched",
+        "#### Hubs and chokepoints",
+        "#### Coupling across boundaries",
+        "#### Impact radius",
+        "#### Untested hotspots",
+        "#### Graph",
+    ):
+        assert heading in block, heading
+    # The extra sections sit after the report and before the footer.
+    assert body.index("</details>") < body.index(render.FOOTER)
+    assert body.index("### Test gaps") < body.index("<details>")
+
+
+def test_details_render_only_the_sections_asked_for(detailed):
+    body = render.render_markdown(detailed, details=("risk", "graph"))
+    block = _details_block(body)
+    assert "#### Why these risk scores" in block
+    assert "#### Graph" in block
+    assert "#### Hubs and chokepoints" not in block
+    assert "#### Impact radius" not in block
+
+
+def test_risk_section_names_the_signals_behind_the_score(detailed):
+    block = _details_block(render.render_markdown(detailed, details=("risk",)))
+    line = next(row for row in block.splitlines() if "rotate" in row)
+    assert "0.72" in line
+    assert "no tests +0.30" in line
+    assert "security-related name +0.20" in line
+    assert "in 2 flow(s) +0.17" in line
+    assert "1 caller(s) from other communities +0.05" in line
+    # A signal that added nothing is not listed as a reason.
+    assert "commit" not in line
+    # Largest contribution first.
+    assert line.index("no tests") < line.index("security-related")
+
+
+def test_risk_section_says_when_the_signals_hit_the_cap(detailed):
+    entry = detailed["details"]["risk"][0]
+    entry["risk_score"] = 1.0
+    entry["signals"]["callers"] = {"score": 0.1, "count": 9}
+    entry["signals"]["flows"] = {"score": 0.25, "count": 9}
+    entry["signals"]["churn"] = {"score": 0.15, "count": 30}
+    block = _details_block(render.render_markdown(detailed, details=("risk",)))
+    assert "capped at 1.00" in block
+
+
+def test_graph_section_names_the_community_detector(detailed):
+    block = _details_block(render.render_markdown(detailed, details=("graph",)))
+    assert "Leiden" in block
+    assert "12 communities" in block
+    detailed["details"]["graph"]["community_detector"] = "file"
+    detailed["details"]["graph"]["igraph_installed"] = False
+    block = _details_block(render.render_markdown(detailed, details=("graph",)))
+    assert "file-based grouping" in block
+    assert "igraph is not installed" in block
+    detailed["details"]["graph"]["community_detector"] = None
+    block = _details_block(render.render_markdown(detailed, details=("graph",)))
+    assert "not recorded" in block
+
+
+def test_details_rows_are_bounded(detailed):
+    details = detailed["details"]
+    details["risk"] = details["risk"] * 40
+    details["communities"]["touched"] = details["communities"]["touched"] * 40
+    details["hubs"]["nodes"] = details["hubs"]["nodes"] * 40
+    details["coupling"]["edges"] = details["coupling"]["edges"] * 40
+    details["impact"]["top_files"] = details["impact"]["top_files"] * 40
+    details["impact"]["callers"] = details["impact"]["callers"] * 40
+    details["gaps"]["hotspots"] = details["gaps"]["hotspots"] * 40
+    block = _details_block(render.render_markdown(detailed, details=render.DETAIL_SECTIONS))
+    rows = render._DETAIL_ROWS
+    risk = block.split("#### Why these risk scores", 1)[1].split("####", 1)[0]
+    assert risk.count("- **") == rows
+    # The list is the riskiest few, not all changed symbols: it claims no total.
+    assert "...and" not in risk
+    hubs = block.split("#### Hubs and chokepoints", 1)[1].split("####", 1)[0]
+    assert hubs.count("- **") == rows
+    touched = block.split("#### Communities touched", 1)[1].split("####", 1)[0]
+    assert touched.count("- **") == rows
+    coupling = block.split("#### Coupling across boundaries", 1)[1].split("####", 1)[0]
+    assert coupling.count("web/client.ts") == rows
+
+
+def test_details_never_exceed_the_hard_cap(detailed):
+    # Every row name at the cell limit, every list long: the block still
+    # fits its cap.
+    long = "pkg/" + "n" * 400 + ".py::" + "f" * 400
+    details = detailed["details"]
+    details["risk"] = [{**details["risk"][0], "qualified_name": long}] * 40
+    details["hubs"]["nodes"] = [
+        {**details["hubs"]["nodes"][0], "qualified_name": long}
+    ] * 40
+    details["coupling"]["edges"] = [
+        {**details["coupling"]["edges"][0], "source": long, "target": long}
+    ] * 40
+    details["impact"]["callers"] = [
+        {"qualified_name": long, "total": 99, "callers": [long] * 20}
+    ] * 40
+    details["gaps"]["hotspots"] = [
+        {**details["gaps"]["hotspots"][0], "qualified_name": long}
+    ] * 40
+    body = render.render_markdown(detailed, details=render.DETAIL_SECTIONS)
+    block = _details_block(body)
+    assert len(block.encode("utf-8")) <= render._MAX_DETAILS_BYTES
+    assert "Powered by [code-review-graph]" in body
+
+
+def test_details_cut_at_the_cap_say_so(detailed, monkeypatch):
+    monkeypatch.setattr(render, "_MAX_DETAILS_BYTES", 1200)
+    body = render.render_markdown(detailed, details=render.DETAIL_SECTIONS)
+    block = _details_block(body)
+    assert len(block.encode("utf-8")) <= 1200
+    assert "Graph context cut at 1,200 bytes" in block
+    # The note names what the reader is not seeing.
+    assert "graph" in block.split("Graph context cut at", 1)[1]
+    assert block.count("<details>") == block.count("</details>") == 1
+
+
+def test_details_fit_inside_the_body_budget(detailed):
+    # A report already near the 60,000-byte cap leaves the extra sections no
+    # room. They give way; the report, its footer and the HTML stay whole.
+    detailed["review_priorities"] = [
+        {"qualified_name": f"mod.py::fn_{i}" + "x" * 100, "risk_score": 0.5,
+         "file_path": "mod.py", "line_start": i}
+        for i in range(5000)
+    ]
+    body = render.render_markdown(
+        detailed, max_functions=5000, details=render.DETAIL_SECTIONS
+    )
+    assert len(render._artifact_text(body).encode("utf-8")) <= render._MAX_BODY
+    assert body.endswith(render.FOOTER)
+    assert body.count("<details>") == body.count("</details>")
+
+
+def test_details_asked_for_but_missing_from_the_report(report):
+    body = render.render_markdown(report, details=("risk",))
+    block = _details_block(body)
+    assert "has no graph context" in block
+    assert "--details" in block
+
+
+def test_a_section_missing_from_the_report_says_so(detailed):
+    del detailed["details"]["hubs"]
+    block = _details_block(render.render_markdown(detailed, details=("hubs", "graph")))
+    assert "#### Hubs and chokepoints" in block
+    assert "not in the report" in block
+    assert "#### Graph" in block
+
+
+def test_details_escape_hostile_names(detailed):
+    details = detailed["details"]
+    details["risk"][0]["qualified_name"] = "x|y`z<script>"
+    details["coupling"]["edges"][0]["source"] = "<img src=x onerror=alert(1)>"
+    details["communities"]["touched"][0]["name"] = "evil</details><b>"
+    body = render.render_markdown(detailed, details=render.DETAIL_SECTIONS)
+    assert "<script>" not in body
+    # Every "<" from the report is escaped, so none opens a tag.
+    assert "\\<img" in body
+    assert "<img" not in body.replace("\\<", "")
+    assert "evil</details>" not in body
+    assert body.count("</details>") == 1
+    assert "x\\|y\\`z" in body
+
+
+def test_details_relativize_runner_paths(detailed, monkeypatch):
+    ws = "/home/runner/work/repo/repo"
+    monkeypatch.setenv("GITHUB_WORKSPACE", ws)
+    details = detailed["details"]
+    details["risk"][0]["qualified_name"] = f"{ws}/auth/session.py::rotate_token"
+    details["risk"][0]["file_path"] = f"{ws}/auth/session.py"
+    details["impact"]["top_files"][0]["file_path"] = f"{ws}/auth/routes.py"
+    details["coupling"]["edges"][0]["source"] = f"{ws}/web/client.ts::refresh"
+    body = render.render_markdown(detailed, details=render.DETAIL_SECTIONS)
+    assert "/home/runner" not in body
+
+
+def test_parse_details_accepts_lists_and_all():
+    assert render.parse_details("") == ()
+    assert render.parse_details("all") == render.DETAIL_SECTIONS
+    assert render.parse_details(" graph , risk,graph ") == ("risk", "graph")
+    with pytest.raises(ValueError):
+        render.parse_details("risk,bogus")
+
+
+def test_main_rejects_an_unknown_section():
+    with pytest.raises(SystemExit) as exc:
+        render.main(["--input", str(FIXTURE), "--details", "bogus"])
+    assert exc.value.code == 2
+
+
+def test_main_renders_details_when_asked(tmp_path, detailed):
+    src = tmp_path / "report.json"
+    src.write_text(json.dumps(detailed), encoding="utf-8")
+    out = tmp_path / "comment.md"
+    assert render.main(
+        ["--input", str(src), "--output", str(out), "--details", "risk,graph"]
+    ) == 0
+    text = out.read_text(encoding="utf-8")
+    assert "#### Why these risk scores" in text
+    assert "#### Graph" in text
+
+
+def test_renderer_and_cli_agree_on_section_names():
+    from code_review_graph.change_details import DETAIL_SECTIONS, parse_detail_sections
+
+    assert render.DETAIL_SECTIONS == DETAIL_SECTIONS
+    for value in ("", "all", "risk", "graph, hubs", "impact,gaps,risk"):
+        assert render.parse_details(value) == parse_detail_sections(value)

@@ -662,16 +662,42 @@ def compute_risk_score(
     symbol that merely sits under a tested caller scores as untested here; see
     :meth:`~code_review_graph.graph.GraphStore.get_caller_test_routes` for why
     that reachability is reported beside the score rather than folded into it.
+
+    The score is the sum of :func:`risk_signals`, so a report that explains
+    a score with those signals can never disagree with the score itself.
     """
     score = 0.0
+    for signal in risk_signals(store, node, churn_counts).values():
+        score += signal["score"]
+    return round(min(max(score, 0.0), 1.0), 4)
+
+
+def risk_signals(
+    store: GraphStore,
+    node: GraphNode,
+    churn_counts: dict[str, int] | None = None,
+) -> dict[str, dict[str, float]]:
+    """Each term of :func:`compute_risk_score`, with the count behind it.
+
+    Returns ``{name: {"score": float, "count": int}}`` for ``flows``,
+    ``cross_community``, ``tests``, ``security``, ``callers`` and ``churn``,
+    in the order the score adds them. A term that does not apply scores 0.0.
+    ``count`` is what the term measured: flow memberships, callers in other
+    communities, tests reaching the node, 1 for a security-looking name,
+    callers, and commits to the file.
+    """
+    signals: dict[str, dict[str, float]] = {}
 
     # --- Flow participation (cap 0.25), weighted by criticality ---
     flow_criticalities = store.get_flow_criticalities_for_node(node.id)
     if flow_criticalities:
-        score += min(sum(flow_criticalities), 0.25)
+        signals["flows"] = {
+            "score": min(sum(flow_criticalities), 0.25),
+            "count": len(flow_criticalities),
+        }
     else:
         flow_count = store.count_flow_memberships(node.id)
-        score += min(flow_count * 0.05, 0.25)
+        signals["flows"] = {"score": min(flow_count * 0.05, 0.25), "count": flow_count}
 
     # --- Community crossing (cap 0.15) ---
     callers = store.get_edges_by_target(node.qualified_name)
@@ -686,32 +712,65 @@ def compute_risk_score(
         for cid in cid_map.values():
             if cid is not None and cid != node_cid:
                 cross_community += 1
-    score += min(cross_community * 0.05, 0.15)
+    signals["cross_community"] = {
+        "score": min(cross_community * 0.05, 0.15),
+        "count": cross_community,
+    }
 
     # --- Test coverage (direct + transitive) ---
+    # A lifecycle method in test code has no coverage to lack, so the term
+    # does not apply to it at all.
+    signals["tests"] = {"score": 0.0, "count": 0}
     if not _is_test_lifecycle(node, store):
         transitive_tests = store.get_transitive_tests(
             node.qualified_name, include_helper_routes=False,
         )
         test_count = len(transitive_tests)
-        score += 0.30 - (min(test_count / 5.0, 1.0) * 0.25)
+        signals["tests"] = {
+            "score": 0.30 - (min(test_count / 5.0, 1.0) * 0.25),
+            "count": test_count,
+        }
 
     # --- Security sensitivity ---
     name_lower = node.name.lower()
     qn_lower = node.qualified_name.lower()
-    if any(kw in name_lower or kw in qn_lower for kw in _SECURITY_KEYWORDS):
-        score += 0.20
+    sensitive = any(kw in name_lower or kw in qn_lower for kw in _SECURITY_KEYWORDS)
+    signals["security"] = {"score": 0.20 if sensitive else 0.0, "count": int(sensitive)}
 
     # --- Caller count (cap 0.10) ---
     caller_count = len(caller_edges)
-    score += min(caller_count / 20.0, 0.10)
+    signals["callers"] = {"score": min(caller_count / 20.0, 0.10), "count": caller_count}
 
     # --- Change frequency (opt-in, cap 0.15) ---
+    signals["churn"] = {"score": 0.0, "count": 0}
     if churn_counts and node.file_path:
         commit_count = churn_counts.get(node.file_path, 0)
-        score += min(commit_count / _CHURN_SATURATION, 1.0) * _CHURN_WEIGHT
+        signals["churn"] = {
+            "score": min(commit_count / _CHURN_SATURATION, 1.0) * _CHURN_WEIGHT,
+            "count": commit_count,
+        }
 
-    return round(min(max(score, 0.0), 1.0), 4)
+    return signals
+
+
+def review_churn_counts(
+    repo_root: str | None, include_churn: bool,
+) -> tuple[dict[str, int] | None, str]:
+    """Commit counts per file for the opt-in churn term, and their status.
+
+    Keys are both the repo-relative paths ``git log`` prints and the absolute
+    normalized paths the graph stores, so a lookup by ``node.file_path``
+    finds them. Returns ``(None, "off")`` when churn was not asked for.
+    """
+    if not include_churn or repo_root is None:
+        return None, CHURN_OFF
+    raw_churn, churn_status = compute_file_churn_with_status(repo_root)
+    churn_counts: dict[str, int] = {}
+    root_path = Path(repo_root)
+    for key, count in raw_churn.items():
+        churn_counts[key] = count
+        churn_counts[normalize_file_path(root_path / key)] = count
+    return churn_counts, churn_status
 
 
 # ---------------------------------------------------------------------------
@@ -841,15 +900,7 @@ def analyze_changes(
     yaml_path_results = [node_to_dict(node) for node in changed_yaml_paths]
     json_path_results = [node_to_dict(node) for node in changed_json_paths]
 
-    churn_counts: dict[str, int] | None = None
-    churn_status = CHURN_OFF
-    if include_churn and repo_root is not None:
-        raw_churn, churn_status = compute_file_churn_with_status(repo_root)
-        churn_counts = {}
-        root_path = Path(repo_root)
-        for key, count in raw_churn.items():
-            churn_counts[key] = count
-            churn_counts[normalize_file_path(root_path / key)] = count
+    churn_counts, churn_status = review_churn_counts(repo_root, include_churn)
 
     # Classify test coverage before scoring: the same answer decides both the
     # gap report and the coverage term of every node's risk score, and doing
