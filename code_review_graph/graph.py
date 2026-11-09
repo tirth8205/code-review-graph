@@ -2753,6 +2753,13 @@ class GraphStore:
         sql = f"SELECT COUNT(*) FROM nodes WHERE {where}"  # nosec B608
         return int(self._conn.execute(sql, params).fetchone()[0])
 
+    def get_nodes_by_name(self, name: str) -> list[GraphNode]:
+        """Return every node whose bare name is exactly *name*."""
+        rows = self._conn.execute(
+            "SELECT * FROM nodes WHERE name = ?", (name,)
+        ).fetchall()
+        return [self._row_to_node(row) for row in rows]
+
     def count_nodes_by_name(
         self,
         name: str,
