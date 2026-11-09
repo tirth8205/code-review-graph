@@ -782,6 +782,7 @@ def store_flows(store: GraphStore, flows: list[dict]) -> int:
                 membership_rows,
             )
 
+        conn.execute("DELETE FROM metadata WHERE key = 'csharp_flows_dirty'")
         conn.commit()
     except BaseException:
         conn.rollback()
@@ -810,6 +811,11 @@ def incremental_trace_flows(
 
     Returns the number of re-traced flows that were stored.
     """
+    if store.get_metadata("csharp_flows_dirty") == "1":
+        # C# rebinding can change callers and entry points in files that were
+        # never reparsed, so a changed-file set cannot bound the work. Retrace
+        # in full until the binder reports a complete affected set.
+        return store_flows(store, trace_flows(store, max_depth=max_depth))
     if not changed_files and not entry_point_qns:
         return 0
 

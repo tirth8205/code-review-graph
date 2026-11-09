@@ -101,6 +101,7 @@ def forget_files(
     from .parser import CodeParser
     from .postprocessing import run_post_processing
     from .python_resolver import resolve_python_imports
+    from .scoped_resolver import resolve_scoped_calls
 
     forgotten = set(targets)
 
@@ -158,6 +159,13 @@ def forget_files(
         resolve_python_imports(store)
     except Exception as exc:  # noqa: BLE001 - resolver failure is non-fatal
         logger.warning("Python import resolver failed after forget: %s", exc)
+
+    #    Re-parsed C#, PHP and Rust referrers hold raw scoped calls again, even
+    #    for same-file targets, so bind them the way a build does (#964).
+    try:
+        resolve_scoped_calls(store, repo_root)
+    except Exception as exc:  # noqa: BLE001 - resolver failure is non-fatal
+        logger.warning("Scoped call resolver failed after forget: %s", exc)
 
     # 5. Re-run the shared post-processing pipeline. store_flows and
     #    store_communities clear their tables first, so flows and communities

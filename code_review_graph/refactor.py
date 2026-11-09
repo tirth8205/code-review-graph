@@ -1916,6 +1916,17 @@ def _ascii_fold(text: str) -> str:
     return text.lower() if text.isascii() else text.translate(_ASCII_FOLD)
 
 
+def _csharp_member_scopes(conn: Any) -> dict[str, set[str]]:
+    """Map each C# type's leaf name to the parent names its members use."""
+    scopes: dict[str, set[str]] = {}
+    for (parent,) in conn.execute(
+        "SELECT DISTINCT parent_name FROM nodes WHERE language = 'csharp' "
+        "AND parent_name IS NOT NULL AND kind IN ('Function', 'Test')"
+    ):
+        scopes.setdefault(parent.rpartition(".")[2], set()).add(parent)
+    return scopes
+
+
 def find_dead_code(
     store: GraphStore,
     kind: Optional[str] = None,
@@ -1998,6 +2009,7 @@ def find_dead_code(
     class_bases: dict[str, list[str]] = {}
     base_targets: dict[str, set[str]] = {}
     importer_files: dict[str, set[str]] = {}
+    csharp_member_scopes: dict[str, set[str]] | None = None
     conn = store._conn
     for row in conn.execute(
         "SELECT e.kind, e.source_qualified, e.target_qualified, e.file_path, n.language "
@@ -2298,12 +2310,28 @@ def find_dead_code(
                 if node.qualified_name.endswith(method_suffix):
                     class_qn = node.qualified_name[: -len(method_suffix)]
                     for base_name in class_bases.get(class_qn, []):
-                        rows = conn.execute(
-                            "SELECT n.qualified_name FROM nodes n "
-                            "WHERE n.parent_name = ? AND n.name = ? "
-                            "AND n.kind IN ('Function', 'Test')",
-                            (base_name, node.name),
-                        ).fetchall()
+                        base_parents = [base_name]
+                        if node.language == "csharp":
+                            # C# parent names carry the namespace while the
+                            # INHERITS target keeps its source spelling, so
+                            # ``ISink`` names ``Lib.ISink`` (#964).
+                            if csharp_member_scopes is None:
+                                csharp_member_scopes = _csharp_member_scopes(conn)
+                            base_parents += [
+                                scope for scope in csharp_member_scopes.get(
+                                    base_name.rpartition(".")[2], (),
+                                )
+                                if scope != base_name and scope.endswith("." + base_name)
+                            ]
+                        rows = [
+                            row for parent in base_parents
+                            for row in conn.execute(
+                                "SELECT n.qualified_name FROM nodes n "
+                                "WHERE n.parent_name = ? AND n.name = ? "
+                                "AND n.kind IN ('Function', 'Test')",
+                                (parent, node.name),
+                            ).fetchall()
+                        ]
                         for (base_method_qn,) in rows:
                             if "CALLS" in incoming_kinds.get(base_method_qn, ()):
                                 has_callers = True
