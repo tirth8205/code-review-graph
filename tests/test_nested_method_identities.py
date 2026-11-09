@@ -586,11 +586,16 @@ def test_rows_written_with_the_old_identity_are_replaced(tmp_path, monkeypatch, 
     _write_repo(tmp_path)
     m = (tmp_path / 'm.py').as_posix()
     with GraphStore(tmp_path / 'graph.db') as store:
-        # Earlier releases spelled every method with its leaf class only.
+        # Earlier releases spelled every method with its leaf class only, and
+        # their writer collapsed the resulting same-file collisions (#585).
         with monkeypatch.context() as legacy:
             legacy.setattr(
                 CodeParser, '_index_ambiguous_method_scopes',
                 lambda self, root, language, import_map: None, raising=False,
+            )
+            legacy.setattr(
+                GraphStore, '_plan_file_identities',
+                lambda self, file_path, nodes: [self._make_qualified(n) for n in nodes],
             )
             full_build(tmp_path, store)
         old = {n.qualified_name for n in store.get_nodes_by_file(m) if n.kind == 'Function'}
