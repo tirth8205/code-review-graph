@@ -114,6 +114,9 @@
 - Adding a member to a commented JSONC config, as `install` does for an MCP
   entry, no longer moves a trailing comment onto the new member or drops a
   comment from an empty object.
+- `.cjs` files are indexed as JavaScript and `.kts` files as Kotlin, as `.mjs`
+  and `.kt` already were. Every build skipped them, so their functions, imports
+  and calls were missing from the graph and read as if they did not exist.
 - TypeScript and JavaScript imports resolve against `compilerOptions.baseUrl`
   when no `paths` pattern matches them, as `tsc` does. A tsconfig that sets
   `baseUrl` without `paths` resolved no non-relative import at all: on a
