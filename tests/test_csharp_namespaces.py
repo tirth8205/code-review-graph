@@ -821,3 +821,66 @@ def test_typed_receiver_declared_in_the_calling_type_still_uses_its_scope(tmp_pa
     }) as store:
         found, = _calls(store, "App.Outer.Inner.Go")
         assert found["target_qualified"] == f"{tmp_path / 'Case.cs'}::App.Outer.Inner.Service.Run"
+
+
+class _FailingConnection:
+    """Delegate to a real connection but fail one statement, like a crash."""
+
+    def __init__(self, conn, fragment: str) -> None:
+        self._conn = conn
+        self._fragment = fragment
+
+    def execute(self, sql, *args):
+        if self._fragment in sql:
+            raise RuntimeError("interrupted binding pass")
+        return self._conn.execute(sql, *args)
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
+@pytest.mark.parametrize("fragment", ["kind = 'TESTED_BY'", "csharp_flows_dirty"])
+def test_interrupted_binding_pass_leaves_nothing_half_written(tmp_path, fragment):
+    # The CALLS edge, its TESTED_BY mirror and the flow marker commit together.
+    # Otherwise a retry sees the edge already rebound and skips the rest
+    # (Copilot review of #964).
+    files = {
+        "Other.cs": "namespace Other; public class Service { public void Run() {} }",
+        "ServiceTests.cs": (
+            "using Other; class ServiceTests { void TestRun() { "
+            "Service s = new Service(); s.Run(); } }"
+        ),
+    }
+    with GraphStore(tmp_path / ".code-review-graph" / "graph.db") as store:
+        parser = CodeParser(tmp_path)
+        for name, source in files.items():
+            path = tmp_path / name
+            path.write_text(source, encoding="utf-8")
+            nodes, edges = parser.parse_file(path)
+            store.store_file_nodes_edges(str(path), nodes, edges, "hash")
+        before = store._conn.execute(
+            "SELECT kind, source_qualified, target_qualified, extra FROM edges "
+            "WHERE kind IN ('CALLS', 'TESTED_BY') ORDER BY id",
+        ).fetchall()
+        real = store._conn
+        store._conn = _FailingConnection(real, fragment)
+        try:
+            with pytest.raises(RuntimeError, match="interrupted"):
+                resolve_scoped_calls(store, tmp_path)
+        finally:
+            store._conn = real
+        after = store._conn.execute(
+            "SELECT kind, source_qualified, target_qualified, extra FROM edges "
+            "WHERE kind IN ('CALLS', 'TESTED_BY') ORDER BY id",
+        ).fetchall()
+        assert [tuple(row) for row in after] == [tuple(row) for row in before]
+        assert store.get_metadata("csharp_flows_dirty") is None
+        resolve_scoped_calls(store, tmp_path)
+        target = f"{tmp_path / 'Other.cs'}::Other.Service.Run"
+        assert target in {row[0] for row in store._conn.execute(
+            "SELECT target_qualified FROM edges WHERE kind = 'CALLS'",
+        )}
+        assert target in {row[0] for row in store._conn.execute(
+            "SELECT source_qualified FROM edges WHERE kind = 'TESTED_BY'",
+        )}
+        assert store.get_metadata("csharp_flows_dirty") == "1"

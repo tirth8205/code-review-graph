@@ -9,12 +9,31 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import contextmanager
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Iterator
 
 if TYPE_CHECKING:
     from .graph import GraphStore
+
+
+@contextmanager
+def _binding_transaction(store: GraphStore) -> Iterator[None]:
+    """Commit a pass's CALLS, TESTED_BY and flow-marker writes together.
+
+    The connection autocommits, so without this an interrupted pass could
+    leave a rebound call with a stale mirror or no flow marker, and the next
+    pass would see the call already rebound and skip the rest.
+    """
+    conn = store._conn
+    store._begin_immediate()
+    try:
+        yield
+    except BaseException:
+        conn.rollback()
+        raise
+    conn.commit()
 
 
 def _extra(raw: str | None) -> dict:
@@ -337,26 +356,26 @@ def resolve_csharp_calls(store: GraphStore, repo_root: Path | None = None) -> di
 
     resolved = 0
     changed = False
-    for row in conn.execute(
-        f"SELECT * FROM edges WHERE kind = 'CALLS' AND file_path IN ({csharp_files_sql})",
-    ).fetchall():
-        extra = _extra(row["extra"])
-        raw = extra.get("csharp_raw_target")
-        if row["file_path"] not in files or not isinstance(raw, str):
-            continue
-        candidates = targets(row, extra)
-        target = candidates[0] if len(candidates) == 1 else raw
-        for key in ("unresolved_targets", "scoped_resolved", "scoped_via"):
-            extra.pop(key, None)
-        if len(candidates) == 1:
-            extra.update(scoped_resolved=True, scoped_via="csharp_namespace")
-        else:
-            extra["unresolved_targets"] = []
-        if _set_call(store, row, target, extra):
-            resolved += len(candidates) == 1
-            changed = True
+    with _binding_transaction(store):
+        for row in conn.execute(
+            f"SELECT * FROM edges WHERE kind = 'CALLS' AND file_path IN ({csharp_files_sql})",
+        ).fetchall():
+            extra = _extra(row["extra"])
+            raw = extra.get("csharp_raw_target")
+            if row["file_path"] not in files or not isinstance(raw, str):
+                continue
+            candidates = targets(row, extra)
+            target = candidates[0] if len(candidates) == 1 else raw
+            for key in ("unresolved_targets", "scoped_resolved", "scoped_via"):
+                extra.pop(key, None)
+            if len(candidates) == 1:
+                extra.update(scoped_resolved=True, scoped_via="csharp_namespace")
+            else:
+                extra["unresolved_targets"] = []
+            if _set_call(store, row, target, extra):
+                resolved += len(candidates) == 1
+                changed = True
     if changed:
-        conn.commit()
         store._invalidate_cache()
     return {"files_indexed": len(files), "calls_resolved": resolved}
 
@@ -398,15 +417,15 @@ def restore_csharp_references(store: GraphStore, deleted_files: list[str]) -> No
         "WHERE e.kind = 'CALLS' AND n.language = 'csharp'",
     ).fetchall()
     changed = False
-    for row in rows:
-        extra = _extra(row["extra"])
-        raw = extra.get("csharp_raw_target")
-        if row["target_file"] not in deleted or not isinstance(raw, str):
-            continue
-        extra.pop("scoped_resolved", None)
-        extra.pop("scoped_via", None)
-        extra["unresolved_targets"] = []
-        changed = _set_call(store, row, raw, extra) or changed
+    with _binding_transaction(store):
+        for row in rows:
+            extra = _extra(row["extra"])
+            raw = extra.get("csharp_raw_target")
+            if row["target_file"] not in deleted or not isinstance(raw, str):
+                continue
+            extra.pop("scoped_resolved", None)
+            extra.pop("scoped_via", None)
+            extra["unresolved_targets"] = []
+            changed = _set_call(store, row, raw, extra) or changed
     if changed:
-        store.commit()
         store._invalidate_cache()
