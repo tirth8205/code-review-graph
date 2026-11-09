@@ -161,6 +161,20 @@ def _opencode_config_path(repo_root: Path) -> Path:
     return repo_root / "opencode.jsonc"
 
 
+def _mimo_config_home() -> Path:
+    """Return MiMo Code's global config folder.
+
+    Mirrors MiMo's own lookup: ``$MIMOCODE_HOME/config`` when that is an
+    absolute path, otherwise ``mimocode`` under ``$XDG_CONFIG_HOME``
+    (default ``~/.config``).
+    """
+    mimo_home = os.environ.get("MIMOCODE_HOME", "").strip()
+    if mimo_home and os.path.isabs(mimo_home):
+        return Path(mimo_home) / "config"
+    xdg = os.environ.get("XDG_CONFIG_HOME", "").strip()
+    return (Path(xdg) if xdg else Path.home() / ".config") / "mimocode"
+
+
 def _mimo_config_paths(repo_root: Path) -> tuple[Path, Path]:
     """Return both MiMo project configs, in the order MiMo Code loads them.
 
@@ -244,8 +258,7 @@ PLATFORMS: dict[str, dict[str, Any]] = {
         # Every file install may have written. Uninstall cleans each one.
         "config_paths": _mimo_config_paths,
         "key": "mcp",
-        "detect": lambda: bool(shutil.which("mimo"))
-        or (Path.home() / ".config" / "mimocode").exists(),
+        "detect": lambda: bool(shutil.which("mimo")) or _mimo_config_home().exists(),
         "format": "object",
         "needs_type": False,
     },
@@ -2943,7 +2956,7 @@ def inject_claude_md(repo_root: Path) -> str:
 # Used to filter writes when the user passes --platform <X>: only files
 # whose owner set includes the target (or "all") are written.
 _PLATFORM_INSTRUCTION_FILES: dict[str, tuple[str, ...]] = {
-    "AGENTS.md": ("cursor", "opencode", "antigravity", "codex", "hermes"),
+    "AGENTS.md": ("cursor", "opencode", "mimo", "antigravity", "codex", "hermes"),
     "GEMINI.md": ("antigravity", "gemini-cli"),
     ".cursorrules": ("cursor",),
     ".windsurfrules": ("windsurf",),

@@ -1817,6 +1817,35 @@ class TestInstallPlatformConfigs:
 
         assert mimo_config.read_text(encoding="utf-8") == first
 
+    @pytest.mark.parametrize(
+        "variable, folder",
+        [("MIMOCODE_HOME", "mimo-home/config"), ("XDG_CONFIG_HOME", "xdg/mimocode")],
+    )
+    def test_mimo_is_detected_where_mimo_keeps_its_config(
+        self, tmp_path, monkeypatch, variable, folder
+    ):
+        """MiMo Code moves its config folder with MIMOCODE_HOME or XDG_CONFIG_HOME."""
+        monkeypatch.setattr(skills_module.shutil, "which", lambda name: None)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+        monkeypatch.delenv("MIMOCODE_HOME", raising=False)
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        detect = PLATFORMS["mimo"]["detect"]
+        assert detect() is False
+
+        root = tmp_path / folder.split("/", 1)[0]
+        monkeypatch.setenv(variable, str(root))
+        assert detect() is False
+        (tmp_path / folder).mkdir(parents=True)
+        assert detect() is True
+
+    def test_mimo_install_writes_agents_md(self, tmp_path):
+        """MiMo Code reads AGENTS.md, as OpenCode does."""
+        outcomes = skills_module.inject_instruction_files(tmp_path, target="mimo")
+
+        assert outcomes == {"AGENTS.md": "created"}
+        agents = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+        assert skills_module._CLAUDE_MD_SECTION_MARKER in agents
+
     def test_install_qwen_config(self, tmp_path):
         """Qwen Code uses ~/.qwen/settings.json with mcpServers (see #83)."""
         qwen_config = tmp_path / ".qwen" / "settings.json"
