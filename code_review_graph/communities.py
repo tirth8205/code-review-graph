@@ -958,10 +958,11 @@ def incremental_detect_communities(
     """Re-detect communities only if changed files affect existing communities.
 
     If no existing communities contain nodes from changed files, skips
-    re-detection unless changed files contain unassigned code nodes. The
-    latter can happen after reparsing: file replacement deletes the old
-    assigned nodes and inserts new nodes with no community assignment yet.
-    In that case, re-run full community detection to assign the new nodes.
+    re-detection unless changed files contain unassigned code nodes. That
+    happens for a file new to the graph, which was in no community to be
+    affected, and for a re-parsed file whose nodes were inserted without
+    their old assignment. In that case, re-run full community detection to
+    assign the new nodes, as a clean build would.
 
     Args:
         store: The GraphStore instance.
