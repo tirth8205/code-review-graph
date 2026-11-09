@@ -161,6 +161,39 @@ def _opencode_config_path(repo_root: Path) -> Path:
     return repo_root / "opencode.jsonc"
 
 
+def _mimo_config_home() -> Path:
+    """Return MiMo Code's global config folder.
+
+    Mirrors MiMo's own lookup: ``$MIMOCODE_HOME/config`` when that is an
+    absolute path, otherwise ``mimocode`` under ``$XDG_CONFIG_HOME``
+    (default ``~/.config``).
+    """
+    mimo_home = os.environ.get("MIMOCODE_HOME", "").strip()
+    if mimo_home and os.path.isabs(mimo_home):
+        return Path(mimo_home) / "config"
+    xdg = os.environ.get("XDG_CONFIG_HOME", "").strip()
+    return (Path(xdg) if xdg else Path.home() / ".config") / "mimocode"
+
+
+def _mimo_config_paths(repo_root: Path) -> tuple[Path, Path]:
+    """Return both MiMo project configs, in the order MiMo Code loads them.
+
+    MiMo reads ``.mimocode/mimocode.json`` and then ``.mimocode/mimocode.jsonc``,
+    so an entry in either file is live.
+    """
+    config_dir = repo_root / ".mimocode"
+    return config_dir / "mimocode.json", config_dir / "mimocode.jsonc"
+
+
+def _mimo_config_path(repo_root: Path) -> Path:
+    """Return the MiMo project config install writes to.
+
+    An existing ``mimocode.jsonc`` wins, because MiMo loads it last.
+    """
+    json_path, jsonc_path = _mimo_config_paths(repo_root)
+    return jsonc_path if jsonc_path.exists() else json_path
+
+
 PLATFORMS: dict[str, dict[str, Any]] = {
     "codex": {
         "name": "Codex",
@@ -216,6 +249,16 @@ PLATFORMS: dict[str, dict[str, Any]] = {
         "config_path": _opencode_config_path,
         "key": "mcp",
         "detect": lambda: True,
+        "format": "object",
+        "needs_type": False,
+    },
+    "mimo": {
+        "name": "MiMo Code",
+        "config_path": _mimo_config_path,
+        # Every file install may have written. Uninstall cleans each one.
+        "config_paths": _mimo_config_paths,
+        "key": "mcp",
+        "detect": lambda: bool(shutil.which("mimo")) or _mimo_config_home().exists(),
         "format": "object",
         "needs_type": False,
     },
@@ -394,11 +437,11 @@ def _build_server_entry(
 ) -> dict[str, Any]:
     """Build the MCP server entry for a platform."""
     command, args = _detect_serve_command()
-    if key == "opencode":
-        opencode_command = [command, *args]
+    if key in ("opencode", "mimo"):
+        local_command = [command, *args]
         if repo_root is not None:
-            opencode_command.extend(("--repo", str(repo_root)))
-        return {"type": "local", "command": opencode_command}
+            local_command.extend(("--repo", str(repo_root)))
+        return {"type": "local", "command": local_command}
 
     entry: dict[str, Any] = {"command": command, "args": args}
     if key == "hermes":
@@ -2919,7 +2962,7 @@ def inject_claude_md(repo_root: Path) -> str:
 # Used to filter writes when the user passes --platform <X>: only files
 # whose owner set includes the target (or "all") are written.
 _PLATFORM_INSTRUCTION_FILES: dict[str, tuple[str, ...]] = {
-    "AGENTS.md": ("cursor", "opencode", "antigravity", "codex", "hermes"),
+    "AGENTS.md": ("cursor", "opencode", "mimo", "antigravity", "codex", "hermes"),
     "GEMINI.md": ("antigravity", "gemini-cli"),
     ".cursorrules": ("cursor",),
     ".windsurfrules": ("windsurf",),

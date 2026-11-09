@@ -209,6 +209,12 @@
   escaped to a lone surrogate, such as `"\ud800"`, is left out; before, a
   YAML one stopped the whole build. Run `build` to add JSON to a graph you
   already have.
+- MiMo Code is a supported platform (#593, PR #688 by @Aditya-Tripuraneni).
+  `install --platform mimo` adds the server under `mcp` in
+  `.mimocode/mimocode.jsonc` if that file exists, otherwise in
+  `.mimocode/mimocode.json`, and writes the graph instructions to `AGENTS.md`.
+  Other servers, settings and comments are kept. MiMo reads both files, so
+  `uninstall` removes the entry from both.
 
 ### Changed
 

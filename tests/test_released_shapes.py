@@ -391,3 +391,20 @@ def test_every_released_server_entry_is_recognised() -> None:
         "an MCP entry shape a release wrote is no longer recognised, so a stale "
         "interpreter path or dead checkout would survive a reinstall"
     )
+
+
+@pytest.mark.parametrize("platform", sorted(skills.PLATFORMS))
+def test_the_entry_each_platform_writes_today_is_recognised(
+    platform: str, tmp_path: Path
+) -> None:
+    """The next release has to replace what this one writes, so it must claim it.
+
+    Needs no tags: it covers a platform no release has shipped yet, such as
+    MiMo Code (#688), whose shape the tags cannot show.
+    """
+    spec = skills.PLATFORMS[platform]
+    entry = skills._build_server_entry(spec, key=platform, repo_root=tmp_path)
+    assert skills._is_generated_server_entry(entry), (
+        f"{platform} writes {entry!r}, which a later install or uninstall would not "
+        "recognise as its own"
+    )

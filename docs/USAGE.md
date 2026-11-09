@@ -37,6 +37,7 @@ code-review-graph install --platform codebuddy
 | Zed | `zed` | `~/Library/Application Support/Zed/settings.json` (macOS) or `~/.config/zed/settings.json` |
 | Continue | `continue` | `~/.continue/config.json` |
 | OpenCode | `opencode` | `opencode.jsonc` (preferred) or `opencode.json` |
+| MiMo Code | `mimo` | `.mimocode/mimocode.jsonc` if it exists, otherwise `.mimocode/mimocode.json` |
 | Antigravity | `antigravity` | `~/.gemini/antigravity/mcp_config.json` |
 | Gemini CLI | `gemini-cli` | `.gemini/settings.json` |
 | Qwen Code | `qwen` | `~/.qwen/settings.json` |
@@ -59,6 +60,11 @@ The CodeBuddy layout follows its documentation for
 [hooks](https://www.codebuddy.ai/docs/cli/hooks). Hook commands resolve the
 repository at runtime, so committed settings do not contain one developer's
 checkout path.
+
+MiMo Code reads `.mimocode/mimocode.json` and then `.mimocode/mimocode.jsonc`.
+`install` adds the server to the `.jsonc` file if there is one, and to the
+`.json` file if not, and keeps other servers, settings and comments.
+`uninstall` removes it from both.
 
 ### Git pre-commit hook
 

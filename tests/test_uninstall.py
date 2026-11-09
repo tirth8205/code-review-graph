@@ -116,6 +116,100 @@ def test_uninstall_removes_mcp_entry_for_every_current_platform_spec(
         assert data["theme"] == "dark"
 
 
+def test_uninstall_mimo_jsonc_removes_only_crg_entry(
+    fake_repo: Path, fake_home: Path
+) -> None:
+    config = fake_repo / ".mimocode" / "mimocode.jsonc"
+    _write(
+        config,
+        '{\n'
+        '  // preserve MiMo settings\n'
+        '  "$schema": "https://mimo.xiaomi.com/mimocode/config.json",\n'
+        '  "theme": "dark",\n'
+        '  "mcp": {\n'
+        '    "code-review-graph": {"type": "local", "command": ["crg"]},\n'
+        '    "other": {"type": "local", "command": ["other"]}\n'
+        '  }\n'
+        '}\n',
+    )
+    json_config = config.with_suffix(".json")
+    _write(json_config, '{"theme": "light"}\n')
+
+    report = uninstall.run(repo=fake_repo, keep_data=True, platforms=["mimo"])
+
+    assert report.errors == []
+    assert "preserve MiMo settings" in config.read_text(encoding="utf-8")
+    assert _read_jsonc(config) == {
+        "$schema": "https://mimo.xiaomi.com/mimocode/config.json",
+        "theme": "dark",
+        "mcp": {"other": {"type": "local", "command": ["other"]}},
+    }
+    assert json_config.read_text(encoding="utf-8") == '{"theme": "light"}\n'
+
+
+def _mimo_entry_in_both_files(repo: Path) -> tuple[Path, Path]:
+    """Install into ``mimocode.json``, then into a ``mimocode.jsonc`` added later.
+
+    MiMo Code loads both files, so both registrations are live.
+    """
+    json_config, jsonc_config = skills._mimo_config_paths(repo)
+    assert skills.install_platform_configs(repo, target="mimo") == ["MiMo Code"]
+    _write(
+        jsonc_config,
+        '{\n'
+        '  // added by the user after the first install\n'
+        '  "theme": "dark",\n'
+        '  "mcp": {\n'
+        '    "other": {"type": "local", "command": ["other"]}\n'
+        '  }\n'
+        '}\n',
+    )
+    assert skills.install_platform_configs(repo, target="mimo") == ["MiMo Code"]
+    for path in (json_config, jsonc_config):
+        assert "code-review-graph" in _read_jsonc(path)["mcp"]  # type: ignore[index]
+    return json_config, jsonc_config
+
+
+@pytest.mark.parametrize("platforms", [["mimo"], None], ids=["unbind", "full"])
+def test_uninstall_mimo_cleans_both_config_files(
+    fake_repo: Path, fake_home: Path, platforms: list[str] | None
+) -> None:
+    """Review of #688: an entry left in either MiMo file stays registered."""
+    json_config, jsonc_config = _mimo_entry_in_both_files(fake_repo)
+
+    report = uninstall.run(repo=fake_repo, keep_data=True, platforms=platforms)
+
+    assert report.errors == []
+    assert _read_jsonc(json_config) == {"mcp": {}}
+    assert "// added by the user after the first install" in jsonc_config.read_text(
+        encoding="utf-8"
+    )
+    assert _read_jsonc(jsonc_config) == {
+        "theme": "dark",
+        "mcp": {"other": {"type": "local", "command": ["other"]}},
+    }
+    # "mimocode.json" is a prefix of "mimocode.jsonc", so match up to the bracket.
+    for path in (json_config, jsonc_config):
+        assert any(line.startswith(f"{path} (") for line in report.edited_paths)
+
+
+def test_uninstall_dry_run_lists_both_mimo_files_and_writes_nothing(
+    fake_repo: Path, fake_home: Path
+) -> None:
+    json_config, jsonc_config = _mimo_entry_in_both_files(fake_repo)
+    before = {path: path.read_bytes() for path in (json_config, jsonc_config)}
+
+    report = uninstall.run(repo=fake_repo, keep_data=True, platforms=["mimo"], dry_run=True)
+
+    assert report.errors == []
+    assert {path: path.read_bytes() for path in before} == before
+    for path in (json_config, jsonc_config):
+        assert any(
+            line.startswith(f"{path} (would remove")
+            for line in report.edited_paths
+        ), report.edited_paths
+
+
 def test_platform_inventory_is_derived_not_hard_coded(
     fake_repo: Path,
     fake_home: Path,

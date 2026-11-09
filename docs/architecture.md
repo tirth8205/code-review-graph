@@ -17,7 +17,7 @@ Claude Code is one supported client among several.
 │  ├── Codex                └── incremental update             │
 │  ├── Claude Code, CodeBuddy Code                             │
 │  ├── Cursor, Windsurf, Zed, Continue, Antigravity            │
-│  ├── Gemini CLI, Qwen, Qoder, Kiro, OpenCode                 │
+│  ├── Gemini CLI, MiMo Code, Qwen, Qoder, Kiro, OpenCode      │
 │  └── Copilot, Copilot CLI, Hermes Agent                      │
 │          │                        │                          │
 │          ▼                        ▼                          │
