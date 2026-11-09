@@ -284,6 +284,11 @@ def _apply_steering_choice(
     from .skills import install_steering_hook
     from .uninstall import remove_steering_hook
 
+    # Checked before either way: --no-steering for another platform must not
+    # touch Claude Code's settings.
+    if target not in ("claude", "all"):
+        print("Skipped the steering hook: it is only for Claude Code.")
+        return
     if not steering:
         report = remove_steering_hook(repo_root, dry_run=dry_run)
         for skipped in report.skipped_paths:
@@ -301,8 +306,6 @@ def _apply_steering_choice(
         return
     if skip_hooks:
         print("Skipped the steering hook: --no-hooks was given.")
-    elif target not in ("claude", "all"):
-        print("Skipped the steering hook: it is only for Claude Code.")
     elif dry_run:
         print("[dry-run] Would add the steering hook to .claude/settings.json.")
     else:

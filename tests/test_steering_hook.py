@@ -152,6 +152,16 @@ class TestSwitchingOff:
 
         assert _pre_tool_commands(repo) == [STEERING_COMMAND]
 
+    def test_no_steering_for_another_platform_leaves_it(self, tmp_path, monkeypatch, capsys):
+        repo = _repo(tmp_path, monkeypatch)
+        _run(repo, "install", "--platform", "claude", "--steering")
+        capsys.readouterr()
+
+        _run(repo, "install", "--platform", "codex", "--no-steering")
+
+        assert _pre_tool_commands(repo) == [STEERING_COMMAND]
+        assert "only for Claude Code" in capsys.readouterr().out
+
     def test_uninstall_removes_it(self, tmp_path, monkeypatch):
         repo = _repo(tmp_path, monkeypatch)
         _run(repo, "install", "--platform", "claude", "--steering")
@@ -216,6 +226,68 @@ class TestUserHooks:
 
         assert _pre_tool_commands(repo) == ["my-audit-log"]
 
+    @pytest.mark.parametrize("command", [
+        "code-review-graph status",
+        "code-review-graph update --quiet",
+    ])
+    def test_install_keeps_other_project_commands_under_its_matcher(
+        self, tmp_path, monkeypatch, command,
+    ):
+        """The installer writes these on other events, so here they are the user's."""
+        repo = _repo(tmp_path, monkeypatch)
+        group = {
+            "matcher": "Grep|Glob|Bash|Read",
+            "hooks": [{"type": "command", "command": command}],
+        }
+        self._plant(repo, {"hooks": {"PreToolUse": [group]}})
+
+        _run(repo, "install", "--platform", "claude", "--steering")
+
+        assert sorted(_pre_tool_commands(repo)) == sorted([command, STEERING_COMMAND])
+
+    @pytest.mark.parametrize("off", ["no-steering", "uninstall"])
+    def test_removal_keeps_a_copy_filed_elsewhere(self, tmp_path, monkeypatch, off):
+        """Only the hook under the steering event and matcher is ours to remove."""
+        repo = _repo(tmp_path, monkeypatch)
+        _run(repo, "install", "--platform", "claude", "--steering")
+        settings = _settings(repo)
+        copy = {"type": "command", "command": STEERING_COMMAND}
+        settings["hooks"]["PreToolUse"].append({"matcher": "Bash", "hooks": [copy]})
+        settings["hooks"]["Stop"] = [{"hooks": [copy]}]
+        self._plant(repo, settings)
+
+        if off == "no-steering":
+            _run(repo, "install", "--platform", "claude", "--no-steering")
+        else:
+            with patch.object(sys, "argv", [
+                "code-review-graph", "uninstall", "--repo", str(repo), "--yes",
+            ]):
+                cli.main()
+
+        after = _settings(repo)["hooks"]
+        assert after["PreToolUse"] == [{"matcher": "Bash", "hooks": [copy]}]
+        assert after["Stop"] == [{"hooks": [copy]}]
+
+    @pytest.mark.parametrize("folder", [".qoder", ".codebuddy"])
+    def test_uninstall_leaves_it_in_other_platforms(self, tmp_path, monkeypatch, folder):
+        """Install writes the steering hook for Claude Code only."""
+        repo = _repo(tmp_path, monkeypatch)
+        path = repo / folder / "settings.json"
+        path.parent.mkdir(parents=True)
+        group = {
+            "matcher": "Grep|Glob|Bash|Read",
+            "hooks": [{"type": "command", "command": STEERING_COMMAND}],
+        }
+        settings = {"hooks": {"PreToolUse": [group]}}
+        path.write_text(json.dumps(settings), encoding="utf-8")
+
+        with patch.object(sys, "argv", [
+            "code-review-graph", "uninstall", "--repo", str(repo), "--yes",
+        ]):
+            cli.main()
+
+        assert json.loads(path.read_text(encoding="utf-8")) == settings
+
     def test_removal_keeps_comments_in_the_file(self, tmp_path, monkeypatch):
         repo = _repo(tmp_path, monkeypatch)
         _run(repo, "install", "--platform", "claude", "--steering")
@@ -243,7 +315,7 @@ class TestUserHooks:
         }
         self._plant(repo, {"hooks": {"PreToolUse": [group]}})
 
-        assert not skills._is_generated_hook_command(command)
+        assert not skills._is_steering_hook_command(command)
         _run(repo, "install", "--platform", "claude", "--steering")
         assert command in _pre_tool_commands(repo)
 
@@ -251,7 +323,9 @@ class TestUserHooks:
         assert _pre_tool_commands(repo) == [command]
 
     def test_our_command_is_recognised(self):
-        assert skills._is_generated_hook_command(STEERING_COMMAND)
+        assert skills._is_steering_hook_command(STEERING_COMMAND)
+        # Only the steering install and removal claim it.
+        assert not skills._is_generated_hook_command(STEERING_COMMAND)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="the hook command needs a POSIX shell")

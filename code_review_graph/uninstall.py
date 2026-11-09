@@ -452,10 +452,33 @@ def _legacy_codex_hook_commands() -> set[str]:
     return {update, status, stdin_guard + update, stdin_guard + status}
 
 
+def _steering_hook_scopes() -> dict[str, tuple[str, Any]]:
+    """Map the steering hook's command to the one event and matcher it is written under.
+
+    Install writes it there and only there, so a copy anywhere else is the user's.
+    """
+    scopes: dict[str, tuple[str, Any]] = {}
+    for event, groups in skills.generate_steering_hooks_config()["hooks"].items():
+        for group in groups:
+            for hook in group["hooks"]:
+                scopes[hook["command"]] = (event, group.get("matcher"))
+    return scopes
+
+
 def _clean_hook_data(
     data: dict[str, Any],
     owned_commands: set[str],
+    scoped_commands: dict[str, tuple[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], list[tuple[str | int, ...]]]:
+    """Drop owned hooks: ``owned_commands`` anywhere, ``scoped_commands`` only
+    under their own ``(event, matcher)``."""
+    scoped = scoped_commands or {}
+
+    def owned(command: Any, event: str, matcher: Any) -> bool:
+        if not isinstance(command, str):
+            return False
+        return command in owned_commands or scoped.get(command) == (event, matcher)
+
     expected = copy.deepcopy(data)
     hooks_obj = data.get("hooks")
     if not isinstance(hooks_obj, dict):
@@ -472,8 +495,7 @@ def _clean_hook_data(
             if not isinstance(entry, dict):
                 new_entries.append(copy.deepcopy(entry))
                 continue
-            direct_command = entry.get("command")
-            if isinstance(direct_command, str) and direct_command in owned_commands:
+            if owned(entry.get("command"), event, entry.get("matcher")):
                 entry_paths.append(("hooks", event, entry_index))
                 continue
 
@@ -485,7 +507,7 @@ def _clean_hook_data(
             nested_paths: list[tuple[str | int, ...]] = []
             for nested_index, hook in enumerate(nested):
                 command = hook.get("command") if isinstance(hook, dict) else None
-                if isinstance(command, str) and command in owned_commands:
+                if owned(command, event, entry.get("matcher")):
                     nested_paths.append(("hooks", event, entry_index, "hooks", nested_index))
                 else:
                     kept_nested.append(copy.deepcopy(hook))
@@ -516,10 +538,11 @@ def remove_steering_hook(repo_root: Path, *, dry_run: bool = False) -> Uninstall
     report = UninstallReport()
     _remove_hooks(
         repo_root / ".claude" / "settings.json",
-        _commands(skills.generate_steering_hooks_config()),
+        set(),
         repo_root,
         report,
         dry_run=dry_run,
+        scoped_commands=_steering_hook_scopes(),
     )
     return report
 
@@ -531,6 +554,7 @@ def _remove_hooks(
     report: UninstallReport,
     *,
     dry_run: bool,
+    scoped_commands: dict[str, tuple[str, Any]] | None = None,
 ) -> None:
     if not path.exists() or not _safe_path(path, boundary, report):
         return
@@ -540,7 +564,7 @@ def _remove_hooks(
     data = _parse_jsonc(path, raw, report)
     if data is None:
         return
-    expected, paths = _clean_hook_data(data, owned_commands)
+    expected, paths = _clean_hook_data(data, owned_commands, scoped_commands)
     if not paths:
         return
     try:
@@ -1128,7 +1152,6 @@ def _process_repo(
             _remove_file(path, repo_root, report, dry_run=dry_run)
 
     hook_commands = _commands(skills.generate_hooks_config(repo_root))
-    hook_commands.update(_commands(skills.generate_steering_hooks_config()))
     hook_commands.update(_legacy_repo_hook_commands(repo_root))
     _remove_hooks(
         repo_root / ".claude" / "settings.json",
@@ -1136,6 +1159,7 @@ def _process_repo(
         repo_root,
         report,
         dry_run=dry_run,
+        scoped_commands=_steering_hook_scopes(),
     )
     _remove_hooks(
         repo_root / ".qoder" / "settings.json",
