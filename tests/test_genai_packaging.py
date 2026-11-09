@@ -90,15 +90,14 @@ def test_lock_pins_google_genai_within_pyproject_bounds():
 
 
 def test_lock_registry_sources_are_pypi_only():
-    """Supply-chain guard: every locked package must come from pypi.org."""
-    for pkg in _lock()["package"]:
-        source = pkg.get("source", {})
-        registry = source.get("registry")
-        if registry is not None:
-            assert registry == "https://pypi.org/simple", (
-                pkg["name"],
-                registry,
-            )
+    """Supply-chain guard: external packages must come from pypi.org."""
+    expected = {"code-review-graph": {"editable": "."}}
+    unexpected = {
+        pkg["name"]: pkg["source"]
+        for pkg in _lock()["package"]
+        if pkg["source"] != expected.get(pkg["name"], {"registry": "https://pypi.org/simple"})
+    }
+    assert not unexpected
 
 
 def test_lock_requires_dist_matches_pyproject():

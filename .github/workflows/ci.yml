@@ -112,6 +112,10 @@ jobs:
         run: >-
           pytest --tb=short -q -m "not browser and not upgrade"
           --cov=code_review_graph --cov-report=term-missing --cov-fail-under=65
+      - name: Check writer locks with real parser processes
+        run: >-
+          pytest tests/test_concurrency_and_daemon.py -m concurrency
+          -k TestSingleFlightWriteLock -q --tb=short
 
   viz-browser:
     name: Visualization browser tests

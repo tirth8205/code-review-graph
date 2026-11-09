@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -16,11 +17,13 @@ else:  # pragma: no cover - Python 3.10 backport
     import tomli as tomllib
 
 from code_review_graph import skills as skills_module
+from code_review_graph.codex_skill import install_codex_skill
 from code_review_graph.skills import (
     _CLAUDE_MD_SECTION_MARKER,
     PLATFORMS,
     _copilot_vscode_detected,
     _cursor_hook_scripts,
+    _detect_opencode_major_version,
     _detect_serve_command,
     _in_poetry_project,
     _in_uv_project,
@@ -365,7 +368,7 @@ class TestShippedHooksFiles:
         )
         commands = [
             hook["command"]
-            for entries in data.values()
+            for entries in data["hooks"].values()
             for entry in entries
             for hook in entry.get("hooks", [])
             if hook.get("type") == "command"
@@ -375,6 +378,82 @@ class TestShippedHooksFiles:
             assert command.startswith(self.STDIN_DRAIN), (
                 f"hooks.json command lacks the stdin drain prefix: {command!r}"
             )
+
+    def _shipped_hooks(self) -> dict:
+        data = json.loads((self.HOOKS_DIR / "hooks.json").read_text(encoding="utf-8"))
+        # Claude Code rejects a plugin hooks file with no top-level "hooks" key.
+        assert set(data) == {"hooks"}
+        return data["hooks"]
+
+    def test_hooks_json_update_hook_matches_edits_only(self):
+        """Matching Bash made ``git status`` run a full build with no graph."""
+        matchers = [entry["matcher"] for entry in self._shipped_hooks()["PostToolUse"]]
+        assert matchers == ["EnterWorktree", "Edit|Write"]
+
+    def test_hooks_json_commands_keep_the_generated_guards(self):
+        """The plugin hooks must guard like the hooks ``install`` writes (#549)."""
+        shipped = self._shipped_hooks()
+        generated = generate_hooks_config(Path("."))["hooks"]
+        assert (
+            shipped["SessionStart"][0]["hooks"][0]["command"]
+            == generated["SessionStart"][0]["hooks"][0]["command"]
+        )
+        assert (
+            shipped["PostToolUse"][1]["hooks"][0]["command"]
+            == generated["PostToolUse"][0]["hooks"][0]["command"]
+        )
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="runs the POSIX hook commands")
+    @pytest.mark.parametrize(
+        ("in_git", "cli", "called"),
+        [
+            pytest.param(True, None, False, id="cli-not-on-path"),
+            pytest.param(False, "exit 0", False, id="outside-git"),
+            pytest.param(True, "exit 7", True, id="cli-fails"),
+        ],
+    )
+    def test_hooks_json_commands_never_report_an_error(self, tmp_path, in_git, cli, called):
+        """Without the guards Claude Code shows a hook error on every event."""
+        git = shutil.which("git")
+        assert git is not None
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "git").symlink_to(git)
+        (bin_dir / "cat").symlink_to(shutil.which("cat"))
+        log = tmp_path / "cli.log"
+        if cli is not None:
+            fake = bin_dir / "code-review-graph"
+            fake.write_text(f'#!/bin/sh\necho "$*" >> "{log}"\n{cli}\n', encoding="utf-8")
+            fake.chmod(0o755)
+        work = tmp_path / "work"
+        work.mkdir()
+        if in_git:
+            subprocess.run([git, "init", "-q"], cwd=work, check=True)
+
+        shipped = self._shipped_hooks()
+        for command, expected in (
+            (shipped["SessionStart"][0]["hooks"][0]["command"], "status"),
+            (shipped["PostToolUse"][1]["hooks"][0]["command"], "update --skip-flows"),
+        ):
+            log.unlink(missing_ok=True)
+            proc = subprocess.run(
+                ["/bin/sh", "-c", command],
+                input="{}",
+                capture_output=True,
+                text=True,
+                cwd=work,
+                env={
+                    "PATH": str(bin_dir),
+                    "HOME": str(tmp_path),
+                    "GIT_CEILING_DIRECTORIES": str(tmp_path),
+                },
+            )
+            assert proc.returncode == 0, proc.stderr
+            assert proc.stderr == ""
+            if called:
+                assert log.read_text(encoding="utf-8").startswith(expected)
+            else:
+                assert not log.exists()
 
     def test_session_start_script_drains_stdin(self):
         script = (self.HOOKS_DIR / "session-start.sh").read_text(encoding="utf-8")
@@ -533,7 +612,7 @@ class TestGenerateCodexHooksConfig:
         inner = entry["hooks"][0]
         assert inner["type"] == "command"
         assert "update" in inner["command"]
-        assert inner["command"].startswith("cat >/dev/null || true; ")
+        assert inner["command"].startswith("cat | { if command -v code-review-graph")
         assert inner["statusMessage"] == "Updating code-review-graph"
 
     def test_has_session_start(self, tmp_path):
@@ -544,7 +623,7 @@ class TestGenerateCodexHooksConfig:
         inner = entry["hooks"][0]
         assert inner["type"] == "command"
         assert "status" in inner["command"]
-        assert inner["command"].startswith("cat >/dev/null || true; ")
+        assert inner["command"].startswith("cat | { if command -v code-review-graph")
         assert inner["statusMessage"] == "Checking code-review-graph status"
 
 
@@ -579,10 +658,11 @@ class TestGenerateCodexHooksConfig:
         config = generate_codex_hooks_config(tmp_path / "repo with spaces")
         post_cmd = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
         session_cmd = config["hooks"]["SessionStart"][0]["hooks"][0]["command"]
-        assert "--repo" not in post_cmd
-        assert "--repo" not in session_cmd
-        assert "code-review-graph update --skip-flows" in post_cmd
-        assert "code-review-graph status" in session_cmd
+        for command, subcommand in ((post_cmd, "hook-update"), (session_cmd, "hook-status")):
+            assert command == (
+                "cat | { if command -v code-review-graph >/dev/null 2>&1; "
+                f"then code-review-graph {subcommand}; else cat >/dev/null; fi; }}"
+            )
 
 
 class TestInstallCodexHooks:
@@ -596,6 +676,119 @@ class TestInstallCodexHooks:
         assert "hooks" in data
         assert "PostToolUse" in data["hooks"]
         assert "SessionStart" in data["hooks"]
+
+    def test_installs_global_skill_under_codex_home(self, tmp_path, monkeypatch):
+        codex_home = tmp_path / "codex-home"
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+        destination = install_codex_skill()
+
+        assert destination == codex_home / "skills" / "code-review-graph"
+        assert (destination / "SKILL.md").is_file()
+        assert (destination / "scripts" / "crg_readonly.py").is_file()
+        assert (destination / "agents" / "openai.yaml").is_file()
+        assert (destination / ".code-review-graph-managed.json").is_file()
+
+    def test_global_skill_install_excludes_python_caches(self, tmp_path, monkeypatch):
+        from code_review_graph import codex_skill
+
+        resources = tmp_path / "resources"
+        shutil.copytree(codex_skill.bundled_skill_dir(), resources)
+        cache = resources / "scripts" / "__pycache__"
+        cache.mkdir(exist_ok=True)
+        (cache / "crg_readonly.cpython-313.pyc").write_bytes(b"compiled")
+        (cache / "other.txt").write_text("cache metadata", encoding="utf-8")
+        (resources / "scripts" / "crg_readonly.pyc").write_bytes(b"legacy compiled")
+        (resources / "scripts" / "crg_readonly.pyo").write_bytes(b"optimized")
+        monkeypatch.setattr(codex_skill, "_RESOURCE_ROOT", resources)
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+
+        destination = install_codex_skill()
+
+        assert destination is not None
+        expected = {"SKILL.md", "agents/openai.yaml", "scripts/crg_readonly.py"}
+        manifest = json.loads(
+            (destination / ".code-review-graph-managed.json").read_text(encoding="utf-8")
+        )
+        assert set(manifest["files"]) == expected
+        assert {
+            p.relative_to(destination).as_posix()
+            for p in destination.rglob("*") if p.is_file()
+        } == expected | {".code-review-graph-managed.json"}
+
+    def test_global_skill_install_is_idempotent_and_preserves_unrelated_files(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+        destination = install_codex_skill()
+        custom = destination / "notes.txt"
+        custom.write_text("keep\n", encoding="utf-8")
+        first = {
+            path.relative_to(destination): path.read_bytes()
+            for path in destination.rglob("*")
+            if path.is_file()
+        }
+
+        install_codex_skill()
+
+        second = {
+            path.relative_to(destination): path.read_bytes()
+            for path in destination.rglob("*")
+            if path.is_file()
+        }
+        assert second == first
+        assert custom.read_text(encoding="utf-8") == "keep\n"
+
+    def test_unmarked_conflicting_skill_is_not_overwritten(self, tmp_path, monkeypatch):
+        codex_home = tmp_path / "codex-home"
+        destination = codex_home / "skills" / "code-review-graph"
+        destination.mkdir(parents=True)
+        skill = destination / "SKILL.md"
+        skill.write_text("user-owned\n", encoding="utf-8")
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+        install_codex_skill()
+
+        assert skill.read_text(encoding="utf-8") == "user-owned\n"
+
+    def test_incomplete_manifest_does_not_overwrite_user_skill(self, tmp_path, monkeypatch):
+        codex_home = tmp_path / "codex-home"
+        destination = codex_home / "skills" / "code-review-graph"
+        destination.mkdir(parents=True)
+        skill = destination / "SKILL.md"
+        skill.write_text("user-owned instructions\n", encoding="utf-8")
+        manifest = destination / ".code-review-graph-managed.json"
+        manifest.write_text('{"version": 1, "files": {}}', encoding="utf-8")
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+        assert install_codex_skill() is None
+        assert skill.read_text(encoding="utf-8") == "user-owned instructions\n"
+        assert json.loads(manifest.read_text(encoding="utf-8"))["files"] == {}
+        assert not (destination / "agents" / "openai.yaml").exists()
+
+    def test_symlinked_manifest_is_not_written(self, tmp_path, monkeypatch):
+        codex_home = tmp_path / "codex-home"
+        destination = codex_home / "skills" / "code-review-graph"
+        destination.mkdir(parents=True)
+        outside = tmp_path / "outside.json"
+        outside.write_text("keep\n", encoding="utf-8")
+        (destination / ".code-review-graph-managed.json").symlink_to(outside)
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+        install_codex_skill()
+
+        assert outside.read_text(encoding="utf-8") == "keep\n"
+        assert not (destination / "SKILL.md").exists()
+
+    def test_codex_platform_config_honors_codex_home(self, tmp_path, monkeypatch):
+        codex_home = tmp_path / "codex-home"
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+        install_platform_configs(tmp_path, target="codex")
+
+        assert (codex_home / "config.toml").is_file()
+        assert "[mcp_servers.code-review-graph]" in (
+            codex_home / "config.toml"
+        ).read_text(encoding="utf-8")
 
     def test_merges_with_existing(self, tmp_path, monkeypatch):
         # Path.home() ignores HOME on Windows; patch it like the cursor tests do.
@@ -643,6 +836,45 @@ class TestInstallCodexHooks:
         data = json.loads((tmp_path / ".codex" / "hooks.json").read_text())
         assert len(data["hooks"]["PostToolUse"]) == 1
         assert len(data["hooks"]["SessionStart"]) == 1
+
+    def test_reinstall_replaces_the_v2_3_9_hooks(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("code_review_graph.skills.Path.home", lambda: tmp_path)
+        released = {
+            "PostToolUse": (
+                "Write|Edit|Bash",
+                "cat >/dev/null || true; git rev-parse --git-dir >/dev/null 2>&1"
+                " && code-review-graph update --skip-flows || true",
+            ),
+            "SessionStart": (
+                "startup|resume",
+                "cat >/dev/null || true; git rev-parse --git-dir >/dev/null 2>&1"
+                " && code-review-graph status || echo 'Not a git repo, skipping'",
+            ),
+        }
+        hooks_path = tmp_path / ".codex" / "hooks.json"
+        hooks_path.parent.mkdir()
+        hooks_path.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        event: [
+                            {
+                                "matcher": matcher,
+                                "hooks": [{"type": "command", "command": command}],
+                            }
+                        ]
+                        for event, (matcher, command) in released.items()
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        install_codex_hooks(tmp_path / "repo")
+
+        assert json.loads(hooks_path.read_text(encoding="utf-8"))["hooks"] == (
+            generate_codex_hooks_config(tmp_path / "repo")["hooks"]
+        )
 
     def test_install_qoder_hooks(self, tmp_path):
         install_hooks(tmp_path, platform="qoder")
@@ -2356,27 +2588,36 @@ class TestOpenCodePluginContent:
 
     def test_has_plugin_type_import(self):
         content = _opencode_plugin_content()
-        assert "import type" in content
-        assert "@opencode-ai/plugin" in content
+        assert 'import type { Plugin } from "@opencode/plugin"' in content
+        assert "satisfies Parameters<typeof Plugin.define>[0]" in content
+        assert "Plugin.define(" not in content
 
     def test_has_default_export(self):
         content = _opencode_plugin_content()
         assert "export default" in content
 
-    def test_hooks_file_edited_event(self):
+    def test_uses_v2_definition_shape(self):
+        """V2 loader requires an object with id + setup, not a function."""
         content = _opencode_plugin_content()
-        assert '"file.edited"' in content
-        assert "code-review-graph update --skip-flows" in content
+        assert 'id: "code-review-graph"' in content
+        assert "async setup(ctx" in content
+        assert "app.on(" not in content
+
+    def test_hooks_file_edits_via_tool_hook(self):
+        content = _opencode_plugin_content()
+        assert 'ctx.tool.hook("execute.after"' in content
+        assert '"update", "--skip-flows"' in content
 
     def test_hooks_session_created_event(self):
         content = _opencode_plugin_content()
         assert '"session.created"' in content
-        assert "code-review-graph status" in content
+        assert "ctx.event.subscribe" in content
+        assert '["status"]' in content
 
     def test_hooks_tool_execute_before_event(self):
         content = _opencode_plugin_content()
-        assert '"tool.execute.before"' in content
-        assert "code-review-graph detect-changes --brief" in content
+        assert 'ctx.tool.hook("execute.before"' in content
+        assert '"detect-changes", "--brief"' in content
 
     def test_has_git_commit_detection(self):
         """Pre-commit hook should match git commit commands."""
@@ -2389,6 +2630,77 @@ class TestOpenCodePluginContent:
         content = _opencode_plugin_content()
         # Count the three event registrations and ensure catch blocks
         assert content.count("} catch") >= 3
+
+    def test_v1_uses_returned_hooks_api(self):
+        content = _opencode_plugin_content(1)
+        assert 'import type { Plugin } from "@opencode-ai/plugin"' in content
+        assert "const CodeReviewGraphPlugin: Plugin = async" in content
+        assert "return {" in content
+        assert "event: async" in content
+        assert '"tool.execute.before": async' in content
+        assert "app.on(" not in content
+        assert 'id: "code-review-graph"' not in content
+
+    def test_v1_runs_commands_from_worktree_without_repo_override(self):
+        content = _opencode_plugin_content(1)
+        assert 'const baseDir = worktree && worktree !== "/" ? worktree : directory' in content
+        assert '--repo' not in content
+        assert 'execFileAsync("code-review-graph", args' in content
+        assert '["update", "--skip-flows"]' in content
+        assert '["status"]' in content
+        assert '["detect-changes", "--brief"]' in content
+
+    def test_rejects_unknown_legacy_major(self):
+        with pytest.raises(ValueError, match="Unsupported OpenCode major version"):
+            _opencode_plugin_content(0)
+
+
+class TestOpenCodeVersionDetection:
+    def test_detects_v1(self, monkeypatch):
+        monkeypatch.setattr("code_review_graph.skills.shutil.which", lambda name: "opencode")
+        completed = subprocess.CompletedProcess(
+            args=["opencode", "--version"], returncode=0, stdout="opencode v1.19.4\n", stderr=""
+        )
+        monkeypatch.setattr("code_review_graph.skills.subprocess.run", lambda *a, **kw: completed)
+        assert _detect_opencode_major_version() == 1
+
+    def test_detects_v2(self, monkeypatch):
+        monkeypatch.setattr("code_review_graph.skills.shutil.which", lambda name: "opencode")
+        completed = subprocess.CompletedProcess(
+            args=["opencode", "--version"], returncode=0, stdout="opencode v2.1.4\n", stderr=""
+        )
+        monkeypatch.setattr("code_review_graph.skills.subprocess.run", lambda *a, **kw: completed)
+        assert _detect_opencode_major_version() == 2
+
+    @pytest.mark.parametrize(
+        ("output", "major"),
+        [
+            ("1.19.4-beta.1\n", 1),
+            ("1.19.4+build.7\n", 1),
+            ("opencode v1.19.4-rc.2+sha.5\n", 1),
+            ("2.1.4-next.3\n", 2),
+            ("2.1\n", 2),
+        ],
+    )
+    def test_detects_major_with_semver_suffix(self, monkeypatch, output, major):
+        monkeypatch.setattr("code_review_graph.skills.shutil.which", lambda name: "opencode")
+        completed = subprocess.CompletedProcess(
+            args=["opencode", "--version"], returncode=0, stdout=output, stderr=""
+        )
+        monkeypatch.setattr("code_review_graph.skills.subprocess.run", lambda *a, **kw: completed)
+        assert _detect_opencode_major_version() == major
+
+    def test_returns_none_when_binary_is_missing(self, monkeypatch):
+        monkeypatch.setattr("code_review_graph.skills.shutil.which", lambda name: None)
+        assert _detect_opencode_major_version() is None
+
+    def test_returns_none_for_unparseable_version(self, monkeypatch):
+        monkeypatch.setattr("code_review_graph.skills.shutil.which", lambda name: "opencode")
+        completed = subprocess.CompletedProcess(
+            args=["opencode", "--version"], returncode=0, stdout="unknown\n", stderr=""
+        )
+        monkeypatch.setattr("code_review_graph.skills.subprocess.run", lambda *a, **kw: completed)
+        assert _detect_opencode_major_version() is None
 
 
 class TestInstallOpenCodePlugin:
@@ -2403,10 +2715,36 @@ class TestInstallOpenCodePlugin:
 
     def test_plugin_file_has_correct_content(self, tmp_path):
         with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
-            result = install_opencode_plugin()
+            result = install_opencode_plugin(opencode_major=2)
         content = result.read_text(encoding="utf-8")
         assert "export default" in content
-        assert "file.edited" in content
+        assert "execute.after" in content
+
+    def test_installs_v1_template_for_opencode_1(self, tmp_path):
+        with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
+            result = install_opencode_plugin(opencode_major=1)
+        content = result.read_text(encoding="utf-8")
+        assert "const CodeReviewGraphPlugin: Plugin = async" in content
+        assert '"tool.execute.before": async' in content
+        assert 'id: "code-review-graph"' not in content
+
+    def test_auto_detects_installed_major(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "code_review_graph.skills._detect_opencode_major_version", lambda: 1
+        )
+        with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
+            result = install_opencode_plugin()
+        assert "const CodeReviewGraphPlugin: Plugin = async" in result.read_text(encoding="utf-8")
+
+    def test_unknown_version_defaults_to_v2(self, tmp_path, monkeypatch, caplog):
+        monkeypatch.setattr(
+            "code_review_graph.skills._detect_opencode_major_version", lambda: None
+        )
+        with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
+            result = install_opencode_plugin()
+        content = result.read_text(encoding="utf-8")
+        assert 'id: "code-review-graph"' in content
+        assert "defaulting to the OpenCode 2.x plugin template" in caplog.text
 
     def test_creates_parent_directories(self, tmp_path):
         with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
@@ -2660,6 +2998,12 @@ class TestInstallSkillsRespectTargetPlatform:
 
     def test_all_target_creates_skills(self, tmp_path):
         assert self._run_install(tmp_path, "all") is True
+
+    def test_codex_install_creates_global_skill(self, tmp_path, monkeypatch):
+        codex_home = tmp_path / "codex-home"
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+        self._run_install(tmp_path, "codex")
+        assert (codex_home / "skills" / "code-review-graph" / "SKILL.md").is_file()
 
 
 class TestNonAsciiConfigPreservation:

@@ -351,12 +351,7 @@ def test_the_timeout_message_names_the_knob(git_repo):
 
 
 def test_a_base_ref_that_does_not_resolve_is_not_an_unrunnable_git(git_repo):
-    """A repository with no commits still has to work.
-
-    ``require_vcs`` is about a VCS that could not be run at all. A base ref
-    that simply is not there keeps the documented ``--cached`` fallback, or
-    ``detect-changes`` would fail on every fresh ``git init``.
-    """
+    """An unresolved base falls back to staged, unstaged, and untracked files."""
     calls = []
 
     def fake_run(cmd, **kwargs):
@@ -364,13 +359,15 @@ def test_a_base_ref_that_does_not_resolve_is_not_an_unrunnable_git(git_repo):
 
         class _Result:
             returncode = 128 if len(calls) == 1 else 0
-            stdout = b""
+            stdout = b"" if len(calls) == 1 else b" M tracked.py\0?? new.py\0"
 
         return _Result()
 
     with patch("code_review_graph.incremental.subprocess.run", side_effect=fake_run):
-        assert get_changed_files(git_repo, "HEAD~1", require_vcs=True) == []
-    assert len(calls) == 2, "the --cached fallback was skipped"
+        assert get_changed_files(git_repo, "HEAD~1", require_vcs=True) == ["tracked.py", "new.py"]
+    assert len(calls) == 2
+    assert calls[1][:2] == ["git", "status"]
+    assert "--untracked-files=all" in calls[1]
 
 
 def test_analyze_changes_degrades_rather_than_failing_on_a_partial_diff(tmp_path):

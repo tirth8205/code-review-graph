@@ -172,6 +172,301 @@ class TestTools:
         assert result["status"] == "ok"
         assert result["search_mode"] == "fts"
 
+    def test_include_source_returns_the_code(self, monkeypatch, tmp_path):
+        """include_source attaches the node's own lines, so a caller can
+        answer without opening the file itself."""
+        import code_review_graph.tools.query as query_mod
+        from code_review_graph.search import rebuild_fts_index
+        from code_review_graph.tools.query import semantic_search_nodes
+
+        src = tmp_path / "auth.py"
+        src.write_text(
+            "import os\n"
+            "\n"
+            "def login(user):\n"
+            "    return check(user)\n",
+            encoding="utf-8",
+        )
+        db = tmp_path / "test.db"
+        store = GraphStore(db)
+        store.upsert_node(NodeInfo(
+            kind="Function", name="login", file_path=str(src),
+            line_start=3, line_end=4, language="python",
+        ))
+        store.commit()
+        rebuild_fts_index(store)
+        store.close()
+        # Each call closes the store it is given, so hand out a fresh one.
+        monkeypatch.setattr(
+            query_mod, "_get_store", lambda repo_root=None: (GraphStore(db), tmp_path),
+        )
+
+        plain = semantic_search_nodes("login")
+        assert "source" not in plain["results"][0]
+
+        withsrc = semantic_search_nodes("login", include_source=True)
+        hit = withsrc["results"][0]
+        assert hit["source"] == "def login(user):\n    return check(user)"
+        assert hit["source_lines"] == [3, 4]
+
+    def test_expand_neighbors_returns_caller_source(self, monkeypatch, tmp_path):
+        """One call answers "how does X work": the hit plus the code each side."""
+        import code_review_graph.tools.query as query_mod
+        from code_review_graph.graph import EdgeInfo
+        from code_review_graph.search import rebuild_fts_index
+        from code_review_graph.tools.query import semantic_search_nodes
+
+        src = tmp_path / "app.py"
+        src.write_text(
+            "def wsgi_app(env):\n"
+            "    return dispatch(env)\n"
+            "\n"
+            "def dispatch(env):\n"
+            "    return 200\n",
+            encoding="utf-8",
+        )
+        db = tmp_path / "test.db"
+        store = GraphStore(db)
+        for name, ls, le in (("wsgi_app", 1, 2), ("dispatch", 4, 5)):
+            store.upsert_node(NodeInfo(
+                kind="Function", name=name, file_path=str(src),
+                line_start=ls, line_end=le, language="python",
+            ))
+        store.upsert_edge(EdgeInfo(
+            # Qualified names hold the POSIX spelling, also on Windows (#774).
+            kind="CALLS",
+            source=f"{src.as_posix()}::wsgi_app",
+            target=f"{src.as_posix()}::dispatch",
+            file_path=str(src), line=2,
+        ))
+        store.commit()
+        rebuild_fts_index(store)
+        store.close()
+        monkeypatch.setattr(
+            query_mod, "_get_store", lambda repo_root=None: (GraphStore(db), tmp_path),
+        )
+
+        hit = semantic_search_nodes(
+            "dispatch", include_source=True, expand_neighbors=True,
+        )["results"][0]
+        assert hit["name"] == "dispatch"
+        callers = hit.get("callers") or []
+        assert [c["name"] for c in callers] == ["wsgi_app"]
+        assert "return dispatch(env)" in callers[0]["source"]
+
+    def test_include_source_caps_long_nodes(self, monkeypatch, tmp_path):
+        """A huge node is truncated and says so rather than blowing the budget."""
+        import code_review_graph.tools.query as query_mod
+        from code_review_graph.search import rebuild_fts_index
+        from code_review_graph.tools.query import semantic_search_nodes
+
+        src = tmp_path / "big.py"
+        src.write_text("\n".join(f"line{i}" for i in range(500)), encoding="utf-8")
+        store = GraphStore(tmp_path / "test.db")
+        store.upsert_node(NodeInfo(
+            kind="Function", name="sprawl", file_path=str(src),
+            line_start=1, line_end=500, language="python",
+        ))
+        store.commit()
+        rebuild_fts_index(store)
+        monkeypatch.setattr(
+            query_mod, "_get_store", lambda repo_root=None: (store, tmp_path),
+        )
+
+        hit = semantic_search_nodes("sprawl", include_source=True)["results"][0]
+        assert hit["source_truncated"] is True
+        assert len(hit["source"].splitlines()) <= 60
+
+    def test_include_source_ignored_for_minimal(self, monkeypatch, tmp_path):
+        """detail_level="minimal" stays minimal."""
+        import code_review_graph.tools.query as query_mod
+        from code_review_graph.search import rebuild_fts_index
+        from code_review_graph.tools.query import semantic_search_nodes
+
+        src = tmp_path / "auth.py"
+        src.write_text("def login(user):\n    return 1\n", encoding="utf-8")
+        store = GraphStore(tmp_path / "test.db")
+        store.upsert_node(NodeInfo(
+            kind="Function", name="login", file_path=str(src),
+            line_start=1, line_end=2, language="python",
+        ))
+        store.commit()
+        rebuild_fts_index(store)
+        monkeypatch.setattr(
+            query_mod, "_get_store", lambda repo_root=None: (store, tmp_path),
+        )
+
+        out = semantic_search_nodes(
+            "login", include_source=True, detail_level="minimal",
+        )
+        assert all("source" not in r for r in out["results"])
+
+    @staticmethod
+    def _search_store(monkeypatch, tmp_path, build):
+        """Fill a graph with *build*, and make searches open a fresh store on it."""
+        import code_review_graph.tools.query as query_mod
+        from code_review_graph.search import rebuild_fts_index
+
+        db = tmp_path / "test.db"
+        store = GraphStore(db)
+        build(store)
+        store.commit()
+        rebuild_fts_index(store)
+        store.close()
+        monkeypatch.setattr(
+            query_mod, "_get_store", lambda repo_root=None: (GraphStore(db), tmp_path),
+        )
+
+    @staticmethod
+    def _fn(src, name, start, end):
+        return NodeInfo(
+            kind="Function", name=name, file_path=str(src),
+            line_start=start, line_end=end, language="python",
+        )
+
+    def test_include_source_lines_match_the_parser(self, monkeypatch, tmp_path):
+        """A form feed is not a new line to the parser, so must not shift the slice."""
+        from code_review_graph.tools.query import semantic_search_nodes
+
+        src = tmp_path / "ff.py"
+        src.write_text("import os\n\x0c\ndef real():\n    return 1\n", encoding="utf-8")
+        self._search_store(
+            monkeypatch, tmp_path, lambda s: s.upsert_node(self._fn(src, "real", 3, 4)),
+        )
+
+        hit = semantic_search_nodes("real", include_source=True)["results"][0]
+        assert hit["source"] == "def real():\n    return 1"
+
+    def test_include_source_skips_notebooks(self, monkeypatch, tmp_path):
+        """Notebook line numbers are not file line numbers: no snippet beats a wrong one."""
+        from code_review_graph.tools.query import semantic_search_nodes
+
+        ipynb = tmp_path / "nb.ipynb"
+        ipynb.write_text('{\n "cells": [\n  1\n ]\n}\n', encoding="utf-8")
+        dbx = tmp_path / "dbx.py"
+        dbx.write_text(
+            "# Databricks notebook source\n# MAGIC %md\n# MAGIC x\n\n"
+            "def dbx_fn():\n    return 1\n",
+            encoding="utf-8",
+        )
+
+        def build(store):
+            store.upsert_node(self._fn(ipynb, "nb_fn", 1, 2))
+            store.upsert_node(self._fn(dbx, "dbx_fn", 2, 3))
+
+        self._search_store(monkeypatch, tmp_path, build)
+
+        for name in ("nb_fn", "dbx_fn"):
+            hit = semantic_search_nodes(name, include_source=True)["results"][0]
+            assert "source" not in hit
+
+    def test_include_source_caps_characters(self, monkeypatch, tmp_path):
+        """One minified line must not get past a budget counted in lines."""
+        from code_review_graph.tools.query import (
+            _MAX_SEARCH_SOURCE_CHARS_PER_NODE,
+            semantic_search_nodes,
+        )
+
+        src = tmp_path / "min.py"
+        src.write_text("huge = '" + "x" * 500_000 + "'\n", encoding="utf-8")
+        self._search_store(
+            monkeypatch, tmp_path, lambda s: s.upsert_node(self._fn(src, "huge", 1, 1)),
+        )
+
+        hit = semantic_search_nodes("huge", include_source=True)["results"][0]
+        assert len(hit["source"]) == _MAX_SEARCH_SOURCE_CHARS_PER_NODE
+        assert hit["source_truncated"] is True
+
+    def test_expand_neighbors_gets_budget_before_lower_hits(self, monkeypatch, tmp_path):
+        """Twelve long hits used to spend it all, so nothing got its callers."""
+        from code_review_graph.graph import EdgeInfo
+        from code_review_graph.tools.query import semantic_search_nodes
+
+        src = tmp_path / "many.py"
+        src.write_text("\n".join(f"line{i}" for i in range(4000)), encoding="utf-8")
+
+        def build(store):
+            for i in range(20):
+                store.upsert_node(self._fn(src, f"widget_{i}", 1 + i * 100, 80 + i * 100))
+            store.upsert_node(self._fn(src, "caller_fn", 3000, 3010))
+            for i in range(20):
+                store.upsert_edge(EdgeInfo(
+                    kind="CALLS",
+                    source=f"{src.as_posix()}::caller_fn",
+                    target=f"{src.as_posix()}::widget_{i}",
+                    file_path=str(src), line=3001 + i,
+                ))
+
+        self._search_store(monkeypatch, tmp_path, build)
+
+        results = semantic_search_nodes(
+            "widget", include_source=True, expand_neighbors=True,
+        )["results"]
+        assert all(hit["callers"][0]["name"] == "caller_fn" for hit in results[:3])
+
+    def test_expand_neighbors_stops_when_budget_is_gone(self, monkeypatch, tmp_path):
+        """Thousands of edges must not mean thousands of lookups for no source."""
+        import code_review_graph.tools.query as query_mod
+        from code_review_graph.graph import EdgeInfo
+        from code_review_graph.tools.query import semantic_search_nodes
+
+        src = tmp_path / "hub.py"
+        src.write_text("\n".join(f"line{i}" for i in range(2000)), encoding="utf-8")
+
+        def build(store):
+            store.upsert_node(self._fn(src, "hub", 1, 60))
+            for i in range(200):
+                store.upsert_node(self._fn(src, f"c{i}", 100 + i, 101 + i))
+                store.upsert_edge(EdgeInfo(
+                    kind="CALLS",
+                    source=f"{src.as_posix()}::c{i}",
+                    target=f"{src.as_posix()}::hub",
+                    file_path=str(src), line=i,
+                ))
+
+        self._search_store(monkeypatch, tmp_path, build)
+        monkeypatch.setattr(query_mod, "_MAX_EXPANDED_SOURCE_LINES", 60)
+        calls = []
+        real_get_node = GraphStore.get_node
+        monkeypatch.setattr(
+            GraphStore, "get_node", lambda s, q: calls.append(q) or real_get_node(s, q),
+        )
+
+        result = semantic_search_nodes(
+            "hub", include_source=True, expand_neighbors=True, limit=1,
+        )
+        assert calls == []
+        assert result["source_omitted"] == 1
+
+    def test_expand_neighbors_finds_edges_of_long_names(self, monkeypatch, tmp_path):
+        """Edges are keyed on the whole name, not the 256 characters a hit shows."""
+        from code_review_graph.graph import EdgeInfo
+        from code_review_graph.tools.query import semantic_search_nodes
+
+        long_name = "a" * 300
+        src = tmp_path / "long.py"
+        src.write_text(
+            f"def {long_name}():\n    return callee()\n\ndef callee():\n    return 1\n",
+            encoding="utf-8",
+        )
+
+        def build(store):
+            store.upsert_node(self._fn(src, long_name, 1, 2))
+            store.upsert_node(self._fn(src, "callee", 4, 5))
+            store.upsert_edge(EdgeInfo(
+                kind="CALLS",
+                source=f"{src.as_posix()}::{long_name}",
+                target=f"{src.as_posix()}::callee",
+                file_path=str(src), line=2,
+            ))
+
+        self._search_store(monkeypatch, tmp_path, build)
+
+        hit = semantic_search_nodes(
+            long_name, include_source=True, expand_neighbors=True,
+        )["results"][0]
+        assert [c["name"] for c in hit["callees"]] == ["callee"]
+
     def test_search_edges_by_target_name(self):
         """Search for edges by unqualified target name."""
         # Add an edge with bare target name
@@ -1433,14 +1728,13 @@ class TestFlowTools:
 
     def test_list_flows_kind_filter(self):
         result = list_flows(repo_root=str(self.root), kind="Function")
+
         assert result["status"] == "ok"
-        # All returned flows should have Function entry points
-        for f in result["flows"]:
-            ep_id = f["entry_point_id"]
-            row = self.store._conn.execute(
-                "SELECT kind FROM nodes WHERE id = ?", (ep_id,)
-            ).fetchone()
-            assert row["kind"] == "Function"
+        assert len(result["flows"]) == 1
+
+        flow = result["flows"][0]
+        assert flow["name"] == "handle_request"
+        assert self.store.get_node_kind_by_id(flow["entry_point_id"]) == "Function"
 
     def test_list_flows_kind_filter_no_match(self):
         result = list_flows(repo_root=str(self.root), kind="Class")
@@ -1544,25 +1838,42 @@ class TestFlowTools:
             detail_level="minimal",
         )
         assert result["status"] == "ok"
-        assert result["total"] >= 1
-        for flow in result["affected_flows"]:
-            assert "steps" not in flow
-            assert "path" not in flow
-            assert "name" in flow
-            assert "criticality" in flow
+        assert len(result["affected_flows"]) == result["total"] == 1
+
+        flow = result["affected_flows"][0]
+        assert "steps" not in flow
+        assert "path" not in flow
+        assert "name" in flow
+        assert "criticality" in flow
 
     def test_get_affected_flows_max_flows_truncates(self):
         """max_flows bounds the list while total keeps the full count (#849)."""
+        app_py = (self.root / "app.py").as_posix()
+        auth_py = (self.root / "auth.py").as_posix()
+
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name="admin_handler",
+            file_path=app_py, line_start=26, line_end=35, language="python",
+        ))
+        self.store.upsert_edge(EdgeInfo(
+            kind="CALLS",
+            source=f"{app_py}::admin_handler",
+            target=f"{auth_py}::check_auth",
+            file_path=app_py, line=30,
+        ))
+        self.store.commit()
+        self._build_flows()
+
         result = get_affected_flows_func(
             changed_files=["auth.py"],
             repo_root=str(self.root),
             max_flows=1,
         )
         assert result["status"] == "ok"
-        assert len(result["affected_flows"]) <= 1
-        if result["total"] > 1:
-            assert result["truncated"] is True
-            assert "showing 1" in result["summary"]
+        assert result["total"] >= 2
+        assert len(result["affected_flows"]) == 1
+        assert result["truncated"] is True
+        assert "showing 1" in result["summary"]
 
     def test_get_affected_flows_max_flows_zero_disables_limit(self):
         result = get_affected_flows_func(
@@ -1780,9 +2091,13 @@ class TestCommunityTools:
 
     def test_get_architecture_overview_defaults_to_compact_output(self):
         result = get_architecture_overview_func(repo_root=str(self.root))
+
         assert "community pairs" in result["summary"]
-        for c in result["communities"]:
-            assert "members" not in c
+
+        communities = result["communities"]
+        assert communities
+        assert all("members" not in community for community in communities)
+
         assert result["context_savings"]["estimated"] is True
         assert set(result["context_savings"]) == {
             "estimated",
@@ -1812,17 +2127,21 @@ class TestCommunityTools:
         minimal = get_architecture_overview_func(
             repo_root=str(self.root), detail_level="minimal"
         )
-        # Minimal edges are pair-aggregated, so count is <= standard's
-        # per-edge count.
-        assert len(minimal["cross_community_edges"]) <= len(
-            std["cross_community_edges"]
-        )
-        for pair in minimal["cross_community_edges"]:
-            assert "source_community" in pair
-            assert "target_community" in pair
-            assert "edge_count" in pair
-            assert pair["edge_count"] >= 1
-            assert isinstance(pair["top_kinds"], list)
+
+        # Minimal edges are pair-aggregated, so one pair stands for every
+        # standard edge in this fixture.
+        std_edges = std["cross_community_edges"]
+        pairs = minimal["cross_community_edges"]
+
+        assert std_edges
+        assert len(pairs) == 1
+
+        pair = pairs[0]
+        assert pair["source_community"]
+        assert pair["target_community"]
+        assert pair["edge_count"] == len(std_edges)
+        assert isinstance(pair["top_kinds"], list)
+        assert "CALLS" in pair["top_kinds"]
 
     def test_get_architecture_overview_minimal_summary_label(self):
         result = get_architecture_overview_func(
@@ -1929,9 +2248,10 @@ class TestBuildPostprocessResolvesBareEndpoints:
     """Every explicit build/postprocess path applies safe endpoint resolution."""
 
     def setup_method(self):
-        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-        self.tmp.close()
-        self.db_path = Path(self.tmp.name)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo = Path(self.tmp.name)
+        self.db_path = self.repo / ".code-review-graph" / "graph.db"
+        self.db_path.parent.mkdir()
         self.store = GraphStore(self.db_path)
         app_file = "/repo/src/app.py"
         test_file = "/repo/tests/test_app.py"
@@ -1973,7 +2293,7 @@ class TestBuildPostprocessResolvesBareEndpoints:
             self.store.close()
         except Exception:
             pass
-        self.db_path.unlink(missing_ok=True)
+        self.tmp.cleanup()
 
     @staticmethod
     def _tested_by_source(store: GraphStore) -> str:
@@ -2001,19 +2321,15 @@ class TestBuildPostprocessResolvesBareEndpoints:
         assert "bare_edges_resolved" not in result
         assert self._tested_by_source(self.store) == "parse"
 
-    def test_manual_run_postprocess_resolves(self, monkeypatch):
+    def test_manual_run_postprocess_resolves(self):
         import code_review_graph.tools.build as build_module
 
-        monkeypatch.setattr(
-            build_module,
-            "_get_store",
-            lambda _repo_root: (self.store, Path("/repo")),
-        )
+        self.store.close()
         result = build_module.run_postprocess(
             flows=False,
             communities=False,
             fts=False,
-            repo_root="/repo",
+            repo_root=str(self.repo),
         )
 
         assert result["bare_edges_resolved"] == 1
@@ -2033,7 +2349,7 @@ class TestBuildPostprocessResolvesBareEndpoints:
             reopened.close()
 
     def test_manual_run_postprocess_clears_the_marker_after_a_repair(
-        self, monkeypatch
+        self
     ):
         """A build that stored every file and died is what this command repairs.
 
@@ -2045,16 +2361,12 @@ class TestBuildPostprocessResolvesBareEndpoints:
         from code_review_graph.tools.build import BUILD_COMPLETE, BUILD_STATE_KEY
 
         self.store.set_metadata(BUILD_STATE_KEY, POSTPROCESS_PENDING)
-        monkeypatch.setattr(
-            build_module,
-            "_get_store",
-            lambda _repo_root: (self.store, Path("/repo")),
-        )
+        self.store.close()
         result = build_module.run_postprocess(
             flows=False,
             communities=False,
             fts=False,
-            repo_root="/repo",
+            repo_root=str(self.repo),
         )
 
         assert result["status"] == "ok"
@@ -2062,7 +2374,7 @@ class TestBuildPostprocessResolvesBareEndpoints:
         assert self._stored_build_state() == BUILD_COMPLETE
 
     def test_manual_run_postprocess_keeps_the_marker_when_files_are_missing(
-        self, monkeypatch
+        self
     ):
         """Derived data over a graph missing files is not a complete graph.
 
@@ -2074,16 +2386,12 @@ class TestBuildPostprocessResolvesBareEndpoints:
         from code_review_graph.tools.build import BUILD_IN_PROGRESS, BUILD_STATE_KEY
 
         self.store.set_metadata(BUILD_STATE_KEY, BUILD_IN_PROGRESS)
-        monkeypatch.setattr(
-            build_module,
-            "_get_store",
-            lambda _repo_root: (self.store, Path("/repo")),
-        )
+        self.store.close()
         result = build_module.run_postprocess(
             flows=False,
             communities=False,
             fts=False,
-            repo_root="/repo",
+            repo_root=str(self.repo),
         )
 
         # It still repairs what it can, and reports what it could not.
