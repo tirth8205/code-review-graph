@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
 
-from . import install_gitignore, jsonc, skills
+from . import install_gitignore, install_plan, jsonc, skills
 
 _tomllib: Any = importlib.import_module(
     "tomllib" if sys.version_info >= (3, 11) else "tomli"
@@ -120,7 +120,10 @@ def _record_remove(report: UninstallReport, path: Path, detail: str, dry_run: bo
 
 def _read_text(path: Path, report: UninstallReport) -> str | None:
     try:
-        return path.read_text(encoding="utf-8")
+        # Through the install plan, so ``install --no-steering`` sees the
+        # hooks it planned a moment before (#173). Without a plan this is
+        # a plain read.
+        return install_plan.read_text(path, encoding="utf-8")
     except (OSError, UnicodeError) as exc:
         report.errors.append(f"{path}: read failed ({exc})")
         return None
@@ -136,6 +139,11 @@ def _write_text(
 ) -> None:
     if dry_run:
         _record_edit(report, path, detail, True)
+        return
+    if install_plan.active() is not None:
+        # ``install --no-steering``: held with the rest of install's writes.
+        install_plan.write_bytes(path, text.encode("utf-8"))
+        _record_edit(report, path, detail, False)
         return
     temporary: Path | None = None
     try:
@@ -569,7 +577,7 @@ def _remove_hooks(
     dry_run: bool,
     scoped_commands: dict[str, tuple[str, Any]] | None = None,
 ) -> None:
-    if not path.exists() or not _safe_path(path, boundary, report):
+    if not install_plan.exists(path) or not _safe_path(path, boundary, report):
         return
     raw = _read_text(path, report)
     if raw is None:

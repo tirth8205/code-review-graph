@@ -28,7 +28,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     # runtime, so neither spelling has to be imported where it is deprecated.
     from importlib.resources.abc import Traversable
 
-from . import jsonc
+from . import install_plan, jsonc
 from ._legacy_instructions import LEGACY_INSTRUCTION_SECTIONS
 
 logger = logging.getLogger(__name__)
@@ -629,8 +629,8 @@ def _merge_toml_mcp_server(
     section = "\n".join(section_lines) + "\n"
 
     existing = ""
-    if config_path.exists():
-        existing = config_path.read_text(encoding="utf-8")
+    if install_plan.exists(config_path):
+        existing = install_plan.read_text(config_path, encoding="utf-8")
 
     lines = existing.splitlines(keepends=True)
     span = _toml_table_span(lines, table_path)
@@ -668,21 +668,20 @@ def _merge_toml_mcp_server(
             if dry_run:
                 return True
             start, end = span
-            config_path.write_text(
-                "".join(lines[:start]) + section + "".join(lines[end:]), encoding="utf-8"
+            install_plan.write_text(
+                config_path, "".join(lines[:start]) + section + "".join(lines[end:])
             )
             return True
 
     if dry_run:
         return True
 
-    config_path.parent.mkdir(parents=True, exist_ok=True)
     prefix = ""
     if existing:
         prefix = existing if existing.endswith("\n") else existing + "\n"
         if not prefix.endswith("\n\n"):
             prefix += "\n"
-    config_path.write_text(prefix + section, encoding="utf-8")
+    install_plan.write_text(config_path, prefix + section)
     return True
 
 
@@ -787,8 +786,8 @@ def _merge_yaml_mcp_server(
 
     raw = ""
     replacing = False
-    if config_path.exists():
-        raw = config_path.read_text(encoding="utf-8", errors="replace")
+    if install_plan.exists(config_path):
+        raw = install_plan.read_text(config_path, encoding="utf-8", errors="replace")
         try:
             parsed = yaml.safe_load(raw)
         except yaml.YAMLError as exc:
@@ -883,8 +882,7 @@ def _merge_yaml_mcp_server(
         return None
 
     if not dry_run:
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        config_path.write_text(rewritten, encoding="utf-8")
+        install_plan.write_text(config_path, rewritten)
     return True
 
 
@@ -1042,10 +1040,24 @@ def install_platform_configs(
     Args:
         repo_root: Project root directory.
         target: Platform key or "all".
-        dry_run: If True, print what would be done without writing.
+        dry_run: If True, print what would be done without writing. Inside an
+            active :func:`install_plan.planning` block the would-be writes go
+            into that plan, so the caller can show them.
 
     Returns:
         List of platform names that were configured.
+    """
+    if dry_run and install_plan.active() is None:
+        with install_plan.planning():
+            return _install_platform_configs(repo_root, target, dry_run=True)
+    return _install_platform_configs(repo_root, target, dry_run=dry_run)
+
+
+def _install_platform_configs(repo_root: Path, target: str, dry_run: bool) -> list[str]:
+    """Do the work of :func:`install_platform_configs`.
+
+    Writes go through :mod:`install_plan`, so under a dry run (always inside a
+    plan here) they are held in memory and shown, never written.
     """
     shared_aliases: dict[str, tuple[str, ...]] = {}
     if target == "all":
@@ -1093,7 +1105,6 @@ def install_platform_configs(
                     config_path,
                     "code-review-graph",
                     server_entry,
-                    dry_run=dry_run,
                 )
             else:
                 changed = _merge_yaml_mcp_server(
@@ -1101,7 +1112,6 @@ def install_platform_configs(
                     server_key,
                     "code-review-graph",
                     server_entry,
-                    dry_run=dry_run,
                 )
             if changed is None:
                 # Refused to avoid data loss; the reason was already printed.
@@ -1120,8 +1130,8 @@ def install_platform_configs(
         # Read existing config
         existing: dict[str, Any] = {}
         raw = ""
-        if config_path.exists():
-            raw = config_path.read_text(encoding="utf-8", errors="replace")
+        if install_plan.exists(config_path):
+            raw = install_plan.read_text(config_path, encoding="utf-8", errors="replace")
             # Strip comments and trailing commas (JSONC compat for editors like
             # Zed that allow non-standard JSON) without corrupting string values.
             stripped = _strip_jsonc(raw)
@@ -1233,8 +1243,7 @@ def install_platform_configs(
                 wrote_entry = True
 
         # Re-serialising a commented config deletes every comment in it, so a
-        # commented file is spliced instead. Computed before the dry-run branch
-        # so a dry run reports the same refusal a real run would.
+        # commented file is spliced instead. A dry run shows the same splice.
         spliced: str | None = None
         if jsonc.has_comments(raw):
             spliced = _splice_commented_config(
@@ -1253,16 +1262,15 @@ def install_platform_configs(
                 )
                 continue
 
+        install_plan.write_text(
+            config_path,
+            spliced
+            if spliced is not None
+            else json.dumps(existing, indent=2, ensure_ascii=False) + "\n",
+        )
         if dry_run:
             print(f"  [dry-run] {plat['name']}: would write {config_path}")
         else:
-            config_path.parent.mkdir(parents=True, exist_ok=True)
-            config_path.write_text(
-                spliced
-                if spliced is not None
-                else json.dumps(existing, indent=2, ensure_ascii=False) + "\n",
-                encoding="utf-8",
-            )
             print(f"  {plat['name']}: configured {config_path}")
 
         if wrote_entry:
@@ -1398,14 +1406,11 @@ def generate_skills(repo_root: Path, skills_dir: Path | None = None) -> Path:
     """
     if skills_dir is None:
         skills_dir = repo_root / ".claude" / "skills"
-    skills_dir.mkdir(parents=True, exist_ok=True)
 
     for filename, skill in _SKILLS.items():
         # Claude Code expects skills at .claude/skills/<name>/SKILL.md
         skill_name = filename.removesuffix(".md")
-        skill_subdir = skills_dir / skill_name
-        skill_subdir.mkdir(parents=True, exist_ok=True)
-        path = skill_subdir / "SKILL.md"
+        path = skills_dir / skill_name / "SKILL.md"
         content = (
             "---\n"
             f"name: {skill['name']}\n"
@@ -1413,7 +1418,7 @@ def generate_skills(repo_root: Path, skills_dir: Path | None = None) -> Path:
             "---\n\n"
             f"{skill['body']}\n"
         )
-        path.write_text(content, encoding="utf-8")
+        install_plan.write_text(path, content)
         logger.info("Wrote skill: %s", path)
 
     return skills_dir
@@ -1929,11 +1934,10 @@ def install_git_hook(repo_root: Path) -> Path | None:
         return None
 
     hook_path = hooks_dir / "pre-commit"
-    hook_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if hook_path.exists():
+    if install_plan.exists(hook_path):
         try:
-            existing = hook_path.read_text(encoding="utf-8")
+            existing = install_plan.read_text(hook_path, encoding="utf-8")
         except UnicodeDecodeError:
             existing = None
         # A shell block appended to a Python or Node hook breaks every commit.
@@ -1964,15 +1968,15 @@ def install_git_hook(repo_root: Path) -> Path | None:
             if upgraded == existing:
                 logger.info("%s already holds the current hook block.", hook_path)
                 return hook_path
-            hook_path.write_text(upgraded, encoding="utf-8")
+            install_plan.write_text(hook_path, upgraded)
         else:
-            hook_path.write_text(
-                existing.rstrip("\n") + "\n" + _GIT_HOOK_BLOCK, encoding="utf-8"
+            install_plan.write_text(
+                hook_path, existing.rstrip("\n") + "\n" + _GIT_HOOK_BLOCK
             )
     else:
-        hook_path.write_text(_GIT_HOOK_SHEBANG + _GIT_HOOK_BLOCK, encoding="utf-8")
+        install_plan.write_text(hook_path, _GIT_HOOK_SHEBANG + _GIT_HOOK_BLOCK)
 
-    hook_path.chmod(0o755)
+    install_plan.chmod(hook_path, 0o755)  # nosec B103 - a hook must be executable
     logger.info("Wrote git pre-commit hook: %s", hook_path)
     return hook_path
 
@@ -2089,15 +2093,14 @@ def install_git_sync_hooks(repo_root: Path) -> list[Path]:
     hooks_dir = _git_hooks_dir(repo_root)
     if hooks_dir is None:
         return []
-    hooks_dir.mkdir(parents=True, exist_ok=True)
 
     written: list[Path] = []
     for name in _GIT_SYNC_HOOK_NAMES:
         hook_path = hooks_dir / name
         block = _git_sync_hook_block(name)
-        if hook_path.exists():
+        if install_plan.exists(hook_path):
             try:
-                existing = hook_path.read_text(encoding="utf-8")
+                existing = install_plan.read_text(hook_path, encoding="utf-8")
             except UnicodeDecodeError:
                 existing = None
             if existing is None or not _is_shell_hook(existing):
@@ -2125,12 +2128,12 @@ def install_git_sync_hooks(repo_root: Path) -> list[Path]:
                 begin, end = span
                 updated = existing[:begin] + block + existing[end:]
                 if updated != existing:
-                    hook_path.write_text(updated, encoding="utf-8")
+                    install_plan.write_text(hook_path, updated)
             else:
-                hook_path.write_text(existing.rstrip("\n") + "\n" + block, encoding="utf-8")
+                install_plan.write_text(hook_path, existing.rstrip("\n") + "\n" + block)
         else:
-            hook_path.write_text(_GIT_HOOK_SHEBANG + block, encoding="utf-8")
-        hook_path.chmod(0o755)
+            install_plan.write_text(hook_path, _GIT_HOOK_SHEBANG + block)
+        install_plan.chmod(hook_path, 0o755)  # nosec B103 - a hook must be executable
         logger.info("Wrote git %s hook: %s", name, hook_path)
         written.append(hook_path)
     return written
@@ -2443,13 +2446,13 @@ def _read_settings_for_merge(
     that cannot be merged is named and left alone, as
     :func:`install_platform_configs` does for MCP entries.
     """
-    if not path.exists():
+    if not install_plan.exists(path):
         return "", {}
     try:
         # Bytes, because text mode would rewrite CRLF line endings on the way
         # through, and strict UTF-8, because replacing a bad byte and writing the
         # file back would corrupt it.
-        raw = path.read_bytes().decode("utf-8")
+        raw = install_plan.read_bytes(path).decode("utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         _report_settings_left_alone(label, path, f"could not be read ({exc})")
         return None
@@ -2548,17 +2551,15 @@ def _write_merged_settings(
     if raw.strip():
         backup_path = path.with_name(f"{path.name}.bak")
         try:
-            shutil.copy2(path, backup_path)
+            install_plan.copy_file(path, backup_path)
         except OSError as exc:
             _report_settings_left_alone(label, path, f"could not be backed up ({exc})")
             return False
         logger.info("Backed up existing settings to %s", backup_path)
     if spliced is not None:
-        path.write_bytes(spliced.encode("utf-8"))
+        install_plan.write_bytes(path, spliced.encode("utf-8"))
     else:
-        path.write_text(
-            json.dumps(merged, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-        )
+        install_plan.write_text(path, json.dumps(merged, indent=2, ensure_ascii=False) + "\n")
     return True
 
 
@@ -2573,7 +2574,6 @@ def _merge_hooks_into_settings(
     ``owns`` says which commands are ours to replace. Returns the settings
     path, or None when the file had to be left alone.
     """
-    settings_dir.mkdir(parents=True, exist_ok=True)
     settings_path = settings_dir / "settings.json"
 
     new_hooks = hooks_config.get("hooks", {})
@@ -2664,7 +2664,6 @@ def install_codex_hooks(repo_root: Path) -> Path | None:
     Returns the hooks path, or None when the file had to be left alone.
     """
     codex_dir = _codex_home()
-    codex_dir.mkdir(parents=True, exist_ok=True)
     hooks_path = codex_dir / "hooks.json"
 
     hooks_config = generate_codex_hooks_config(repo_root)
@@ -2873,8 +2872,8 @@ def _inject_instructions(file_path: Path, marker: str, section: str) -> str:
       caller is expected to tell the user about it.
     """
     existing = ""
-    if file_path.exists():
-        existing = file_path.read_text(encoding="utf-8", errors="replace")
+    if install_plan.exists(file_path):
+        existing = install_plan.read_text(file_path, encoding="utf-8", errors="replace")
 
     if marker in existing:
         upgraded = _upgrade_managed_block(existing, section)
@@ -2887,14 +2886,13 @@ def _inject_instructions(file_path: Path, marker: str, section: str) -> str:
                 file_path,
             )
             return "conflict"
-        file_path.write_text(upgraded, encoding="utf-8")
+        install_plan.write_text(file_path, upgraded)
         logger.info("Updated the MCP tools section in %s", file_path)
         return "updated"
 
     separator = "\n" if existing and not existing.endswith("\n") else ""
     extra_newline = "\n" if existing else ""
-    file_path.parent.mkdir(parents=True, exist_ok=True)
-    file_path.write_text(existing + separator + extra_newline + section, encoding="utf-8")
+    install_plan.write_text(file_path, existing + separator + extra_newline + section)
     logger.info("Appended MCP tools section to %s", file_path)
     return "created"
 
@@ -2934,9 +2932,9 @@ _LEGACY_PLATFORM_INSTRUCTION_FILES: dict[str, tuple[str, ...]] = {
 
 def _remove_legacy_instruction_file(path: Path) -> None:
     """Strip an exact generated section from a superseded instruction file."""
-    if not path.exists():
+    if not install_plan.exists(path):
         return
-    content = path.read_text(encoding="utf-8", errors="replace")
+    content = install_plan.read_text(path, encoding="utf-8", errors="replace")
     if _CLAUDE_MD_SECTION_MARKER not in content:
         return
     # Longest first, so removing a long block cannot leave the tail of a shorter
@@ -2946,10 +2944,10 @@ def _remove_legacy_instruction_file(path: Path) -> None:
     if _CLAUDE_MD_SECTION_MARKER in content:
         return
     if content.strip():
-        path.write_text(content.rstrip() + "\n", encoding="utf-8")
+        install_plan.write_text(path, content.rstrip() + "\n")
         logger.info("Removed legacy instruction section from %s", path)
     else:
-        path.unlink()
+        install_plan.unlink(path)
         logger.info("Removed legacy instruction file %s", path)
 
 
@@ -2969,7 +2967,6 @@ def install_gemini_cli_hooks(repo_root: Path) -> Path | None:
     Returns the settings path, or None when the file had to be left alone.
     """
     settings_dir = repo_root / ".gemini"
-    settings_dir.mkdir(parents=True, exist_ok=True)
     settings_path = settings_dir / "settings.json"
 
     label = PLATFORMS["gemini-cli"]["name"]
@@ -3060,26 +3057,22 @@ exit 0
     logger.info("Wrote Gemini CLI hooks config: %s", settings_path)
 
     hooks_dir = settings_dir / "hooks"
-    hooks_dir.mkdir(parents=True, exist_ok=True)
     for filename, content in zip(
         _GEMINI_CLI_HOOK_FILENAMES, (session_start_script, update_script)
     ):
         script_path = hooks_dir / filename
-        script_path.write_text(content, encoding="utf-8")
-        script_path.chmod(0o755)
+        install_plan.write_text(script_path, content)
+        install_plan.chmod(script_path, 0o755)  # nosec B103 - a hook must be executable
     return settings_path
 
 
 def install_gemini_cli_skills(repo_root: Path) -> Path:
     """Install Gemini CLI Agent Skills in .gemini/skills/<skill>/SKILL.md."""
     skills_root = repo_root / ".gemini" / "skills"
-    skills_root.mkdir(parents=True, exist_ok=True)
 
     for filename, skill in _SKILLS.items():
         slug = filename.rsplit(".", 1)[0]
-        skill_dir = skills_root / slug
-        skill_dir.mkdir(parents=True, exist_ok=True)
-        skill_path = skill_dir / "SKILL.md"
+        skill_path = skills_root / slug / "SKILL.md"
         content = (
             "---\n"
             f"name: {slug}\n"
@@ -3087,7 +3080,7 @@ def install_gemini_cli_skills(repo_root: Path) -> Path:
             "---\n\n"
             f"{skill['body']}\n"
         )
-        skill_path.write_text(content, encoding="utf-8")
+        install_plan.write_text(skill_path, content)
         logger.info("Wrote Gemini CLI skill: %s", skill_path)
 
     return skills_root
@@ -3096,13 +3089,10 @@ def install_gemini_cli_skills(repo_root: Path) -> Path:
 def install_codebuddy_skills(repo_root: Path) -> Path:
     """Install project skills in .codebuddy/skills/<name>/SKILL.md."""
     skills_root = repo_root / ".codebuddy" / "skills"
-    skills_root.mkdir(parents=True, exist_ok=True)
 
     for filename, skill in _SKILLS.items():
         slug = filename.rsplit(".", 1)[0]
-        skill_dir = skills_root / slug
-        skill_dir.mkdir(parents=True, exist_ok=True)
-        skill_path = skill_dir / "SKILL.md"
+        skill_path = skills_root / slug / "SKILL.md"
         content = (
             "---\n"
             f"name: {slug}\n"
@@ -3110,7 +3100,7 @@ def install_codebuddy_skills(repo_root: Path) -> Path:
             "---\n\n"
             f"{skill['body']}\n"
         )
-        skill_path.write_text(content, encoding="utf-8")
+        install_plan.write_text(skill_path, content)
         logger.info("Wrote CodeBuddy skill: %s", skill_path)
 
     return skills_root
@@ -3331,20 +3321,21 @@ def install_cursor_hooks() -> Path | None:
 
     existing["hooks"] = existing_hooks
 
-    cursor_dir.mkdir(parents=True, exist_ok=True)
     if not _write_merged_settings(hooks_json_path, raw, existing, label):
         return None
     logger.info("Wrote Cursor hooks config: %s", hooks_json_path)
 
     # --- Write hook scripts ---
-    hooks_script_dir.mkdir(parents=True, exist_ok=True)
     scripts = _cursor_hook_scripts()
 
     for filename, content in scripts.items():
         script_path = hooks_script_dir / filename
-        script_path.write_text(content, encoding="utf-8")
+        install_plan.write_text(script_path, content)
         # Make executable (owner rwx, group rx, other rx)
-        script_path.chmod(stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH)
+        install_plan.chmod(
+            script_path,
+            stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH,
+        )
         logger.info("Wrote Cursor hook script: %s", script_path)
 
     return hooks_json_path
@@ -3414,7 +3405,6 @@ def install_qoder_skills(repo_root: Path) -> Path | None:
     """
     # Qoder skills directory (project-level)
     qoder_skills_dir = repo_root / ".qoder" / "skills"
-    qoder_skills_dir.mkdir(parents=True, exist_ok=True)
 
     source_skills_dir = bundled_skills_dir()
     if source_skills_dir is None:
@@ -3426,10 +3416,8 @@ def install_qoder_skills(repo_root: Path) -> Path | None:
         if skill_dir.is_dir():
             skill_file = skill_dir / "SKILL.md"
             if skill_file.is_file():
-                target_dir = qoder_skills_dir / skill_dir.name
-                target_dir.mkdir(parents=True, exist_ok=True)
-                target_file = target_dir / "SKILL.md"
-                target_file.write_text(skill_file.read_text(encoding="utf-8"), encoding="utf-8")
+                target_file = qoder_skills_dir / skill_dir.name / "SKILL.md"
+                install_plan.write_text(target_file, skill_file.read_text(encoding="utf-8"))
                 logger.info("Installed Qoder skill: %s", skill_dir.name)
                 installed_count += 1
 
@@ -3737,8 +3725,7 @@ def install_opencode_plugin(opencode_major: int | None = None) -> Path:
     plugins_dir = Path.home() / ".config" / "opencode" / "plugins"
     plugin_path = plugins_dir / "crg-plugin.ts"
 
-    plugins_dir.mkdir(parents=True, exist_ok=True)
-    plugin_path.write_text(_opencode_plugin_content(opencode_major), encoding="utf-8")
+    install_plan.write_text(plugin_path, _opencode_plugin_content(opencode_major))
     logger.info("Wrote OpenCode %s.x plugin: %s", opencode_major, plugin_path)
 
     return plugin_path

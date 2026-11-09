@@ -39,7 +39,9 @@ if sys.version_info < (3, 10):
     sys.exit(1)
 
 import argparse
+import contextlib
 import fnmatch
+import io
 import json
 import logging
 import os
@@ -48,8 +50,9 @@ from functools import partial
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterable, TypedDict
+from typing import TYPE_CHECKING, Callable, Iterable, TypedDict
 
+from . import install_plan
 from .errors import CodeReviewGraphError, is_lock_error
 
 if TYPE_CHECKING:
@@ -161,12 +164,12 @@ def _print_banner() -> None:
 def _instruction_files_to_modify(
     repo_root: Path,
     target: str,
-) -> list[str]:
-    """Return the list of instruction files that ``install`` would write
-    or modify, given the current state of the repo and the selected
-    platform target. Used for the dry-run / confirm preview (#173).
+) -> list[tuple[str, str]]:
+    """Return ``(filename, how)`` for each instruction file that ``install``
+    would write or modify, given the current state of the repo and the
+    selected platform target. Shown before the question about them (#173).
 
-    A file holding a section from an older release is listed as ``(update)``:
+    A file holding a section from an older release is listed as ``update``:
     install replaces that block in place rather than leaving it stale (#314).
     """
     from .skills import (
@@ -178,17 +181,17 @@ def _instruction_files_to_modify(
         _upgrade_managed_block,
     )
 
-    targets: list[str] = []
+    targets: list[tuple[str, str]] = []
 
     def _describe(filename: str, path: Path, section: str) -> None:
-        if not path.exists():
-            targets.append(f"{filename} (new)")
+        if not install_plan.exists(path):
+            targets.append((filename, "new"))
             return
-        content = path.read_text(encoding="utf-8", errors="replace")
+        content = install_plan.read_text(path, encoding="utf-8", errors="replace")
         if _CLAUDE_MD_SECTION_MARKER not in content:
-            targets.append(f"{filename} (append)")
+            targets.append((filename, "append"))
         elif _upgrade_managed_block(content, section) is not None:
-            targets.append(f"{filename} (update)")
+            targets.append((filename, "update"))
 
     if target in ("claude", "all"):
         _describe("CLAUDE.md", repo_root / "CLAUDE.md", _CLAUDE_MD_SECTION)
@@ -206,20 +209,30 @@ def _instruction_files_to_modify(
     return targets
 
 
-def _confirm_yes_no(prompt: str, default_yes: bool = True) -> bool:
+def _confirm_yes_no(
+    prompt: str, default_yes: bool = True, *, cancel_on_interrupt: bool = False
+) -> bool:
     """Prompt the user [Y/n] and return True for yes.
 
     Non-interactive environments (no TTY on stdin, e.g. an MCP wrapper
     piping the CLI) return ``default_yes`` without blocking — the
     stdio transport cannot safely read from stdin without corrupting
     the JSON-RPC stream. See: #173, #174
+
+    Ctrl-C counts as "no" unless ``cancel_on_interrupt`` is set, in which case
+    it is raised so the caller can stop altogether.
     """
     if not sys.stdin.isatty():
         return default_yes
     suffix = "[Y/n]" if default_yes else "[y/N]"
     try:
         answer = input(f"{prompt} {suffix} ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
+    except KeyboardInterrupt:
+        print()
+        if cancel_on_interrupt:
+            raise
+        return False
+    except EOFError:
         print()
         return False
     if not answer:
@@ -289,50 +302,64 @@ _STEERING_HELP = (
 )
 
 
+def _say_nothing(*_args: object, **_kwargs: object) -> None:
+    """Drop a progress message: a dry run shows that change as a diff instead."""
+
+
 def _apply_steering_choice(
     repo_root: Path, target: str, steering: bool, *, skip_hooks: bool, dry_run: bool,
 ) -> None:
-    """Add or remove the steering hook, as ``--steering`` or ``--no-steering`` asked."""
+    """Add or remove the steering hook, as ``--steering`` or ``--no-steering`` asked.
+
+    Called inside the install plan in both modes, so the change is planned
+    with the rest and a dry run shows it as a diff.
+    """
     from .skills import install_steering_hook
     from .uninstall import remove_steering_hook
 
+    lead = "[dry-run] " if dry_run else ""
     # Checked before either way: --no-steering for another platform must not
     # touch Claude Code's settings.
     if target not in ("claude", "all"):
-        print("Skipped the steering hook: it is only for Claude Code.")
+        print(f"{lead}Skipped the steering hook: it is only for Claude Code.")
         return
     if not steering:
-        report = remove_steering_hook(repo_root, dry_run=dry_run)
+        report = remove_steering_hook(repo_root)
         for skipped in report.skipped_paths:
-            print(f"Could not remove the steering hook: {skipped}")
+            print(f"{lead}Could not remove the steering hook: {skipped}")
         if report.errors:
             for error in report.errors:
-                print(f"Could not remove the steering hook: {error}")
+                print(f"{lead}Could not remove the steering hook: {error}")
         elif report.total_actions == 0:
             if not report.skipped_paths:
-                print("No steering hook to remove.")
+                print(f"{lead}No steering hook to remove.")
         elif dry_run:
             print("[dry-run] Would remove the steering hook.")
         else:
             print("Removed the steering hook.")
         return
     if skip_hooks:
-        print("Skipped the steering hook: --no-hooks was given.")
-    elif dry_run:
-        print("[dry-run] Would add the steering hook to .claude/settings.json.")
-    else:
-        path = install_steering_hook(repo_root)
-        if path:
-            print(f"Installed the steering hook in {path}. Remove it with --no-steering.")
+        print(f"{lead}Skipped the steering hook: --no-hooks was given.")
+        return
+    path = install_steering_hook(repo_root)
+    if path and dry_run:
+        print(f"[dry-run] Would add the steering hook to {path}.")
+    elif path:
+        print(f"Installed the steering hook in {path}. Remove it with --no-steering.")
 
 
 def _report_gitignore_block(
     repo_root: Path, plan: _GitignorePlan, *, dry_run: bool
 ) -> None:
-    """Update (or preview) the --gitignore block and say what happened (#471)."""
+    """Plan the --gitignore block and say what it does (#471).
+
+    Called inside the install plan in both modes, so the block is worked out
+    from the files the plan creates and the dry run lists exactly what a real
+    install writes.
+    """
     from . import install_gitignore
 
-    result = install_gitignore.apply(repo_root, plan, dry_run=dry_run)
+    result = install_gitignore.apply(repo_root, plan, dry_run=False)
     lead = "[dry-run] " if dry_run else ""
     if result.status == "written":
         if result.added:
@@ -360,9 +387,15 @@ def _report_gitignore_block(
 
 
 def _handle_init(args: argparse.Namespace) -> None:
-    """Set up MCP config for detected AI coding platforms."""
-    from .incremental import ensure_repo_gitignore_excludes_crg, find_repo_root
-    from .skills import install_platform_configs
+    """Set up MCP config, hooks, skills and instructions for AI coding platforms.
+
+    Every write is planned in memory first (see ``install_plan``). ``--dry-run``
+    prints the plan as diffs and writes nothing. A real install lists the files
+    it will change and asks about instruction files before it writes anything,
+    then writes exactly that plan (#173).
+    """
+    from .incremental import find_repo_root
+    from .skills import inject_instruction_files
 
     repo_root = Path(args.repo) if args.repo else find_repo_root()
     if not repo_root:
@@ -374,14 +407,11 @@ def _handle_init(args: argparse.Namespace) -> None:
         target = "claude"
     auto_yes = getattr(args, "yes", False)
     skip_instructions = getattr(args, "no_instructions", False)
-    # Platform-native skills and hooks are installed by default where supported
-    # so the graph tools are used proactively. Use --no-skills / --no-hooks /
-    # --no-instructions to opt out.
-    skip_skills = getattr(args, "no_skills", False)
     skip_hooks = getattr(args, "no_hooks", False)
+    steering = getattr(args, "steering", None)
 
     # --gitignore (#471, off by default): note what exists before anything is
-    # written, so only files this run creates are added to .gitignore.
+    # planned, so only files this run creates are added to .gitignore.
     gitignore_plan: _GitignorePlan | None = None
     if getattr(args, "gitignore", False):
         from . import install_gitignore
@@ -389,57 +419,171 @@ def _handle_init(args: argparse.Namespace) -> None:
         gitignore_plan = install_gitignore.plan(
             repo_root,
             target,
-            with_skills=not skip_skills,
+            with_skills=not getattr(args, "no_skills", False),
             with_hooks=not skip_hooks,
             with_instructions=not skip_instructions,
         )
 
+    # In a real install the progress messages wait until the files are
+    # written, so none of them reports a change that has not happened yet.
+    # A dry run prints its messages as it goes, but not the ones that only
+    # say a file was written: its diffs show those.
+    report = io.StringIO()
+    try:
+        with install_plan.planning() as plan:
+            quiet = contextlib.nullcontext() if dry_run else contextlib.redirect_stdout(report)
+            with quiet:
+                _plan_mcp_configs(repo_root, target, dry_run)
+                codex_skill_error = _plan_integrations(
+                    args, repo_root, target, say=_say_nothing if dry_run else print
+                )
+                if steering is not None:
+                    _apply_steering_choice(
+                        repo_root, target, steering, skip_hooks=skip_hooks, dry_run=dry_run,
+                    )
+
+            # Instruction files are planned before the question too, so the
+            # same plan is shown in both modes and an edit made while the
+            # question is open is left alone, as for every other file.
+            instr_targets: list[tuple[str, str]] = []
+            outcomes: dict[str, str] = {}
+            before_instructions = plan.checkpoint()
+            if not skip_instructions:
+                instr_targets = _instruction_files_to_modify(repo_root, target)
+                outcomes = inject_instruction_files(repo_root, target=target)
+            instr_changes = plan.changes_since(before_instructions)
+
+            # The --gitignore block lists what the run creates, instruction
+            # files included, so it is planned last. Its messages are kept
+            # apart: saying no to the question plans it again.
+            gitignore_report = io.StringIO()
+            if gitignore_plan is not None:
+                to = sys.stdout if dry_run else gitignore_report
+                with contextlib.redirect_stdout(to):
+                    print()
+                    _report_gitignore_block(repo_root, gitignore_plan, dry_run=dry_run)
+
+            if dry_run:
+                _print_instruction_conflicts(outcomes)
+                if codex_skill_error and target == "codex":
+                    # With --platform all the error was already printed above.
+                    print(f"[dry-run] {codex_skill_error}", file=sys.stderr)
+                _print_dry_run(plan, repo_root)
+                return
+
+            _print_planned_files(plan, repo_root, skip=instr_changes)
+            inject = False
+            if instr_changes:
+                # An old copy that install removes is listed too.
+                named = {(repo_root / name).resolve() for name, _ in instr_targets}
+                for change in instr_changes:
+                    if change.path not in named:
+                        shown = install_plan.display_path(change.path, repo_root)
+                        how = "old file removed" if change.after is None else "old section removed"
+                        instr_targets.append((shown, how))
+                print()
+                print("Graph instructions will be injected into:")
+                for name, how in instr_targets:
+                    print(f"  {name} ({how})")
+                try:
+                    inject = auto_yes or _confirm_yes_no(
+                        "Inject graph instructions into these files?",
+                        default_yes=True,
+                        cancel_on_interrupt=True,
+                    )
+                except KeyboardInterrupt:
+                    # Nothing has been written yet, so stopping here leaves no trace.
+                    print("Install cancelled. No files were written.")
+                    raise SystemExit(130) from None
+            if instr_changes and not inject:
+                plan.rollback(before_instructions)
+                if gitignore_plan is not None:
+                    # The block must not list instruction files that will not
+                    # be written, so it is planned again without them.
+                    gitignore_report = io.StringIO()
+                    with contextlib.redirect_stdout(gitignore_report):
+                        print()
+                        _report_gitignore_block(repo_root, gitignore_plan, dry_run=False)
+            with contextlib.redirect_stdout(report):
+                if inject:
+                    for label, wording in (
+                        ("created", "Injected graph instructions into"),
+                        ("updated", "Updated graph instructions in"),
+                    ):
+                        names = [f for f, o in outcomes.items() if o == label]
+                        if names:
+                            print(f"{wording}: {', '.join(names)}")
+                    _print_instruction_conflicts(outcomes)
+                elif skip_instructions:
+                    print("Skipped instruction injection (--no-instructions).")
+                elif instr_changes:
+                    print("Skipped instruction injection (user declined).")
+                else:
+                    _print_instruction_conflicts(outcomes)
+            report.write(gitignore_report.getvalue())
+    except Exception:
+        # A step failed while planning, before any file reached the disk.
+        print("Install stopped before writing any file.", file=sys.stderr)
+        raise
+    planned = plan.changes()
+    failures = plan.apply()
+
+    print()
+    if failures:
+        # The progress messages would claim files that were left alone, so
+        # name only what was written.
+        failed = {path for path, _ in failures}
+        written = [change for change in planned if change.path not in failed]
+        if written:
+            print("These files were written:")
+            for change in written:
+                print(f"  {install_plan.display_path(change.path, repo_root)}")
+        for path, reason in failures:
+            print(f"Could not write {path}: {reason}", file=sys.stderr)
+        raise CodeReviewGraphError(
+            f"install could not write {len(failures)} file(s); see the messages above"
+        )
+    sys.stdout.write(report.getvalue())
+    if codex_skill_error and target == "codex":
+        raise CodeReviewGraphError(codex_skill_error)
+    print()
+    print("Next steps:")
+    print("  1. code-review-graph build    # build the knowledge graph")
+    print("  2. Restart your AI coding tool to pick up the new config")
+
+
+def _plan_mcp_configs(repo_root: Path, target: str, dry_run: bool) -> None:
+    """Plan the MCP server entry for each platform and say what it does."""
+    from .skills import install_platform_configs
+
     print("Installing MCP server config...")
     configured = install_platform_configs(repo_root, target=target, dry_run=dry_run)
-
     if not configured:
         print("No platforms detected.")
+    elif dry_run:
+        print(
+            f"\n[dry-run] Would configure {len(configured)} platform(s): "
+            f"{', '.join(configured)}"
+        )
     else:
         print(f"\nConfigured {len(configured)} platform(s): {', '.join(configured)}")
 
-    # Preview the instruction files that would be touched (#173).
-    instr_targets = _instruction_files_to_modify(repo_root, target)
-    if instr_targets:
-        print()
-        print("Graph instructions will be injected into:")
-        for t in instr_targets:
-            print(f"  {t}")
 
-    steering = getattr(args, "steering", None)
+def _plan_integrations(
+    args: argparse.Namespace, repo_root: Path, target: str, *, say: Callable[[str], None]
+) -> str | None:
+    """Plan the .gitignore entry, skills and hooks. Return a Codex skill error, if any.
 
-    if dry_run:
-        if steering is not None:
-            print()
-            _apply_steering_choice(
-                repo_root, target, steering,
-                skip_hooks=getattr(args, "no_hooks", False), dry_run=True,
-            )
-        print("\n[dry-run] Would ensure .gitignore ignores .code-review-graph/.")
-        if gitignore_plan is not None:
-            _report_gitignore_block(repo_root, gitignore_plan, dry_run=True)
-        print("[dry-run] No files were modified.")
-        return
-
-    gitignore_state = ensure_repo_gitignore_excludes_crg(repo_root)
-    if gitignore_state == "created":
-        print("Created .gitignore and added .code-review-graph/.")
-    elif gitignore_state == "updated":
-        print("Updated .gitignore with .code-review-graph/.")
-    else:
-        print(".gitignore already contains .code-review-graph/.")
-
-    codex_skill_error: str | None = None
-    # Legacy: --skills/--hooks/--all still accepted (no-op, everything is default)
-
+    Platform-native skills and hooks are installed by default where supported
+    so the graph tools are used proactively; ``--no-skills`` and ``--no-hooks``
+    opt out. The legacy ``--skills``/``--hooks``/``--all`` flags are still
+    accepted and do nothing. ``say`` prints a message that only reports a
+    write; a warning is printed in both modes.
+    """
+    from .incremental import ensure_repo_gitignore_excludes_crg
     from .skills import (
         PLATFORMS,
         generate_skills,
-        inject_instruction_files,
         install_codebuddy_hooks,
         install_codebuddy_skills,
         install_codex_hooks,
@@ -454,6 +598,18 @@ def _handle_init(args: argparse.Namespace) -> None:
         install_opencode_plugin,
         install_qoder_skills,
     )
+
+    gitignore_state = ensure_repo_gitignore_excludes_crg(repo_root)
+    if gitignore_state == "created":
+        say("Created .gitignore and added .code-review-graph/.")
+    elif gitignore_state == "updated":
+        say("Updated .gitignore with .code-review-graph/.")
+    else:
+        say(".gitignore already contains .code-review-graph/.")
+
+    skip_skills = getattr(args, "no_skills", False)
+    skip_hooks = getattr(args, "no_hooks", False)
+    codex_skill_error: str | None = None
     if not skip_skills:
         codex_detected = target == "codex" or (
             target == "all" and PLATFORMS["codex"]["detect"]()
@@ -471,103 +627,68 @@ def _handle_init(args: argparse.Namespace) -> None:
                 if target == "all":
                     print(codex_skill_error, file=sys.stderr)
             else:
-                print(f"Installed Codex skill in {codex_skill_dir}")
+                say(f"Installed Codex skill in {codex_skill_dir}")
 
         # Claude Code skills are only relevant for Claude (or full install).
         if target in ("claude", "all"):
             skills_dir = generate_skills(repo_root)
-            print(f"Generated Claude Code skills in {skills_dir}")
+            say(f"Generated Claude Code skills in {skills_dir}")
 
         # Gemini CLI skills are workspace-scoped under .gemini/.
         if target in ("gemini-cli", "all"):
             gemini_skills_dir = install_gemini_cli_skills(repo_root)
-            print(f"Installed Gemini CLI skills in {gemini_skills_dir}")
+            say(f"Installed Gemini CLI skills in {gemini_skills_dir}")
 
         # CodeBuddy discovers project skills under .codebuddy/skills/.
         if target in ("codebuddy", "all"):
             codebuddy_skills_dir = install_codebuddy_skills(repo_root)
-            print(f"Installed CodeBuddy skills in {codebuddy_skills_dir}")
+            say(f"Installed CodeBuddy skills in {codebuddy_skills_dir}")
 
         # Hermes Agent discovers skills under <HERMES_HOME>/skills/.
         if target == "hermes" or (target == "all" and PLATFORMS["hermes"]["detect"]()):
             hermes_skills_dir = install_hermes_skills(repo_root)
-            print(f"Installed Hermes Agent skills in {hermes_skills_dir}")
+            say(f"Installed Hermes Agent skills in {hermes_skills_dir}")
 
-    # Confirm before writing instruction files (#173). --yes skips the
-    # prompt; --no-instructions skips the whole block.
-    if not skip_instructions and instr_targets:
-        if auto_yes or _confirm_yes_no(
-            "Inject graph instructions into the files above?",
-            default_yes=True,
-        ):
-            outcomes = inject_instruction_files(repo_root, target=target)
-            for label, wording in (
-                ("created", "Injected graph instructions into"),
-                ("updated", "Updated graph instructions in"),
-            ):
-                names = [f for f, o in outcomes.items() if o == label]
-                if names:
-                    print(f"{wording}: {', '.join(names)}")
-            # A hand-edited block is never overwritten, so say which file it is
-            # rather than reporting success the user did not get (#314).
-            stale = [f for f, o in outcomes.items() if o == "conflict"]
-            if stale:
-                print(
-                    "Left edited graph instructions alone in: "
-                    f"{', '.join(stale)}. Delete the section between "
-                    "<!-- code-review-graph MCP tools --> and its closing marker "
-                    "and reinstall to pick up the current text."
-                )
-        else:
-            print("Skipped instruction injection (user declined).")
-    elif skip_instructions:
-        print("Skipped instruction injection (--no-instructions).")
+        # Qoder skills live in the project's .qoder/skills/.
+        if target in ("qoder", "all"):
+            qoder_skills_dir = install_qoder_skills(repo_root)
+            if qoder_skills_dir:
+                say(f"Installed Qoder skills to {qoder_skills_dir}")
 
-
-    # Install Qoder skills (global user-level skills directory)
-    if not skip_skills and target in ("qoder", "all"):
-        qoder_skills_dir = install_qoder_skills(repo_root)
-        if qoder_skills_dir:
-            print(f"Installed Qoder skills to {qoder_skills_dir}")
     if not skip_hooks and target in ("codebuddy", "all"):
         try:
             codebuddy_settings = install_codebuddy_hooks(repo_root)
             if codebuddy_settings:
-                print(f"Installed CodeBuddy hooks in {codebuddy_settings}")
+                say(f"Installed CodeBuddy hooks in {codebuddy_settings}")
         except Exception as exc:
             logger.warning("Could not install CodeBuddy hooks: %s", exc)
     if not skip_hooks and target in ("codex", "all"):
         hooks_path = install_codex_hooks(repo_root)
         if hooks_path:
-            print(f"Installed Codex hooks in {hooks_path}")
+            say(f"Installed Codex hooks in {hooks_path}")
         git_hook = install_git_hook(repo_root)
         if git_hook:
-            print(f"Installed git pre-commit hook in {git_hook}")
+            say(f"Installed git pre-commit hook in {git_hook}")
         for sync_hook in install_git_sync_hooks(repo_root):
-            print(f"Installed git {sync_hook.name} hook in {sync_hook}")
+            say(f"Installed git {sync_hook.name} hook in {sync_hook}")
     if not skip_hooks and target in ("claude", "qoder", "all"):
         platforms_to_install = [target] if target != "all" else ["claude", "qoder"]
         for plat in platforms_to_install:
             settings_path = install_hooks(repo_root, platform=plat)
             if settings_path:
-                print(f"Installed hooks in {settings_path}")
+                say(f"Installed hooks in {settings_path}")
         git_hook = install_git_hook(repo_root)
         if git_hook:
-            print(f"Installed git pre-commit hook in {git_hook}")
+            say(f"Installed git pre-commit hook in {git_hook}")
         for sync_hook in install_git_sync_hooks(repo_root):
-            print(f"Installed git {sync_hook.name} hook in {sync_hook}")
-
-    if steering is not None:
-        _apply_steering_choice(
-            repo_root, target, steering, skip_hooks=skip_hooks, dry_run=False,
-        )
+            say(f"Installed git {sync_hook.name} hook in {sync_hook}")
 
     # Cursor hooks (user-level, only if ~/.cursor exists — matching MCP detect)
     if not skip_hooks and target in ("all", "cursor") and PLATFORMS["cursor"]["detect"]():
         try:
             hooks_path = install_cursor_hooks()
             if hooks_path:
-                print(f"Installed Cursor hooks in {hooks_path}")
+                say(f"Installed Cursor hooks in {hooks_path}")
         except Exception as exc:
             logger.warning("Could not install Cursor hooks: %s", exc)
 
@@ -575,7 +696,7 @@ def _handle_init(args: argparse.Namespace) -> None:
         try:
             gemini_settings = install_gemini_cli_hooks(repo_root)
             if gemini_settings:
-                print(f"Installed Gemini CLI hooks in {gemini_settings}")
+                say(f"Installed Gemini CLI hooks in {gemini_settings}")
         except Exception as exc:
             logger.warning("Could not install Gemini CLI hooks: %s", exc)
 
@@ -583,20 +704,61 @@ def _handle_init(args: argparse.Namespace) -> None:
     if not skip_hooks and target in ("all", "opencode") and PLATFORMS["opencode"]["detect"]():
         try:
             plugin_path = install_opencode_plugin()
-            print(f"Installed OpenCode plugin in {plugin_path}")
+            say(f"Installed OpenCode plugin in {plugin_path}")
         except Exception as exc:
             logger.warning("Could not install OpenCode plugin: %s", exc)
+    return codex_skill_error
 
-    if gitignore_plan is not None:
-        print()
-        _report_gitignore_block(repo_root, gitignore_plan, dry_run=False)
 
-    if codex_skill_error and target == "codex":
-        raise CodeReviewGraphError(codex_skill_error)
+def _print_instruction_conflicts(outcomes: dict[str, str]) -> None:
+    """Name each file whose graph block was edited by hand, so left alone (#314)."""
+    stale = [f for f, o in outcomes.items() if o == "conflict"]
+    if stale:
+        print(
+            "Left edited graph instructions alone in: "
+            f"{', '.join(stale)}. Delete the section between "
+            "<!-- code-review-graph MCP tools --> and its closing marker "
+            "and reinstall to pick up the current text."
+        )
+
+
+def _print_planned_files(
+    plan: install_plan.Plan,
+    repo_root: Path,
+    skip: Iterable[install_plan.FileChange] = (),
+) -> None:
+    """List each file a real install is about to write, before it writes any.
+
+    ``skip`` holds the instruction changes, listed apart because they wait on
+    the question.
+    """
+
+    skipped = {change.path for change in skip}
+    changes = [change for change in plan.changes() if change.path not in skipped]
     print()
-    print("Next steps:")
-    print("  1. code-review-graph build    # build the knowledge graph")
-    print("  2. Restart your AI coding tool to pick up the new config")
+    if not changes:
+        print("No config, hook or skill files need changing.")
+        return
+    print("Install will change these files:")
+    for change in changes:
+        shown = install_plan.display_path(change.path, repo_root)
+        print(f"  {shown} ({install_plan.describe(change)})")
+    print("Run with --dry-run to see each change first.")
+
+
+def _print_dry_run(plan: install_plan.Plan, repo_root: Path) -> None:
+    """Show what each file would become, then say that nothing was written."""
+
+    changes = plan.changes()
+    print()
+    if not changes:
+        print("[dry-run] Every file is already up to date.")
+    else:
+        print(f"[dry-run] Install would change {len(changes)} file(s):")
+        print()
+        sys.stdout.write(install_plan.render(changes, repo_root))
+    print()
+    print("[dry-run] No files were modified.")
 
 
 def _handle_data_dir_option(args, repo_root: Path) -> None:
@@ -1417,7 +1579,7 @@ def build_parser() -> argparse.ArgumentParser:
     install_cmd.add_argument(
         "--dry-run",
         action="store_true",
-        help="Show what would be done without writing files",
+        help="Show each file install would change, as a diff, and write nothing",
     )
     install_cmd.add_argument(
         "--no-skills",
@@ -1469,7 +1631,7 @@ def build_parser() -> argparse.ArgumentParser:
     init_cmd.add_argument(
         "--dry-run",
         action="store_true",
-        help="Show what would be done without writing files",
+        help="Show each file install would change, as a diff, and write nothing",
     )
     init_cmd.add_argument(
         "--no-skills",

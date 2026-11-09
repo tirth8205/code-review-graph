@@ -493,7 +493,7 @@ Run `code-review-graph <command> --help` for the full option list.
 ```bash
 # Setup
 code-review-graph install           # Configure detected AI coding platforms (alias: init)
-code-review-graph install --dry-run # Preview without writing files
+code-review-graph install --dry-run # Show each file's diff; write nothing
 code-review-graph install --gitignore  # Also add the files this run creates to .gitignore (off by default)
 code-review-graph install --platform codex  # Configure Codex MCP, hooks, and global Skill
 code-review-graph install --steering        # Opt in: graph context beside Claude Code searches and reads

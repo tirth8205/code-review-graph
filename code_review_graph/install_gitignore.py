@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePath, PurePosixPath
 
 from . import codex_skill, skills
+from . import install_plan as planned_files
 
 logger = logging.getLogger(__name__)
 
@@ -262,7 +263,7 @@ def _created_entries(repo_root: Path, install_plan: Plan, dry_run: bool) -> list
         path
         for path in paths
         if path not in install_plan.existed
-        and (dry_run or os.path.lexists(repo_root / path))
+        and (dry_run or planned_files.lexists(repo_root / path))
     }
     tops = sorted(path for path in created if PurePosixPath(path).parent.as_posix() not in created)
     tracked = _tracked(repo_root, tops)
@@ -363,6 +364,8 @@ def apply(repo_root: Path, install_plan: Plan, *, dry_run: bool) -> Result:
 
     With ``dry_run`` nothing is written: every planned path that does not
     exist yet is taken as created, and the result says what would change.
+    ``install`` itself calls this inside its plan (#173), where the files the
+    plan creates count as created and the write is held with the rest.
     """
     if not _in_git_work_tree(repo_root):
         return Result("not-git")
@@ -372,7 +375,11 @@ def apply(repo_root: Path, install_plan: Plan, *, dry_run: bool) -> Result:
         return Result("error", detail=f"{gitignore} is a symlink; left alone")
     try:
         # Bytes, so the file's own line endings survive the round trip.
-        text = gitignore.read_bytes().decode("utf-8") if gitignore.exists() else ""
+        text = (
+            planned_files.read_bytes(gitignore).decode("utf-8")
+            if planned_files.exists(gitignore)
+            else ""
+        )
     except (OSError, UnicodeError) as exc:
         logger.warning("Could not read %s: %s", gitignore, exc)
         return Result("error", detail=str(exc))
@@ -395,7 +402,7 @@ def apply(repo_root: Path, install_plan: Plan, *, dry_run: bool) -> Result:
                 entry
                 for entry in old
                 if (
-                    os.path.lexists(repo_root / entry.rstrip("/"))
+                    planned_files.lexists(repo_root / entry.rstrip("/"))
                     or entry.rstrip("/") in planned
                 )
                 and not _holds_tracked(entry, tracked)
@@ -423,7 +430,7 @@ def apply(repo_root: Path, install_plan: Plan, *, dry_run: bool) -> Result:
         return Result("unchanged", entries=entries)
     if not dry_run:
         try:
-            gitignore.write_bytes(new_text.encode("utf-8"))
+            planned_files.write_bytes(gitignore, new_text.encode("utf-8"))
         except OSError as exc:
             logger.warning("Could not write %s: %s", gitignore, exc)
             return Result("error", detail=str(exc))

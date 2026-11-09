@@ -62,7 +62,7 @@ code-review-graph install              # detect installed AI coding tools and co
 code-review-graph build                # parse the codebase
 ```
 
-`install` detects which AI coding tools you have, writes an MCP server entry for each, installs hooks and skills where the platform supports them, and adds graph instructions to the platform's rules file. The MCP entry uses `poetry run` or `uv run` inside a Poetry or uv project environment, `uvx code-review-graph serve` when `uvx` is on PATH, and otherwise the current Python interpreter. Restart the editor or tool afterwards.
+`install` detects which AI coding tools you have, writes an MCP server entry for each, installs hooks and skills where the platform supports them, and adds graph instructions to the platform's rules file. The MCP entry uses `poetry run` or `uv run` inside a Poetry or uv project environment, `uvx code-review-graph serve` when `uvx` is on PATH, and otherwise the current Python interpreter. Nothing is written until `install` has listed the files it will change and you have answered its question about instruction files; `install --dry-run` shows each change as a diff and writes nothing. Restart the editor or tool afterwards.
 
 <p align="center">
   <img src="diagrams/diagram8_supported_platforms.png" alt="One install, every platform: detects Codex, Claude Code, CodeBuddy Code, Cursor, Windsurf, Zed, Continue, OpenCode, Antigravity, Gemini CLI, Qwen, Qoder, Kiro, GitHub Copilot, GitHub Copilot CLI, and Hermes Agent" width="85%" />

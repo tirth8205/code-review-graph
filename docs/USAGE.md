@@ -10,7 +10,7 @@ code-review-graph install    # detect installed AI coding tools and configure ea
 code-review-graph build      # parse the codebase
 ```
 
-`install` detects which AI coding tools you have, writes an MCP server entry for each, installs hooks and skills where the platform supports them, and adds graph instructions to the platform's rules file (`CLAUDE.md`, `AGENTS.md`, and others). `--no-hooks`, `--no-skills` and `--no-instructions` skip those steps; `--dry-run` shows what would be written. Restart the editor or tool afterwards.
+`install` detects which AI coding tools you have, writes an MCP server entry for each, installs hooks and skills where the platform supports them, and adds graph instructions to the platform's rules file (`CLAUDE.md`, `AGENTS.md`, and others). `--no-hooks`, `--no-skills` and `--no-instructions` skip those steps. `--dry-run` shows what each file would become, as one diff per file, and writes nothing. Without it, `install` lists the files it will change and asks about the instruction files before it writes anything; `--yes` answers yes for you. Restart the editor or tool afterwards.
 
 `--steering` is off by default and only for Claude Code. It adds a hook that puts graph context, such as callers, callees, flows and tests, beside each `Grep`, `Glob`, `grep` or `rg` command and `Read`. That steers the model towards the graph, but it changes what the model sees on every one of those calls: on Flask, about 0.12 seconds and up to about 220 tokens each. `--no-steering` removes only that hook, and `uninstall` removes it too. A failed lookup never stops the tool call.
 

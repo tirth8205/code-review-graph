@@ -268,6 +268,25 @@
 
 ### Fixed
 
+- `install --dry-run` shows what each file would become, and `install` writes
+  nothing until you have answered its question (#173). The dry run used to list
+  file names only, and a real install wrote the MCP config before it asked
+  about `CLAUDE.md` and the other instruction files. Every install write (MCP
+  configs, `.gitignore`, skills, hooks, git hooks, the OpenCode plugin, the
+  instruction files, the `--steering` hook and the `--gitignore` block) now
+  goes into a plan first. `--dry-run` prints that plan
+  as one unified diff per file, a new file as its full content, cut at 60
+  lines a file with a note saying how many lines were left out, and writes
+  nothing. A real install lists the files it will change, asks about the
+  instruction files, and only then writes exactly the plan it showed. Ctrl-C
+  at the question stops the install with nothing written, and a file whose
+  content or permissions change while the question is open is left alone and
+  reported. A file reached by two names, such as `CLAUDE.md` linked to
+  `AGENTS.md`, is planned and written once. Commented JSONC configs and hook
+  settings are previewed and written through the same splice, so their
+  comments are kept. A hook settings file install will leave alone is named in
+  the dry run too. Saying no to the question also keeps the instruction files
+  out of the `--gitignore` block.
 - `query_graph_tool` no longer answers "ambiguous" when a full name has one
   real symbol. The name search splits on underscores, so `hybrid_search` also
   matched every `test_hybrid_search_*` and came back with 34 candidates and no
