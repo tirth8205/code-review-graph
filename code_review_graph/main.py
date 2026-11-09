@@ -24,7 +24,7 @@ from fastmcp import FastMCP
 
 from . import __version__
 from . import incremental as _incremental
-from .constants import env_int
+from .constants import MAX_IMPACT_NODES, env_int
 from .graph import GraphStore
 from .incremental import find_project_root, get_db_path, start_watch_thread
 from .prompts import (
@@ -392,7 +392,7 @@ async def get_minimal_context_tool(
 async def get_impact_radius_tool(
     changed_files: Optional[list[str]] = None,
     max_depth: int = 2,
-    max_results: int = 500,
+    max_results: int = MAX_IMPACT_NODES,
     repo_root: Optional[str] = None,
     base: str = "HEAD~1",
     detail_level: str = "standard",
@@ -411,10 +411,11 @@ async def get_impact_radius_tool(
     Args:
         changed_files: List of changed file paths (relative to repo root). Auto-detected if omitted.
         max_depth: Number of hops to traverse in the dependency graph. Default: 2.
-        max_results: How many impacted nodes to traverse to. Default: 500. Each
-            list in the response also has a fixed ceiling (100 nodes, 150
-            edges, 200 files) so the response size does not grow with the
-            repository; the omitted counts report the rest.
+        max_results: How many impacted nodes to traverse to. Default: the
+            CRG_MAX_IMPACT_NODES setting, or 500. Each list in the response also
+            has a fixed ceiling (100 nodes, 150 edges, 200 files) so the response
+            size does not grow with the repository; the omitted counts report
+            the rest.
         repo_root: Repository root path. Auto-detected if omitted.
         base: Git ref for auto-detecting changes. Default: HEAD~1.
         detail_level: "standard" for full output, "minimal" for compact summary. Default: standard.
@@ -560,7 +561,8 @@ async def semantic_search_nodes_tool(
     Args:
         query: Search string to match against node names.
         kind: Optional filter: File, Class, Function, Type, Test, YamlPath, or DocSection.
-        limit: Maximum results. Default: 20.
+        limit: Maximum results. Default: 20. At most 100, or 5 with
+               detail_level "minimal". ``total`` counts the matches ranked.
         repo_root: Repository root path. Auto-detected if omitted.
         model: Embedding model for query vectors. Must match the model used
                during embed_graph. Falls back to CRG_EMBEDDING_MODEL env var
@@ -686,6 +688,7 @@ async def find_large_functions_tool(
     file_path_pattern: Optional[str] = None,
     limit: int = 50,
     repo_root: Optional[str] = None,
+    detail_level: str = "standard",
 ) -> dict:
     """Find functions, classes, or files exceeding a line-count threshold.
 
@@ -696,15 +699,18 @@ async def find_large_functions_tool(
         min_lines: Minimum line count to flag. Default: 50.
         kind: Optional filter: Function, Class, File, Test, YamlPath, or DocSection.
         file_path_pattern: Filter by file path substring (e.g. "components/").
-        limit: Maximum results. Default: 50.
+        limit: Maximum results. Default: 50. At most 100, or 25 with
+            detail_level "minimal". ``total`` always counts every match.
         repo_root: Repository root path. Auto-detected if omitted.
+        detail_level: "standard" for full rows, "minimal" for fewer, smaller rows.
+            Default: standard.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
         "find_large_functions_tool",
         lambda: find_large_functions(
             min_lines=min_lines, kind=kind, file_path_pattern=file_path_pattern,
-            limit=limit, repo_root=root,
+            limit=limit, repo_root=root, detail_level=detail_level,
         ),
         root,
     )
@@ -1279,8 +1285,8 @@ async def traverse_graph_tool(
         mode: Traversal mode: "bfs" (breadth-first) or "dfs"
             (depth-first). Default: bfs.
         depth: Max traversal depth (1-6). Default: 3.
-        token_budget: Approximate token limit for results.
-            Default: 2000.
+        token_budget: Approximate token limit for results, at most 10000.
+            The walk stops when it runs out. Default: 2000.
         repo_root: Repository root path. Auto-detected if omitted.
     """
     root = _resolve_repo_root(repo_root)
