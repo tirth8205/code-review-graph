@@ -1002,7 +1002,15 @@ class TestTruncationContract:
         assert f"Found {result['total']}+ node(s)" in result["summary"]
         assert f"showing 1 of {result['total']}" in result["summary"]
 
-    def test_semantic_search_counts_exactly_when_the_window_is_not_full(self, repo):
+    def test_semantic_search_counts_exactly_when_the_window_is_not_full(
+        self, repo, monkeypatch,
+    ):
+        # With an embedding model installed, the module's embed_graph_tool case
+        # leaves vectors behind, and vector search ranks every node, so the
+        # window fills. Count keyword matches only, whatever extras are present.
+        from code_review_graph import search as search_mod
+
+        monkeypatch.setattr(search_mod, "_embedding_search", lambda *a, **k: [])
         result = _invoke(
             crg_main.semantic_search_nodes_tool,
             repo_root=repo["root"], query="helper_0_0_0", limit=100,
