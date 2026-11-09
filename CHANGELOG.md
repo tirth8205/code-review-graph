@@ -540,6 +540,15 @@
   asking for functions could return few or none when many existed: `dead` with
   `kind="Function"` found 1 of them on sidekiq and now finds 9. If the exact
   reading of a query matches only other kinds, the wider reading is now tried.
+- `tests_for` gives the same answer every time on the same graph. On a large
+  class it follows at most 50 callees (`CRG_MAX_TRANSITIVE_FRONTIER`), and it
+  picked them in an order that changed with each new process, so an MCP
+  restart or a new CLI call gave a different list. On koel, 20 runs on one
+  graph gave `SongService` anything from 43 to 90 tests, and every run gave a
+  different list. The 50 are now the first by name, with named callees before
+  bare ones, which are never followed. The `detect_changes` risk score counts
+  the same tests, so it is steady too. Two builds of the same code already
+  gave the same graph; only the query moved.
 - Imports of sibling packages in npm, yarn and pnpm workspaces resolve to the
   package's source files (#1030). A specifier such as `@acme/shared` or
   `@acme/sdk/browser` names a package-manager link, not a

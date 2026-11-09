@@ -2297,7 +2297,8 @@ class GraphStore:
 
         ``max_frontier`` caps the CALLS fan-out per BFS hop to prevent O(N*M)
         query explosion on hub functions in large graphs. Defaults to
-        ``CRG_MAX_TRANSITIVE_FRONTIER`` env var (50 if unset).
+        ``CRG_MAX_TRANSITIVE_FRONTIER`` env var (50 if unset). The callees
+        kept are the first by name, so one graph gives one answer.
         """
         if max_frontier is None:
             max_frontier = env_int("CRG_MAX_TRANSITIVE_FRONTIER", 50)
@@ -2442,8 +2443,11 @@ class GraphStore:
                 if d:
                     results.append(d)
 
-        # Transitive: follow CALLS edges, then collect TESTED_BY on callees
-        frontier = set(input_qns)
+        # Transitive: follow CALLS edges, then collect TESTED_BY on callees.
+        # Each hop is sorted before it is cut: a set's order changes with the
+        # string hash seed, so cutting it unsorted kept different callees in
+        # every new process. Callees with a node go first, since the rest are skipped.
+        frontier = sorted(set(input_qns))
         for _ in range(max_depth):
             next_frontier: set[str] = set()
             for qn in frontier:
@@ -2455,14 +2459,15 @@ class GraphStore:
                     if _edge_extra_is_unresolved(row["extra"]):
                         continue
                     next_frontier.add(row["target_qualified"])
-            if len(next_frontier) > max_frontier:
-                next_frontier = set(list(next_frontier)[:max_frontier])
             # A callee with no node has no stable identity, be it a bare name
             # or a scoped one like ``String::new``. Endpoint resolution binds it
             # when graph evidence exists; otherwise following TESTED_BY here
             # would attribute every same-named test. One query per hop.
             bound_callees = self._existing_qualified_names(next_frontier)
-            for callee in next_frontier:
+            frontier = sorted(
+                next_frontier, key=lambda name: (name not in bound_callees, name),
+            )[:max_frontier]
+            for callee in frontier:
                 if callee not in bound_callees:
                     continue
                 for row in conn.execute(
@@ -2478,7 +2483,6 @@ class GraphStore:
                         d = _node_dict(tgt, indirect=True)
                         if d:
                             results.append(d)
-            frontier = next_frontier
 
         if max_depth > 0 and include_helper_routes:
             for route in self._get_test_helper_routes(
