@@ -971,7 +971,7 @@ class TestIncrementalUpdate:
                 mock_enrich.reset_mock()
                 result = incremental_update(tmp_path, store, changed_files=[])
                 # Nothing was re-parsed, so the Jedi step does not run.
-                assert result["jedi_enrichment"] is None
+                assert result.get("jedi_enrichment") is None
                 mock_enrich.assert_not_called()
         finally:
             store.close()
@@ -2902,3 +2902,106 @@ class TestUntrackedScope:
         assert get_staged_and_unstaged(tmp_path) == [
             "brandnew/a.py", "pkg/newmod.py", "src/a.py", "weird/",
         ]
+
+
+_JEDI_SERVICES = (
+    "class OldService:\n    def authenticate(self):\n        return True\n\n"
+    "class NewService:\n    def authenticate(self):\n        return False\n\n"
+)
+_JEDI_APP = (
+    "from svc import make\n\ndef run():\n    s = make()\n    return s.authenticate()\n"
+)
+
+
+def _jedi_repo(root: Path, returned: str = "OldService") -> None:
+    (root / ".git").mkdir(exist_ok=True)
+    (root / "svc.py").write_text(
+        _JEDI_SERVICES + f"def make():\n    return {returned}()\n", encoding="utf-8",
+    )
+    (root / "app.py").write_text(_JEDI_APP, encoding="utf-8")
+
+
+def _authenticate_edges(store: GraphStore, root: Path) -> list[tuple[str, dict, str]]:
+    import json
+
+    rows = store._conn.execute(
+        "SELECT target_qualified, extra, target_resolution FROM edges"
+        " WHERE kind = 'CALLS' AND file_path = ? AND line = 5",
+        (str(root.resolve() / "app.py"),),
+    ).fetchall()
+    return [
+        (r["target_qualified"].rsplit("/", 1)[-1], json.loads(r["extra"]), r["target_resolution"])
+        for r in rows
+    ]
+
+
+class TestJediEnrichment:
+    """Review of PR #823: the Jedi step must improve the edges a build stores."""
+
+    def test_build_without_jedi_skips_the_step(self, tmp_path, monkeypatch):
+        import sys
+
+        # The enrichment extra is optional: without it a build only notes the skip.
+        monkeypatch.setitem(sys.modules, "jedi", None)
+        _jedi_repo(tmp_path)
+        with GraphStore(tmp_path / "test.db") as store:
+            with patch(
+                "code_review_graph.incremental.get_all_tracked_files",
+                return_value=["svc.py", "app.py"],
+            ):
+                result = full_build(tmp_path, store)
+            assert result["jedi_enrichment"] == {
+                "skipped": True, "reason": "jedi not installed",
+            }
+            [(target, _extra, resolution)] = _authenticate_edges(store, tmp_path)
+            assert (target, resolution) == ("authenticate", "unresolved")
+
+    def test_full_build_refines_the_bare_call_edge(self, tmp_path):
+        pytest.importorskip("jedi")
+        _jedi_repo(tmp_path)
+        with GraphStore(tmp_path / "test.db") as store:
+            with patch(
+                "code_review_graph.incremental.get_all_tracked_files",
+                return_value=["svc.py", "app.py"],
+            ):
+                result = full_build(tmp_path, store)
+
+            assert result["jedi_enrichment"]["resolved"] == 1
+            assert result["jedi_enrichment"]["refined"] == 1
+            # One edge, now naming the method the factory's object has.
+            [(target, extra, resolution)] = _authenticate_edges(store, tmp_path)
+            assert target == "svc.py::OldService.authenticate"
+            assert extra["call_resolution"] == "jedi"
+            assert extra["receiver"] == "s"
+            assert resolution == "direct"
+
+    def test_update_refreshes_an_unchanged_dependent(self, tmp_path):
+        pytest.importorskip("jedi")
+        _jedi_repo(tmp_path)
+        with GraphStore(tmp_path / "test.db") as store:
+            incremental_update(tmp_path, store, changed_files=["svc.py", "app.py"])
+            [(target, _extra, _res)] = _authenticate_edges(store, tmp_path)
+            assert target == "svc.py::OldService.authenticate"
+
+            # Only svc.py changes; app.py's bytes do not.
+            _jedi_repo(tmp_path, returned="NewService")
+            result = incremental_update(tmp_path, store, changed_files=["svc.py"])
+
+            assert "app.py" in result["dependent_files"]
+            [(target, _extra, _res)] = _authenticate_edges(store, tmp_path)
+            assert target == "svc.py::NewService.authenticate"
+
+    def test_target_outside_the_graph_keeps_the_bare_edge(self, tmp_path):
+        pytest.importorskip("jedi")
+        _jedi_repo(tmp_path)
+        # svc.py is ignored, so no node answers to what Jedi finds there; an
+        # unrelated authenticate() keeps the name among the project's functions.
+        (tmp_path / ".code-review-graphignore").write_text("svc.py\n", encoding="utf-8")
+        (tmp_path / "other.py").write_text("def authenticate():\n    pass\n", encoding="utf-8")
+        with GraphStore(tmp_path / "test.db") as store:
+            incremental_update(
+                tmp_path, store, changed_files=["svc.py", "app.py", "other.py"],
+            )
+            [(target, extra, _res)] = _authenticate_edges(store, tmp_path)
+            assert target == "authenticate"
+            assert "call_resolution" not in extra
