@@ -316,6 +316,21 @@
   SQL statements to 20 and from 120 MB to 13 MB at peak, with the same output
   byte for byte. A path query still reads the whole graph, since a route can
   run anywhere, and so does a view that reaches most of a large graph.
+- Translation files no longer flood the graph. A translation file repeats the
+  same keys once per language, and each key became a `YamlPath` node: on sidekiq,
+  `web/locales/*.yml` gave 3,147 of the 3,336 `YamlPath` nodes. A YAML file in a
+  `locale`, `locales`, `i18n`, `l10n` or `translations` folder whose name or
+  sub-folder is a language code, such as `config/locales/devise.en.yml` or
+  `locales/pt-BR/app.yml`, now gets a file node only. Sidekiq's graph falls from
+  5,085 nodes to 1,935 and its database from 45 MB to 31 MB. A name alone is not
+  enough, so `config/en.yml` and `.github/workflows/it.yml` keep their paths, and
+  so does `locales/deploy.yml`. Run `build` to clear these nodes from a graph you
+  already have; `update` only re-reads files that changed.
+- `semantic_search_nodes_tool` and `cross_repo_search_tool` apply `kind` before
+  they cut the hits, not after. Rows of another kind could fill the fetch limit, so
+  asking for functions could return few or none when many existed: `dead` with
+  `kind="Function"` found 1 of them on sidekiq and now finds 9. If the exact
+  reading of a query matches only other kinds, the wider reading is now tried.
 - Imports of sibling packages in npm, yarn and pnpm workspaces resolve to the
   package's source files (#1030). A specifier such as `@acme/shared` or
   `@acme/sdk/browser` names a package-manager link, not a

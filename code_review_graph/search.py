@@ -747,8 +747,9 @@ def _fts_search(
 
     Tries each expression from :func:`build_fts_queries` in turn and returns
     the first non-empty result, so the precise reading of a query wins and
-    the widened one is only a fallback. Without *kind*, ``_UNSEARCHED_KIND``
-    rows are left out inside the statement, so they cannot use up *limit*.
+    the widened one is only a fallback. *kind* filters inside the statement, so
+    rows of another kind neither use up *limit* nor count as an answer. Without
+    *kind*, ``_UNSEARCHED_KIND`` rows are left out there for the same reason.
 
     Returns list of ``(node_id, bm25_score)`` tuples. The BM25 score is
     negated so higher = better (FTS5 returns negative BM25).
@@ -766,25 +767,34 @@ def _fts_search(
     # The weights are floats formatted from a module constant, never from the
     # query, so there is no user-controlled text in this statement. The MATCH
     # expression itself stays a bound parameter.
-    sql = (  # nosec B608
-        f"SELECT rowid, bm25(nodes_fts, {weights}) AS score FROM nodes_fts "
-        "WHERE nodes_fts MATCH ? ORDER BY score LIMIT ?"
-    )
-    params: tuple[Any, ...] = (limit,)
-    # Most graphs hold no such rows, and they keep the plain statement.
-    if not kind and conn.execute(
+    filters: tuple[Any, ...] = ()
+    if kind:
+        # CROSS JOIN keeps the full-text index as the outer loop.
+        sql = (  # nosec B608
+            f"SELECT nodes_fts.rowid, bm25(nodes_fts, {weights}) AS score FROM nodes_fts "
+            "CROSS JOIN nodes ON nodes.id = nodes_fts.rowid "
+            "WHERE nodes_fts MATCH ? AND nodes.kind = ? ORDER BY score LIMIT ?"
+        )
+        filters = (kind,)
+    # Most graphs hold no unsearched rows, and they keep the plain statement.
+    elif conn.execute(
         "SELECT 1 FROM nodes WHERE kind = ? LIMIT 1", (_UNSEARCHED_KIND,),
     ).fetchone():
-        # CROSS JOIN keeps the full-text index as the outer loop.
         sql = (  # nosec B608
             f"SELECT nodes_fts.rowid, bm25(nodes_fts, {weights}) AS score FROM nodes_fts "
             "CROSS JOIN nodes ON nodes.id = nodes_fts.rowid "
             "WHERE nodes_fts MATCH ? AND nodes.kind != ? ORDER BY score LIMIT ?"
         )
-        params = (_UNSEARCHED_KIND, limit)
+        filters = (_UNSEARCHED_KIND,)
+    else:
+        sql = (  # nosec B608
+            f"SELECT rowid, bm25(nodes_fts, {weights}) AS score FROM nodes_fts "
+            "WHERE nodes_fts MATCH ? ORDER BY score LIMIT ?"
+        )
     for expression in expressions:
+        params = (expression, *filters, limit)
         try:
-            rows = conn.execute(sql, (expression, *params)).fetchall()
+            rows = conn.execute(sql, params).fetchall()
         except sqlite3.OperationalError as e:
             logger.warning("FTS5 search failed for %r: %s", expression, e)
             return []
@@ -805,8 +815,12 @@ def _embedding_search(
     limit: int = 50,
     model: str | None = None,
     provider: str | None = None,
+    kind: str | None = None,
 ) -> list[tuple[int, float]]:
     """Run a vector similarity search using the embedding store.
+
+    Vectors do not carry a node kind, so with *kind* set every one is ranked
+    and the filter runs on that whole list, before *limit* cuts it.
 
     Returns list of ``(node_id, similarity_score)`` tuples.
     Gracefully returns an empty list if embeddings are not available.
@@ -825,7 +839,20 @@ def _embedding_search(
             if not emb_store.available or emb_store.count() == 0:
                 return []
 
-            results = emb_store.search(query, limit=limit)
+            if kind:
+                of_kind = {
+                    row[0]
+                    for row in store._conn.execute(
+                        "SELECT qualified_name FROM nodes WHERE kind = ?", (kind,),
+                    )
+                }
+                results = [
+                    hit
+                    for hit in emb_store.search(query, limit=emb_store.count())
+                    if hit[0] in of_kind
+                ][:limit]
+            else:
+                results = emb_store.search(query, limit=limit)
             # Map qualified names back to node IDs
             id_scores: list[tuple[int, float]] = []
             for qn, score in results:
@@ -853,8 +880,9 @@ def _keyword_search(
 ) -> list[tuple[int, float]]:
     """Fall back to simple LIKE keyword matching.
 
-    Each word in the query must match independently (AND logic). Without
-    *kind*, ``_UNSEARCHED_KIND`` rows are left out before *limit* cuts them.
+    Each word in the query must match independently (AND logic), and *kind*
+    filters before *limit* cuts the rows. Without *kind*, ``_UNSEARCHED_KIND``
+    rows are left out before *limit* cuts them.
     Returns ``(node_id, score)`` tuples with a basic relevance score.
     """
     words = query.lower().split()
@@ -868,7 +896,10 @@ def _keyword_search(
             "(LOWER(name) LIKE ? OR LOWER(qualified_name) LIKE ?)"
         )
         params.extend([f"%{word}%", f"%{word}%"])
-    if not kind:
+    if kind:
+        conditions.append("kind = ?")
+        params.append(kind)
+    else:
         conditions.append("kind != ?")
         params.append(_UNSEARCHED_KIND)
 
@@ -944,7 +975,7 @@ def hybrid_search(
     # because those operate on the FTS virtual table or need raw Row
     # access for batch-fetch performance.  This is documented coupling.
     conn = store._conn
-    fetch_limit = limit * 3  # Fetch extra to allow for filtering and boosting
+    fetch_limit = limit * 3  # Fetch extra to allow for boosting
 
     # ------ Phase 1: Gather ranked lists ------
     fts_results: list[tuple[int, float]] = []
@@ -958,7 +989,7 @@ def hybrid_search(
 
     # Try embedding search
     emb_results = _embedding_search(
-        store, query, limit=fetch_limit, model=model, provider=provider,
+        store, query, limit=fetch_limit, model=model, provider=provider, kind=kind,
     )
 
     # ------ Phase 2: Merge via RRF or fallback ------

@@ -4372,6 +4372,8 @@ def node_to_dict(n: GraphNode) -> dict:
             "truncated": bool(n.extra.get("yaml_truncated")),
             "values_indexed": False,
         }
+        if n.extra.get("yaml_locale_file"):
+            file_yaml_metadata["locale_file"] = True
         duplicate_keys = n.extra.get("yaml_duplicate_keys")
         if isinstance(duplicate_keys, list):
             safe_duplicate_keys: list[dict[str, Any]] = []
