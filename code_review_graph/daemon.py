@@ -918,10 +918,34 @@ def reap_orphaned_watchers(
     # After the signals: a watcher still running could publish again.
     for entry in state.values():
         if isinstance(entry, dict) and entry.get("path"):
-            clear_watch_health(str(entry["path"]))
+            _clear_health_left_by(str(entry["path"]), entry.get("pid"))
     if state:
         clear_state(state_path)
     return orphans
+
+
+def _clear_health_left_by(repo_path: str, pid: Any) -> None:
+    """Drop the health file our watcher on *repo_path* left, not a replacement's.
+
+    Health files are keyed by repository, so a watcher started by hand after
+    ours died publishes to the same file. Deleting it would let the next
+    ``start`` miss that watcher and launch a second writer on the same database.
+    """
+    health = read_watch_health(repo_path)
+    publisher = health.get("pid") if isinstance(health, dict) else None
+    if (
+        isinstance(publisher, int)
+        and publisher != pid
+        and _is_pid_alive(publisher)
+        and is_our_watcher(publisher, repo_path)
+    ):
+        logger.info(
+            "Keeping the health file for '%s': live watcher PID %d publishes it",
+            repo_path,
+            publisher,
+        )
+        return
+    clear_watch_health(repo_path)
 
 
 def _signal_until_dead(pid: int, *, timeout: float = 5.0) -> bool:

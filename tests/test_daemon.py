@@ -1572,13 +1572,14 @@ class TestStopClearsWatcherHealth:
         return proc.pid
 
     @staticmethod
-    def _publish_health(repo: Path) -> Path:
+    def _publish_health(repo: Path, pid: int) -> Path:
+        """What a watch child publishes: its own PID and a fresh heartbeat."""
         from code_review_graph.daemon import watch_health_path
 
         path = watch_health_path(repo)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
-            json.dumps({"pid": 1, "updated_at": time.time(), "observer_alive": True}),
+            json.dumps({"pid": pid, "updated_at": time.time(), "observer_alive": True}),
             encoding="utf-8",
         )
         return path
@@ -1594,7 +1595,7 @@ class TestStopClearsWatcherHealth:
         state.write_text(
             json.dumps({"repo": {"pid": pid, "path": str(repo)}}), encoding="utf-8",
         )
-        return self._publish_health(repo), state
+        return self._publish_health(repo, pid), state
 
     def test_stop_clears_health_when_the_daemon_is_killed_outright(self, tmp_path, capsys):
         from code_review_graph.daemon import write_pid
@@ -1678,7 +1679,7 @@ class TestStopClearsWatcherHealth:
         health, _state = self._left_behind_by(tmp_path, os.getpid())
 
         def last_heartbeat(_pid, *, timeout):
-            self._publish_health(repo)
+            self._publish_health(repo, os.getpid())
             return True
 
         with (
@@ -1713,12 +1714,50 @@ class TestStopClearsWatcherHealth:
 
         hand_run = tmp_path / "hand-run"
         hand_run.mkdir()
-        other = self._publish_health(hand_run)
+        other = self._publish_health(hand_run, os.getpid())
         self._left_behind_by(tmp_path, self._dead_pid())
 
         daemon_module.reap_orphaned_watchers()
 
         assert other.exists()
+
+    def test_a_live_replacement_on_the_same_repo_keeps_its_health(self, tmp_path):
+        """A watcher started by hand after ours died publishes to the same file.
+
+        Deleting it would let the next ``start`` miss that watcher and launch a
+        second writer on the same database.
+        """
+        from code_review_graph import daemon as daemon_module
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        replacement = subprocess.Popen(
+            [
+                sys.executable, "-c", "import time; time.sleep(60)",
+                "code-review-graph", "watch", "--repo", str(repo),
+            ]
+        )
+        try:
+            reaper = threading.Thread(target=replacement.wait, daemon=True)
+            reaper.start()
+            state = daemon_module.default_state_path()
+            state.parent.mkdir(parents=True, exist_ok=True)
+            state.write_text(
+                json.dumps({"repo": {"pid": self._dead_pid(), "path": str(repo)}}),
+                encoding="utf-8",
+            )
+            health = self._publish_health(repo, replacement.pid)
+
+            reaped = daemon_module.reap_orphaned_watchers()
+
+            assert reaped == []
+            assert replacement.poll() is None
+            assert health.exists()
+            assert not state.exists()
+        finally:
+            if replacement.poll() is None:
+                replacement.kill()
+            replacement.wait()
 
 
 class TestPerUserStateLocation:
