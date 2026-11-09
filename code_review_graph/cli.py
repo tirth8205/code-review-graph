@@ -628,7 +628,13 @@ def _handle_context_history(args) -> None:
     from . import context_history as ch
     from .incremental import find_project_root, get_data_dir
 
-    repo_root = Path(args.repo) if args.repo else find_project_root()
+    if args.repo:
+        # Same walk as the graph-tool commands, so ``impact --repo repo/src``
+        # and ``context-history --repo repo/src`` use the same log.
+        given = Path(args.repo).expanduser()
+        repo_root = _find_explicit_repo_root(given) or given
+    else:
+        repo_root = find_project_root()
     if args.data_dir:
         data_dir = Path(args.data_dir).expanduser().resolve()
     else:

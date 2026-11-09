@@ -14,6 +14,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -193,8 +194,10 @@ class TestBoundedSize:
         for _ in range(200):
             _attach(tmp_path, detail_level="minimal", files=12, depth=2)
 
-        names = sorted(p.name for p in tmp_path.iterdir())
+        names = sorted(p.name for p in tmp_path.iterdir() if p.name != "context-history.lock")
         assert names == [LOG_NAME, LOG_NAME + ".1"]
+        lock = tmp_path / "context-history.lock"
+        assert not lock.exists() or lock.stat().st_size == 0
         one_line = len((tmp_path / LOG_NAME).read_text(encoding="utf-8").splitlines()[0]) + 1
         for name in names:
             assert (tmp_path / name).stat().st_size < 600 + one_line
@@ -205,6 +208,33 @@ class TestBoundedSize:
 
     def test_the_default_limit_is_small(self):
         assert ch.MAX_BYTES <= 2 * 1024 * 1024
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="the guard uses flock")
+    def test_two_writers_rolling_over_at_once_keep_the_old_log(self, tmp_path, monkeypatch):
+        # Both writers see a full log. Without one lock around the size check,
+        # the roll-over and the append, the second renames the first one's
+        # new one-line log over .1 and the whole older log is lost.
+        _enable(monkeypatch)
+        monkeypatch.setattr(ch, "MAX_BYTES", 600)
+        full = "x" * 700 + "\n"
+        (tmp_path / LOG_NAME).write_text(full, encoding="utf-8")
+
+        real_replace = os.replace
+        other = threading.Thread(target=_attach, args=(tmp_path,))
+
+        def slow_first_replace(src, dst):
+            # The first writer pauses mid roll-over while the second one runs.
+            if not other.is_alive() and other.ident is None:
+                other.start()
+                other.join(timeout=1.0)
+            real_replace(src, dst)
+
+        monkeypatch.setattr(ch.os, "replace", slow_first_replace)
+        _attach(tmp_path)
+        other.join(timeout=5)
+
+        assert (tmp_path / (LOG_NAME + ".1")).read_text(encoding="utf-8") == full
+        assert len(_log_lines(tmp_path)) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -509,6 +539,21 @@ class TestCommand:
         assert code == 0
         assert "CRG_CONTEXT_HISTORY=1" in out
         assert not (repo / ".code-review-graph").exists()
+
+    def test_repo_inside_the_project_reads_the_project_log(self, repo_with_log, capsys):
+        # ``impact --repo repo/src`` logs under the project root, so the
+        # reader must look there too, not under repo/src.
+        repo, _ = repo_with_log
+        sub = repo / "src"
+        sub.mkdir()
+
+        code, out = _run(["context-history", "--repo", str(sub), "--json"], capsys)
+
+        assert code == 0
+        data = json.loads(out)
+        assert data["log"] == str(repo.resolve() / ".code-review-graph" / LOG_NAME)
+        assert data["total"]["calls"] == 4
+        assert not (sub / ".code-review-graph").exists()
 
     def test_days_must_be_positive(self, tmp_path, capsys):
         repo = tmp_path / "repo"

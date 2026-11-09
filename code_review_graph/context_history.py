@@ -16,7 +16,9 @@ is ever written: ``tool`` is a constant from the code, ``detail_level`` is
 reduced to the two values the tools act on, and the rest are counts. When the
 file reaches ``MAX_BYTES`` it is renamed to ``context-history.jsonl.1``
 (replacing the older one), so the two files together never pass twice that
-by more than one line.
+by more than one line. Writers take ``context-history.lock`` around the size
+check, the roll-over and the append, so two writers that both see a full log
+cannot roll it over twice and lose the older file.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ import contextvars
 import json
 import logging
 import os
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,6 +40,7 @@ logger = logging.getLogger(__name__)
 
 HISTORY_ENV = "CRG_CONTEXT_HISTORY"
 HISTORY_FILE = "context-history.jsonl"
+LOCK_FILE = "context-history.lock"
 SCHEMA_VERSION = 1
 #: Size at which the log rolls over to ``.1``. Two files at most, so the log
 #: never takes much more than twice this on disk (about 10,000 calls in all).
@@ -113,17 +117,40 @@ def record_call(call: CallInfo, *, baseline: int, returned: int, saved: int) -> 
         # The graph's data directory is never created just to hold a log.
         if not path.parent.is_dir():
             return
-        _roll_over_if_full(path)
-        # One write on an O_APPEND descriptor, so lines from the MCP server,
-        # the CLI and the daemon do not interleave.
-        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0)
-        fd = os.open(path, flags, 0o600)
-        try:
-            os.write(fd, line)
-        finally:
-            os.close(fd)
+        with _locked(path.with_name(LOCK_FILE)):
+            _roll_over_if_full(path)
+            # One write on an O_APPEND descriptor, so lines from the MCP
+            # server, the CLI and the daemon do not interleave.
+            flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0)
+            fd = os.open(path, flags, 0o600)
+            try:
+                os.write(fd, line)
+            finally:
+                os.close(fd)
     except OSError as exc:
         logger.warning("Could not write context history to %s: %s", path, exc)
+
+
+@contextlib.contextmanager
+def _locked(lock_path: Path) -> Iterator[None]:
+    """Hold an exclusive ``flock`` on *lock_path* for the block.
+
+    Each call opens its own descriptor, so threads in one process wait for
+    each other as well as other processes. Windows has no ``flock``; there
+    the block runs unguarded, as the graph write lock does.
+    """
+    if sys.platform == "win32":  # pragma: no cover - POSIX in CI
+        yield
+        return
+    import fcntl
+
+    fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        # Closing the descriptor drops the lock.
+        os.close(fd)
 
 
 def _roll_over_if_full(path: Path) -> None:

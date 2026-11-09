@@ -205,7 +205,9 @@ and, where the call has them, `detail_level`, the number of changed files and
 the depth. It never holds file names, paths, symbol names or source text, and
 nothing is sent anywhere. At 1 MiB the file is renamed to
 `context-history.jsonl.1` (replacing the older one), so the log never takes
-much more than 2 MiB, about 10,000 calls. Delete the files to clear it. Nothing is written in read-only mode
+much more than 2 MiB, about 10,000 calls. Writers share an empty
+`context-history.lock` so two of them never roll the log over at once. Delete
+the files to clear it. Nothing is written in read-only mode
 (`CRG_READ_ONLY=1`).
 
 Read it back as a trend:
