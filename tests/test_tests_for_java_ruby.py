@@ -587,3 +587,182 @@ end
         path = tmp_path / "test" / "thing_test.rb"
         nodes, _ = CodeParser().parse_bytes(path, source.encode())
         assert [node for node in nodes if node.kind == "Test"] == []
+
+
+def _calls(root: Path, relative: str, source: str) -> list:
+    path = root / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(source, encoding="utf-8")
+    _, edges = CodeParser(root).parse_file(path)
+    return [edge for edge in edges if edge.kind == "CALLS"]
+
+
+class TestReviewFollowUps:
+    """Points raised in review of PR #1154."""
+
+    def test_ruby_constant_does_not_reach_a_java_class(self, tmp_path: Path):
+        root = _build(tmp_path, {
+            "src/main/java/a/Cart.java": (
+                "package a;\npublic class Cart {\n"
+                "  public int total() { return 0; }\n}\n"
+            ),
+            "lib/cart.rb": "class Cart\n  def total\n    0\n  end\nend\n",
+            "test/cart_test.rb": 'it "totals" do\n  Cart.new.total\nend\n',
+        })
+        assert _tests_for(root, "src/main/java/a/Cart.java", "Cart.total") == []
+        assert any(
+            n.startswith("it:totals@") for n in _tests_for(root, "lib/cart.rb", "Cart.total")
+        )
+
+    def test_ruby_constant_alone_in_java_is_no_link(self, tmp_path: Path):
+        root = _build(tmp_path, {
+            "src/main/java/a/Cart.java": (
+                "package a;\npublic class Cart {\n"
+                "  public int total() { return 0; }\n}\n"
+            ),
+            "test/cart_test.rb": 'it "totals" do\n  Cart.new.total\nend\n',
+        })
+        assert _tests_for(root, "src/main/java/a/Cart.java", "Cart.total") == []
+
+    def test_java_package_qualified_type_is_not_the_same_package_class(
+        self, tmp_path: Path,
+    ):
+        files = dict(JAVA_FILES)
+        files["src/test/java/com/acme/shop/QualifiedTests.java"] = """\
+package com.acme.shop;
+
+import org.junit.jupiter.api.Test;
+
+class QualifiedTests {
+    @Test
+    void qualified() {
+        com.acme.other.Cart cart = new com.acme.other.Cart();
+        cart.total();
+    }
+}
+"""
+        root = _build(tmp_path, files)
+        assert "qualified" not in _tests_for(root, CART, "Cart.total")
+        assert "qualified" in _tests_for(root, OTHER_CART, "Cart.total")
+
+    def test_ruby_constant_is_looked_up_in_its_lexical_scope(self, tmp_path: Path):
+        root = _build(tmp_path, {
+            "lib/shop/cart.rb": RUBY_CART,
+            "lib/cart.rb": (
+                "class Cart\n  def total\n    0\n  end\n"
+                "  def tax\n    0\n  end\nend\n"
+            ),
+            "test/cart_test.rb": """\
+module Shop
+  describe Cart do
+    it "totals in scope" do
+      Cart.new.total
+    end
+
+    it "builds through described_class" do
+      described_class.build
+    end
+
+    it "reaches the top level" do
+      ::Cart.new.tax
+    end
+  end
+end
+""",
+        })
+        shop = "lib/shop/cart.rb"
+        assert any(
+            n.startswith("it:totals in scope@") for n in _tests_for(root, shop, "Shop.Cart.total")
+        )
+        assert any(
+            n.startswith("it:builds through described_class@")
+            for n in _tests_for(root, shop, "Shop.Cart.build")
+        )
+        assert _tests_for(root, "lib/cart.rb", "Cart.total") == []
+        assert any(
+            n.startswith("it:reaches the top level@")
+            for n in _tests_for(root, "lib/cart.rb", "Cart.tax")
+        )
+        assert _tests_for(root, shop, "Shop.Cart.tax") == []
+
+    def test_ruby_constant_falls_back_to_the_top_level(self, tmp_path: Path):
+        root = _build(tmp_path, {
+            "lib/cart.rb": "class Cart\n  def total\n    0\n  end\nend\n",
+            "test/cart_test.rb": """\
+module Shop
+  it "totals" do
+    Cart.new.total
+  end
+end
+""",
+        })
+        assert any(
+            n.startswith("it:totals@") for n in _tests_for(root, "lib/cart.rb", "Cart.total")
+        )
+
+    def test_ruby_receiver_evidence_stays_with_its_own_call(self, tmp_path: Path):
+        calls = _calls(
+            tmp_path,
+            "test/cart_test.rb",
+            'it "totals" do\n  assert_equal Cart.new.total, total(1)\nend\n',
+        )
+        totals = [edge for edge in calls if edge.target.rsplit("::", 1)[-1] == "total"]
+        assert len(totals) == 2
+        assert [edge.extra.get("receiver_class") for edge in totals] == ["Cart", None]
+        assert "receiver_binding" not in totals[1].extra
+
+    def test_java_this_field_is_not_a_shadowing_parameter(self, tmp_path: Path):
+        files = dict(JAVA_FILES)
+        files["src/test/java/com/acme/shop/FieldTests.java"] = """\
+package com.acme.shop;
+
+import org.junit.jupiter.api.Test;
+import com.acme.pay.Gateway;
+
+class FieldTests {
+    private Gateway field;
+
+    @Test
+    void shadowed(Cart field) {
+        this.field.refund();
+        field.total();
+    }
+}
+"""
+        root = _build(tmp_path, files)
+        assert "shadowed" in _tests_for(root, GATEWAY, "Gateway.refund")
+        assert "shadowed" in _tests_for(root, CART, "Cart.total")
+
+    def test_java_expression_receiver_is_not_matched_by_name(self, tmp_path: Path):
+        files = dict(JAVA_FILES)
+        files["src/test/java/com/acme/shop/StreamTests.java"] = """\
+package com.acme.shop;
+
+import java.util.List;
+import org.junit.jupiter.api.Test;
+import com.acme.pay.Gateway;
+
+class StreamTests {
+    @Test
+    void streams(List<String> items) {
+        items.stream().isEmpty();
+        "x".charge(1);
+        new Gateway().refund();
+    }
+
+    int isEmpty() { return 0; }
+}
+"""
+        root = _build(tmp_path, files)
+        assert "streams" not in _tests_for(root, GATEWAY, "Gateway.isEmpty")
+        assert "streams" not in _tests_for(root, GATEWAY, "Gateway.charge")
+        assert "streams" in _tests_for(root, GATEWAY, "Gateway.refund")
+        with GraphStore(root / ".code-review-graph" / "graph.db") as store:
+            test_file = str(root / "src/test/java/com/acme/shop/StreamTests.java")
+            targets = {
+                edge.target_qualified
+                for edge in store.get_edges_by_source(f"{test_file}::StreamTests.streams")
+                if edge.kind == "CALLS"
+            }
+        # The receiver is a stream, not this test class.
+        assert f"{test_file}::StreamTests.isEmpty" not in targets

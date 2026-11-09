@@ -1937,11 +1937,27 @@ class GraphStore:
             class_file = edge_extra.get("receiver_class_file")
             if class_file is not None and not isinstance(class_file, str):
                 return []
-            return [
-                candidate for candidate in candidates
-                if parent_lookup.get(candidate[0]) == class_name
-                and (not class_file or candidate[1] == class_file)
+            # A relative Ruby constant is looked up in the modules written
+            # around it first: ``Cart`` inside ``module Shop`` is
+            # ``Shop::Cart`` when that exists, and the top-level one if not.
+            scopes = edge_extra.get("receiver_scopes")
+            lookup = [
+                *(
+                    f"{scope}.{class_name}"
+                    for scope in (scopes if isinstance(scopes, list) else [])
+                    if isinstance(scope, str) and scope
+                ),
+                class_name,
             ]
+            for path in lookup:
+                matched = [
+                    candidate for candidate in candidates
+                    if parent_lookup.get(candidate[0]) == path
+                    and (not class_file or candidate[1] == class_file)
+                ]
+                if matched:
+                    return matched
+            return []
         return []
 
     @classmethod
@@ -2349,14 +2365,18 @@ class GraphStore:
         # qualified_name -> owning class, so a receiver known to be an
         # instance of one class cannot be answered by another class's method.
         parent_lookup: dict[str, str | None] = {}
+        # A Ruby constant can only name a Ruby class.
+        ruby_nodes: set[str] = set()
         for row in conn.execute(
-            "SELECT name, qualified_name, file_path, parent_name FROM nodes "
+            "SELECT name, qualified_name, file_path, parent_name, language FROM nodes "
             "WHERE kind IN ('Function', 'Test', 'Class')"
         ).fetchall():
             node_lookup.setdefault(row["name"], []).append(
                 (row["qualified_name"], row["file_path"]),
             )
             parent_lookup[row["qualified_name"]] = row["parent_name"]
+            if row["language"] == "ruby":
+                ruby_nodes.add(row["qualified_name"])
 
         # call-site file -> explicitly imported files
         import_targets: dict[str, set[str]] = {}
@@ -2479,6 +2499,10 @@ class GraphStore:
                 "initialize" if receiver_constant and bare_name == "new" else bare_name
             )
             candidates = node_lookup.get(lookup_name, [])
+            if receiver_constant:
+                candidates = [
+                    candidate for candidate in candidates if candidate[0] in ruby_nodes
+                ]
             if "receiver_binding" in edge_extra:
                 candidates = self._receiver_backed_candidates(
                     candidates, edge_extra, parent_lookup,

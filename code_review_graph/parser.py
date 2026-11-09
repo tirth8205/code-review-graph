@@ -1773,6 +1773,10 @@ _RUBY_TEST_BLOCK_NAMES = frozenset({
 _RUBY_MEMO_BLOCK_NAMES = frozenset({"let", "let!", "subject", "subject!"})
 _RUBY_DESCRIBING_BLOCK_NAMES = frozenset({"describe", "context"})
 _RUBY_CONSTANT_PATH_RE = re.compile(r"^[A-Z]\w*(?:\.[A-Z]\w*)*$")
+#: A Ruby constant as written, with the modules around it, innermost first.
+_RubyClassRef = tuple[str, tuple[str, ...]]
+#: ``com.acme.Cart``: a Java type written with its package.
+_JAVA_PACKAGE_QUALIFIED_TYPE = re.compile(r"(?:[a-z_$][\w$]*\.)+[A-Z][\w$]*")
 
 # Annotations/decorators that mark test methods (JUnit, TestNG, etc.)
 _TEST_ANNOTATIONS = frozenset({
@@ -7166,13 +7170,18 @@ class CodeParser:
                     node, language,
                 )
                 if receiver and method:
-                    type_name = bindings.get(receiver)
+                    # ``this.field`` is the field even where a parameter or a
+                    # local of that name hides it.
+                    this_field = language == "java" and self._java_this_field_call(node)
+                    type_name = (
+                        class_fields.get(receiver) if this_field else bindings.get(receiver)
+                    )
                     evidence = (
                         "constructed_receiver"
                         if language == "php"
                         else "typed_receiver"
                     )
-                    if type_name is None and receiver[:1].isupper():
+                    if type_name is None and not this_field and receiver[:1].isupper():
                         # C# receivers keep their class-name evidence even
                         # when the class is not visible in this file: the
                         # graph-wide scoped resolver validates it against
@@ -7342,7 +7351,7 @@ class CodeParser:
         elif language == "java" and node.type in (
             "formal_parameter", "spread_parameter",
         ):
-            self._store_typed_binding(
+            self._store_java_typed_binding(
                 result,
                 node.child_by_field_name("name"),
                 node.child_by_field_name("type"),
@@ -7364,7 +7373,7 @@ class CodeParser:
                     ):
                         # ``var x = new Cart()`` states its type on the right.
                         declared = value.child_by_field_name("type") or type_node
-                    self._store_typed_binding(
+                    self._store_java_typed_binding(
                         result,
                         child.child_by_field_name("name"),
                         declared,
@@ -7473,6 +7482,27 @@ class CodeParser:
             result[name] = type_name
 
     @classmethod
+    def _store_java_typed_binding(cls, result: dict[str, str], name_node, type_node) -> None:
+        """Store a Java binding, keeping a package-qualified type whole.
+
+        ``com.acme.other.Cart`` is not the ``Cart`` in this file's package, so
+        cutting it to ``Cart`` would let the package fallback pick the wrong one.
+        """
+        cls._store_typed_binding(result, name_node, type_node)
+        if name_node is None or type_node is None:
+            return
+        name = name_node.text.decode("utf-8", errors="replace")
+        qualified = _JAVA_PACKAGE_QUALIFIED_TYPE.match(
+            type_node.text.decode("utf-8", errors="replace").strip(),
+        )
+        if (
+            name in result
+            and qualified is not None
+            and qualified.group(0).rsplit(".", 1)[-1] == result[name]
+        ):
+            result[name] = qualified.group(0)
+
+    @classmethod
     def _base_type_name(cls, annotation: str) -> Optional[str]:
         """Return the receiver class from a generic/nullable annotation."""
         current = annotation.strip()
@@ -7530,6 +7560,14 @@ class CodeParser:
             if not base_type:
                 return None
             return f"{base_type}::{method}"
+
+        if language == "java" and _JAVA_PACKAGE_QUALIFIED_TYPE.fullmatch(type_name):
+            # A package-qualified type names its file; nothing else may stand in.
+            package_file = self._resolve_module_to_file(type_name, file_path, language)
+            if not package_file:
+                return None
+            class_name = type_name.rsplit(".", 1)[-1]
+            return f"{self._qualify(class_name, package_file, None)}.{method}"
 
         base_type = self._base_type_name(type_name)
         if not base_type:
@@ -9128,7 +9166,34 @@ class CodeParser:
         )
         return path if _RUBY_CONSTANT_PATH_RE.match(path) else None
 
-    def _collect_ruby_test_receivers(self, root) -> dict[tuple[int, str], Optional[str]]:
+    @classmethod
+    def _ruby_class_ref(cls, node, nesting: tuple[str, ...]) -> Optional[_RubyClassRef]:
+        """Return a constant with the modules around it, innermost first.
+
+        Ruby looks a relative constant up in those modules before the top
+        level, so the scopes travel with it. ``::Cart`` is absolute and has none.
+        """
+        path = cls._ruby_constant_path(node)
+        if path is None:
+            return None
+        return path, () if node.text.startswith(b"::") else nesting
+
+    @classmethod
+    def _ruby_nesting(cls, node, nesting: tuple[str, ...]) -> tuple[str, ...]:
+        """Return the lexical nesting inside a ``module`` or ``class`` body."""
+        if node.type not in ("module", "class"):
+            return nesting
+        name = node.child_by_field_name("name")
+        path = cls._ruby_constant_path(name)
+        if name is None or path is None:
+            return nesting
+        if nesting and not name.text.startswith(b"::"):
+            path = f"{nesting[0]}.{path}"
+        return (path, *nesting)
+
+    def _collect_ruby_test_receivers(
+        self, root,
+    ) -> dict[tuple[int, str], list[tuple[bool, Optional[_RubyClassRef]]]]:
         """Say which class each call in a Ruby test file is made on.
 
         Ruby calls carry no receiver, so ``client.push`` matches every ``push``
@@ -9138,18 +9203,22 @@ class CodeParser:
         ``let`` names are read file-wide, since ``before`` sets them for the
         tests beside it, unless the file gives one name two meanings.
 
-        Returns ``{(line, method): class}`` for every call on a receiver, with
-        ``None`` where the file does not say what that receiver is.
+        Returns, for each ``(line, method)``, one entry per call in source
+        order: whether it has a receiver, and the class the file says that
+        receiver is, or ``None`` where it does not say. A receiverless call on
+        the same line as one with a receiver keeps its own entry.
         """
-        shared: dict[str, Optional[str]] = {}
+        shared: dict[str, Optional[_RubyClassRef]] = {}
 
         def text_of(node) -> str:
             return node.text.decode("utf-8", errors="replace") if node is not None else ""
 
-        def share(name: str, class_path: Optional[str]) -> None:
-            shared[name] = class_path if shared.get(name, class_path) == class_path else None
+        def share(name: str, class_ref: Optional[_RubyClassRef]) -> None:
+            shared[name] = class_ref if shared.get(name, class_ref) == class_ref else None
 
-        def constructed(node, described: Optional[str]) -> Optional[str]:
+        def constructed(
+            node, described: Optional[_RubyClassRef], nesting: tuple[str, ...],
+        ) -> Optional[_RubyClassRef]:
             if node is None or node.type != "call":
                 return None
             if text_of(node.child_by_field_name("method")) != "new":
@@ -9157,9 +9226,11 @@ class CodeParser:
             receiver = node.child_by_field_name("receiver")
             if receiver is not None and text_of(receiver) == "described_class":
                 return described
-            return self._ruby_constant_path(receiver)
+            return self._ruby_class_ref(receiver, nesting)
 
-        def narrowed(node, described: Optional[str]) -> Optional[str]:
+        def narrowed(
+            node, described: Optional[_RubyClassRef], nesting: tuple[str, ...],
+        ) -> Optional[_RubyClassRef]:
             if node.type == "call" and (
                 text_of(node.child_by_field_name("method"))
                 in _RUBY_DESCRIBING_BLOCK_NAMES
@@ -9167,12 +9238,17 @@ class CodeParser:
                 arguments = node.child_by_field_name("arguments")
                 if arguments is not None and arguments.named_children:
                     return (
-                        self._ruby_constant_path(arguments.named_children[0])
+                        self._ruby_class_ref(arguments.named_children[0], nesting)
                         or described
                     )
             return described
 
-        def gather(node, described: Optional[str], depth: int = 0) -> None:
+        def gather(
+            node,
+            described: Optional[_RubyClassRef],
+            nesting: tuple[str, ...],
+            depth: int = 0,
+        ) -> None:
             if depth > self._MAX_AST_DEPTH:
                 return
             if node.type == "assignment":
@@ -9180,7 +9256,7 @@ class CodeParser:
                 if left is not None and left.type == "instance_variable":
                     share(
                         text_of(left),
-                        constructed(node.child_by_field_name("right"), described),
+                        constructed(node.child_by_field_name("right"), described, nesting),
                     )
             elif (
                 node.type == "call"
@@ -9202,19 +9278,24 @@ class CodeParser:
                         if body is not None and body.named_children
                         else None,
                         described,
+                        nesting,
                     ),
                 )
-            described = narrowed(node, described)
+            described = narrowed(node, described, nesting)
+            nesting = self._ruby_nesting(node, nesting)
             for child in node.children:
-                gather(child, described, depth + 1)
+                gather(child, described, nesting, depth + 1)
 
-        gather(root, None)
+        gather(root, None, ())
 
-        found: dict[tuple[int, str], Optional[str]] = {}
+        found: dict[tuple[int, str], list[tuple[bool, Optional[_RubyClassRef]]]] = {}
 
         def class_of(
-            receiver, local: dict[str, Optional[str]], described: Optional[str],
-        ) -> Optional[str]:
+            receiver,
+            local: dict[str, Optional[_RubyClassRef]],
+            described: Optional[_RubyClassRef],
+            nesting: tuple[str, ...],
+        ) -> Optional[_RubyClassRef]:
             if receiver.type == "instance_variable":
                 return shared.get(text_of(receiver))
             if receiver.type == "identifier":
@@ -9222,12 +9303,16 @@ class CodeParser:
                 if name == "described_class":
                     return described
                 return local[name] if name in local else shared.get(name)
-            return self._ruby_constant_path(receiver) or constructed(receiver, described)
+            return (
+                self._ruby_class_ref(receiver, nesting)
+                or constructed(receiver, described, nesting)
+            )
 
         def walk(
             node,
-            local: dict[str, Optional[str]],
-            described: Optional[str],
+            local: dict[str, Optional[_RubyClassRef]],
+            described: Optional[_RubyClassRef],
+            nesting: tuple[str, ...],
             depth: int = 0,
         ) -> None:
             if depth > self._MAX_AST_DEPTH:
@@ -9243,56 +9328,69 @@ class CodeParser:
             if node.type == "call":
                 receiver = node.child_by_field_name("receiver")
                 method = node.child_by_field_name("method")
-                if receiver is not None and method is not None and receiver.type != "self":
-                    class_path = class_of(receiver, local, described)
-                    key = (node.start_point[0] + 1, text_of(method))
-                    found[key] = (
-                        class_path if found.get(key, class_path) == class_path else None
+                if method is not None:
+                    # Calls are listed in the order the extractor emits their
+                    # edges, so ``Cart.new.total, total(1)`` on one line keeps
+                    # the class with the first ``total`` and off the second.
+                    has_receiver = receiver is not None and receiver.type != "self"
+                    found.setdefault((node.start_point[0] + 1, text_of(method)), []).append(
+                        (
+                            has_receiver,
+                            class_of(receiver, local, described, nesting)
+                            if has_receiver
+                            else None,
+                        ),
                     )
-            described = narrowed(node, described)
+            described = narrowed(node, described, nesting)
+            nesting = self._ruby_nesting(node, nesting)
             for child in node.children:
-                walk(child, local, described, depth + 1)
+                walk(child, local, described, nesting, depth + 1)
             if node.type == "assignment":
                 left = node.child_by_field_name("left")
                 if left is not None and left.type == "identifier":
                     local[text_of(left)] = constructed(
-                        node.child_by_field_name("right"), described,
+                        node.child_by_field_name("right"), described, nesting,
                     )
 
-        walk(root, {}, None)
+        walk(root, {}, None, ())
         return found
 
     @staticmethod
     def _apply_ruby_test_receivers(
         edges: list[EdgeInfo],
-        receivers: dict[tuple[int, str], Optional[str]],
+        receivers: dict[tuple[int, str], list[tuple[bool, Optional[_RubyClassRef]]]],
     ) -> list[EdgeInfo]:
         """Stamp each Ruby test call with the class the file says it is made on.
 
         A receiver the file says nothing about is stamped too. A test is the one
         place a wrong call costs a false claim of coverage, and a method that
         merely shares a name with something the test requires is not evidence.
+        A call with no receiver is left as it is.
         """
+        pending = {key: iter(calls) for key, calls in receivers.items()}
         for edge in edges:
             if edge.kind != "CALLS":
                 continue
             method = edge.target.rsplit("::", 1)[-1]
-            key = (edge.line, method)
-            if key not in receivers:
+            calls = pending.get((edge.line, method))
+            has_receiver, class_ref = next(calls, (False, None)) if calls else (False, None)
+            if not has_receiver:
                 continue
             edge.target = method
-            class_path = receivers[key]
+            if class_ref is None:
+                edge.extra = {
+                    **edge.extra,
+                    "receiver_binding": "unknown",
+                    "receiver_form": "expression",
+                }
+                continue
+            class_path, scopes = class_ref
             edge.extra = {
                 **edge.extra,
-                **(
-                    {
-                        "receiver_binding": "class",
-                        "receiver_class": class_path,
-                        "receiver_constant": True,
-                    }
-                    if class_path
-                    else {"receiver_binding": "unknown", "receiver_form": "expression"}
-                ),
+                "receiver_binding": "class",
+                "receiver_class": class_path,
+                "receiver_constant": True,
+                **({"receiver_scopes": list(scopes)} if scopes else {}),
             }
         return edges
 
@@ -15558,6 +15656,15 @@ class CodeParser:
                     # is indistinguishable from a plain ``get(...)`` and the
                     # resolvers below happily bind it to any same-named node.
                     call_extra["receiver_form"] = "expression"
+                elif (
+                    method_name
+                    and language == "java"
+                    and self._java_expression_receiver(child)
+                    and self._is_test_path(file_path)
+                ):
+                    # The same, for a Java test, where a wrong match is a false
+                    # claim of coverage. Production calls keep their old path.
+                    call_extra["receiver_form"] = "expression"
                 if language == "java" and child.type == "method_reference":
                     call_extra["call_syntax"] = "method_reference"
 
@@ -16961,6 +17068,32 @@ class CodeParser:
                 receiver_name = field.text.decode("utf-8", errors="replace")
 
         return method_name, receiver_name
+
+    @staticmethod
+    def _java_this_field_call(node) -> bool:
+        """Whether a Java call is made on ``this.field``."""
+        receiver = node.child_by_field_name("object")
+        if receiver is None or receiver.type != "field_access":
+            return False
+        owner = receiver.child_by_field_name("object")
+        return owner is not None and owner.type == "this"
+
+    @classmethod
+    def _java_expression_receiver(cls, node) -> bool:
+        """Whether a Java call is made on an expression with no name or type.
+
+        ``items.stream().count()`` and ``"x".length()`` say nothing about which
+        class answers them. ``new Cart().total()`` and ``this.x()`` do.
+        """
+        if node.type != "method_invocation":
+            return False
+        receiver = node.child_by_field_name("object")
+        return (
+            receiver is not None
+            and receiver.type
+            not in ("identifier", "this", "super", "object_creation_expression")
+            and not cls._java_this_field_call(node)
+        )
 
     def _extract_jsx_component_call(
         self,
@@ -20130,7 +20263,10 @@ class CodeParser:
             if (
                 edge.kind == "CALLS"
                 and "::" not in edge.target
-                and edge.extra.get("receiver")
+                and (
+                    edge.extra.get("receiver")
+                    or edge.extra.get("receiver_form") == "expression"
+                )
                 and "receiver_type" not in edge.extra
             ):
                 edge.extra = {**edge.extra, "receiver_binding": "unknown"}

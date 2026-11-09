@@ -97,7 +97,8 @@
   - Ruby: `it "..." do`, `describe`, `before`, `let` and `test "..." do` are test
     nodes in test files. A call is matched to a method only when the file says
     what class it is made on: a constant, a constructor, `described_class`, or a
-    name assigned from one of those.
+    name assigned from one of those. A constant is looked up in the modules
+    around it first, as Ruby does, so `Cart` inside `module Shop` is `Shop::Cart`.
   - A call in a test on something of unknown type no longer matches a method by
     name alone, in either language. An inherited method is not linked yet, so
     `owner.setId()` does not count for `BaseEntity.setId`.
