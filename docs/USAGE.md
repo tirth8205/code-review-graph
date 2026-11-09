@@ -10,7 +10,7 @@ code-review-graph install    # detect installed AI coding tools and configure ea
 code-review-graph build      # parse the codebase
 ```
 
-`install` detects which AI coding tools you have, writes an MCP server entry for each, installs hooks and skills where the platform supports them, and adds graph instructions to the platform's rules file (`CLAUDE.md`, `AGENTS.md`, and others). `--no-hooks`, `--no-skills` and `--no-instructions` skip those steps; `--dry-run` shows what would be written. Restart the editor or tool afterwards.
+`install` detects which AI coding tools you have, writes an MCP server entry for each, installs hooks and skills where the platform supports them, and adds graph instructions to the platform's rules file (`CLAUDE.md`, `AGENTS.md`, and others). `--no-hooks`, `--no-skills` and `--no-instructions` skip those steps. `--dry-run` shows what each file would become, as one diff per file, and writes nothing. Without it, `install` lists the files it will change and asks about the instruction files before it writes anything; `--yes` answers yes for you. Restart the editor or tool afterwards.
 
 To configure one platform only:
 

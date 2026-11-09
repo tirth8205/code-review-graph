@@ -39,7 +39,9 @@ if sys.version_info < (3, 10):
     sys.exit(1)
 
 import argparse
+import contextlib
 import fnmatch
+import io
 import json
 import logging
 import os
@@ -50,6 +52,7 @@ from importlib.metadata import version as pkg_version
 from pathlib import Path
 from typing import Iterable, TypedDict
 
+from . import install_plan
 from .errors import CodeReviewGraphError, is_lock_error
 from .neighbourhood import DEFAULT_DEPTH as NB_DEFAULT_DEPTH
 from .neighbourhood import DEFAULT_MAX_NODES as NB_DEFAULT_MAX_NODES
@@ -152,7 +155,7 @@ def _instruction_files_to_modify(
 ) -> list[str]:
     """Return the list of instruction files that ``install`` would write
     or modify, given the current state of the repo and the selected
-    platform target. Used for the dry-run / confirm preview (#173).
+    platform target. Shown before the question about them (#173).
 
     A file holding a section from an older release is listed as ``(update)``:
     install replaces that block in place rather than leaving it stale (#314).
@@ -169,10 +172,10 @@ def _instruction_files_to_modify(
     targets: list[str] = []
 
     def _describe(filename: str, path: Path, section: str) -> None:
-        if not path.exists():
+        if not install_plan.exists(path):
             targets.append(f"{filename} (new)")
             return
-        content = path.read_text(encoding="utf-8", errors="replace")
+        content = install_plan.read_text(path, encoding="utf-8", errors="replace")
         if _CLAUDE_MD_SECTION_MARKER not in content:
             targets.append(f"{filename} (append)")
         elif _upgrade_managed_block(content, section) is not None:
@@ -194,20 +197,30 @@ def _instruction_files_to_modify(
     return targets
 
 
-def _confirm_yes_no(prompt: str, default_yes: bool = True) -> bool:
+def _confirm_yes_no(
+    prompt: str, default_yes: bool = True, *, cancel_on_interrupt: bool = False
+) -> bool:
     """Prompt the user [Y/n] and return True for yes.
 
     Non-interactive environments (no TTY on stdin, e.g. an MCP wrapper
     piping the CLI) return ``default_yes`` without blocking — the
     stdio transport cannot safely read from stdin without corrupting
     the JSON-RPC stream. See: #173, #174
+
+    Ctrl-C counts as "no" unless ``cancel_on_interrupt`` is set, in which case
+    it is raised so the caller can stop altogether.
     """
     if not sys.stdin.isatty():
         return default_yes
     suffix = "[Y/n]" if default_yes else "[y/N]"
     try:
         answer = input(f"{prompt} {suffix} ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
+    except KeyboardInterrupt:
+        print()
+        if cancel_on_interrupt:
+            raise
+        return False
+    except EOFError:
         print()
         return False
     if not answer:
@@ -271,9 +284,15 @@ def _match_files_to_forget(
 
 
 def _handle_init(args: argparse.Namespace) -> None:
-    """Set up MCP config for detected AI coding platforms."""
-    from .incremental import ensure_repo_gitignore_excludes_crg, find_repo_root
-    from .skills import install_platform_configs
+    """Set up MCP config, hooks, skills and instructions for AI coding platforms.
+
+    Every write is planned in memory first (see ``install_plan``). ``--dry-run``
+    prints the plan as diffs and writes nothing. A real install lists the files
+    it will change and asks about instruction files before it writes anything,
+    then writes exactly that plan (#173).
+    """
+    from .incremental import find_repo_root
+    from .skills import inject_instruction_files
 
     repo_root = Path(args.repo) if args.repo else find_repo_root()
     if not repo_root:
@@ -286,47 +305,113 @@ def _handle_init(args: argparse.Namespace) -> None:
     auto_yes = getattr(args, "yes", False)
     skip_instructions = getattr(args, "no_instructions", False)
 
+    # In a real install the progress messages wait until the files are
+    # written, so none of them reports a change that has not happened yet.
+    report = io.StringIO()
+    try:
+        with install_plan.planning() as plan:
+            quiet = contextlib.nullcontext() if dry_run else contextlib.redirect_stdout(report)
+            with quiet:
+                _plan_mcp_configs(repo_root, target, dry_run)
+            # A dry run shows these steps as diffs, so their messages are dropped.
+            with contextlib.redirect_stdout(io.StringIO() if dry_run else report):
+                codex_skill_error = _plan_integrations(args, repo_root, target)
+
+            if dry_run:
+                if not skip_instructions:
+                    _print_instruction_conflicts(
+                        inject_instruction_files(repo_root, target=target)
+                    )
+                if codex_skill_error and target == "codex":
+                    # With --platform all the error was already printed above.
+                    print(f"[dry-run] {codex_skill_error}", file=sys.stderr)
+                _print_dry_run(plan, repo_root)
+                return
+
+            instr_targets = _instruction_files_to_modify(repo_root, target)
+            _print_planned_files(plan, repo_root)
+            inject = False
+            if not skip_instructions and instr_targets:
+                print()
+                print("Graph instructions will be injected into:")
+                for t in instr_targets:
+                    print(f"  {t}")
+                try:
+                    inject = auto_yes or _confirm_yes_no(
+                        "Inject graph instructions into these files?",
+                        default_yes=True,
+                        cancel_on_interrupt=True,
+                    )
+                except KeyboardInterrupt:
+                    # Nothing has been written yet, so stopping here leaves no trace.
+                    print("Install cancelled. No files were written.")
+                    raise SystemExit(130) from None
+            with contextlib.redirect_stdout(report):
+                if inject:
+                    outcomes = inject_instruction_files(repo_root, target=target)
+                    for label, wording in (
+                        ("created", "Injected graph instructions into"),
+                        ("updated", "Updated graph instructions in"),
+                    ):
+                        names = [f for f, o in outcomes.items() if o == label]
+                        if names:
+                            print(f"{wording}: {', '.join(names)}")
+                    _print_instruction_conflicts(outcomes)
+                elif skip_instructions:
+                    print("Skipped instruction injection (--no-instructions).")
+                elif instr_targets:
+                    print("Skipped instruction injection (user declined).")
+    except Exception:
+        # A step failed while planning, before any file reached the disk.
+        print("Install stopped before writing any file.", file=sys.stderr)
+        raise
+    failures = plan.apply()
+
+    print()
+    sys.stdout.write(report.getvalue())
+    for path, reason in failures:
+        print(f"Could not write {path}: {reason}", file=sys.stderr)
+    if failures:
+        raise CodeReviewGraphError(
+            f"install could not write {len(failures)} file(s); see the messages above"
+        )
+    if codex_skill_error and target == "codex":
+        raise CodeReviewGraphError(codex_skill_error)
+    print()
+    print("Next steps:")
+    print("  1. code-review-graph build    # build the knowledge graph")
+    print("  2. Restart your AI coding tool to pick up the new config")
+
+
+def _plan_mcp_configs(repo_root: Path, target: str, dry_run: bool) -> None:
+    """Plan the MCP server entry for each platform and say what it does."""
+    from .skills import install_platform_configs
+
     print("Installing MCP server config...")
     configured = install_platform_configs(repo_root, target=target, dry_run=dry_run)
-
     if not configured:
         print("No platforms detected.")
+    elif dry_run:
+        print(
+            f"\n[dry-run] Would configure {len(configured)} platform(s): "
+            f"{', '.join(configured)}"
+        )
     else:
         print(f"\nConfigured {len(configured)} platform(s): {', '.join(configured)}")
 
-    # Preview the instruction files that would be touched (#173).
-    instr_targets = _instruction_files_to_modify(repo_root, target)
-    if instr_targets:
-        print()
-        print("Graph instructions will be injected into:")
-        for t in instr_targets:
-            print(f"  {t}")
 
-    if dry_run:
-        print("\n[dry-run] Would ensure .gitignore ignores .code-review-graph/.")
-        print("[dry-run] No files were modified.")
-        return
+def _plan_integrations(args: argparse.Namespace, repo_root: Path, target: str) -> str | None:
+    """Plan the .gitignore entry, skills and hooks. Return a Codex skill error, if any.
 
-    gitignore_state = ensure_repo_gitignore_excludes_crg(repo_root)
-    if gitignore_state == "created":
-        print("Created .gitignore and added .code-review-graph/.")
-    elif gitignore_state == "updated":
-        print("Updated .gitignore with .code-review-graph/.")
-    else:
-        print(".gitignore already contains .code-review-graph/.")
-
-    # Platform-native skills and hooks are installed by default where supported
-    # so the graph tools are used proactively. Use --no-skills / --no-hooks /
-    # --no-instructions to opt out.
-    skip_skills = getattr(args, "no_skills", False)
-    skip_hooks = getattr(args, "no_hooks", False)
-    codex_skill_error: str | None = None
-    # Legacy: --skills/--hooks/--all still accepted (no-op, everything is default)
-
+    Platform-native skills and hooks are installed by default where supported
+    so the graph tools are used proactively; ``--no-skills`` and ``--no-hooks``
+    opt out. The legacy ``--skills``/``--hooks``/``--all`` flags are still
+    accepted and do nothing.
+    """
+    from .incremental import ensure_repo_gitignore_excludes_crg
     from .skills import (
         PLATFORMS,
         generate_skills,
-        inject_instruction_files,
         install_codebuddy_hooks,
         install_codebuddy_skills,
         install_codex_hooks,
@@ -341,6 +426,18 @@ def _handle_init(args: argparse.Namespace) -> None:
         install_opencode_plugin,
         install_qoder_skills,
     )
+
+    gitignore_state = ensure_repo_gitignore_excludes_crg(repo_root)
+    if gitignore_state == "created":
+        print("Created .gitignore and added .code-review-graph/.")
+    elif gitignore_state == "updated":
+        print("Updated .gitignore with .code-review-graph/.")
+    else:
+        print(".gitignore already contains .code-review-graph/.")
+
+    skip_skills = getattr(args, "no_skills", False)
+    skip_hooks = getattr(args, "no_hooks", False)
+    codex_skill_error: str | None = None
     if not skip_skills:
         codex_detected = target == "codex" or (
             target == "all" and PLATFORMS["codex"]["detect"]()
@@ -380,42 +477,12 @@ def _handle_init(args: argparse.Namespace) -> None:
             hermes_skills_dir = install_hermes_skills(repo_root)
             print(f"Installed Hermes Agent skills in {hermes_skills_dir}")
 
-    # Confirm before writing instruction files (#173). --yes skips the
-    # prompt; --no-instructions skips the whole block.
-    if not skip_instructions and instr_targets:
-        if auto_yes or _confirm_yes_no(
-            "Inject graph instructions into the files above?",
-            default_yes=True,
-        ):
-            outcomes = inject_instruction_files(repo_root, target=target)
-            for label, wording in (
-                ("created", "Injected graph instructions into"),
-                ("updated", "Updated graph instructions in"),
-            ):
-                names = [f for f, o in outcomes.items() if o == label]
-                if names:
-                    print(f"{wording}: {', '.join(names)}")
-            # A hand-edited block is never overwritten, so say which file it is
-            # rather than reporting success the user did not get (#314).
-            stale = [f for f, o in outcomes.items() if o == "conflict"]
-            if stale:
-                print(
-                    "Left edited graph instructions alone in: "
-                    f"{', '.join(stale)}. Delete the section between "
-                    "<!-- code-review-graph MCP tools --> and its closing marker "
-                    "and reinstall to pick up the current text."
-                )
-        else:
-            print("Skipped instruction injection (user declined).")
-    elif skip_instructions:
-        print("Skipped instruction injection (--no-instructions).")
+        # Qoder skills live in the project's .qoder/skills/.
+        if target in ("qoder", "all"):
+            qoder_skills_dir = install_qoder_skills(repo_root)
+            if qoder_skills_dir:
+                print(f"Installed Qoder skills to {qoder_skills_dir}")
 
-
-    # Install Qoder skills (global user-level skills directory)
-    if not skip_skills and target in ("qoder", "all"):
-        qoder_skills_dir = install_qoder_skills(repo_root)
-        if qoder_skills_dir:
-            print(f"Installed Qoder skills to {qoder_skills_dir}")
     if not skip_hooks and target in ("codebuddy", "all"):
         try:
             codebuddy_settings = install_codebuddy_hooks(repo_root)
@@ -463,13 +530,49 @@ def _handle_init(args: argparse.Namespace) -> None:
             print(f"Installed OpenCode plugin in {plugin_path}")
         except Exception as exc:
             logger.warning("Could not install OpenCode plugin: %s", exc)
+    return codex_skill_error
 
-    if codex_skill_error and target == "codex":
-        raise CodeReviewGraphError(codex_skill_error)
+
+def _print_instruction_conflicts(outcomes: dict[str, str]) -> None:
+    """Name each file whose graph block was edited by hand, so left alone (#314)."""
+    stale = [f for f, o in outcomes.items() if o == "conflict"]
+    if stale:
+        print(
+            "Left edited graph instructions alone in: "
+            f"{', '.join(stale)}. Delete the section between "
+            "<!-- code-review-graph MCP tools --> and its closing marker "
+            "and reinstall to pick up the current text."
+        )
+
+
+def _print_planned_files(plan: install_plan.Plan, repo_root: Path) -> None:
+    """List each file a real install is about to write, before it writes any."""
+
+    changes = plan.changes()
     print()
-    print("Next steps:")
-    print("  1. code-review-graph build    # build the knowledge graph")
-    print("  2. Restart your AI coding tool to pick up the new config")
+    if not changes:
+        print("No config, hook or skill files need changing.")
+        return
+    print("Install will change these files:")
+    for change in changes:
+        shown = install_plan.display_path(change.path, repo_root)
+        print(f"  {shown} ({install_plan.describe(change)})")
+    print("Run with --dry-run to see each change first.")
+
+
+def _print_dry_run(plan: install_plan.Plan, repo_root: Path) -> None:
+    """Show what each file would become, then say that nothing was written."""
+
+    changes = plan.changes()
+    print()
+    if not changes:
+        print("[dry-run] Every file is already up to date.")
+    else:
+        print(f"[dry-run] Install would change {len(changes)} file(s):")
+        print()
+        sys.stdout.write(install_plan.render(changes, repo_root))
+    print()
+    print("[dry-run] No files were modified.")
 
 
 def _handle_data_dir_option(args, repo_root: Path) -> None:
@@ -1084,7 +1187,7 @@ def build_parser() -> argparse.ArgumentParser:
     install_cmd.add_argument(
         "--dry-run",
         action="store_true",
-        help="Show what would be done without writing files",
+        help="Show each file install would change, as a diff, and write nothing",
     )
     install_cmd.add_argument(
         "--no-skills",
@@ -1125,7 +1228,7 @@ def build_parser() -> argparse.ArgumentParser:
     init_cmd.add_argument(
         "--dry-run",
         action="store_true",
-        help="Show what would be done without writing files",
+        help="Show each file install would change, as a diff, and write nothing",
     )
     init_cmd.add_argument(
         "--no-skills",

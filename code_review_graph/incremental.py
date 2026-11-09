@@ -23,6 +23,7 @@ from functools import partial
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable, NamedTuple, Optional
 
+from . import install_plan
 from .build_state import advance_to_postprocess_pending
 from .constants import GIT_TIMEOUT as _GIT_TIMEOUT
 from .constants import (
@@ -625,7 +626,11 @@ def ensure_repo_gitignore_excludes_crg(repo_root: Path) -> str:
     - ``already-present``: no changes were needed
     """
     gitignore_path = repo_root / ".gitignore"
-    existing = gitignore_path.read_text(encoding="utf-8") if gitignore_path.exists() else ""
+    existing = (
+        install_plan.read_text(gitignore_path, encoding="utf-8")
+        if install_plan.exists(gitignore_path)
+        else ""
+    )
 
     for raw_line in existing.splitlines():
         line = raw_line.strip()
@@ -636,7 +641,7 @@ def ensure_repo_gitignore_excludes_crg(repo_root: Path) -> str:
 
     block = "# Added by code-review-graph\n.code-review-graph/\n"
     prefix = "\n" if existing and not existing.endswith("\n") else ""
-    gitignore_path.write_text(existing + prefix + block, encoding="utf-8")
+    install_plan.write_text(gitignore_path, existing + prefix + block)
 
     if existing:
         return "updated"

@@ -88,6 +88,20 @@
 
 ### Fixed
 
+- `install --dry-run` shows what each file would become, and `install` writes
+  nothing until you have answered its question (#173). The dry run used to list
+  file names only, and a real install wrote the MCP config before it asked
+  about `CLAUDE.md` and the other instruction files. Every install write (MCP
+  configs, `.gitignore`, skills, hooks, git hooks, the OpenCode plugin and the
+  instruction files) now goes into a plan first. `--dry-run` prints that plan
+  as one unified diff per file, a new file as its full content, cut at 60
+  lines a file with a note saying how many lines were left out, and writes
+  nothing. A real install lists the files it will change, asks about the
+  instruction files, and only then writes exactly the plan it showed. Ctrl-C
+  at the question stops the install with nothing written, and a file edited
+  while the question was open is left alone and reported. Commented JSONC
+  configs are previewed and written through the same splice, so their
+  comments are kept.
 - TypeScript and JavaScript imports resolve against `compilerOptions.baseUrl`
   when no `paths` pattern matches them, as `tsc` does. A tsconfig that sets
   `baseUrl` without `paths` resolved no non-relative import at all: on a

@@ -408,7 +408,7 @@ Run `code-review-graph <command> --help` for the full option list.
 ```bash
 # Setup
 code-review-graph install           # Configure detected AI coding platforms (alias: init)
-code-review-graph install --dry-run # Preview without writing files
+code-review-graph install --dry-run # Show each file's diff; write nothing
 code-review-graph install --platform codex  # Configure Codex MCP, hooks, and global Skill
 code-review-graph uninstall                 # Remove CRG configs, hooks, skills, and data
 code-review-graph uninstall --platform codex  # Unbind one platform (keeps graph data and others)
