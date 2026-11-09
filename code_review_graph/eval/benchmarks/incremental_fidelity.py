@@ -68,21 +68,11 @@ EDIT_KINDS: tuple[str, ...] = (
 #: its differing rows, and is reported as ``known_failure``. Remove an entry
 #: once the underlying bug is fixed and the regression guard takes over.
 #:
-#: All seven are listed because all seven diverge on this repository (see the
-#: pull request that introduced this benchmark). Three independent defects
-#: produce them:
+#: All seven are listed because all seven diverged on this repository when the
+#: benchmark was introduced. #673 fixed the dangling flow memberships and the
+#: relative-versus-absolute path match behind two of the three defects, so
+#: re-measure before trusting this list. What remains known:
 #:
-#: * ``flow_memberships.node_id`` is a bare integer with no foreign key and no
-#:   cascade. ``GraphStore._replace_file_data`` deletes and re-inserts a
-#:   re-parsed file's nodes, which allocates new ids, so every membership row
-#:   for that file is left dangling. Flows silently get shorter and, because
-#:   ``incremental_trace_flows`` finds affected flows by joining memberships to
-#:   ``nodes``, the dangling rows are invisible to the repair path too.
-#: * ``nodes.community_id`` is not repopulated for a re-parsed file, and
-#:   ``incremental_detect_communities`` / ``incremental_trace_flows`` compare
-#:   ``nodes.file_path`` (absolute) against ``incremental_update``'s
-#:   ``changed_files`` (repo-relative), so both always see zero affected rows
-#:   and skip.
 #: * Edges whose target lived in a deleted or re-parsed file keep the
 #:   qualified name they were resolved to, so a rebuild and an update disagree
 #:   about which call targets are resolved.
@@ -214,7 +204,13 @@ def _incremental_build(tree: Path, db_path: Path, base: str) -> dict[str, Any]:
             result,
             "full",
             full_rebuild=False,
-            changed_files=result.get("changed_files"),
+            changed_files=[
+                *(result.get("changed_files") or []),
+                *(result.get("dependent_files") or []),
+            ],
+            repo_root=str(tree),
+            entry_point_qns=result.get("flow_entry_point_qns"),
+            communities_were_affected=bool(result.get("communities_were_affected")),
         )
         return result
     finally:

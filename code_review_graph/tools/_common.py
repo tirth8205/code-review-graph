@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from ..graph import GraphStore
+from ..graph import GraphStore, _sanitize_name
 from ..incremental import find_project_root, get_db_path
 from ..parser import normalize_file_path
 
@@ -205,7 +205,51 @@ def _resolve_root(repo_root: str | None = None) -> Path:
     return _validate_repo_root(Path(repo_root)) if repo_root else find_project_root()
 
 
-def _get_store(repo_root: str | None = None) -> tuple[GraphStore, Path]:
+def _open_graph_store(db_path: Path, command: str):
+    """Open the graph store, recovering from an unusable database file.
+
+    A restored CI cache can hold a truncated or half-written ``graph.db``,
+    and it can just as easily hold a valid SQLite file whose tables are the
+    wrong shape. SQLite refuses either one and the command used to die with a
+    traceback, which is why ``action.yml``'s ``update || build`` fallback
+    could not recover: the full build failed for exactly the same reason.
+    ``build`` rewrites the graph from scratch, so there the bad file is
+    discarded and the build proceeds.
+
+    Every other command re-raises, and ``main`` prints the one actionable
+    line the error already carries. That is the whole difference between the
+    two paths, and it is worth stating why the reporting is not duplicated
+    here: a second message would compete with the first, and one of them
+    would drift.
+
+    ``build`` discards only what ``CorruptGraphDatabaseError`` names, and
+    that class is deliberately narrow. A contended database, a read-only
+    checkout, a foreign SQLite file and a graph from a newer release all
+    reach ``main`` as themselves, because deleting any of those would destroy
+    a graph, or data, that is not broken.
+    """
+    from ..graph import CorruptGraphDatabaseError, GraphStore, discard_corrupt_database
+
+    try:
+        return GraphStore(db_path)
+    except CorruptGraphDatabaseError as exc:
+        if command != "build":
+            raise
+        logger.warning(
+            "Graph database at %s is unusable (%s); discarding it and "
+            "building from scratch.",
+            db_path, exc.reason,
+        )
+        discard_corrupt_database(db_path)
+        return GraphStore(db_path)
+
+
+def _get_store(
+    repo_root: str | None = None,
+    *,
+    db_path: Path | None = None,
+    recover_corrupt: bool = False,
+) -> tuple[GraphStore, Path]:
     """Resolve repo root and open the graph store.
 
     Callers own the returned store and must close it (try/finally or
@@ -219,8 +263,9 @@ def _get_store(repo_root: str | None = None) -> tuple[GraphStore, Path]:
     from ..incremental import assert_graph_serves_root
 
     root = _resolve_root(repo_root)
-    db_path = get_db_path(root)
-    store = GraphStore(db_path)
+    if db_path is None:
+        db_path = get_db_path(root)
+    store = _open_graph_store(db_path, "build") if recover_corrupt else GraphStore(db_path)
     try:
         assert_graph_serves_root(root, store)
     except BaseException:
@@ -232,6 +277,13 @@ def _get_store(repo_root: str | None = None) -> tuple[GraphStore, Path]:
 def _resolve_graph_file_paths(
     store: GraphStore, root: Path, file_paths: list[str],
 ) -> list[str]:
+    """Compatibility wrapper returning only matched graph paths."""
+    return _resolve_graph_file_paths_with_unmatched(store, root, file_paths)[0]
+
+
+def _resolve_graph_file_paths_with_unmatched(
+    store: GraphStore, root: Path, file_paths: list[str],
+) -> tuple[list[str], list[str]]:
     """Resolve user-facing file paths to the paths stored in the graph.
 
     Graphs may contain absolute paths, repo-relative paths, or cwd-relative
@@ -239,7 +291,9 @@ def _resolve_graph_file_paths(
     repo root, so exact matching alone can miss existing graph nodes.
     """
     resolved: list[str] = []
+    unmatched: list[str] = []
     seen: set[str] = set()
+    unmatched_seen: set[str] = set()
 
     def add(path: str) -> None:
         if path not in seen:
@@ -247,6 +301,7 @@ def _resolve_graph_file_paths(
             seen.add(path)
 
     for file_path in file_paths:
+        matched = False
         raw = file_path.replace("\\", "/")
         candidates = [raw]
         path = Path(file_path)
@@ -260,6 +315,7 @@ def _resolve_graph_file_paths(
 
         for candidate in candidates:
             if store.get_nodes_by_file(candidate):
+                matched = True
                 add(candidate)
 
         suffixes = []
@@ -270,9 +326,26 @@ def _resolve_graph_file_paths(
 
         for suffix in suffixes:
             for matched_path in store.get_files_matching(suffix):
+                matched = True
                 add(matched_path)
+        if not matched and file_path not in unmatched_seen:
+            unmatched_seen.add(file_path)
+            # Reported back to the client, and an auto-detected path comes
+            # straight from the working tree, so it is untrusted text. It also
+            # lands in a line of the summary, so it may not start a new line.
+            unmatched.append(_sanitize_name(file_path).replace("\n", " "))
 
-    return resolved
+    return resolved, unmatched
+
+
+def _unmatched_file_warning(unmatched: list[str]) -> str:
+    """Explain incomplete path coverage without growing an unbounded summary."""
+    if not unmatched:
+        return ""
+    paths = ", ".join(unmatched[:5])
+    if len(unmatched) > 5:
+        paths += f" (+{len(unmatched) - 5} more)"
+    return f"  - {len(unmatched)} requested file(s) are not indexed: {paths}"
 
 
 # ---------------------------------------------------------------------------

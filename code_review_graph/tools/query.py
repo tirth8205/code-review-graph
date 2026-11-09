@@ -45,6 +45,8 @@ from ._common import (
     _error_response,
     _get_store,
     _resolve_graph_file_paths,
+    _resolve_graph_file_paths_with_unmatched,
+    _unmatched_file_warning,
 )
 
 logger = logging.getLogger(__name__)
@@ -61,6 +63,27 @@ logger = logging.getLogger(__name__)
 _MAX_IMPACT_NODES_SHOWN = 100
 _MAX_IMPACT_EDGES = 150
 _MAX_IMPACT_FILES = 200
+
+# Source snippets attached to search hits when include_source is set. Without
+# them a caller only gets names and line numbers, so it has to open the files
+# itself and the graph query becomes additive rather than a substitute.
+_MAX_SEARCH_SOURCE_LINES = 240
+_MAX_SEARCH_SOURCE_LINES_PER_NODE = 60
+
+# Expanding a hit to its callers and callees costs more lines, but it is what
+# turns a search result into an answer: "how does X work" is nearly always
+# answered by X plus the code on either side of it. Without this the caller
+# reads those files itself and the graph has saved nothing.
+_MAX_EXPANDED_SOURCE_LINES = 700
+_MAX_EXPANDED_HITS = 3
+_MAX_NEIGHBORS_PER_HIT = 4
+
+# Lines alone do not bound a reply: one minified line can be megabytes.
+_MAX_SEARCH_SOURCE_CHARS = 80_000
+_MAX_SEARCH_SOURCE_CHARS_PER_NODE = 12_000
+
+# _sanitize_name cuts names sent to clients to this length.
+_SANITIZED_NAME_MAX = 256
 
 # ---------------------------------------------------------------------------
 # Tool 2: get_impact_radius
@@ -79,6 +102,8 @@ _QUERY_PATTERNS = {
     "triggered_by": "Find schedulers or other triggers that invoke a method",
     "publishers_of": "Find methods that publish an event",
     "listeners_of": "Find methods that listen for an event",
+    "advises": "Find methods an AOP advice targets via its pointcut",
+    "advised_by": "Find AOP advice methods that intercept a given method",
     "handlers_of": "Find methods that handle an endpoint",
     "endpoints_for": "Find endpoints handled by a method",
     "consumers_of": "Find classes that consume a Spring configuration property",
@@ -181,6 +206,24 @@ def _java_fqn_candidates(store: GraphStore, target: str) -> list[GraphNode] | No
     return matches
 
 
+def _namespaced_ruby_candidates(store: GraphStore, target: str) -> list[GraphNode]:
+    """Resolve ``Class.method`` to a Ruby method whose class sits in a namespace.
+
+    Ruby symbols carry the whole namespace (``Billing.Base.audit``), so the exact
+    qualified-tail lookup misses the short form people actually type.
+    """
+    method_name = target.rsplit(".", 1)[-1]
+    return [
+        candidate
+        for candidate in store.search_nodes(
+            method_name, limit=_MAX_DOTTED_TARGET_CANDIDATES,
+        )
+        if candidate.language.lower() == "ruby"
+        and candidate.name == method_name
+        and candidate.qualified_name.endswith(f".{target}")
+    ]
+
+
 def _rank_disambiguation_candidates(
     candidates: list[GraphNode], target: str,
 ) -> list[dict[str, Any]]:
@@ -256,7 +299,12 @@ def get_impact_radius(
 
         # Resolve user-facing paths to the file paths stored in the graph.
         original_tokens = estimate_file_tokens(root, changed_files)
-        abs_files = _resolve_graph_file_paths(store, root, changed_files)
+        abs_files, unmatched_files = _resolve_graph_file_paths_with_unmatched(
+            store, root, changed_files,
+        )
+        shown_unmatched, unmatched_total, unmatched_cut = _bounded(
+            unmatched_files, 5 if detail_level == "minimal" else max_results, _MAX_IMPACT_FILES,
+        )
         result = store.get_impact_radius(
             abs_files, max_depth=max_depth, max_nodes=max_results,
             resolution=resolution,
@@ -334,6 +382,11 @@ def get_impact_radius(
             or files_omitted > 0
         )
         total_impacted = result["total_impacted"]
+        risk = (
+            "unknown" if not abs_files else
+            "high" if total_impacted > 20 else
+            "medium" if total_impacted > 5 else "low"
+        )
 
         summary_parts = [
             f"Blast radius for {len(changed_files)} changed file(s):",
@@ -341,6 +394,8 @@ def get_impact_radius(
             f"  - {total_impacted} nodes impacted (within {max_depth} hops)",
             f"  - {files_total} additional files affected",
         ]
+        if unmatched_files:
+            summary_parts.append(_unmatched_file_warning(unmatched_files))
         if len(impacted_dicts) < total_impacted:
             summary_parts.append(
                 f"  - Results truncated: showing {len(impacted_dicts)}"
@@ -367,13 +422,6 @@ def get_impact_radius(
         if detail_level == "minimal":
             # The full count, not the displayed one: the risk band must not
             # change because a display cap trimmed the list.
-            impacted_count = total_impacted
-            if impacted_count > 20:
-                risk = "high"
-            elif impacted_count > 5:
-                risk = "medium"
-            else:
-                risk = "low"
             key_entities = [
                 n["name"] for n in impacted_dicts[:5]
             ]
@@ -381,9 +429,12 @@ def get_impact_radius(
                 "status": "ok",
                 "summary": "\n".join(summary_parts),
                 "risk": risk,
+                "unmatched_files": shown_unmatched,
+                "unmatched_files_total": unmatched_total,
+                "unmatched_files_truncated": unmatched_cut,
                 "impacted_file_count": len(result["impacted_files"]),
                 "key_entities": key_entities,
-                "truncated": truncated,
+                "truncated": truncated or unmatched_cut,
                 "nodes_omitted": max(0, total_impacted - len(impacted_dicts)),
                 # One integer, and the only thing in this response that says
                 # the radius has a blind spot at all.
@@ -396,6 +447,10 @@ def get_impact_radius(
 
         response: dict[str, Any] = {
             "status": "ok",
+            "risk": risk,
+            "unmatched_files": shown_unmatched,
+            "unmatched_files_total": unmatched_total,
+            "unmatched_files_truncated": unmatched_cut,
             "summary": "\n".join(summary_parts),
             "changed_files": changed_files,
             "changed_nodes": changed_dicts,
@@ -405,7 +460,7 @@ def get_impact_radius(
             "impacted_files_omitted": files_omitted,
             "edges": edge_dicts,
             "edges_omitted": edges_omitted,
-            "truncated": truncated,
+            "truncated": truncated or unmatched_cut,
             "total_impacted": total_impacted,
             "nodes_omitted": max(0, total_impacted - len(impacted_dicts)),
             "resolution": resolution,
@@ -444,7 +499,8 @@ def query_graph(
         pattern: Query pattern. One of: callers_of, references_to, callees_of,
                  imports_of, importers_of, children_of, tests_for, inheritors_of,
                  triggers_of, triggered_by, publishers_of, listeners_of,
-                 handlers_of, endpoints_for, consumers_of, file_summary.
+                 handlers_of, endpoints_for, consumers_of, advises, advised_by,
+                 file_summary.
         target: The node name, qualified name, or file path to query about.
         repo_root: Repository root path. Auto-detected if omitted.
         detail_level: "standard" (full output) or "minimal" (summary only).
@@ -575,8 +631,10 @@ def query_graph(
                     # are Java-FQN-shaped and have no Java candidates.
                     candidates = qualified_tail_candidates
                 elif java_candidates is not None:
-                    # Java-shaped with no safe match: do not fall back.
-                    candidates = []
+                    # Java-shaped with no safe match: do not fall back to a
+                    # fuzzy search. A namespaced Ruby method is an exact match
+                    # on the class and method, so it is still safe.
+                    candidates = _namespaced_ruby_candidates(store, target)
                 else:
                     candidates = store.search_nodes(target, limit=20)
                 if pattern == "inheritors_of" and "::" not in target:
@@ -971,6 +1029,26 @@ def query_graph(
                 else:
                     edges_out.append(edge_to_dict(edge))
 
+        elif pattern == "advises":
+            for edge in store.get_edges_by_source(qn):
+                if edge.kind != "CALLS" or not edge.extra.get("aop_resolved"):
+                    continue
+                target_node = store.get_node(edge.target_qualified)
+                if target_node:
+                    add_result(node_to_dict(target_node), edge)
+                else:
+                    edges_out.append(edge_to_dict(edge))
+
+        elif pattern == "advised_by":
+            for edge in store.get_edges_by_target(qn):
+                if edge.kind != "CALLS" or not edge.extra.get("aop_resolved"):
+                    continue
+                advice_node = store.get_node(edge.source_qualified)
+                if advice_node:
+                    add_result(node_to_dict(advice_node), edge)
+                else:
+                    edges_out.append(edge_to_dict(edge))
+
         elif pattern == "handlers_of":
             for edge in store.get_edges_by_target(qn):
                 if edge.kind != "HANDLES":
@@ -1111,6 +1189,169 @@ def query_graph(
 # ---------------------------------------------------------------------------
 
 
+class _SourceBudget:
+    """Hands out source snippets until a shared line budget runs out.
+
+    One budget is shared by the hits and by any neighbours expanded from
+    them, so a response cannot grow without bound no matter how many edges a
+    hot symbol has. Files are read once and reused.
+    """
+
+    def __init__(self, root: Path, total: int, per_node: int) -> None:
+        self._root = root
+        self._root_resolved = root.resolve()
+        self._left = total
+        self._chars_left = _MAX_SEARCH_SOURCE_CHARS
+        self._per_node = per_node
+        self._files: dict[str, list[str]] = {}
+        self.omitted = 0
+
+    @property
+    def exhausted(self) -> bool:
+        return self._left <= 0 or self._chars_left <= 0
+
+    def _lines(self, raw_path: str) -> list[str]:
+        lines = self._files.get(raw_path)
+        if lines is not None:
+            return lines
+        path = Path(raw_path)
+        if not path.is_absolute():
+            path = self._root / path
+        try:
+            # The graph stores paths it parsed from inside the repo, but a
+            # stale row must never be able to read outside it.
+            path.resolve().relative_to(self._root_resolved)
+            text = path.read_text(encoding="utf-8", errors="replace")
+            # Notebook nodes are numbered in the parser's joined-up code cells,
+            # so slicing the file by those numbers returns the wrong text.
+            if path.suffix.lower() == ".ipynb" or (
+                text.split("\n", 1)[0] == "# Databricks notebook source"
+            ):
+                lines = []
+            else:
+                # Not splitlines(): it also breaks on form feeds and U+2028,
+                # which the parser does not count, so later lines would shift.
+                lines = text.split("\n")
+        except (OSError, UnicodeDecodeError, ValueError) as exc:
+            logger.warning(
+                "Could not read %s for a source snippet: %s", raw_path, exc,
+            )
+            lines = []
+        self._files[raw_path] = lines
+        return lines
+
+    def attach(
+        self, target: dict[str, Any], raw_path: Any, start: Any, end: Any,
+    ) -> bool:
+        """Attach ``source`` to *target*; return whether anything was added."""
+        if not raw_path or not start or not end or end < start:
+            return False
+        if self.exhausted:
+            self.omitted += 1
+            return False
+        lines = self._lines(raw_path)
+        if not lines:
+            return False
+        span = min(end - start + 1, self._per_node, self._left)
+        if span <= 0:
+            self.omitted += 1
+            return False
+        snippet = lines[start - 1:start - 1 + span]
+        if not snippet:
+            return False
+        text = "\n".join(snippet)
+        char_cap = min(_MAX_SEARCH_SOURCE_CHARS_PER_NODE, self._chars_left)
+        cut = len(text) > char_cap
+        if cut:
+            text = text[:char_cap]
+        target["source"] = text
+        target["source_lines"] = [start, start + text.count("\n")]
+        if cut or end - start + 1 > len(snippet):
+            target["source_truncated"] = True
+        self._left -= len(snippet)
+        self._chars_left -= len(text)
+        return True
+
+
+def _neighbor_entry(node: GraphNode) -> dict[str, Any]:
+    return {
+        "name": _sanitize_name(node.name),
+        "qualified_name": _sanitize_name(node.qualified_name),
+        "kind": node.kind,
+        "file_path": node.file_path,
+        "line_start": node.line_start,
+        "line_end": node.line_end,
+    }
+
+
+def _stored_qualified_name(store: GraphStore, hit: dict[str, Any]) -> str | None:
+    """Return the name edges are keyed on; a hit's own may be cut for display."""
+    qname = hit.get("qualified_name")
+    if not qname or len(qname) < _SANITIZED_NAME_MAX:
+        return qname
+    for node in store.get_nodes_by_file(hit.get("file_path") or ""):
+        if (
+            node.line_start == hit.get("line_start")
+            and _sanitize_name(node.qualified_name) == qname
+        ):
+            return node.qualified_name
+    return qname
+
+
+def _attach_neighbors(
+    results: list[dict[str, Any]],
+    store: GraphStore,
+    budget: _SourceBudget,
+) -> None:
+    """Attach each top hit's direct callers and callees, with their source.
+
+    A question about how a symbol works is usually answered by the symbol
+    plus what calls it and what it calls, so returning those here is what
+    stops the caller opening the same files by hand.
+    """
+    for hit in results[:_MAX_EXPANDED_HITS]:
+        qname = _stored_qualified_name(store, hit)
+        if not qname:
+            continue
+        try:
+            incoming = store.get_edges_by_target(qname)
+            outgoing = store.get_edges_by_source(qname)
+        except Exception as exc:  # noqa: BLE001 - a bad row must not fail search
+            logger.warning("Neighbour lookup failed for %s: %s", qname, exc)
+            continue
+
+        for key, edges, attr in (
+            ("callers", incoming, "source_qualified"),
+            ("callees", outgoing, "target_qualified"),
+        ):
+            seen: set[str] = set()
+            entries: list[dict[str, Any]] = []
+            for edge in edges:
+                if edge.kind != "CALLS":
+                    continue
+                if len(entries) >= _MAX_NEIGHBORS_PER_HIT:
+                    break
+                if budget.exhausted:
+                    # A hot symbol can have thousands of edges; stop looking
+                    # them up once nothing more can be returned.
+                    budget.omitted += 1
+                    break
+                other = getattr(edge, attr, None)
+                if not other or other in seen or other == qname:
+                    continue
+                seen.add(other)
+                node = store.get_node(other)
+                if node is None:
+                    continue
+                entry = _neighbor_entry(node)
+                if budget.attach(
+                    entry, node.file_path, node.line_start, node.line_end,
+                ):
+                    entries.append(entry)
+            if entries:
+                hit[key] = entries
+
+
 def semantic_search_nodes(
     query: str,
     kind: str | None = None,
@@ -1120,6 +1361,9 @@ def semantic_search_nodes(
     model: str | None = None,
     provider: str | None = None,
     detail_level: str = "standard",
+    include_source: bool = False,
+    expand_neighbors: bool = False,
+    max_source_lines: int = _MAX_SEARCH_SOURCE_LINES_PER_NODE,
 ) -> dict[str, Any]:
     """Search for nodes by name, keyword, or semantic similarity.
 
@@ -1135,6 +1379,16 @@ def semantic_search_nodes(
         context_files: Optional list of file paths. Nodes in these files
             receive a relevance boost.
         detail_level: "standard" (full output) or "minimal" (summary only).
+        include_source: Attach the source of each hit, so the caller can
+            answer from the response instead of opening the files itself.
+            Off by default: it costs tokens, and a caller that only wants
+            locations should not pay for them.
+        expand_neighbors: With include_source, also return the direct callers
+            and callees of the top hits, each with their own source. This is
+            what lets a caller answer "how does X work" from one response
+            instead of opening those files itself.
+        max_source_lines: Per-node snippet cap when include_source is set.
+            The response is additionally capped in total.
 
     Returns:
         Ranked list of matching nodes.
@@ -1144,10 +1398,39 @@ def semantic_search_nodes(
         mode_out: list[str] = []
         results = hybrid_search(
             store, query, kind=kind, limit=limit, context_files=context_files,
-            model=model, provider=provider, _out_mode=mode_out,
+            model=model, provider=provider, _out_mode=mode_out, repo_root=root,
         )
 
         search_mode = mode_out[0] if mode_out else "keyword"
+
+        source_omitted = 0
+        if include_source and results and detail_level != "minimal":
+            per_node = min(
+                max(int(max_source_lines), 1),
+                _MAX_SEARCH_SOURCE_LINES_PER_NODE,
+            )
+            budget = _SourceBudget(
+                root,
+                _MAX_EXPANDED_SOURCE_LINES if expand_neighbors
+                else _MAX_SEARCH_SOURCE_LINES,
+                per_node,
+            )
+            # Expansion was asked for, so lower-ranked hits must not spend the
+            # budget before the top hits' callers and callees get any of it.
+            top = results[:_MAX_EXPANDED_HITS] if expand_neighbors else results
+            for hit in top:
+                budget.attach(
+                    hit, hit.get("file_path"),
+                    hit.get("line_start"), hit.get("line_end"),
+                )
+            if expand_neighbors:
+                _attach_neighbors(results, store, budget)
+            for hit in results[len(top):]:
+                budget.attach(
+                    hit, hit.get("file_path"),
+                    hit.get("line_start"), hit.get("line_end"),
+                )
+            source_omitted = budget.omitted
 
         summary = f"Found {len(results)} node(s) matching '{query}'" + (
             f" (kind={kind})" if kind else ""
@@ -1188,6 +1471,8 @@ def semantic_search_nodes(
             "summary": summary,
             "results": results,
         }
+        if source_omitted:
+            result["source_omitted"] = source_omitted
         if confidence:
             result["confidence"] = confidence
         result["_hints"] = generate_hints(

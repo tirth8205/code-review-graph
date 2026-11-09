@@ -179,7 +179,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: tirth8205/code-review-graph@v2.3.8
+      - uses: tirth8205/code-review-graph@v2.3.9
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 ```
@@ -219,7 +219,9 @@ jobs:
 >
 > `code-review-graph` 행은 스냅샷이며 현재 측정값이 아닙니다. `84bde354` 이후 저장소가 커져서 코퍼스도 그래프도 오늘은 훨씬 큽니다.
 
-코퍼스 전체 기준선은 실제 에이전트가 치르지 않는 상한입니다. 에이전트는 식별자를 grep하고 가장 잘 맞는 파일을 읽습니다. `agent_baseline` 평가 벤치마크가 바로 그 경우를 측정합니다(순수 파이썬으로 코퍼스를 grep하고, 일치 수 기준 상위 3개 파일을 골라, 그래프 질의 비용과 토큰을 비교). 결과는 `evaluate/results/<repo>_agent_baseline_<date>.csv`에 기록됩니다. 아직 공식 측정값은 공개하지 않았습니다.
+코퍼스 전체 기준선은 실제 에이전트가 치르지 않는 상한입니다. 에이전트는 식별자를 grep하고 가장 잘 맞는 파일을 읽습니다. `agent_baseline` 평가 벤치마크가 바로 그 경우를 측정합니다(순수 파이썬으로 코퍼스를 grep하고, 일치 수 기준 상위 3개 파일을 골라, 그래프 질의 비용과 토큰을 비교). 결과는 `evaluate/results/<repo>_agent_baseline_<date>.csv`에 기록됩니다. 이 현실적인 기준선에 대해 6개 저장소 18개 질문의 중앙값은 **6.65x**입니다(평균 14.8x, 범위 4.2x~72.6x). 2026-09-22 측정은 검색과 이 기준선이 테스트 파일의 순위를 낮추기 전의 것이므로, 다시 측정하기 전까지 `code-review-graph eval --benchmark agent_baseline --embed`의 결과는 이 수치와 다릅니다. 전체 표는 `docs/REPRODUCING.md`의 "Canonical capture, 2026-09-22" 절에 있습니다.
+
+이 비율은 저장소 크기를 따라갑니다. 그래프 응답은 일정하게 유지되는 반면(이번에 측정한 모든 저장소에서 2,432~4,021 토큰) grep 기준선은 코퍼스와 함께 커지기 때문입니다. express는 4.5x, fastapi는 52x였습니다. 두 수치 모두 **검색** 비용, 즉 답을 찾는 데 필요한 토큰을 측정합니다. 에이전트가 그래프가 지목한 파일을 그다음에 연다면 그래프 비용은 대체가 아니라 추가입니다. `semantic_search_nodes_tool(include_source=True)`는 위치와 함께 코드를 반환해 그럴 필요를 없애지만, 이 경로를 종단 간으로 측정하는 일은 남아 있습니다.
 
 공식 `token_efficiency` 벤치마크는 다른 상황을 측정합니다. 커밋의 변경 파일 내용만을 상대로 `get_review_context()` JSON 전체를 비교하며, 응답에 영향 범위 엣지와 소스 조각이 들어 있어 작은 커밋에서는 비율이 1보다 작게 나옵니다. 두 벤치마크는 서로 다른 질문에 답합니다. [`docs/REPRODUCING.md`](docs/REPRODUCING.md#which-benchmark-measures-what)를 보세요.
 
@@ -525,11 +527,14 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_EMBEDDING_MODEL` | 로컬 벡터 임베딩의 기본 모델 | `all-MiniLM-L6-v2` |
 | `CRG_ACCEPT_CLOUD_EMBEDDINGS` | `1`로 두면 클라우드 임베딩 전송 경고를 숨김 | - |
 | `CRG_ALLOW_REMOTE_CODE` | `trust_remote_code=True`가 필요한 HuggingFace 모델 허용 | `0` |
+| `CRG_VECTOR_CACHE` | `1`로 두면 디코딩한 임베딩 벡터를 시맨틱 검색 사이에도 메모리에 유지해, 쿼리마다 SQLite에서 전부 다시 읽지 않음. 대신 RAM(캐시한 인덱스마다 벡터 수 × 차원 수 × 4바이트)과, 캐시한 데이터베이스마다 프로세스가 끝날 때까지 열려 있는 읽기 연결 1개를 사용함. Windows에서는 열려 있는 동안 `graph.db`를 삭제하거나 교체할 수 없음 | - |
 | `CRG_MAX_IMPACT_NODES` | 영향 분석에 넣는 최대 노드 수 | `500` |
 | `CRG_MAX_IMPACT_DEPTH` | 영향 범위 분석의 탐색 깊이 | `2` |
 | `CRG_MAX_BFS_DEPTH` | 그래프 순회의 최대 깊이 | `15` |
 | `CRG_MAX_CHANGED_FUNCS` | 변경 보고 하나에서 분석하는 변경 함수의 최대 수 | `500` |
 | `CRG_MAX_TRANSITIVE_FRONTIER` | 전이적 호출자/피호출자 확장의 최대 프런티어 크기 | `50` |
+| `CRG_CALLER_TEST_ROUTE_DEPTH` | 테스트가 없는 변경 심벌에 대해 테스트된 호출자를 찾으며 들어오는 `CALLS`를 거슬러 올라갈 홉 수. 커버리지가 아니라 참고 정보로 보고됩니다 | `2` |
+| `CRG_CALLER_TEST_ROUTE_MAX_CALLERS` | 그 테스트된 호출자를 찾는 동안 검사할 최대 호출자 수 | `500` |
 | `CRG_TOOL_TIMEOUT` | 읽기 전용 MCP 도구의 제한 시간(초. `0`이면 해제). 쓰기 작업(build / postprocess / embed / wiki / apply-refactor)에는 적용되지 않음 | `0` |
 | `CRG_CHURN_WINDOW_DAYS` | `detect-changes --churn`의 커밋 수를 세는 기간 | `90` |
 | `CRG_LEIDEN_SEED` | Leiden 커뮤니티 탐지의 시드 | `42` |
