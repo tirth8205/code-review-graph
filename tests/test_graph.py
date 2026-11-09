@@ -2230,3 +2230,30 @@ class TestQualifiedNameCollisionLifecycle:
         assert sorted(
             (n.params, n.line_start) for n in self.store.get_nodes_by_file(path)
         ) == [("(a)", 10), ("(b)", 20)]
+
+    def test_tested_by_follows_the_duplicate_test_that_made_the_call(self):
+        """The parser mints TESTED_BY as the reverse of a test's CALLS edge on
+        the same line. Its target (the test) must be the same duplicate the
+        CALLS source was aligned to, or coverage names the wrong test.
+        """
+        tests = "/test/test_app.py"
+        helper = "/test/app.py::helper"
+        nodes = [self._render(tests, 10, is_test=True),
+                 self._render(tests, 20, is_test=True, line_end=24)]
+        base = f"{tests}::render"
+        edges = []
+        for line in (11, 22):
+            edges.append(EdgeInfo(kind="CALLS", source=base, target=helper,
+                                  file_path=tests, line=line))
+            edges.append(EdgeInfo(kind="TESTED_BY", source=helper, target=base,
+                                  file_path=tests, line=line))
+
+        self.store.store_file_nodes_edges(tests, nodes, edges)
+
+        first, second = self._identity_at(tests, 10), self._identity_at(tests, 20)
+        calls = {(e.line, e.source_qualified) for e in self.store.get_edges_by_target(helper)
+                 if e.kind == "CALLS"}
+        tested_by = {(e.line, e.target_qualified) for e in self.store.get_edges_by_source(helper)
+                     if e.kind == "TESTED_BY"}
+        assert calls == {(11, first), (22, second)}
+        assert tested_by == calls

@@ -1556,6 +1556,20 @@ class GraphStore:
         collisions: dict[str, list[tuple[NodeInfo, str]]],
     ) -> EdgeInfo:
         """Point an edge at the colliding definition evidenced by its line."""
+        if edge.kind == "TESTED_BY":
+            # The parser mints TESTED_BY as a test's CALLS edge reversed, on
+            # the same line, so align it as that call and reverse it back.
+            call = self._align_edge_with_collisions(
+                EdgeInfo(kind="CALLS", source=edge.target, target=edge.source,
+                         file_path=edge.file_path, line=edge.line, extra=edge.extra),
+                collisions,
+            )
+            if call.source == edge.target and call.target == edge.source:
+                return edge
+            return EdgeInfo(
+                kind=edge.kind, source=call.target, target=call.source,
+                file_path=edge.file_path, line=edge.line, extra=edge.extra,
+            )
         source = edge.source
         source_candidates = collisions.get(source, [])
         containing_sources = [
