@@ -275,6 +275,15 @@
   write lock and exit `75`, the new git and steering hooks, untracked files,
   Liquid and the other new node kinds, confidence tiers and schema v15. They also
   drop claims the code no longer backs.
+- The read-only query script in the bundled skill (`crg_readonly.py`) now
+  takes `path_to` with `--to`, so it offers every pattern the CLI `query`
+  command accepts. It stops before running the CLI when `path_to` has no
+  `--to`. A test now fails if the script's list drifts from `tools/query.py`
+  or the CLI again; the patterns the CLI does not take yet are listed there
+  with the reason.
+- The VS Code `codeReviewGraph.cliPath` setting no longer talks about a bundled
+  version. The extension does not include the CLI; left empty, it runs
+  `code-review-graph` from your `PATH` (#369).
 - `install --dry-run` shows what each file would become, and `install` writes
   nothing until you have answered its question (#173). The dry run used to list
   file names only, and a real install wrote the MCP config before it asked

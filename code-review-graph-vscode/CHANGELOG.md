@@ -6,6 +6,11 @@
 - Accepts Python backend schema v15. The extension read none of the tables and
   indexes that v15 drops.
 
+### Fixed
+- The `codeReviewGraph.cliPath` setting no longer talks about a bundled
+  version. The extension does not include the CLI; left empty, it runs
+  `code-review-graph` from your `PATH` (#369).
+
 ## 0.3.0 - 2026-09-18
 
 ### Changed
