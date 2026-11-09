@@ -3196,8 +3196,9 @@ def _is_locale_yaml(path: "str | PurePath", repo_root: "str | PurePath | None") 
     this misses keeps its paths, which costs some noise; a false match would
     lose real config, so doubtful files stay indexed.
 
-    The folders above a checkout belong to whoever cloned it, so with no root
-    to read the path against, nothing is called a translation file.
+    The folders above a checkout belong to whoever cloned it, so an absolute
+    path with no root to read it against is never called a translation file.
+    A relative path is already read as relative to the root, as everywhere else.
     """
     relative = repo_relative_path(path, repo_root)
     if relative is None:
@@ -3615,7 +3616,11 @@ class CodeParser:
         if language == "spring_config":
             if _yaml is None:
                 return [], []
-            if path.suffix.lower() in (".yaml", ".yml") and _is_ansible_content(source):
+            is_yaml = path.suffix.lower() in (".yaml", ".yml")
+            # ``locales/en/application.yml`` is a catalogue, not Spring config.
+            if is_yaml and _is_locale_yaml(path, self._repo_root):
+                return self._parse_yaml(path, source)
+            if is_yaml and _is_ansible_content(source):
                 return self._parse_ansible(path, source)
             spring_nodes, spring_edges = self._parse_spring_config(path, source)
             if spring_nodes or path.suffix.lower() == ".properties":

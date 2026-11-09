@@ -66,6 +66,29 @@ def test_translation_files_get_a_file_node_only(tmp_path: Path, relative: str) -
     assert nodes[0].extra["values_indexed"] is False
 
 
+@pytest.mark.parametrize(
+    "relative", ["config/locales/en/application.yml", "locales/de/application-web.yaml"],
+)
+def test_a_catalogue_named_like_spring_config_is_still_a_translation(
+    tmp_path: Path, relative: str,
+) -> None:
+    nodes, edges = CodeParser(tmp_path).parse_bytes(tmp_path / relative, _TRANSLATION)
+
+    assert [node.kind for node in nodes] == ["File"]
+    assert edges == []
+    assert nodes[0].extra["yaml_locale_file"] is True
+
+
+def test_spring_config_outside_a_translation_folder_keeps_its_properties(
+    tmp_path: Path,
+) -> None:
+    nodes, _ = CodeParser(tmp_path).parse_bytes(
+        tmp_path / "src/main/resources/application.yml", _CONFIG,
+    )
+
+    assert "ConfigProperty" in {node.kind for node in nodes}
+
+
 def test_a_reader_can_see_why_a_translation_file_has_no_paths(tmp_path: Path) -> None:
     path = tmp_path / "locales" / "en.yml"
     nodes, _ = CodeParser(tmp_path).parse_bytes(path, _TRANSLATION)
@@ -123,6 +146,13 @@ def test_without_a_repo_root_nothing_is_called_a_translation(tmp_path: Path) -> 
     nodes, _ = CodeParser().parse_bytes(path, _TRANSLATION)
 
     assert _yaml_paths(nodes) != []
+
+
+def test_a_relative_path_is_read_from_the_repo_root() -> None:
+    """The same rule as ``is_test_file``: a relative path has no folders above it."""
+    nodes, _ = CodeParser().parse_bytes(Path("config/locales/en.yml"), _TRANSLATION)
+
+    assert [node.kind for node in nodes] == ["File"]
 
 
 def _git(repo: Path, *args: str) -> None:
