@@ -217,6 +217,12 @@
   It was in no community, so the update saw nothing affected, skipped
   community detection and left the file's nodes without one until the next
   full build (#1058, PR #1122 by @jay23606).
+- On Windows, `build` and `update` started with stdin on the `NUL` device
+  (`subprocess.DEVNULL`, Node's `stdio: "ignore"`) parse with threads.
+  `NUL` passes `isatty()`, so they used a process pool, and a caller that
+  stopped the run, such as a pre-commit hook timeout, left up to 8 worker
+  processes behind each time. Only a real console now keeps the process pool
+  (#1163, PR #1166 by @xOscarCodes).
 - TypeScript and JavaScript imports resolve against `compilerOptions.baseUrl`
   when no `paths` pattern matches them, as `tsc` does. A tsconfig that sets
   `baseUrl` without `paths` resolved no non-relative import at all: on a
