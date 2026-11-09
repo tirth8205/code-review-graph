@@ -31,6 +31,7 @@ from .constants import (
     env_int,
     read_only_requested,
 )
+from .csharp_resolver import restore_csharp_references
 from .errors import ChangeDiscoveryError, GraphRootMismatchError, GraphStoreError
 from .graph import GraphStore
 from .parser import CodeParser, normalize_file_path
@@ -91,6 +92,9 @@ logger = logging.getLogger(__name__)
 VERIFIED_FILE_COUNT_KEY = "verified_file_count"
 CPP_IDENTITY_VERSION = "1"
 _CPP_IDENTITY_METADATA_KEY = "cpp_identity_version"
+CSHARP_IDENTITY_VERSION = "5"  # Namespace/call context, static and generic-arity evidence.
+_CSHARP_IDENTITY_METADATA_KEY = "csharp_identity_version"
+_CSHARP_PENDING_METADATA_KEY = "csharp_identity_pending_files"
 _CPP_IDENTITY_PENDING_KEY = "cpp_identity_pending"
 _DEPENDENTS_PENDING_KEY = "dependents_reparse_pending"
 
@@ -228,11 +232,11 @@ def _run_hcl_resolver(store: GraphStore) -> Optional[dict]:
         return None
 
 
-def _run_scoped_resolver(store: GraphStore) -> Optional[dict]:
+def _run_scoped_resolver(store: GraphStore, repo_root: Path) -> Optional[dict]:
     """Resolve static/scoped ``Class::method`` calls without failing a build."""
     try:
         from .scoped_resolver import resolve_scoped_calls
-        return resolve_scoped_calls(store)
+        return resolve_scoped_calls(store, repo_root)
     except Exception as exc:  # noqa: BLE001 - best-effort post-pass
         logger.warning("Scoped call resolver failed: %s", exc)
         return None
@@ -1727,6 +1731,7 @@ def _reconcile_stale_files(
                 current_paths.add(stored_file)
     stale_files = sorted(stored_files - current_paths)
     if stale_files and remove:
+        restore_csharp_references(store, stale_files)
         store.remove_files_permanently(stale_files, stored_paths=True)
     return stale_files
 
@@ -2040,6 +2045,12 @@ def full_build(
         VERIFIED_FILE_COUNT_KEY, "0" if errors else str(len(store.get_all_files()))
     )
     _store_cpp_identity_pending(store, cpp_errors)
+    # Record the attempted C# format and retry only failed files. Holding the
+    # entire version gate open for one bad file repeats a full build (#944).
+    store.set_metadata(_CSHARP_IDENTITY_METADATA_KEY, CSHARP_IDENTITY_VERSION)
+    store.set_metadata(_CSHARP_PENDING_METADATA_KEY, json.dumps(sorted(
+        error["file"] for error in errors if error["file"].endswith(".cs")
+    )))
     # Post-processing cannot redo these, so they run while the marker still
     # says in progress: a process killed here gets a full rebuild.
     python_stats = _run_python_resolver(store)
@@ -2049,7 +2060,7 @@ def full_build(
     spring_event_stats = _run_spring_event_resolver(store)
     temporal_stats = _run_temporal_resolver(store)
     hcl_stats = _run_hcl_resolver(store)
-    scoped_stats = _run_scoped_resolver(store)
+    scoped_stats = _run_scoped_resolver(store, repo_root)
     _refresh_target_resolution(store)
     store.set_metadata(_DEPENDENTS_PENDING_KEY, "[]")
     # Storing is over: every file that could be parsed has its rows. Recorded
@@ -2151,6 +2162,19 @@ def incremental_update(
             base,
             strict=authoritative_git_sync,
         )
+    csharp_upgrade = (
+        store.get_metadata(_CSHARP_IDENTITY_METADATA_KEY) != CSHARP_IDENTITY_VERSION
+        and store.has_nodes_for_language("csharp")
+    )
+    pending_csharp = set(json.loads(store.get_metadata(_CSHARP_PENDING_METADATA_KEY) or "[]"))
+    if csharp_upgrade:
+        pending_csharp.update(
+            str(Path(row[0]).relative_to(repo_root))
+            for row in store._conn.execute(
+                "SELECT DISTINCT file_path FROM nodes WHERE language = 'csharp'",
+            )
+            if Path(row[0]).is_relative_to(repo_root)
+        )
     content_mismatches: list[str] = []
     current_hashes: dict[str, str] = {}
     known_text: set[str] | None = None
@@ -2166,7 +2190,10 @@ def incremental_update(
         )
     changed_files = list(
         dict.fromkeys(
-            [_relative_update_input(repo_root, p) for p in [*changed_files, *content_mismatches]]
+            [
+                _relative_update_input(repo_root, p)
+                for p in [*changed_files, *content_mismatches, *sorted(pending_csharp)]
+            ]
         )
     )
     # Defer permanent stale removal until after flow/community capture (#569).
@@ -2279,7 +2306,8 @@ def incremental_update(
         try:
             existing_nodes = store.get_nodes_by_file(str(abs_path))
             if (
-                rel_path not in remaining_identity
+                rel_path not in pending_csharp
+                and rel_path not in remaining_identity
                 and fhash is not None
                 and existing_nodes
                 and existing_nodes[0].file_hash == fhash
@@ -2394,6 +2422,9 @@ def incremental_update(
             store, to_remove, repo_root=repo_root,
         )
         cleared_entry_qns |= clear_flows_for_files(store, remove_paths)
+        # Return incoming C# calls to their raw references while the deleted
+        # declarations can still be joined, so a recreated type binds again.
+        restore_csharp_references(store, to_remove)
         removed_files = store.remove_files_permanently(
             to_remove, stored_paths=True,
         )
@@ -2413,6 +2444,11 @@ def incremental_update(
     )
 
     files_updated = parsed_files + removed_files
+    if csharp_upgrade or pending_csharp or any(p.endswith(".cs") for p in all_files):
+        store.set_metadata(_CSHARP_IDENTITY_METADATA_KEY, CSHARP_IDENTITY_VERSION)
+        store.set_metadata(_CSHARP_PENDING_METADATA_KEY, json.dumps(sorted(
+            error["file"] for error in errors if error["file"].endswith(".cs")
+        )))
     if identity_pending is not None and remaining_identity != identity_pending:
         _store_cpp_identity_pending(store, remaining_identity)
         store.commit()
@@ -2446,9 +2482,13 @@ def incremental_update(
     temporal_stats = _run_temporal_resolver(store) if spring_changed else None
     hcl_changed = any(rp.endswith((".tf", ".hcl")) for rp in all_files)
     hcl_stats = _run_hcl_resolver(store) if hcl_changed else None
-    scoped_changed = any(rp.endswith((".php", ".rs", ".cs")) for rp in all_files)
-    scoped_stats = _run_scoped_resolver(store) if scoped_changed else None
-    if files_updated or stale_files:
+    scoped_changed = any(
+        rp.endswith((".php", ".rs", ".cs")) or _is_csharp_project(rp)
+        for rp in set(all_files) | set(stale_files) | missing_paths
+    )
+    scoped_stats = _run_scoped_resolver(store, repo_root) if scoped_changed else None
+    # Project-only edits can rebind C# calls without reparsing a source file.
+    if files_updated or stale_files or scoped_changed:
         _refresh_target_resolution(store)
 
     # Freshness follows what was stored. A file that failed to parse is
@@ -2490,6 +2530,7 @@ def incremental_update(
         "temporal_resolution": temporal_stats,
         "hcl_resolution": hcl_stats,
         "scoped_resolution": scoped_stats,
+        **({"identity_rebuild": True} if csharp_upgrade else {}),
     }
 
 
@@ -3417,6 +3458,11 @@ class _WatchSupervisor:
             pass
 
 
+def _is_csharp_project(relative_path: str) -> bool:
+    """A ``.csproj`` decides C# project ownership, so it rebinds calls (#964)."""
+    return relative_path.lower().endswith(".csproj")
+
+
 def _create_watch_handler(
     repo_root: Path,
     store: GraphStore,
@@ -3597,9 +3643,13 @@ def _create_watch_handler(
             else:
                 if source is not None and event.event_type in {"deleted", "moved"}:
                     paths.add(source)
-                elif source is not None and self._parseable_file(source):
+                elif source is not None and (
+                    self._parseable_file(source) or _is_csharp_project(source)
+                ):
                     paths.add(source)
-                if destination is not None and self._parseable_file(destination):
+                if destination is not None and (
+                    self._parseable_file(destination) or _is_csharp_project(destination)
+                ):
                     paths.add(destination)
             return paths
 
@@ -3624,7 +3674,12 @@ def _create_watch_handler(
                         )
                         _raise_watch_update_errors(result, "incremental update")
                         files_updated += result["files_updated"]
-                    if files_updated > 0 and on_files_updated is not None:
+                    if on_files_updated is not None and (
+                        files_updated > 0
+                        # A project file change parses nothing but can rebind
+                        # C# calls in unchanged files; the binder marks flows.
+                        or (changed_files and store.get_metadata("csharp_flows_dirty") == "1")
+                    ):
                         postprocess_result = on_files_updated(store)
                         _raise_watch_postprocess_warnings(postprocess_result)
                 except BaseException as exc:

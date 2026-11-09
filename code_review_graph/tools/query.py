@@ -206,11 +206,12 @@ def _java_fqn_candidates(store: GraphStore, target: str) -> list[GraphNode] | No
     return matches
 
 
-def _namespaced_ruby_candidates(store: GraphStore, target: str) -> list[GraphNode]:
-    """Resolve ``Class.method`` to a Ruby method whose class sits in a namespace.
+def _namespaced_member_candidates(store: GraphStore, target: str) -> list[GraphNode]:
+    """Resolve ``Class.method`` to a Ruby or C# method whose type sits in a namespace.
 
-    Ruby symbols carry the whole namespace (``Billing.Base.audit``), so the exact
-    qualified-tail lookup misses the short form people actually type.
+    Ruby and C# symbols carry the whole namespace (``Billing.Base.audit``,
+    ``Lib.Service.Run``), so the exact qualified-tail lookup misses the short
+    form people actually type.
     """
     method_name = target.rsplit(".", 1)[-1]
     return [
@@ -218,7 +219,7 @@ def _namespaced_ruby_candidates(store: GraphStore, target: str) -> list[GraphNod
         for candidate in store.search_nodes(
             method_name, limit=_MAX_DOTTED_TARGET_CANDIDATES,
         )
-        if candidate.language.lower() == "ruby"
+        if candidate.language.lower() in ("ruby", "csharp")
         and candidate.name == method_name
         and candidate.qualified_name.endswith(f".{target}")
     ]
@@ -632,9 +633,9 @@ def query_graph(
                     candidates = qualified_tail_candidates
                 elif java_candidates is not None:
                     # Java-shaped with no safe match: do not fall back to a
-                    # fuzzy search. A namespaced Ruby method is an exact match
-                    # on the class and method, so it is still safe.
-                    candidates = _namespaced_ruby_candidates(store, target)
+                    # fuzzy search. A namespaced Ruby or C# method is an exact
+                    # match on the type and method, so it is still safe.
+                    candidates = _namespaced_member_candidates(store, target)
                 else:
                     candidates = store.search_nodes(target, limit=20)
                 if pattern == "inheritors_of" and "::" not in target:
