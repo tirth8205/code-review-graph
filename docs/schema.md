@@ -3,7 +3,7 @@
 The graph is one SQLite database, `.code-review-graph/graph.db`, opened in WAL mode.
 The base tables and indexes come from `_SCHEMA_SQL` in `code_review_graph/graph.py`.
 Everything else is added by the versioned migrations in `code_review_graph/migrations.py`.
-The current schema version is 14, the highest key in `MIGRATIONS`. A database
+The current schema version is 15, the highest key in `MIGRATIONS`. A database
 below that is migrated on open, in order, by every migration above its own
 version.
 
@@ -249,40 +249,6 @@ CREATE VIRTUAL TABLE nodes_fts USING fts5(
     tokenize='porter unicode61'
 );
 
--- v6
-CREATE TABLE community_summaries (
-    community_id INTEGER PRIMARY KEY,
-    name TEXT NOT NULL,
-    purpose TEXT DEFAULT '',
-    key_symbols TEXT DEFAULT '[]',
-    risk TEXT DEFAULT 'unknown',
-    size INTEGER DEFAULT 0,
-    dominant_language TEXT DEFAULT '',
-    FOREIGN KEY (community_id) REFERENCES communities(id)
-);
-
-CREATE TABLE flow_snapshots (
-    flow_id INTEGER PRIMARY KEY,
-    name TEXT NOT NULL,
-    entry_point TEXT NOT NULL,
-    critical_path TEXT DEFAULT '[]',
-    criticality REAL DEFAULT 0.0,
-    node_count INTEGER DEFAULT 0,
-    file_count INTEGER DEFAULT 0,
-    FOREIGN KEY (flow_id) REFERENCES flows(id)
-);
-
-CREATE TABLE risk_index (
-    node_id INTEGER PRIMARY KEY,
-    qualified_name TEXT NOT NULL,
-    risk_score REAL DEFAULT 0.0,
-    caller_count INTEGER DEFAULT 0,
-    test_coverage TEXT DEFAULT 'unknown',
-    security_relevant INTEGER DEFAULT 0,
-    last_computed TEXT DEFAULT '',
-    FOREIGN KEY (node_id) REFERENCES nodes(id)
-);
-
 -- v12, widened by v13 to mirror every nodes_fts column
 CREATE TABLE nodes_fts_state (
     node_id INTEGER PRIMARY KEY,
@@ -325,7 +291,7 @@ CREATE TABLE embeddings (
 
 | Key | Set by |
 |---|---|
-| `schema_version` | `migrations.py`; `14` on a current database |
+| `schema_version` | `migrations.py`; `15` on a current database |
 | `fts_state_synced` | `search.rebuild_fts_index`; mirror-shape version |
 | `last_updated` | Full and incremental builds |
 | `last_build_type` | Full and incremental builds |
@@ -339,9 +305,7 @@ CREATE TABLE embeddings (
 |---|---|---|
 | `idx_nodes_file` | `nodes(file_path)` | base |
 | `idx_nodes_kind` | `nodes(kind)` | base |
-| `idx_nodes_qualified` | `nodes(qualified_name)` | base |
-| `idx_edges_source` | `edges(source_qualified)` | base |
-| `idx_edges_target` | `edges(target_qualified)` | base |
+| `idx_nodes_name` | `nodes(name)` | base |
 | `idx_edges_kind` | `edges(kind)` | base |
 | `idx_edges_file` | `edges(file_path)` | base |
 | `idx_edges_target_kind` | `edges(target_qualified, kind)` | base, v7 |
@@ -352,7 +316,6 @@ CREATE TABLE embeddings (
 | `idx_nodes_community` | `nodes(community_id)` | v4 |
 | `idx_communities_parent` | `communities(parent_id)` | v4 |
 | `idx_communities_cohesion` | `communities(cohesion DESC)` | v4 |
-| `idx_risk_index_score` | `risk_index(risk_score DESC)` | v6 |
 | `idx_edges_composite` | `edges(kind, source_qualified, target_qualified, file_path, line)` | v8 |
 | `idx_nodes_symbol` | `nodes(symbol)` | v10 |
 | `idx_edges_kind_target_resolution` | `edges(kind, target_resolution)` | v11 |
@@ -376,3 +339,4 @@ Each migration runs in its own transaction and updates `schema_version` on succe
 | 12 | `nodes_fts_state`, the mirror of the FTS index, and `idx_nodes_fts_state_file` |
 | 13 | `nodes.docstring`, `nodes.name_tokens`, both back-filled; `nodes_fts` and `nodes_fts_state` widened to carry them |
 | 14 | No schema change: `file_hash` cleared on Ruby `File` nodes so the next update re-parses them under the new namespaced class identities |
+| 15 | Dropped `community_summaries`, `flow_snapshots` and `risk_index` with `idx_risk_index_score`, as nothing read them; dropped `idx_nodes_qualified`, `idx_edges_source` and `idx_edges_target`, as other indexes cover them. The file keeps its size until `VACUUM`; later writes reuse the freed pages |

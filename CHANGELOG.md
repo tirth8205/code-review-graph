@@ -142,6 +142,16 @@
   watcher forever. `stop` also now stops any live watcher when it finds the
   daemon already gone. Health files for watchers the daemon never ran are left
   alone.
+- Graphs no longer hold data nothing reads (#1059). Schema v15 drops
+  `community_summaries`, `flow_snapshots` and `risk_index`, which every full
+  postprocess rewrote and nothing read, and whose rows kept pointing at deleted
+  nodes. It also drops `idx_nodes_qualified`, `idx_edges_source` and
+  `idx_edges_target`, as other indexes cover them. A new graph of this repository
+  is 17% smaller, 252 MB down to 210 MB, with the same answers at the same speed.
+  An upgraded graph keeps its file size and reuses the freed space for later
+  writes; to shrink the file, delete it and rebuild, or run `VACUUM`. Older
+  releases refuse a v15 graph, as with any schema change. Build results no longer
+  carry `summaries_computed` or the `summaries_s` timing.
 - TypeScript and JavaScript imports resolve against `compilerOptions.baseUrl`
   when no `paths` pattern matches them, as `tsc` does. A tsconfig that sets
   `baseUrl` without `paths` resolved no non-relative import at all: on a

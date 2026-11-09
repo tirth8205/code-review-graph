@@ -227,9 +227,6 @@ def test_comparator_covers_every_derived_table(tmp_path):
         "flows",
         "flow_memberships",
         "nodes_fts",
-        "community_summaries",
-        "flow_snapshots",
-        "risk_index",
         "metadata",
     ):
         assert table in diff["tables"], f"{table} is never compared"

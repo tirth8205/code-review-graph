@@ -26,9 +26,8 @@ They are not sufficient on their own: a snapshot records only
 ``(kind, file, community_id)`` per node and ``source->target:kind`` per edge,
 so it cannot see a node whose line range, signature, params or file hash
 drifted, an edge whose confidence drifted, or any row in ``flows``,
-``flow_memberships``, ``communities``, ``nodes_fts``, ``community_summaries``,
-``flow_snapshots``, ``risk_index`` or ``metadata``. ``diff_snapshots`` also
-truncates its lists to 100 entries. The per-table comparator below covers
+``flow_memberships``, ``communities``, ``nodes_fts`` or ``metadata``.
+``diff_snapshots`` also truncates its lists to 100 entries. The per-table comparator below covers
 what the snapshot cannot.
 """
 
@@ -89,9 +88,6 @@ COMPARED_TABLES: tuple[str, ...] = (
     "flows",
     "flow_memberships",
     "nodes_fts",
-    "community_summaries",
-    "flow_snapshots",
-    "risk_index",
     "metadata",
 )
 
@@ -405,63 +401,6 @@ def _project_nodes_fts(conn: sqlite3.Connection) -> Optional[_Projection]:
             pass
 
 
-_SUMMARY_VALUE_COLUMNS = ("name", "purpose", "key_symbols", "risk", "size",
-                          "dominant_language")
-
-
-def _project_community_summaries(conn: sqlite3.Connection) -> _Projection:
-    out: _Projection = {}
-    if not _table_exists(conn, "community_summaries"):
-        return out
-    for row in conn.execute(
-        "SELECT s.name AS name, s.purpose AS purpose, "
-        "s.key_symbols AS key_symbols, s.risk AS risk, s.size AS size, "
-        "s.dominant_language AS dominant_language, c.name AS community_name "
-        "FROM community_summaries s "
-        "LEFT JOIN communities c ON c.id = s.community_id"
-    ):
-        key = _blank(row["community_name"]) or f"<orphan>{_blank(row['name'])}"
-        _add(out, key, _join(row, _SUMMARY_VALUE_COLUMNS))
-    return out
-
-
-_SNAPSHOT_VALUE_COLUMNS = ("name", "entry_point", "critical_path",
-                           "criticality", "node_count", "file_count")
-
-
-def _project_flow_snapshots(conn: sqlite3.Connection) -> _Projection:
-    out: _Projection = {}
-    if not _table_exists(conn, "flow_snapshots"):
-        return out
-    keys = _flow_keys(conn)
-    for row in conn.execute(
-        "SELECT flow_id, name, entry_point, critical_path, criticality, "
-        "node_count, file_count FROM flow_snapshots"
-    ):
-        key = keys.get(
-            int(row["flow_id"]),
-            f"<orphan>{_blank(row['entry_point'])}|{_blank(row['name'])}",
-        )
-        _add(out, key, _join(row, _SNAPSHOT_VALUE_COLUMNS))
-    return out
-
-
-_RISK_VALUE_COLUMNS = ("risk_score", "caller_count", "test_coverage",
-                       "security_relevant")
-
-
-def _project_risk_index(conn: sqlite3.Connection) -> _Projection:
-    out: _Projection = {}
-    if not _table_exists(conn, "risk_index"):
-        return out
-    for row in conn.execute(
-        "SELECT qualified_name, risk_score, caller_count, test_coverage, "
-        "security_relevant FROM risk_index"
-    ):
-        _add(out, row["qualified_name"], _join(row, _RISK_VALUE_COLUMNS))
-    return out
-
-
 def _project_metadata(conn: sqlite3.Connection) -> _Projection:
     out: _Projection = {}
     for row in conn.execute("SELECT key, value FROM metadata"):
@@ -479,9 +418,6 @@ _PROJECTORS: dict[str, Callable[[sqlite3.Connection], Optional[_Projection]]] = 
     "flows": _project_flows,
     "flow_memberships": _project_flow_memberships,
     "nodes_fts": _project_nodes_fts,
-    "community_summaries": _project_community_summaries,
-    "flow_snapshots": _project_flow_snapshots,
-    "risk_index": _project_risk_index,
     "metadata": _project_metadata,
 }
 

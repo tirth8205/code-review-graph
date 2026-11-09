@@ -9,7 +9,6 @@ from __future__ import annotations
 import logging
 import random
 import re
-import sqlite3
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
@@ -933,14 +932,6 @@ def purge_empty_communities(store: GraphStore) -> int:
             "WHERE community_id IS NOT NULL)"
         )
         deleted = cur.rowcount if cur.rowcount is not None and cur.rowcount >= 0 else 0
-        # Drop summary rows for removed communities when the table exists.
-        try:
-            conn.execute(
-                "DELETE FROM community_summaries WHERE community_id NOT IN ("
-                "SELECT id FROM communities)"
-            )
-        except sqlite3.OperationalError:
-            pass
         conn.commit()
     except BaseException:
         conn.rollback()
