@@ -80,7 +80,7 @@ def test_build_of_the_issue_repro_links_require_and_calls(tmp_path, monkeypatch)
         assert store.get_stats().files_count == 3
 
     importers = query_graph("importers_of", "util.cjs", str(root))
-    assert [row["file"] for row in importers["results"]] == [str(root / "main.cjs")]
+    assert [row["file"] for row in importers["results"]] == [(root / "main.cjs").as_posix()]
     callers = query_graph("callers_of", "helper", str(root))
     assert [row["name"] for row in callers["results"]] == ["run"]
 
