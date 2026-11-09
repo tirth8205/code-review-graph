@@ -181,7 +181,10 @@ visibility evidence. Namespace imports expose types, not child namespaces.
 `Alias::Type` searches only namespace aliases in the call's lexical scopes; it
 does not select a same-named type, namespace, or local. Unqualified calls can reach
 static methods in enclosing types, using parsed `csharp_static` evidence. Lookup
-stops at a nearer method group; `this.Run()` stays within the immediate type.
+stops at a nearer method group, and at a type with a base list, since an inherited
+member the graph does not model may be the one named; `this.Run()` stays within the
+immediate type. A field or property of an enclosing type names its type from the
+type that declares it, not from the nested type where it is used.
 Unqualified calls hidden by recorded local, parameter, field or property bindings
 stay unresolved.
 This follows the lookup order in the C# specification's
@@ -194,7 +197,8 @@ files in that directory, ownership is unknown and global usings stay local to th
 file. Loose C# files without a project share the review root as one compilation.
 This is a structural approximation: linked/conditional compile items, generated or
 implicit usings, project references and target frameworks require MSBuild evaluation.
-Rebuild after changing project layout when updates are driven only by source watches.
+Watch mode passes `.csproj` changes to the update, so a new or removed project file
+rebinds calls without a rebuild.
 
 Every C# call keeps `csharp_raw_target` and receiver evidence after binding. Resolved
 edges are marked `INFERRED`; unresolved edges retain `unresolved_targets` so generic
@@ -202,7 +206,8 @@ graph fallbacks cannot bind them using weaker evidence. Each C# update re-evalua
 these calls, including unchanged callers. `TESTED_BY` mirrors move with their calls.
 Before deleting a callee file, incoming managed calls return to their raw references
 so recreating a declaration can resolve them again.
-Binding changes persist a `csharp_flows_dirty` marker with the edge update.
+Binding changes persist a `csharp_flows_dirty` marker with the edge update; each
+pass writes its calls, mirrors and marker in one transaction.
 The next full postprocess retraces all flows, including unchanged callers and
 old/new entry points. Deferred postprocessing retains the marker even if a later
 update parses no files; successful full flow replacement clears it atomically.
