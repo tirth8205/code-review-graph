@@ -751,6 +751,11 @@ def _ensure_project_marker(repo_root: Path) -> None:
         _create_data_dir(repo_root / ".code-review-graph")
 
 
+def _enrich_kwargs(args) -> dict:
+    """``--enrich`` asks for Jedi; without it the env var decides (see full_build)."""
+    return {"enrich": True} if getattr(args, "enrich", False) else {}
+
+
 def _handle_build_update(args, repo_root: Path, embedding_refresh_kwargs) -> None:
     """Run writers before the generic CLI store initialization."""
     from .incremental import assert_graph_serves_root, get_db_path
@@ -774,6 +779,7 @@ def _handle_build_update(args, repo_root: Path, embedding_refresh_kwargs) -> Non
                 repo_root=str(repo_root),
                 postprocess=pp,
                 wait_for_lock=getattr(args, "wait", False),
+                **_enrich_kwargs(args),
                 **embedding_refresh_kwargs,
             )
         finally:
@@ -808,6 +814,7 @@ def _handle_build_update(args, repo_root: Path, embedding_refresh_kwargs) -> Non
                 base=args.base,
                 postprocess=pp,
                 wait_for_lock=getattr(args, "wait", False),
+                **_enrich_kwargs(args),
                 **embedding_refresh_kwargs,
             )
         except RuntimeError as exc:
@@ -1222,6 +1229,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_embedding_refresh_args(build_cmd)
     build_cmd.add_argument(
+        "--enrich",
+        action="store_true",
+        help="Also resolve Python method calls with Jedi (needs the "
+             "'enrichment' extra; about a second more per Python file). "
+             "Same as CRG_ENABLE_ENRICHMENT=1. Default: off",
+    )
+    build_cmd.add_argument(
         "--wait",
         action="store_true",
         help="If a build for this repository is already running, wait for it "
@@ -1272,6 +1286,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="External directory to store graph database (useful for network shares)"
     )
     _add_embedding_refresh_args(update_cmd)
+    update_cmd.add_argument(
+        "--enrich",
+        action="store_true",
+        help="Also resolve Python method calls with Jedi (needs the "
+             "'enrichment' extra; about a second more per Python file). "
+             "Same as CRG_ENABLE_ENRICHMENT=1. Default: off",
+    )
     update_cmd.add_argument(
         "--wait",
         action="store_true",

@@ -510,7 +510,7 @@ git 저장소에서는 추적되는 파일만 색인하므로(`git ls-files`) gi
 pip install "code-review-graph[embeddings]"          # Local vector embeddings (sentence-transformers)
 pip install "code-review-graph[google-embeddings]"   # Google Gemini embeddings
 pip install "code-review-graph[communities]"         # Community detection (igraph)
-pip install "code-review-graph[enrichment]"          # Python call-resolution enrichment (Jedi)
+pip install "code-review-graph[enrichment]"          # Python call resolution with Jedi (then build --enrich)
 pip install "code-review-graph[eval]"                # Evaluation benchmarks and SVG export (matplotlib)
 pip install "code-review-graph[wiki]"                # ollama client (not used by the current wiki generator)
 pip install "code-review-graph[all]"                 # All optional dependencies
@@ -556,7 +556,8 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_OPENAI_BATCH_SIZE` | OpenAI 호환 요청의 배치 크기 | `100` |
 | `NO_COLOR` | 터미널의 ANSI 색 끄기 | - |
 | `CRG_SERIAL_PARSE` | `1`로 두면 병렬 파싱 끄기(디버깅용) | - |
-| `CRG_DISABLE_ENRICHMENT` | `1`로 두면 `enrichment` 추가 기능이 있어도 Jedi 호출 해석 끄기 | - |
+| `CRG_ENABLE_ENRICHMENT` | `1`로 두면 build와 update마다 Jedi로 Python 메서드 호출 해석(`enrichment` 추가 기능 필요, Python 파일당 약 1초 추가). `build --enrich`와 같음 | 꺼짐 |
+| `CRG_DISABLE_ENRICHMENT` | `1`로 두면 요청이 있어도 Jedi를 실행하지 않음 | - |
 
 OpenAI 호환 임베딩(OpenAI, Azure 또는 new-api, LiteLLM, vLLM, LocalAI, OpenAI 모드의 Ollama 같은 자체 게이트웨이)에는 추가 설치가 필요 없습니다. 변수를 설정하고 `embed_graph`에 `provider="openai"`를 넘기세요.
 

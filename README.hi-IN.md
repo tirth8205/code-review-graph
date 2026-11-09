@@ -510,7 +510,7 @@ git रिपॉज़िटरी में सिर्फ़ ट्रैक 
 pip install "code-review-graph[embeddings]"          # Local vector embeddings (sentence-transformers)
 pip install "code-review-graph[google-embeddings]"   # Google Gemini embeddings
 pip install "code-review-graph[communities]"         # Community detection (igraph)
-pip install "code-review-graph[enrichment]"          # Python call-resolution enrichment (Jedi)
+pip install "code-review-graph[enrichment]"          # Python call resolution with Jedi (then build --enrich)
 pip install "code-review-graph[eval]"                # Evaluation benchmarks and SVG export (matplotlib)
 pip install "code-review-graph[wiki]"                # ollama client (not used by the current wiki generator)
 pip install "code-review-graph[all]"                 # All optional dependencies
@@ -556,7 +556,8 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_OPENAI_BATCH_SIZE` | OpenAI-संगत अनुरोधों का बैच आकार | `100` |
 | `NO_COLOR` | टर्मिनल में ANSI रंग बंद करें | - |
 | `CRG_SERIAL_PARSE` | `1` करने पर समानांतर पार्सिंग बंद (डिबगिंग के लिए) | - |
-| `CRG_DISABLE_ENRICHMENT` | `1` करने पर `enrichment` एक्स्ट्रा होने पर भी Jedi कॉल रिज़ॉल्यूशन बंद | - |
+| `CRG_ENABLE_ENRICHMENT` | `1` करने पर हर build और update में Jedi से Python मेथड कॉल हल होते हैं (`enrichment` एक्स्ट्रा चाहिए; हर Python फ़ाइल पर लगभग एक सेकंड ज़्यादा)। `build --enrich` जैसा | बंद |
+| `CRG_DISABLE_ENRICHMENT` | `1` करने पर माँगने पर भी Jedi नहीं चलता | - |
 
 OpenAI-संगत एम्बेडिंग (OpenAI, Azure, या new-api, LiteLLM, vLLM, LocalAI, या OpenAI मोड में Ollama जैसा स्व-होस्टेड गेटवे) के लिए अतिरिक्त इंस्टॉल नहीं चाहिए। चर सेट करें और `embed_graph` को `provider="openai"` दें:
 

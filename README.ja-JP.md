@@ -510,7 +510,7 @@ git リポジトリでは追跡されているファイルだけがインデッ�
 pip install "code-review-graph[embeddings]"          # Local vector embeddings (sentence-transformers)
 pip install "code-review-graph[google-embeddings]"   # Google Gemini embeddings
 pip install "code-review-graph[communities]"         # Community detection (igraph)
-pip install "code-review-graph[enrichment]"          # Python call-resolution enrichment (Jedi)
+pip install "code-review-graph[enrichment]"          # Python call resolution with Jedi (then build --enrich)
 pip install "code-review-graph[eval]"                # Evaluation benchmarks and SVG export (matplotlib)
 pip install "code-review-graph[wiki]"                # ollama client (not used by the current wiki generator)
 pip install "code-review-graph[all]"                 # All optional dependencies
@@ -556,7 +556,8 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_OPENAI_BATCH_SIZE` | OpenAI 互換のリクエストのバッチサイズ | `100` |
 | `NO_COLOR` | 端末の ANSI 色を無効化 | - |
 | `CRG_SERIAL_PARSE` | `1` にすると並列解析を無効化（デバッグ用） | - |
-| `CRG_DISABLE_ENRICHMENT` | `1` にすると `enrichment` エクストラ導入時も Jedi による呼び出し解決を無効化 | - |
+| `CRG_ENABLE_ENRICHMENT` | `1` にすると毎回の build と update で Jedi により Python のメソッド呼び出しを解決（`enrichment` エクストラが必要、Python ファイル 1 つにつき約 1 秒増）。`build --enrich` と同じ | オフ |
+| `CRG_DISABLE_ENRICHMENT` | `1` にすると要求があっても Jedi を実行しない | - |
 
 OpenAI 互換の埋め込み（OpenAI、Azure、あるいは new-api、LiteLLM、vLLM、LocalAI、OpenAI モードの Ollama といった自前のゲートウェイ）に追加インストールは要りません。変数を設定し、`embed_graph` に `provider="openai"` を渡します。
 

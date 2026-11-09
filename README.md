@@ -523,7 +523,7 @@ Optional dependency groups:
 pip install "code-review-graph[embeddings]"          # Local vector embeddings (sentence-transformers)
 pip install "code-review-graph[google-embeddings]"   # Google Gemini embeddings
 pip install "code-review-graph[communities]"         # Community detection (igraph)
-pip install "code-review-graph[enrichment]"          # Python call-resolution enrichment (Jedi)
+pip install "code-review-graph[enrichment]"          # Python call resolution with Jedi (then build --enrich)
 pip install "code-review-graph[eval]"                # Evaluation benchmarks and SVG export (matplotlib)
 pip install "code-review-graph[wiki]"                # ollama client (not used by the current wiki generator)
 pip install "code-review-graph[all]"                 # All optional dependencies
@@ -569,7 +569,8 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_OPENAI_BATCH_SIZE` | Batch size for OpenAI-compatible requests | `100` |
 | `NO_COLOR` | Disable ANSI colours in the terminal | - |
 | `CRG_SERIAL_PARSE` | Set to `1` to disable parallel parsing (for debugging) | - |
-| `CRG_DISABLE_ENRICHMENT` | Set to `1` to skip Jedi call resolution when the `enrichment` extra is installed | - |
+| `CRG_ENABLE_ENRICHMENT` | Set to `1` to resolve Python method calls with Jedi on every build and update (needs the `enrichment` extra; about a second more per Python file). Same as `build --enrich` | off |
+| `CRG_DISABLE_ENRICHMENT` | Set to `1` to never run Jedi, even when asked for | - |
 
 OpenAI-compatible embeddings (OpenAI, Azure, or a self-hosted gateway such as new-api, LiteLLM, vLLM, LocalAI, or Ollama in OpenAI mode) need no extra install. Set the variables and pass `provider="openai"` to `embed_graph`:
 

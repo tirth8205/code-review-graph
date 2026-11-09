@@ -4,17 +4,20 @@
 
 ### Added
 
-- The `enrichment` extra now does something: with Jedi installed, `build`
-  and `update` resolve Python method calls on a local variable (PR #823). For
+- `build --enrich` and `update --enrich` resolve Python method calls on a
+  local variable with Jedi, from the `enrichment` extra (PR #823). For
   `s = make()` then `s.authenticate()`, the CALLS edge to the bare name
-  `authenticate` now names `svc.py::OldService.authenticate`, so
+  `authenticate` then names `svc.py::OldService.authenticate`, so
   `callers_of` and the impact radius find the call. Jedi was a declared
-  extra that no build ever ran. `update` scans only the Python files it
-  re-parses, plus their dependents, whose edges it rewrites. A target with no
-  node in the graph is never written. Jedi is slow: on an 88-file Python
-  repository a full build went from 26 to 104 seconds and resolved 44 more
-  calls. Without the extra nothing runs and builds cost the same;
-  `CRG_DISABLE_ENRICHMENT=1` turns the step off when Jedi is installed.
+  extra that no build ever ran. It is off unless you ask for it, with the
+  flag or `CRG_ENABLE_ENRICHMENT=1` (for hooks, the watcher and MCP builds),
+  because it is slow: on an 88-file Python repository a full build went from
+  26 to 104 seconds and resolved 44 more calls. Having the extra installed,
+  for example through `[all]`, changes nothing on its own: the graph and the
+  build time stay the same. `CRG_DISABLE_ENRICHMENT=1` keeps it off even
+  when asked for. With it on, `update` scans only the Python files it
+  re-parses, plus their dependents, whose edges it rewrites, and a target
+  with no node in the graph is never written.
 - Python modules that replace themselves in `sys.modules` are followed to the
   module they install. A compatibility shim such as
   `sys.modules[__name__] = importlib.import_module("app.services.billing")`

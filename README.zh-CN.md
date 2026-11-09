@@ -510,7 +510,7 @@ node_modules/**
 pip install "code-review-graph[embeddings]"          # Local vector embeddings (sentence-transformers)
 pip install "code-review-graph[google-embeddings]"   # Google Gemini embeddings
 pip install "code-review-graph[communities]"         # Community detection (igraph)
-pip install "code-review-graph[enrichment]"          # Python call-resolution enrichment (Jedi)
+pip install "code-review-graph[enrichment]"          # Python call resolution with Jedi (then build --enrich)
 pip install "code-review-graph[eval]"                # Evaluation benchmarks and SVG export (matplotlib)
 pip install "code-review-graph[wiki]"                # ollama client (not used by the current wiki generator)
 pip install "code-review-graph[all]"                 # All optional dependencies
@@ -556,7 +556,8 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_OPENAI_BATCH_SIZE` | OpenAI 兼容请求的批大小 | `100` |
 | `NO_COLOR` | 关闭终端中的 ANSI 颜色 | - |
 | `CRG_SERIAL_PARSE` | 设为 `1` 可关闭并行解析（用于调试） | - |
-| `CRG_DISABLE_ENRICHMENT` | 设为 `1` 可在装有 `enrichment` 附加包时跳过 Jedi 调用解析 | - |
+| `CRG_ENABLE_ENRICHMENT` | 设为 `1` 后每次 build 和 update 都用 Jedi 解析 Python 方法调用（需要 `enrichment` 附加包，每个 Python 文件约多 1 秒）。等同 `build --enrich` | 关闭 |
+| `CRG_DISABLE_ENRICHMENT` | 设为 `1` 后即使请求也不运行 Jedi | - |
 
 OpenAI 兼容嵌入（OpenAI、Azure，或自建网关如 new-api、LiteLLM、vLLM、LocalAI，或 OpenAI 模式下的 Ollama）无需额外安装。设置变量并给 `embed_graph` 传入 `provider="openai"`：
 
