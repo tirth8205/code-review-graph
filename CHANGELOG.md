@@ -85,6 +85,7 @@
 - `find_dead_code` collects its edge evidence once, not once per function (#1082, #982).
 - Plain C headers skip the C++ parse through a prefilter (#876, #802).
 - The dev dependency range allows pytest 9 (#1140).
+- The `build-graph`, `review-delta` and `review-pr` skills are written from one source, `DOCUMENTARY_SKILLS` in `skills.py`. `scripts/generate_documentary_skills.py` rewrites them, and a test fails if a file is edited by hand (#822).
 
 ### Fixed
 

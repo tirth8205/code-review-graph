@@ -1518,8 +1518,16 @@ DOCUMENTARY_SKILLS: dict[str, dict[str, str]] = {
 
 
 def render_documentary_skill_markdown(slug: str) -> str:
-    """Render the checked-in markdown for a documentation-driven skill."""
-    spec = DOCUMENTARY_SKILLS[slug]
+    """Render the checked-in markdown for a documentation-driven skill.
+
+    Raises:
+        KeyError: *slug* is not one of ``DOCUMENTARY_SKILLS``.
+    """
+    try:
+        spec = DOCUMENTARY_SKILLS[slug]
+    except KeyError:
+        known = ", ".join(sorted(DOCUMENTARY_SKILLS))
+        raise KeyError(f"unknown documentary skill {slug!r} (known: {known})") from None
     frontmatter = [
         "---",
         f"name: {slug}",
@@ -1540,6 +1548,9 @@ def render_documentary_skill_markdown(slug: str) -> str:
 def generate_documentary_skills(repo_root: Path, skills_dir: Path | None = None) -> Path:
     """Generate the documentation-driven skills under ``skills/``.
 
+    ``DOCUMENTARY_SKILLS`` is the source of these files: edit the text there,
+    then run ``scripts/generate_documentary_skills.py``.
+
     Args:
         repo_root: Repository root directory.
         skills_dir: Custom skills directory. Defaults to repo_root/skills.
@@ -1555,7 +1566,11 @@ def generate_documentary_skills(repo_root: Path, skills_dir: Path | None = None)
         skill_subdir = skills_dir / slug
         skill_subdir.mkdir(parents=True, exist_ok=True)
         skill_path = skill_subdir / "SKILL.md"
-        skill_path.write_text(render_documentary_skill_markdown(slug), encoding="utf-8")
+        # LF on every platform: these files are checked in, and Windows
+        # newline translation would rewrite all three as a diff.
+        skill_path.write_text(
+            render_documentary_skill_markdown(slug), encoding="utf-8", newline="\n",
+        )
 
     return skills_dir
 
