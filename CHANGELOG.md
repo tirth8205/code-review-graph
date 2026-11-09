@@ -687,6 +687,26 @@
 - Renames through re-exports match a full build, and importers keep their flows and communities (#1062).
 - Watch mode does not report a refused directory as adopted (#910, #907) and does not watch ignored trees created after startup (#973, #908).
 - Windows daemon logs accept Unicode and tolerate vanished PIDs (#1129, #866), and a Job Object ends watchers when the daemon dies (#958, part of #925).
+- `tests_for` names PHP tests that reach a class through the Laravel container,
+  and says they are guesses (part of #850). Run a full `build` to pick this up.
+  - A PHP call on an expression, such as `$this->service->run()` or
+    `app(Service::class)->run()`, was bound to a method of the same name in the
+    calling file. A test named after the method it tests was recorded as calling
+    itself: 113 such edges from tests on koel/koel. It now stays unresolved, as
+    the same call in Python does.
+  - When more than one class the test imports defines the called method, the
+    test is listed with `inferred_by: "ambiguous_call"`, unless the call is made
+    on one of those classes that the test builds, as in
+    `(new UpdateBooks)->handle()`. Building one class does not settle the
+    test's other calls. On koel, classes with a test file that names them but
+    no `tests_for` answer went from 17 to 12.
+  - The summary says how many rows are guesses, and `detail_level="minimal"`
+    keeps `inferred_by` on `tests_for` rows.
+  - A guess is never coverage: test gaps and risk scores do not count it. The
+    `detect_changes` summary says PHP gaps are a guess, since container and
+    HTTP calls are not traced (#851 is the full fix).
+- Migration `up` and `down` methods are not test gaps when the file is in a
+  `migrations` or `migrate` folder inside the repository (#850).
 
 ## [2.3.9] - 2026-09-18
 

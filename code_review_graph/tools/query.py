@@ -1085,14 +1085,18 @@ def query_graph(
         results: list[dict[str, Any]] = []
         edges_out: list[dict[str, Any]] = []
         total_results = 0
+        # Results matched by a name or an unpinned call, not a traced edge.
+        inferred_results = 0
         # (dedupe key, row, edge) for the call-site patterns, collected before
         # emission so repeats can be interleaved behind first sightings.
         call_sites: list[tuple[str, dict[str, Any], GraphEdge]] = []
 
         def add_result(result: dict[str, Any], edge: Any | None = None) -> None:
             """Count every logical result but retain only the bounded prefix."""
-            nonlocal total_results
+            nonlocal total_results, inferred_results
             total_results += 1
+            if result.get("inferred_by"):
+                inferred_results += 1
             if len(results) >= response_limit:
                 return
             results.append(result)
@@ -1527,6 +1531,19 @@ def query_graph(
                     result["indirect"] = bool(match.get("indirect", False))
                     add_result(result)
                     seen.add(test_qn)
+            # A PHP test may reach this through the container, as in
+            # ``app(Service::class)->run()``, with a call the graph could not
+            # pin to one class. Name it, labelled, so the answer says the link
+            # is a guess (#850).
+            for test_qn in store.get_ambiguous_call_tests(qn):
+                test = store.get_node(test_qn)
+                if test is None or test_qn in seen or not test.is_test:
+                    continue
+                result = node_to_dict(test)
+                result["indirect"] = False
+                result["inferred_by"] = "ambiguous_call"
+                add_result(result)
+                seen.add(test_qn)
             # Also search by naming convention
             name = node.name if node else target
             cpp_overload_set = bool(
@@ -1718,6 +1735,10 @@ def query_graph(
             summary += f" — showing {len(results)}, {results_omitted} omitted"
         if same_name_tests:
             summary += f" — skipped {same_name_tests} same-named test symbol(s)"
+        if pattern == "tests_for" and inferred_results:
+            # Say it where it is read first: a guessed test link is not a
+            # traced one, and an agent should not report it as coverage.
+            summary += f"; {inferred_results} of them guesses (see inferred_by)"
 
         # A zero here is the dangerous direction: agents read it as "none
         # exist" and either conclude wrongly or fall back to grepping the
@@ -1732,7 +1753,9 @@ def query_graph(
 
         if detail_level == "minimal":
             result_fields: tuple[str, ...] = ("name", "kind", "file_path", "indirect")
-            if pattern == "inheritors_of":
+            if pattern in ("inheritors_of", "tests_for"):
+                # Present only on the rows that are guesses, so a traced row
+                # pays nothing for it.
                 result_fields += ("inferred_by",)
             if pattern in _CALL_SITE_PATTERNS:
                 # The line is what turns a name into a location, and it costs

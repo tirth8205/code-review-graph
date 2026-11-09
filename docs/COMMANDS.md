@@ -148,6 +148,12 @@ graph, so no route does not prove there is none. An unclear end comes back as
 hop by its qualified name from the repository root, and adds `file` only when the
 call is written outside the source's own file.
 
+`tests_for` rows that are guesses carry `inferred_by`, in minimal mode too:
+`naming_convention` for a test found by its name, and `ambiguous_call` for a PHP
+test whose call could mean this method or a same-named one in another class the
+test imports, as with `app(Service::class)->run()`. The summary says how many
+rows are guesses. A guess is never counted as coverage.
+
 #### `get_review_context_tool`
 ```
 changed_files: list[str] | None

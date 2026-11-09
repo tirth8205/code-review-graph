@@ -20,7 +20,7 @@ from .constants import env_float, env_int
 from .errors import ChangeDiscoveryError
 from .flows import get_affected_flows
 from .graph import GraphNode, GraphStore, _sanitize_name, node_to_dict
-from .parser import is_test_file, normalize_file_path
+from .parser import _repo_relative_path, is_test_file, normalize_file_path
 
 logger = logging.getLogger(__name__)
 
@@ -36,9 +36,34 @@ _TEST_GAP_EXEMPT_NAMES = frozenset({
 })
 
 
-def is_test_gap_exempt(node: GraphNode) -> bool:
+# ``up`` and ``down`` are too common to exempt everywhere, so they are exempt
+# only in a migration file: one in a ``migrations`` folder (Laravel, Phinx,
+# Doctrine, Knex) or a ``migrate`` folder (Rails), inside the repository (#850).
+_MIGRATION_METHOD_NAMES = frozenset({"up", "down"})
+_MIGRATION_DIRS = frozenset({"migrations", "migrate"})
+
+
+def _is_migration_file(file_path: str, repo_root: str | Path | None) -> bool:
+    """Whether *file_path* sits in a migration folder inside the repository.
+
+    Read from the path relative to the root, as test folders are: a checkout
+    under a directory named ``migrations`` must not exempt the whole repository.
+    """
+    relative = _repo_relative_path(normalize_file_path(file_path), repo_root)
+    if relative is None:
+        return False
+    return any(part in _MIGRATION_DIRS for part in relative.split("/")[:-1])
+
+
+def is_test_gap_exempt(node: GraphNode, repo_root: str | Path | None = None) -> bool:
     """Return whether a lifecycle node is exempt from test-gap reporting."""
-    return node.kind == "Function" and node.name in _TEST_GAP_EXEMPT_NAMES
+    if node.kind != "Function":
+        return False
+    if node.name in _TEST_GAP_EXEMPT_NAMES:
+        return True
+    return node.name in _MIGRATION_METHOD_NAMES and _is_migration_file(
+        node.file_path, repo_root,
+    )
 
 
 def _is_test_lifecycle(node: GraphNode, store: GraphStore) -> bool:
@@ -849,7 +874,7 @@ def analyze_changes(
     gap_candidates = [
         node for node in changed_funcs
         if not (node.is_test or is_test_file(node.file_path, gap_root))
-        and not is_test_gap_exempt(node)
+        and not is_test_gap_exempt(node, gap_root)
         and not node.extra.get("typescript_kind")
     ]
     # TESTED_BY edges are stored as source=production, target=test by the
@@ -992,6 +1017,17 @@ def analyze_changes(
         summary_parts.append(
             "  - Reached only through a caller: "
             f"{', '.join(_gap_names(indirect_gaps))}"
+        )
+    if any(
+        node.language == "php" and node.qualified_name not in directly_tested
+        for node in gap_candidates
+    ):
+        # A Laravel test reaches code through the container or an HTTP call,
+        # and the graph traces neither, so a PHP gap is a guess (#850, #851).
+        summary_parts.append(
+            "  - PHP gaps are a guess: tests that reach code through the "
+            "container or an HTTP call are not traced (tests_for names "
+            "likely ones)"
         )
     if funcs_truncated:
         summary_parts.append(
