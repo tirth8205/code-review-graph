@@ -25,9 +25,19 @@ remove them from `.claude/settings.json` by hand (`install` writes a backup to
 `.claude/settings.json.bak` first), then run `install` again.
 
 The generated config uses two events: `PostToolUse` (runs
-`code-review-graph update --skip-flows` after Edit/Write) and `SessionStart`
+`code-review-graph hook-update` after Edit/Write) and `SessionStart`
 (runs `code-review-graph status`). Pre-commit checks live in a git hook, not in
 Claude Code settings.
+
+`hook-update` updates the graph of the repository that holds the edited file,
+not the one the session started in, so it works from a folder of sibling
+repos, an outer repo with nested ones, or a main checkout that edits a linked
+worktree. It updates that repository only if it already has a graph, or if it
+is the repository the session started in (which is built on first edit, as
+before). An edit anywhere else on disk changes no graph. A submodule with no
+graph of its own passes the edit to its superproject. Under `CRG_DATA_DIR`
+every repository points at the same database, so it counts only as the graph
+of the repository it was built for.
 
 #### The git pre-commit hook
 
@@ -414,8 +424,9 @@ on first use. Nothing else is needed.
 
 ## Graph seems stale
 
-- With hooks installed, `update --skip-flows` runs after each Edit/Write and
-  the pre-commit hook runs `update` before each commit, and the post-checkout,
+- With hooks installed, `hook-update` updates the edited file's repository
+  after each Edit/Write (see above for which repositories it touches), the
+  pre-commit hook runs `update` before each commit, and the post-checkout,
   post-merge and post-rewrite hooks run it after a branch switch, a merge and
   a rebase (not in linked worktrees; see above).
 - Run `code-review-graph update`, or `/code-review-graph:build-graph` in Claude

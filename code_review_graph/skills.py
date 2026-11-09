@@ -1575,6 +1575,16 @@ def generate_documentary_skills(repo_root: Path, skills_dir: Path | None = None)
     return skills_dir
 
 
+# The edit hook hands the event JSON to ``hook-update``, then drains whatever
+# was left unread, so a large payload never meets a closed pipe (#493). It never
+# fails the edit: not when the CLI is missing, not when an older CLI has no
+# ``hook-update``, not when the update itself fails.
+_CLAUDE_UPDATE_HOOK_COMMAND = (
+    "command -v code-review-graph >/dev/null 2>&1"
+    " && code-review-graph hook-update; cat >/dev/null || true"
+)
+
+
 def generate_hooks_config(repo_root: Path) -> dict[str, Any]:
     """Generate Claude Code hooks configuration.
 
@@ -1583,9 +1593,11 @@ def generate_hooks_config(repo_root: Path) -> dict[str, Any]:
     Claude Code event — pre-commit checks are handled by ``install_git_hook``.
 
     The ``repo_root`` parameter is retained for backward compatibility but is
-    not embedded in hook commands. Instead, the repo root is resolved at
-    runtime via ``git rev-parse --show-toplevel`` so that ``settings.json``
-    is shareable across collaborators with different checkout paths.
+    not embedded in hook commands, so ``settings.json`` is shareable across
+    collaborators with different checkout paths. The edit hook passes the
+    event JSON to ``hook-update``, which updates the repository that holds
+    the edited file rather than the one the session started in (#311). The
+    session hook resolves its repository with ``git rev-parse --show-toplevel``.
     A PATH guard ensures the hook exits silently when the binary is not on
     ``$PATH`` (e.g. installed in a project venv).
     """
@@ -1597,14 +1609,7 @@ def generate_hooks_config(repo_root: Path) -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": (
-                                "cat >/dev/null || true; "
-                                "command -v code-review-graph >/dev/null 2>&1 || exit 0; "
-                                "git rev-parse --git-dir >/dev/null 2>&1"
-                                " && code-review-graph update --skip-flows"
-                                " --repo \"$(git rev-parse --show-toplevel 2>/dev/null)\""
-                                " || true"
-                            ),
+                            "command": _CLAUDE_UPDATE_HOOK_COMMAND,
                             "timeout": 30,
                         },
                     ],
@@ -2171,6 +2176,9 @@ _GENERATED_HOOK_COMMAND_RE = re.compile(
     r"|cat\s*\|\s*\{\s*if\s+command\s+-v\s+code-review-graph\s*>/dev/null\s+2>&1;\s*"
     r"then\s+code-review-graph\s+hook-(?:update|status);\s*"
     r"else\s+cat\s*>/dev/null;\s*fi;\s*\}"
+    # The project edit hook that forwards the event JSON to ``hook-update``.
+    r"|command\s+-v\s+code-review-graph\s*>/dev/null\s+2>&1\s*&&\s*"
+    r"code-review-graph\s+hook-update;\s*cat\s*>/dev/null(?:\s*\|\|\s*true)?"
     r")\Z"
 )
 
