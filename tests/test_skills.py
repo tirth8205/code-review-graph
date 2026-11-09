@@ -717,8 +717,12 @@ class TestGenerateCodexHooksConfig:
         cmd = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
 
         payload = ("x" * 1024 + "\n") * 20000
+        # Resolve PATH explicitly: Windows CreateProcess can prefer the
+        # System32 WSL launcher over Git Bash when passed a bare executable name.
+        bash = shutil.which("bash")
+        assert bash is not None, "Bash is required for the shell hook regression"
         proc = subprocess.Popen(
-            ["bash", "-lc", cmd],
+            [bash, "-lc", cmd],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

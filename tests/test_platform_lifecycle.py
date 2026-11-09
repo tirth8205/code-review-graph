@@ -91,7 +91,7 @@ class PlatformExpectation:
     scope: str  # "repo", "home" or "hermes"
     relative_config: str
     server_key: str
-    fmt: str  # object | array | toml | yaml
+    fmt: str  # object | array | toml | yaml | dsh-patch
     entry_type: str | None  # expected value of the entry's "type" field
     expects_cwd: bool
     extra_fields: dict[str, Any] = field(default_factory=dict)
@@ -259,6 +259,17 @@ EXPECTATIONS: dict[str, PlatformExpectation] = {
         entry_type="stdio",
         expects_cwd=True,
     ),
+    # One ``insert`` operation in DSH's home patch layer; the sandbox points
+    # DSH_HOME at ``<home>/.dsh``.
+    "dsh": PlatformExpectation(
+        key="dsh",
+        scope="home",
+        relative_config=".dsh/cordis.patch.yml",
+        server_key="insert",
+        fmt="dsh-patch",
+        entry_type=None,
+        expects_cwd=False,
+    ),
 }
 
 PLATFORM_KEYS = sorted(EXPECTATIONS)
@@ -283,6 +294,7 @@ EXPECTED_INSTRUCTION_FILES: dict[str, tuple[str, ...]] = {
     "copilot-cli": (".github/instructions/code-review-graph.instructions.md",),
     "hermes": ("AGENTS.md",),
     "codebuddy": ("CODEBUDDY.md",),
+    "dsh": ("AGENTS.md",),
 }
 
 # Files a single-platform install is expected to create for hooks and skills,
@@ -326,6 +338,7 @@ EXPECTED_EXTRA_ARTIFACTS: dict[str, tuple[str, ...]] = {
         "repo:.codebuddy/settings.json",
         "repo:.codebuddy/skills/explore-codebase/SKILL.md",
     ),
+    "dsh": (),
 }
 
 
@@ -346,6 +359,7 @@ HOME_SUBDIRS = (
     ".copilot",
     ".config/opencode",
     ".config/mimocode",
+    ".dsh",
     str(Path(_zed_relative()).parent),
 )
 
@@ -391,6 +405,7 @@ def sandbox(tmp_path_factory, monkeypatch) -> Sandbox:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
     monkeypatch.setenv("CRG_HOME", str(home / ".code-review-graph"))
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("DSH_HOME", str(home / ".dsh"))
     monkeypatch.setattr(Path, "home", lambda: home)
 
     return Sandbox(repo=repo, home=home, hermes_home=hermes_home)
@@ -424,11 +439,35 @@ def run_uninstall(sandbox: Sandbox, **kwargs: Any) -> uninstall.UninstallReport:
 # ---------------------------------------------------------------------------
 
 
+def _dsh_rows(raw: str) -> list[dict[str, Any]]:
+    """Every row of every ``insert`` operation in a DSH patch layer."""
+    from code_review_graph import dsh
+
+    return [
+        row
+        for operation in (dsh.load(raw) or [])
+        if isinstance(operation, dict)
+        for row in operation.get("insert") or []
+        if isinstance(row, dict)
+    ]
+
+
+def _dsh_server(raw: str, name: str) -> dict[str, Any] | None:
+    """The MCP client config DSH starts for ``serverName`` *name*."""
+    for row in _dsh_rows(raw):
+        config = row.get("config")
+        if isinstance(config, dict) and config.get("serverName") == name:
+            return {k: v for k, v in config.items() if k not in ("serverName", "transport")}
+    return None
+
+
 def read_entry(path: Path, expect: PlatformExpectation) -> dict[str, Any] | None:
     """Return the code-review-graph entry from a config, or None if absent."""
     if not path.exists():
         return None
     raw = path.read_text(encoding="utf-8")
+    if expect.fmt == "dsh-patch":
+        return _dsh_server(raw, ENTRY_NAME)
     if expect.fmt == "toml":
         import tomllib
 
@@ -456,6 +495,11 @@ def count_entries(path: Path, expect: PlatformExpectation) -> int:
     if not path.exists():
         return 0
     raw = path.read_text(encoding="utf-8")
+    if expect.fmt == "dsh-patch":
+        return sum(
+            1 for row in _dsh_rows(raw)
+            if (row.get("config") or {}).get("serverName") == ENTRY_NAME
+        )
     if expect.fmt == "toml":
         return len(re.findall(rf"^\[{re.escape(expect.server_key)}\.{ENTRY_NAME}\]", raw, re.M))
     if expect.fmt == "yaml":
@@ -474,6 +518,18 @@ def count_entries(path: Path, expect: PlatformExpectation) -> int:
 def read_foreign(path: Path, expect: PlatformExpectation) -> tuple[Any, Any]:
     """Return ``(unrelated top-level setting, unrelated MCP server entry)``."""
     raw = path.read_text(encoding="utf-8")
+    if expect.fmt == "dsh-patch":
+        from code_review_graph import dsh
+
+        setting = next(
+            (
+                operation["config"]["value"]
+                for operation in dsh.load(raw) or []
+                if isinstance(operation, dict) and operation.get("id") == FOREIGN_SETTING
+            ),
+            None,
+        )
+        return setting, _dsh_server(raw, FOREIGN_SERVER)
     if expect.fmt == "toml":
         import tomllib
 
@@ -500,6 +556,23 @@ FOREIGN_ENTRY = {"command": "other-tool", "args": ["--serve"]}
 def write_preexisting_config(path: Path, expect: PlatformExpectation) -> None:
     """Seed a user's own config: an unrelated setting and another MCP server."""
     path.parent.mkdir(parents=True, exist_ok=True)
+    if expect.fmt == "dsh-patch":
+        path.write_text(
+            "# a user's own DSH patches\n"
+            f"- id: {FOREIGN_SETTING}\n"
+            f"  config: {{value: {FOREIGN_VALUE}}}\n"
+            "- insert:\n"
+            f"    - id: mcp-{FOREIGN_SERVER}\n"
+            "      name: '@deepseek-ai/dsh-mcp-client'\n"
+            "      config:\n"
+            f"        serverName: {FOREIGN_SERVER}\n"
+            "        transport: stdio\n"
+            "        command: other-tool\n"
+            "        args: ['--serve']\n"
+            "        cwd: !!js process.cwd()\n",
+            encoding="utf-8",
+        )
+        return
     if expect.fmt == "toml":
         path.write_text(
             f'{FOREIGN_SETTING} = "{FOREIGN_VALUE}"\n\n'
@@ -538,6 +611,19 @@ def write_stale_config(path: Path, expect: PlatformExpectation) -> None:
     than kept.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
+    if expect.fmt == "dsh-patch":
+        path.write_text(
+            "- insert:\n"
+            "    - id: mcp-code-review-graph\n"
+            "      name: '@deepseek-ai/dsh-mcp-client'\n"
+            "      config:\n"
+            "        serverName: code-review-graph\n"
+            "        transport: stdio\n"
+            f"        command: {STALE_ABSOLUTE}\n"
+            "        args: [-m, code_review_graph, serve]\n",
+            encoding="utf-8",
+        )
+        return
     if expect.fmt == "toml":
         path.write_text(
             f"[{expect.server_key}.{ENTRY_NAME}]\n"
@@ -1224,7 +1310,7 @@ def test_platform_list_does_not_drift() -> None:
 
     # The uninstall sweep iterates skills.PLATFORMS, so drift can only appear as
     # a format it cannot handle. Name any such platform explicitly.
-    handled_formats = {"toml", "yaml", "object", "array"}
+    handled_formats = {"toml", "yaml", "object", "array", "dsh-patch"}
     unsweepable = sorted(
         name
         for name, spec in skills.PLATFORMS.items()

@@ -41,6 +41,8 @@ def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # real config. Re-point it inside this fake home so the Hermes platform
     # is exercised within the user-scope boundary uninstall enforces.
     monkeypatch.setenv("HERMES_HOME", str(home / ".hermes"))
+    # The same holds for DSH_HOME, which conftest also pins.
+    monkeypatch.setenv("DSH_HOME", str(home / ".dsh"))
     return home
 
 
@@ -68,6 +70,17 @@ def test_uninstall_removes_mcp_entry_for_every_current_platform_spec(
             "[mcp_servers.code-review-graph]\n"
             "command = \"code-review-graph\"\n\n"
             "[mcp_servers.other]\ncommand = \"other\"\n",
+        )
+    elif spec["format"] == "dsh-patch":
+        _write(
+            config_path,
+            "- id: model\n"
+            "  config: {theme: dark}\n"
+            "- insert:\n"
+            "    - id: mcp-code-review-graph\n"
+            "      name: '@deepseek-ai/dsh-mcp-client'\n"
+            "      config: {serverName: code-review-graph, transport: stdio,\n"
+            "               command: code-review-graph, args: [serve]}\n",
         )
     elif spec["format"] == "yaml":
         _write(
@@ -100,6 +113,10 @@ def test_uninstall_removes_mcp_entry_for_every_current_platform_spec(
         assert "[mcp_servers.code-review-graph]" not in text
         assert "[mcp_servers.other]" in text
         assert 'theme = "dark"' in text
+    elif spec["format"] == "dsh-patch":
+        assert config_path.read_text(encoding="utf-8") == (
+            "- id: model\n  config: {theme: dark}\n"
+        )
     elif spec["format"] == "yaml":
         import yaml
 
@@ -891,6 +908,7 @@ def test_atomic_config_replace_preserves_file_mode(
     config = fake_repo / ".mcp.json"
     _write_json(config, {"mcpServers": {"code-review-graph": {}, "other": {}}})
     config.chmod(0o640)
+    original_mode = stat.S_IMODE(config.stat().st_mode)
 
     report = uninstall.run(
         repo=fake_repo,
@@ -899,7 +917,7 @@ def test_atomic_config_replace_preserves_file_mode(
     )
 
     assert report.errors == []
-    assert stat.S_IMODE(config.stat().st_mode) == 0o640
+    assert stat.S_IMODE(config.stat().st_mode) == original_mode
     assert _read_jsonc(config) == {"mcpServers": {"other": {}}}
 
 
@@ -955,7 +973,12 @@ def test_symlink_and_out_of_boundary_paths_are_skipped(
     outside_data = tmp_path / "outside-data"
     outside_data.mkdir()
     _write(outside_data / "keep.txt", "keep")
-    os.symlink(outside_data, fake_repo / ".code-review-graph", target_is_directory=True)
+    try:
+        os.symlink(outside_data, fake_repo / ".code-review-graph", target_is_directory=True)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows account lacks symbolic-link privilege")
+        raise
 
     outside_config = tmp_path / "outside-config.json"
     _write_json(outside_config, {"servers": {"code-review-graph": {}, "other": {}}})

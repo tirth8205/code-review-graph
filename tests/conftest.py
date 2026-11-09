@@ -57,6 +57,12 @@ def isolated_crg_home(tmp_path_factory, monkeypatch):
     # Tests that exercise the Codex default patch Path.home() to a temporary
     # directory; clear an external override so it cannot escape that scope.
     monkeypatch.delenv("CODEX_HOME", raising=False)
+    # DeepSeek Harness reads ``$DSH_HOME/cordis.patch.yml``, falling back to
+    # ``~/.dsh``. ``skills._dsh_home()`` prefers that variable over a patched
+    # ``Path.home()``, so a suite that only fakes the home would still edit
+    # the developer's real patch layer. Pin it here, exactly as the Hermes
+    # variable above.
+    monkeypatch.setenv("DSH_HOME", str(tmp_path_factory.mktemp("dsh-home")))
     # A developer who records their own context history (#813) must not
     # have the suite append lines to every scratch repository it builds.
     monkeypatch.delenv("CRG_CONTEXT_HISTORY", raising=False)

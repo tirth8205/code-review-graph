@@ -312,6 +312,50 @@ def _remove_toml_entry(
     )
 
 
+def _remove_dsh_patch_entry(
+    path: Path,
+    boundary: Path,
+    report: UninstallReport,
+    *,
+    dry_run: bool,
+) -> None:
+    """Cut the code-review-graph ``insert`` operation out of a DSH patch layer.
+
+    Only that operation's lines go; comments, ``!!js`` values and every other
+    operation stay byte-for-byte. A row someone merged into an ``insert`` of
+    their own is reported, not edited.
+    """
+    from . import dsh
+
+    if not path.exists() or not _safe_path(path, boundary, report):
+        return
+    raw = _read_text(path, report)
+    if raw is None:
+        return
+    try:
+        document, found = dsh.find_owned(raw)
+        if not found:
+            return
+        op_index = dsh.removable(document, found)
+        if op_index is None:
+            report.skipped_paths.append(
+                f"{path} (the {_ENTRY_NAME} row shares an insert with other rows; "
+                "left unchanged, remove it by hand)"
+            )
+            return
+        rewritten = dsh.without_row(raw, op_index)
+    except dsh.PatchError as exc:
+        report.skipped_paths.append(f"{path} ({exc}; left unchanged)")
+        return
+    _write_text(
+        path,
+        rewritten,
+        report,
+        detail=f"removed the {dsh.ENTRY_ID} insert",
+        dry_run=dry_run,
+    )
+
+
 def _remove_yaml_entry(
     path: Path,
     key: str,
@@ -1001,6 +1045,10 @@ def _scope_for_config(
     hermes_home = _absolute(skills._hermes_home())
     if _is_lexical_child(path, hermes_home):
         return "user", hermes_home
+    # ``DSH_HOME`` can move DeepSeek Harness' patch layer out of home the same way.
+    dsh_home = _absolute(skills._dsh_home())
+    if _is_lexical_child(path, dsh_home):
+        return "user", dsh_home
     for boundary in extra_user_boundaries:
         if _is_lexical_child(path, boundary):
             return "user", boundary
@@ -1072,6 +1120,8 @@ def _process_platform_configs(
                     _remove_yaml_entry(
                         path, entry_key, boundary, report, dry_run=dry_run
                     )
+                elif format_name == "dsh-patch":
+                    _remove_dsh_patch_entry(path, boundary, report, dry_run=dry_run)
                 elif format_name in {"object", "array"}:
                     _remove_mcp_entry(
                         path,

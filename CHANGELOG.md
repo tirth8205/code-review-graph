@@ -4,6 +4,12 @@
 
 ### Added
 
+- DeepSeek Harness is a supported platform (#1100, #1101, thanks @sumingwang233).
+  `install --platform dsh` adds one `insert` entry for DSH's own MCP client to
+  `~/.dsh/cordis.patch.yml` (or `$DSH_HOME/cordis.patch.yml`), which every DSH
+  profile reads, and the graph block to `AGENTS.md`. Comments, `!!js` values and
+  other entries in the file are kept byte for byte, and `uninstall` takes the
+  entry out again. Plain `install` picks DSH up when its home folder exists.
 - HTML pages (`.html`, `.htm`) are indexed (#521). They used to give nothing at
   all. Inline scripts are parsed as JavaScript or TypeScript with the page's own
   line numbers, and a `<script src>` becomes an import of the local file, so

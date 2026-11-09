@@ -152,6 +152,23 @@ def _hermes_config_path() -> Path:
     return _hermes_home() / "config.yaml"
 
 
+def _dsh_home() -> Path:
+    """Return the DeepSeek Harness home, as DSH resolves it.
+
+    ``DSH_HOME`` wins when it is not blank; otherwise ``~/.dsh`` on every
+    platform (DSH's ``@deepseek-ai/dsh-home-paths``).
+    """
+    override = os.environ.get("DSH_HOME", "")
+    if override.strip():
+        return Path(override).expanduser()
+    return Path.home() / ".dsh"
+
+
+def _dsh_config_path() -> Path:
+    """Return DSH's home-level patch layer, which every DSH profile applies."""
+    return _dsh_home() / "cordis.patch.yml"
+
+
 def _opencode_config_path(repo_root: Path) -> Path:
     """Return OpenCode's existing project config, preferring JSONC."""
     for name in ("opencode.jsonc", "opencode.json"):
@@ -332,6 +349,15 @@ PLATFORMS: dict[str, dict[str, Any]] = {
         "format": "yaml",
         "needs_type": False,
     },
+    "dsh": {
+        "name": "DeepSeek Harness",
+        "config_path": lambda root: _dsh_config_path(),
+        # One ``insert`` operation in DSH's patch list, not a key in a mapping.
+        "key": "insert",
+        "detect": lambda: _dsh_home().exists(),
+        "format": "dsh-patch",
+        "needs_type": False,
+    },
     "codebuddy": {
         "name": "CodeBuddy Code",
         "config_path": lambda root: root / ".mcp.json",
@@ -444,13 +470,16 @@ def _build_server_entry(
         return {"type": "local", "command": local_command}
 
     entry: dict[str, Any] = {"command": command, "args": args}
-    if key == "hermes":
+    if key in ("hermes", "dsh"):
         # No repo is pinned here, deliberately. Hermes Agent is a long-lived
         # assistant that moves between projects, and its stdio schema has no
         # ``cwd``, so a baked-in ``--repo`` would silently answer every
         # question about whichever repo happened to be installed from. Every
         # tool takes an explicit ``repo_root``; without a default, omitting it
-        # fails loudly instead of returning another project's graph.
+        # fails loudly instead of returning another project's graph. DSH's
+        # home-level patch layer applies to every profile and workspace, so
+        # the same holds there; the server starts in the folder DSH was
+        # started from.
         return entry
     # Include cwd so the MCP server can find the graph database
     if repo_root is not None:
@@ -929,6 +958,52 @@ def _merge_yaml_mcp_server(
     return True
 
 
+def _merge_dsh_patch_server(config_path: Path, server_entry: dict[str, Any]) -> bool | None:
+    """Add the MCP client row to DSH's home patch layer, keeping the rest as it is.
+
+    Same contract as :func:`_merge_yaml_mcp_server`: True when the file was
+    (or, in a plan, would be) changed, False when the row is already there,
+    None when the edit was refused (the reason is printed).
+    """
+    from . import dsh
+
+    raw = ""
+    row = dsh.server_row(server_entry)
+    try:
+        if install_plan.exists(config_path):
+            try:
+                raw = install_plan.read_text(config_path, encoding="utf-8")
+            except UnicodeDecodeError as exc:
+                # Writing a replaced character back would corrupt the file.
+                raise dsh.PatchError("it is not UTF-8") from exc
+        document, found = dsh.find_owned(raw)
+        replace: int | None = None
+        if found:
+            op_index, row_index = found[0]
+            current = document[op_index]["insert"][row_index]
+            owned = (
+                len(found) == 1
+                and dsh.removable(document, found) == op_index
+                and dsh.is_generated_row(current, _is_generated_server_entry)
+            )
+            if not owned:
+                # Not ours to rewrite, and not something to claim as installed.
+                _report_user_owned_entry(config_path)
+                return None
+            if current == row:
+                return False
+            replace = op_index
+        rewritten = dsh.with_row(raw, row, replace)
+    except dsh.PatchError as exc:
+        print(
+            f"  {config_path}: {exc} — skipping to avoid data loss. "
+            f"Please add the MCP config manually."
+        )
+        return None
+    install_plan.write_text(config_path, rewritten)
+    return True
+
+
 def _indent_block(text: str, indent: int) -> str:
     """Indent every non-empty line of ``text`` by ``indent`` spaces."""
     pad = " " * indent
@@ -1142,13 +1217,15 @@ def _install_platform_configs(repo_root: Path, target: str, dry_run: bool) -> li
         server_key = plat["key"]
         server_entry = _build_server_entry(plat, key=key, repo_root=repo_root)
 
-        if plat["format"] in ("toml", "yaml"):
+        if plat["format"] in ("toml", "yaml", "dsh-patch"):
             if plat["format"] == "toml":
                 changed = _merge_toml_mcp_server(
                     config_path,
                     "code-review-graph",
                     server_entry,
                 )
+            elif plat["format"] == "dsh-patch":
+                changed = _merge_dsh_patch_server(config_path, server_entry)
             else:
                 changed = _merge_yaml_mcp_server(
                     config_path,
@@ -2962,7 +3039,7 @@ def inject_claude_md(repo_root: Path) -> str:
 # Used to filter writes when the user passes --platform <X>: only files
 # whose owner set includes the target (or "all") are written.
 _PLATFORM_INSTRUCTION_FILES: dict[str, tuple[str, ...]] = {
-    "AGENTS.md": ("cursor", "opencode", "mimo", "antigravity", "codex", "hermes"),
+    "AGENTS.md": ("cursor", "opencode", "mimo", "antigravity", "codex", "hermes", "dsh"),
     "GEMINI.md": ("antigravity", "gemini-cli"),
     ".cursorrules": ("cursor",),
     ".windsurfrules": ("windsurf",),

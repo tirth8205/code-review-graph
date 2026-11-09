@@ -2404,11 +2404,21 @@ def _reconcile_stale_files(
         ignore_patterns = _load_ignore_patterns(repo_root)
         parser = _get_code_parser_cls()(repo_root)
         current_paths = set()
+        # A stored file below a folder that is now a link (out of the
+        # repository, or not followed) is stale, and is not opened to find
+        # out: the same rule ``incremental_update`` applies to changed files.
+        followed = _load_followed_files(store)
+        linked_parents: dict[str, bool] = {}
         for stored_file in stored_files:
             path = Path(stored_file)
             try:
                 relative = str(path.relative_to(repo_root))
             except ValueError:
+                continue
+            parent = os.path.dirname(relative)
+            if parent not in linked_parents:
+                linked_parents[parent] = _outside_or_below_symlink(repo_root, relative)
+            if linked_parents[parent] and stored_file not in followed:
                 continue
             if (
                 path.is_file()

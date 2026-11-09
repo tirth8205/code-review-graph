@@ -44,7 +44,8 @@ def sandbox(tmp_path_factory, monkeypatch) -> Sandbox:
     home = base / "home"
     repo = base / "repo"
     hermes_home = home / ".hermes"
-    for directory in (home, repo, hermes_home):
+    dsh_home = home / ".dsh"
+    for directory in (home, repo, hermes_home, dsh_home):
         directory.mkdir(parents=True, exist_ok=True)
     # Make every home-scoped platform look installed.
     for relative in (
@@ -60,6 +61,7 @@ def sandbox(tmp_path_factory, monkeypatch) -> Sandbox:
     monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("DSH_HOME", str(dsh_home))
     monkeypatch.delenv("CODEX_HOME", raising=False)
     monkeypatch.setattr(Path, "home", lambda: home)
     return Sandbox(repo=repo, home=home)
@@ -165,6 +167,10 @@ def _plant_user_files(sandbox: Sandbox) -> None:
     )
     (home / ".hermes" / "config.yaml").write_text(
         "# Hermes\nmodel:\n  default: x\n", encoding="utf-8"
+    )
+    (home / ".dsh" / "cordis.patch.yml").write_text(
+        "# DSH\n- id: model\n  config:\n    url: !!js process.env.MODEL_URL\n",
+        encoding="utf-8",
     )
 
 

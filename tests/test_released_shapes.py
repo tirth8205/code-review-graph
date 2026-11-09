@@ -408,3 +408,29 @@ def test_the_entry_each_platform_writes_today_is_recognised(
         f"{platform} writes {entry!r}, which a later install or uninstall would not "
         "recognise as its own"
     )
+
+
+def test_every_released_serve_command_is_recognised_in_a_dsh_row() -> None:
+    """A DeepSeek Harness row holds only ``command`` and ``args`` (PR #1101).
+
+    So every command line a release has written must still mark the row as
+    ours, or a reinstall after an upgrade would keep the old one.
+    """
+    from code_review_graph import dsh
+
+    _require_tags()
+    commands = {
+        shape: tags
+        for shape, tags in _released_server_entries().items()
+        if set(dict(ast.literal_eval(shape))) == {"command", "args"}
+        and isinstance(dict(ast.literal_eval(shape))["command"], str)
+    }
+    assert commands, "no command-and-args entry could be read from any tag"
+    unrecognised = {
+        shape: sorted(tags)
+        for shape, tags in commands.items()
+        if not dsh.is_generated_row(
+            dsh.server_row(dict(ast.literal_eval(shape))), skills._is_generated_server_entry
+        )
+    }
+    assert unrecognised == {}

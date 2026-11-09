@@ -67,7 +67,7 @@ logger = logging.getLogger(__name__)
 _PLATFORM_CHOICES = [
     "codex", "claude", "claude-code", "cursor", "windsurf", "zed",
     "continue", "opencode", "mimo", "antigravity", "gemini-cli", "qwen", "kiro", "qoder",
-    "copilot", "copilot-cli", "codebuddy", "hermes", "all",
+    "copilot", "copilot-cli", "codebuddy", "hermes", "dsh", "all",
 ]
 
 _GITIGNORE_HELP = (
