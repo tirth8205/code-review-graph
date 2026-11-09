@@ -28,6 +28,7 @@ from code_review_graph.changes import (
 )
 from code_review_graph.graph import GraphStore
 from code_review_graph.incremental import full_build, incremental_update
+from code_review_graph.postprocessing import run_post_processing
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -56,6 +57,7 @@ def make_repo(tmp_path: Path):
         store = GraphStore(repo / ".code-review-graph" / "graph.db")
         stores.append(store)
         full_build(repo, store)
+        run_post_processing(store)
         return repo, store
 
     yield _make
@@ -74,6 +76,8 @@ def _review(
         else:
             path.write_text(text, encoding="utf-8")
     incremental_update(repo, store, base="HEAD", changed_files=list(edits))
+    # Flows and communities feed the risk score; the CLI update runs this too.
+    run_post_processing(store)
     return analyze_changes(
         store, changed_files=list(edits), repo_root=str(repo), base="HEAD",
     )
@@ -222,7 +226,7 @@ def test_deleting_a_whole_function_marks_no_survivor_and_names_its_callers(
     assert removed["used_by_total"] == 2
     assert result["removed_symbols_total"] == 1
     assert "1 removed function(s)/class(es)" in result["summary"]
-    assert "gone (by " in result["summary"]
+    assert "Removed but still used: gone (risk " in result["summary"]
 
 
 def test_a_large_deletion_does_not_mark_the_functions_after_it(make_repo):
@@ -343,7 +347,8 @@ def test_a_removed_symbol_that_is_still_used_is_listed_first(make_repo):
     result = _review(repo, store, {"lib.py": _functions(["kept"])})
 
     assert [r["name"] for r in result["removed_symbols"]] == ["used", "unused"]
-    assert "Removed but still used: used (by main)" in result["summary"]
+    assert "Removed but still used: used (risk " in result["summary"]
+    assert ", by main)" in result["summary"]
 
 
 def test_without_the_old_side_a_deletion_between_functions_marks_neither(
@@ -443,3 +448,81 @@ def test_removed_symbols_stay_inside_the_detect_changes_budget(make_repo):
     # here so the number does not depend on where pytest puts its temp dirs.
     rows = json.dumps(worst["removed_symbols"]).replace(str(repo), "")
     assert len(rows) // 4 < 25 * 150
+
+
+# ---------------------------------------------------------------------------
+# Risk: a removed symbol that is still used breaks its callers
+# ---------------------------------------------------------------------------
+
+
+def _many_callers(name: str, count: int) -> str:
+    calls = "\n\n".join(
+        f"def use_{j}():\n    return {name}(1)\n" for j in range(count)
+    )
+    return f"from lib import {name}\n\n\n{calls}"
+
+
+def test_a_removed_symbol_still_used_scores_at_least_what_changing_it_would(
+    make_repo,
+):
+    repo, store = make_repo({
+        "lib.py": _functions(["kept", "gone"]),
+        "app.py": _many_callers("gone", 20),
+    })
+    lib = (repo / "lib.py").read_text(encoding="utf-8")
+    edited = lib.replace(
+        "def gone(x):\n    x = x + 0\n", "def gone(x):\n    x = x + 7\n",
+    )
+    assert edited != lib
+    changed = _review(repo, store, {"lib.py": edited})
+    change_score = {
+        f["name"]: f["risk_score"] for f in changed["changed_functions"]
+    }["gone"]
+
+    removed = _review(repo, store, {"lib.py": _functions(["kept"])})
+
+    entry = removed["removed_symbols"][0]
+    assert entry["name"] == "gone"
+    assert entry["risk_score"] >= change_score > 0
+    # Nothing that survived changed, so the removal is the whole risk.
+    assert removed["changed_functions"] == []
+    assert removed["risk_score"] == entry["risk_score"]
+    assert f"Overall risk score: {entry['risk_score']:.2f}" in removed["summary"]
+
+
+def test_a_removed_symbol_with_no_users_adds_no_risk(make_repo):
+    repo, store = make_repo({"lib.py": _functions(["kept", "dead"])})
+
+    result = _review(repo, store, {"lib.py": _functions(["kept"])})
+
+    assert result["removed_symbols"][0]["name"] == "dead"
+    assert result["removed_symbols"][0]["risk_score"] == 0.0
+    assert result["risk_score"] == 0.0
+
+
+def test_the_action_risk_gate_sees_a_removed_symbol(make_repo, tmp_path):
+    """``fail-on-risk`` reads ``risk_score``; a still-used removal reaches it."""
+    import importlib.util
+
+    script = Path(__file__).resolve().parents[1] / "scripts" / "render_pr_comment.py"
+    spec = importlib.util.spec_from_file_location("render_pr_comment", script)
+    assert spec is not None and spec.loader is not None
+    render = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(render)
+
+    # Untested (0.30), security-sensitive (0.20), 20 callers (0.10), all of
+    # them in another file's community (0.15): over the 0.70 "high" bar.
+    repo, store = make_repo({
+        "lib.py": _functions(["kept", "check_token"]),
+        "app.py": _many_callers("check_token", 20),
+    })
+    result = _review(repo, store, {"lib.py": _functions(["kept"])})
+    assert result["changed_functions"] == []
+    assert result["risk_score"] >= render.RISK_THRESHOLDS["high"]
+
+    report = tmp_path / "report.json"
+    report.write_text(json.dumps(result, default=str), encoding="utf-8")
+    exit_code = render.main(
+        ["--input", str(report), "--fail-on-risk", "high", "--quiet"],
+    )
+    assert exit_code == 3

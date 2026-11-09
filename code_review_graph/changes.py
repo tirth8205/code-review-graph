@@ -11,7 +11,8 @@ import os
 import re
 import subprocess
 import threading
-from dataclasses import dataclass, field
+from collections import Counter
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +20,7 @@ from .constants import GIT_TIMEOUT as _GIT_TIMEOUT
 from .constants import SECURITY_KEYWORDS as _SECURITY_KEYWORDS
 from .constants import env_float, env_int
 from .errors import ChangeDiscoveryError
-from .flows import get_affected_flows
+from .flows import _trace_single_flow, detect_entry_points, get_affected_flows
 from .graph import (
     GraphEdge,
     GraphNode,
@@ -766,13 +767,21 @@ def _nodes_in_file(store: GraphStore, file_path: str) -> list[GraphNode]:
     return nodes
 
 
+@dataclass
+class _OldSide:
+    """The code symbols of a file as it was at the base, and their calls."""
+
+    nodes: list[tuple[str, NodeInfo]]
+    calls: dict[str, list[str]]
+
+
 def _old_side_nodes(
     parser: CodeParser,
     repo_root: str,
     base: str,
     old_path: str,
     parse_path: str,
-) -> list[tuple[str, NodeInfo]] | None:
+) -> _OldSide | None:
     """Parse the file as it was at *base*, or None when that cannot be done.
 
     The old bytes are parsed as if they lived at *parse_path*, the path the
@@ -796,7 +805,7 @@ def _old_side_nodes(
     if shown.returncode != 0:
         return None
     try:
-        nodes, _ = parser.parse_bytes(Path(parse_path), shown.stdout)
+        nodes, edges = parser.parse_bytes(Path(parse_path), shown.stdout)
     except Exception as exc:
         # Any parser fault means "unknown". The parser covers dozens of
         # grammars, and the update path treats a failure in any of them the
@@ -805,14 +814,21 @@ def _old_side_nodes(
         return None
     if not nodes:
         return None
-    return [
-        (qualified_name_of(node), node)
-        for node in nodes
-        if node.kind in _CODE_KINDS
-        and not node.extra.get("verilog_kind")
-        and node.line_start
-        and node.line_end
-    ]
+    calls: dict[str, list[str]] = {}
+    for edge in edges:
+        if edge.kind == "CALLS":
+            calls.setdefault(edge.source, []).append(edge.target)
+    return _OldSide(
+        nodes=[
+            (qualified_name_of(node), node)
+            for node in nodes
+            if node.kind in _CODE_KINDS
+            and not node.extra.get("verilog_kind")
+            and node.line_start
+            and node.line_end
+        ],
+        calls=calls,
+    )
 
 
 def _bare_call_reaches(edge: GraphEdge, removed: GraphNode) -> bool:
@@ -841,17 +857,42 @@ def _bare_call_reaches(edge: GraphEdge, removed: GraphNode) -> bool:
     ) and edge.source_qualified.startswith(own_class)
 
 
-def _removed_symbol_users(
-    store: GraphStore, qualified_name: str, info: NodeInfo,
-) -> list[dict[str, Any]]:
+@dataclass
+class _RemovedUsers:
+    """What the graph still records as using a removed symbol."""
+
+    users: list[dict[str, Any]]
+    # One entry per CALLS edge, as compute_risk_score counts callers.
+    call_sources: list[str]
+    caller_ids: set[int]
+
+
+def _as_graph_node(qualified_name: str, info: NodeInfo) -> GraphNode:
+    """A parsed node that is not in the store, in the store's own shape."""
+    return GraphNode(
+        id=0, kind=info.kind, name=info.name, qualified_name=qualified_name,
+        file_path=info.file_path, line_start=info.line_start,
+        line_end=info.line_end, language=info.language,
+        parent_name=info.parent_name, params=info.params,
+        return_type=info.return_type, is_test=info.is_test, file_hash=None,
+        extra=info.extra,
+    )
+
+
+def _removed_symbol_users(store: GraphStore, removed: GraphNode) -> _RemovedUsers:
     """Every node the graph still records as using a removed symbol."""
+    qualified_name = removed.qualified_name
     users: dict[str, dict[str, Any]] = {}
+    found = _RemovedUsers(users=[], call_sources=[], caller_ids=set())
 
     def add(source: str, relation: str, line: int) -> None:
-        if source in users or source == qualified_name:
-            return
-        node = store.get_node(source)
+        node = store.get_node(source) if source != qualified_name else None
         if node is None:
+            return
+        if relation == "CALLS":
+            found.call_sources.append(source)
+            found.caller_ids.add(node.id)
+        if source in users:
             return
         # The qualified name carries the file; repeating it doubles the cost.
         users[source] = {
@@ -868,20 +909,129 @@ def _removed_symbol_users(
     for edge in store.get_edges_by_source(qualified_name):
         if edge.kind == "TESTED_BY":
             add(edge.target_qualified, edge.kind, edge.line)
-    removed = GraphNode(
-        id=0, kind=info.kind, name=info.name, qualified_name=qualified_name,
-        file_path=info.file_path, line_start=info.line_start,
-        line_end=info.line_end, language=info.language,
-        parent_name=info.parent_name, params=info.params,
-        return_type=info.return_type, is_test=info.is_test, file_hash=None,
-        extra=info.extra,
-    )
-    for edge in store.search_edges_by_target_name(info.name, kind="CALLS"):
+    for edge in store.search_edges_by_target_name(removed.name, kind="CALLS"):
         if _bare_call_reaches(edge, removed):
             add(edge.source_qualified, edge.kind, edge.line)
-    return sorted(
+    found.users = sorted(
         users.values(), key=lambda u: (u["qualified_name"], u["line"] or 0),
     )
+    return found
+
+
+@dataclass
+class _RemovedSymbol:
+    """A symbol a diff removed, with what is needed to score it."""
+
+    node: GraphNode
+    # Its calls as the old file made them.
+    old_calls: list[str]
+    # The community its file's surviving symbols share, or None.
+    file_community: int | None
+    found: _RemovedUsers = field(
+        default_factory=lambda: _RemovedUsers(users=[], call_sources=[], caller_ids=set()),
+    )
+
+
+def _removed_flow_criticalities(
+    store: GraphStore, removed: list[_RemovedSymbol],
+) -> dict[str, list[float]]:
+    """The flows each removed symbol was part of, traced again.
+
+    Flows are re-traced after every update, so the ones that ran through a
+    removed symbol are gone, and a caller whose only callee it was no longer
+    starts a flow at all. They are rebuilt in memory: the removed symbols go
+    back into the call graph with the calls their old file made, and every
+    entry point that could reach them -- one whose flow contains a caller,
+    or a caller that is itself an entry point -- is traced again with the
+    same tracer and criticality score the stored flows use.
+    """
+    adj = store.load_flow_adjacency()
+    by_qn: dict[str, int] = {}
+    for index, item in enumerate(removed):
+        # A negative id cannot collide with a stored node.
+        node = replace(item.node, id=-(index + 1))
+        by_qn[node.qualified_name] = node.id
+        adj.nodes_by_qn[node.qualified_name] = node
+        adj.nodes_by_id[node.id] = node
+    for item in removed:
+        node = item.node
+        own_file = f"{node.file_path}::"
+        targets = adj.calls_out.setdefault(node.qualified_name, [])
+        for target in item.old_calls:
+            # The old file names same-file callees by bare name at times.
+            if target not in adj.nodes_by_qn and "::" not in target:
+                target = own_file + target
+            targets.append(target)
+        for source in set(item.found.call_sources):
+            callees = adj.calls_out.setdefault(source, [])
+            if node.qualified_name not in callees:
+                callees.append(node.qualified_name)
+
+    caller_ids = set().union(*(item.found.caller_ids for item in removed))
+    starts = store.get_flow_entry_point_ids(caller_ids)
+    entry_ids = {ep.id for ep in detect_entry_points(store)}
+    starts |= caller_ids & entry_ids
+    criticalities: dict[str, list[float]] = {qn: [] for qn in by_qn}
+    for node_id in starts:
+        entry = adj.nodes_by_id.get(node_id)
+        flow = _trace_single_flow(adj, entry) if entry is not None else None
+        if flow is None:
+            continue
+        on_path = set(flow["path"])
+        for qn, removed_id in by_qn.items():
+            if removed_id in on_path:
+                criticalities[qn].append(flow["criticality"])
+    return criticalities
+
+
+def _score_removed(
+    store: GraphStore,
+    removed: list[_RemovedSymbol],
+    churn_counts: dict[str, int] | None,
+) -> dict[str, float]:
+    """Score removed symbols as :func:`compute_risk_score` scores a change.
+
+    Removing a symbol that is still used breaks its users, so it is at least
+    as risky as changing it would be. The node is gone, so each term is
+    rebuilt from what survives:
+
+    * flows: those it was part of, traced again
+      (:func:`_removed_flow_criticalities`);
+    * community crossing: its callers outside its file's community;
+    * test coverage, security, caller count and churn: as for a change,
+      since the TESTED_BY and CALLS edges that name it are still stored.
+
+    A removed symbol nothing uses breaks nothing and scores 0.
+    """
+    used = [item for item in removed if item.found.users]
+    scores = {item.node.qualified_name: 0.0 for item in removed}
+    if not used:
+        return scores
+    flows = _removed_flow_criticalities(store, used)
+    for item in used:
+        qn = item.node.qualified_name
+        scores[qn] = _score_risk(
+            store,
+            item.node,
+            churn_counts,
+            flow_criticalities=flows[qn],
+            flow_count=0,
+            caller_qns=item.found.call_sources,
+            cross_community=_cross_community(
+                store, item.found.call_sources, item.file_community,
+                own_group=True,
+            ),
+        )
+    return scores
+
+
+def _file_community(store: GraphStore, nodes: list[GraphNode]) -> int | None:
+    """The community most of a file's symbols belong to, or None."""
+    cids = store.get_community_ids_by_qualified_names(
+        [node.qualified_name for node in nodes if node.kind != "File"],
+    )
+    counts = Counter(cid for cid in cids.values() if cid is not None)
+    return counts.most_common(1)[0][0] if counts else None
 
 
 def _review_pure_deletions(
@@ -889,12 +1039,14 @@ def _review_pure_deletions(
     deletions: dict[str, FileDeletions],
     repo_root: str | None,
     base: str,
+    churn_counts: dict[str, int] | None = None,
 ) -> _DeletionReview:
     """Judge pure-deletion hunks from the old side of the diff.
 
     For each code symbol of the old file whose lines a hunk removed:
 
-    * gone from the graph -> removed, reported with whatever still uses it;
+    * gone from the graph -> removed, reported with whatever still uses it
+      and scored by :func:`_score_removed`;
     * still there, and the hunk took only part of it -> changed;
     * still there, but the hunk took all of it -> it was defined twice or
       moved within the file, and the lines that added it say so.
@@ -907,22 +1059,22 @@ def _review_pure_deletions(
     review = _DeletionReview()
     parser: CodeParser | None = None
     files_read = 0
-    candidates: list[tuple[str, NodeInfo]] = []
+    candidates: list[_RemovedSymbol] = []
     for file_path, held in deletions.items():
         current = _nodes_in_file(store, file_path)
         if not current:
             # The graph does not know this file, so it cannot say what
             # survived; guessing would report every symbol as removed.
             continue
-        old_nodes: list[tuple[str, NodeInfo]] | None = None
+        old_side: _OldSide | None = None
         if repo_root is not None and files_read < _MAX_DELETION_FILES:
             files_read += 1
             if parser is None:
                 parser = CodeParser(Path(repo_root))
-            old_nodes = _old_side_nodes(
+            old_side = _old_side_nodes(
                 parser, repo_root, base, held.old_path, file_path,
             )
-        if old_nodes is None:
+        if old_side is None:
             review.files_not_read += 1
             review.changed.extend(
                 node for node in current
@@ -936,7 +1088,9 @@ def _review_pure_deletions(
             )
             continue
         survivors = {node.qualified_name: node for node in current}
-        for qualified_name, info in old_nodes:
+        community: int | None = None
+        community_known = False
+        for qualified_name, info in old_side.nodes:
             hit = [
                 hunk for hunk in held.hunks
                 if info.line_start <= hunk.old_end
@@ -946,7 +1100,14 @@ def _review_pure_deletions(
                 continue
             survivor = survivors.get(qualified_name)
             if survivor is None:
-                candidates.append((qualified_name, info))
+                if not community_known:
+                    community = _file_community(store, current)
+                    community_known = True
+                candidates.append(_RemovedSymbol(
+                    node=_as_graph_node(qualified_name, info),
+                    old_calls=old_side.calls.get(qualified_name, []),
+                    file_community=community,
+                ))
             elif not any(
                 hunk.old_start <= info.line_start
                 and info.line_end <= hunk.old_end
@@ -955,21 +1116,28 @@ def _review_pure_deletions(
                 review.changed.append(survivor)
 
     review.removed_total = len(candidates)
-    for qualified_name, info in candidates[:_MAX_REMOVED_SYMBOLS]:
-        users = _removed_symbol_users(store, qualified_name, info)
+    looked_up = candidates[:_MAX_REMOVED_SYMBOLS]
+    for item in looked_up:
+        item.found = _removed_symbol_users(store, item.node)
+    scores = _score_removed(store, looked_up, churn_counts)
+    for item in looked_up:
+        node = item.node
         review.removed.append({
-            "name": _sanitize_name(info.name),
-            "qualified_name": _sanitize_name(qualified_name),
-            "kind": info.kind,
-            "file": info.file_path,
-            "old_line_start": info.line_start,
-            "old_line_end": info.line_end,
-            "used_by": users[:_MAX_REMOVED_USERS_SHOWN],
-            "used_by_total": len(users),
+            "name": _sanitize_name(node.name),
+            "qualified_name": _sanitize_name(node.qualified_name),
+            "kind": node.kind,
+            "file": node.file_path,
+            "old_line_start": node.line_start,
+            "old_line_end": node.line_end,
+            "risk_score": scores[node.qualified_name],
+            "used_by": item.found.users[:_MAX_REMOVED_USERS_SHOWN],
+            "used_by_total": len(item.found.users),
         })
     # What still uses a removed symbol is what may break, so it leads.
     review.removed.sort(
-        key=lambda r: (-r["used_by_total"], r["file"], r["old_line_start"]),
+        key=lambda r: (
+            -r["risk_score"], -r["used_by_total"], r["file"], r["old_line_start"],
+        ),
     )
     return review
 
@@ -987,7 +1155,8 @@ def _removed_summary_lines(review: _DeletionReview) -> list[str]:
             users = ", ".join(_symbol_part(u["qualified_name"]) for u in entry["used_by"])
             more = entry["used_by_total"] - len(entry["used_by"])
             named.append(
-                f"{_symbol_part(entry['qualified_name'])} (by {users}"
+                f"{_symbol_part(entry['qualified_name'])} (risk "
+                f"{entry['risk_score']:.2f}, by {users}"
                 f"{f' +{more} more' if more else ''})"
             )
         lines.append(f"  - Removed but still used: {'; '.join(named)}")
@@ -1028,29 +1197,72 @@ def compute_risk_score(
     :meth:`~code_review_graph.graph.GraphStore.get_caller_test_routes` for why
     that reachability is reported beside the score rather than folded into it.
     """
+    flow_criticalities = store.get_flow_criticalities_for_node(node.id)
+    callers = store.get_edges_by_target(node.qualified_name)
+    caller_qns = [e.source_qualified for e in callers if e.kind == "CALLS"]
+    return _score_risk(
+        store,
+        node,
+        churn_counts,
+        flow_criticalities=flow_criticalities,
+        flow_count=(
+            0 if flow_criticalities else store.count_flow_memberships(node.id)
+        ),
+        caller_qns=caller_qns,
+        cross_community=_cross_community(
+            store, caller_qns, store.get_node_community_id(node.id),
+        ),
+    )
+
+
+def _cross_community(
+    store: GraphStore,
+    caller_qns: list[str],
+    node_cid: int | None,
+    *,
+    own_group: bool = False,
+) -> int:
+    """How many distinct callers sit in a community other than *node_cid*.
+
+    *own_group* is for a removed symbol whose file is left in no community:
+    detection drops a group that shrinks to one symbol, so the file's group
+    can vanish with the removal. The symbol was in that group, which no
+    caller in another community shares, so each of those callers crossed.
+    """
+    if not caller_qns or (node_cid is None and not own_group):
+        return 0
+    cid_map = store.get_community_ids_by_qualified_names(caller_qns)
+    return sum(
+        1 for cid in cid_map.values() if cid is not None and cid != node_cid
+    )
+
+
+def _score_risk(
+    store: GraphStore,
+    node: GraphNode,
+    churn_counts: dict[str, int] | None,
+    *,
+    flow_criticalities: list[float],
+    flow_count: int,
+    caller_qns: list[str],
+    cross_community: int,
+) -> float:
+    """The terms of :func:`compute_risk_score`, from evidence already gathered.
+
+    Split out so a symbol that is no longer in the graph -- one a diff
+    removed -- is scored on exactly the same scale; see
+    :func:`_score_removed` for where its evidence comes from.
+    *caller_qns* holds one entry per incoming CALLS edge.
+    """
     score = 0.0
 
     # --- Flow participation (cap 0.25), weighted by criticality ---
-    flow_criticalities = store.get_flow_criticalities_for_node(node.id)
     if flow_criticalities:
         score += min(sum(flow_criticalities), 0.25)
     else:
-        flow_count = store.count_flow_memberships(node.id)
         score += min(flow_count * 0.05, 0.25)
 
     # --- Community crossing (cap 0.15) ---
-    callers = store.get_edges_by_target(node.qualified_name)
-    caller_edges = [e for e in callers if e.kind == "CALLS"]
-
-    cross_community = 0
-    node_cid = store.get_node_community_id(node.id)
-
-    if node_cid is not None and caller_edges:
-        caller_qns = [edge.source_qualified for edge in caller_edges]
-        cid_map = store.get_community_ids_by_qualified_names(caller_qns)
-        for cid in cid_map.values():
-            if cid is not None and cid != node_cid:
-                cross_community += 1
     score += min(cross_community * 0.05, 0.15)
 
     # --- Test coverage (direct + transitive) ---
@@ -1068,8 +1280,7 @@ def compute_risk_score(
         score += 0.20
 
     # --- Caller count (cap 0.10) ---
-    caller_count = len(caller_edges)
-    score += min(caller_count / 20.0, 0.10)
+    score += min(len(caller_qns) / 20.0, 0.10)
 
     # --- Change frequency (opt-in, cap 0.15) ---
     if churn_counts and node.file_path:
@@ -1175,6 +1386,17 @@ def analyze_changes(
             normalize_file_path(_root / fp) for fp in changed_files
         ]
 
+    # Computed before the mapping: removed symbols are scored as it runs.
+    churn_counts: dict[str, int] | None = None
+    churn_status = CHURN_OFF
+    if include_churn and repo_root is not None:
+        raw_churn, churn_status = compute_file_churn_with_status(repo_root)
+        churn_counts = {}
+        root_path = Path(repo_root)
+        for key, count in raw_churn.items():
+            churn_counts[key] = count
+            churn_counts[normalize_file_path(root_path / key)] = count
+
     # Map changes to nodes.
     deletions: dict[str, FileDeletions] = (
         changed_ranges.deletions if isinstance(changed_ranges, DiffRanges) else {}
@@ -1188,7 +1410,7 @@ def analyze_changes(
         changed_nodes = map_changes_to_nodes(store, changed_ranges.edit_ranges())
         seen_qns = {node.qualified_name for node in changed_nodes}
         deletion_review = _review_pure_deletions(
-            store, deletions, repo_root, base,
+            store, deletions, repo_root, base, churn_counts,
         )
         positions = {
             path: [(hunk.anchor, hunk.anchor) for hunk in held.hunks]
@@ -1233,16 +1455,6 @@ def analyze_changes(
     # Keep one public YAML metadata contract. ``node_to_dict`` owns
     # sanitization and output limits for query and change analysis.
     yaml_path_results = [node_to_dict(node) for node in changed_yaml_paths]
-
-    churn_counts: dict[str, int] | None = None
-    churn_status = CHURN_OFF
-    if include_churn and repo_root is not None:
-        raw_churn, churn_status = compute_file_churn_with_status(repo_root)
-        churn_counts = {}
-        root_path = Path(repo_root)
-        for key, count in raw_churn.items():
-            churn_counts[key] = count
-            churn_counts[normalize_file_path(root_path / key)] = count
 
     # Classify test coverage before scoring: the same answer decides both the
     # gap report and the coverage term of every node's risk score, and doing
@@ -1301,8 +1513,16 @@ def analyze_changes(
             "risk_score": risk,
         })
 
-    # Overall risk score: max of individual risks, or 0.
-    overall_risk = max((nr["risk_score"] for nr in node_risks), default=0.0)
+    # Overall risk score: max of individual risks, or 0. A removed symbol
+    # that is still used breaks its users, so its score counts as well; that
+    # is also what the Action's ``fail-on-risk`` gate reads.
+    overall_risk = max(
+        (
+            *(nr["risk_score"] for nr in node_risks),
+            *(r["risk_score"] for r in deletion_review.removed),
+        ),
+        default=0.0,
+    )
 
     # Affected flows.
     affected = get_affected_flows(store, changed_files)

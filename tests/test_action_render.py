@@ -217,6 +217,7 @@ def test_removed_symbols_section_names_what_still_uses_them(report):
             "qualified_name": "src/utils.py::format_filename",
             "file": "src/utils.py",
             "old_line_start": 430,
+            "risk_score": 0.72,
             "used_by": [
                 {"name": "convert", "qualified_name": "src/types.py::File.convert"},
                 {"name": "convert", "qualified_name": "src/types.py::Path.convert"},
@@ -228,6 +229,7 @@ def test_removed_symbols_section_names_what_still_uses_them(report):
             "qualified_name": "src/utils.py::dead",
             "file": "src/utils.py",
             "old_line_start": 500,
+            "risk_score": 0.0,
             "used_by": [],
             "used_by_total": 0,
         },
@@ -243,6 +245,8 @@ def test_removed_symbols_section_names_what_still_uses_them(report):
     assert "+2 more" in body
     assert "nothing found" in body
     assert "...and 1 more removed symbol(s)." in body
+    assert "| 0.72 | high | " in body
+    assert "3 removed, " in body.splitlines()[4]
 
 
 # ---------------------------------------------------------------------------

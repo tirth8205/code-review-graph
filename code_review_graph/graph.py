@@ -3523,6 +3523,20 @@ class GraphStore:
         ).fetchall()
         return [r["criticality"] for r in rows]
 
+    def get_flow_entry_point_ids(self, node_ids: set[int]) -> set[int]:
+        """Entry-point node ids of the flows that contain any of *node_ids*."""
+        flow_ids = self.get_flow_ids_by_node_ids(node_ids)
+        result: set[int] = set()
+        for i in range(0, len(flow_ids), 450):
+            batch = flow_ids[i:i + 450]
+            placeholders = ",".join("?" for _ in batch)
+            rows = self._conn.execute(  # nosec B608
+                f"SELECT entry_point_id FROM flows WHERE id IN ({placeholders})",
+                batch,
+            ).fetchall()
+            result.update(r["entry_point_id"] for r in rows)
+        return result
+
     def get_node_community_id(self, node_id: int) -> int | None:
         """Return the ``community_id`` for a node, or ``None``."""
         row = self._conn.execute(

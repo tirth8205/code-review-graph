@@ -228,8 +228,8 @@ def _removed_section(
     lines = [
         "### Removed symbols",
         "",
-        "| Symbol | Was at | Still used by |",
-        "| :--- | :--- | :--- |",
+        "| Risk | Level | Symbol | Was at | Still used by |",
+        "| ---: | :--- | :--- | :--- | :--- |",
     ]
     for entry in removed[:max_rows]:
         name = entry.get("qualified_name") or entry.get("name") or "?"
@@ -249,7 +249,11 @@ def _removed_section(
                 cell += f" +{users_total - len(users)} more"
         else:
             cell = "nothing found"
-        lines.append(f"| {md_escape(relativize_path(name))} | {location} | {cell} |")
+        score = float(entry.get("risk_score") or 0.0)
+        lines.append(
+            f"| {score:.2f} | {risk_level(score)} | {md_escape(relativize_path(name))} "
+            f"| {location} | {cell} |"
+        )
     if total > min(len(removed), max_rows):
         lines.append("")
         lines.append(f"...and {total - min(len(removed), max_rows)} more removed symbol(s).")
@@ -387,6 +391,11 @@ def render_markdown(
         gaps_total = uncovered_total + indirect_total
     truncated = gaps_total > len(gaps)
 
+    removed = report.get("removed_symbols") or []
+    removed_total = report.get("removed_symbols_total")
+    if not isinstance(removed_total, int):
+        removed_total = len(removed)
+
     lines: list[str] = [MARKER, "", "## code-review-graph review", ""]
     gap_text = f"{gaps_total} test gap(s)"
     if indirect_total:
@@ -397,7 +406,9 @@ def render_markdown(
     lines.append(
         f"**Overall risk: {score:.2f} ({risk_level(score).upper()})** — "
         f"{len(changed)} changed function(s)/class(es), "
-        f"{len(flows)} affected flow(s), {gap_text}"
+        # The score can come from a removal alone, so say there was one.
+        + (f"{removed_total} removed, " if removed_total else "")
+        + f"{len(flows)} affected flow(s), {gap_text}"
     )
 
     if priorities:
@@ -407,11 +418,7 @@ def render_markdown(
                 priorities, gap_names, max_functions, indirect_names, truncated
             )
         )
-    removed = report.get("removed_symbols") or []
     if removed:
-        removed_total = report.get("removed_symbols_total")
-        if not isinstance(removed_total, int):
-            removed_total = len(removed)
         lines.append("")
         lines.extend(_removed_section(removed, removed_total))
     if flows:

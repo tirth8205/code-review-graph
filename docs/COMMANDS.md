@@ -302,8 +302,12 @@ is not listed as changed. The old version of the file is read instead: a
 function or class that lost some lines is listed as changed, and one that is
 gone is listed in `removed_symbols` (at most 25; `removed_symbols_total` has the
 full count) with up to three of the callers, subclasses, importers or tests that
-still use it (`used_by_total` has the full count). The summary names the ones
-still in use, and minimal mode reports `removed_symbol_count`. Up to 100 files
+still use it (`used_by_total` has the full count). A removed symbol that is still
+used breaks its users, so it gets a `risk_score` on the same scale as a changed
+one (the flows it was part of, callers from other communities, test coverage,
+security names, caller count) and counts towards the overall `risk_score`; one
+that nothing uses scores 0. The summary names the ones still in use, and minimal
+mode reports `removed_symbol_count`. Up to 100 files
 are read per call (`CRG_MAX_DELETION_FILES`); the summary says when a file could
 not be read. A deleted file is not covered.
 
