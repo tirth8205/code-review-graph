@@ -115,7 +115,7 @@ Build the image from the repository root:
 docker build -t code-review-graph:local .
 ```
 
-From the repository you want to analyze, run:
+From the repository you want to analyse, run:
 
 ```bash
 docker run --rm \
@@ -178,7 +178,7 @@ When a file changes, the graph traces every caller, dependent and test that coul
 
 ### Incremental updates
 
-Hooks, the git hooks (pre-commit, post-checkout, post-merge, post-rewrite) and watch mode trigger incremental updates. The update diffs changed files, finds their dependents through the graph's import and call edges, and re-parses only the files whose SHA-256 hash changed. On a ~3,000-file project (django) a two-file edit re-indexes in about 2.5 seconds on the path the hooks use, of which ~1.4 s is process start-up; a no-op update costs only that start-up. See [Incremental update latency](docs/REPRODUCING.md#incremental-update-latency).
+Editor hooks, git hooks (pre-commit, post-checkout, post-merge, post-rewrite) and watch mode trigger incremental updates. The update diffs changed files, finds their dependents through the graph's import and call edges, and re-parses only the files whose SHA-256 hash changed. On a ~3,000-file project (django) a two-file edit re-indexes in about 2.5 seconds on the path the hooks use, of which ~1.4 s is process start-up; a no-op update costs only that start-up. See [Incremental update latency](docs/REPRODUCING.md#incremental-update-latency).
 
 <p align="center">
   <img src="diagrams/diagram4_incremental_update.png" alt="Incremental update flow: a hook or watch update triggers a git diff, dependents are found through graph edges, and only files whose SHA-256 hash changed are re-parsed" width="90%" />
@@ -198,14 +198,14 @@ Instead of feeding a whole corpus to the model, the graph returns a slice shaped
   <img src="diagrams/diagram9_language_coverage.png" alt="Language coverage by category: Web, Backend, Systems, Mobile, Scripting, Shells, Domain, and Other, plus Jupyter and Databricks notebooks" width="90%" />
 </p>
 
-The parser extracts functions, classes, imports, call sites, inheritance and tests, using Tree-sitter where a grammar exists and targeted fallbacks elsewhere. Supported: Python, JavaScript/TypeScript/TSX, Go, Rust, Java, C/C++, C#, VB.NET, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL/PL/SQL (Oracle), Terraform/OpenTofu (`.tf`; other `.hcl` files become file nodes only), Ansible YAML (playbooks, roles, tasks), Spring Boot application config (`application.properties`, `application.yml`, `application.yaml` and their `application-<profile>` variants; key names and value types only, never values), value-free generic YAML structure (translation files in folders such as `locales/` become file nodes only), XSLT stylesheets (`.xsl`, `.xslt`), value-free JSON structure (`.json`; translation, test, docs, example and data files keep only a file node, and lock files are skipped), Vue/Svelte SFCs, HTML pages (`.html`, `.htm`; inline scripts, plus `div`, `section` and `article` blocks with an id as `DocSection` nodes), Astro files (parsed with the TypeScript grammar), Jupyter and Databricks notebooks (`.ipynb`), Perl XS files (`.xs`), Robot Framework files (`.robot`, `.resource`), and Liquid templates (`.liquid`). Other `.properties` files are not treated as source code.
+The parser extracts functions, classes, imports, call sites, inheritance and tests, using Tree-sitter where a grammar exists and targeted fallbacks elsewhere. Supported: Python, JavaScript/TypeScript/TSX (including `.mjs`, `.cjs`, `.mts` and `.cts`), Go, Rust, Java, C/C++, C#, VB.NET, Ruby, Kotlin (`.kt`, `.kts`), Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL/PL/SQL (Oracle) and dbt models, Terraform/OpenTofu (`.tf`; other `.hcl` files become file nodes only), Ansible YAML (playbooks, roles, tasks), Spring Boot application config (`application.properties`, `application.yml`, `application.yaml` and their `application-<profile>` variants; key names and value types only, never values), value-free generic YAML structure (translation files in folders such as `locales/` become file nodes only), XSLT stylesheets (`.xsl`, `.xslt`), value-free JSON structure (`.json`; translation, test, docs, example and data files keep only a file node, and lock files are skipped), Vue/Svelte SFCs, HTML pages (`.html`, `.htm`; inline scripts, plus `div`, `section` and `article` blocks with an id as `DocSection` nodes), Astro files (parsed with the TypeScript grammar), Jupyter and Databricks notebooks (`.ipynb`, plus Databricks `.py` exports), Perl XS files (`.xs`), Robot Framework files (`.robot`, `.resource`), and Liquid templates (`.liquid`). Other `.properties` files are not treated as source code.
 
 PHP projects also get repository-bounded Composer PSR-4 resolution, Blade template references,
 and Laravel Route and Eloquent edges when the source shows explicit framework imports, model
 inheritance and receiver evidence. Static Laravel routes in `routes/*.php` emit Endpoint nodes
 and controller HANDLES edges, including literal group prefixes.
 
-Java projects get Spring dependency-injection call resolution, request endpoints and WebFlux routes, scheduled triggers, application-event publisher-to-listener edges, and Temporal workflow and activity edges. Each resolver runs after the parse and needs the injected field, published event or workflow stub to be visible in the repository.
+Java projects get Spring dependency-injection call resolution, request endpoints and WebFlux routes, scheduled triggers, application-event publisher-to-listener edges, Spring AOP advice-to-target edges, and Temporal workflow and activity edges. Each resolver runs after the parse and needs the injected field, published event or workflow stub to be visible in the repository.
 
 ### Add your own language
 
@@ -347,17 +347,17 @@ From the same 2026-08-02 clean-room build at the pinned SHAs above. Embedding co
 | **Incremental updates** | Re-parses only files whose hash changed. On a ~3,000-file repo a two-file edit takes ~2.5 s on the hook path ([measured](docs/REPRODUCING.md#incremental-update-latency)). |
 | **Language and notebook support** | See [Language coverage](#language-coverage-and-notebooks) above. |
 | **Framework-aware PHP parsing** | Repository-bounded Composer PSR-4 imports, Blade template references, evidence-gated Laravel Route-to-controller and Eloquent relationship edges |
-| **Framework-aware Java parsing** | Spring dependency-injection call resolution, request endpoints and WebFlux routes, scheduled triggers, application-event publisher-to-listener edges, Temporal workflow and activity edges, and Spring Boot config keys indexed without their values |
+| **Framework-aware Java parsing** | Spring dependency-injection call resolution, request endpoints and WebFlux routes, scheduled triggers, application-event publisher-to-listener edges, Spring AOP advice edges, Temporal workflow and activity edges, and Spring Boot config keys indexed without their values |
 | **Blast-radius analysis** | Which functions, classes and files are likely affected by a change |
 | **Auto-update hooks** | Editor hooks, git hooks (before each commit, after checkout, merge and rebase) and watch mode update the graph as you work |
 | **Semantic search** | Optional vector embeddings via sentence-transformers, Google Gemini, MiniMax, Voyage AI, or any OpenAI-compatible endpoint (OpenAI, Azure, new-api, LiteLLM, vLLM, LocalAI) |
-| **Interactive visualisation** | D3.js force-directed graph with search, community legend toggles and degree-scaled nodes |
+| **Interactive visualisation** | D3.js force-directed graph with search, community legend toggles and degree-scaled nodes, plus a neighbourhood view seeded from a symbol, file, flow or change |
 | **Hub and bridge detection** | Most-connected nodes and chokepoints (betweenness centrality) |
 | **Surprise scoring** | Unexpected coupling: cross-community, cross-language, peripheral-to-hub edges |
 | **Knowledge gap analysis** | Isolated nodes, untested hotspots, thin communities, import cycles |
 | **Suggested questions** | Review questions generated from bridges, hubs and surprises |
 | **Edge confidence** | Four tiers (EXTRACTED, INFERRED, AMBIGUOUS, UNRESOLVED) with float scores on edges, so a call the graph could not bind says so |
-| **Graph traversal** | BFS/DFS from any node with configurable depth and token budget |
+| **Graph traversal** | BFS/DFS from any node with configurable depth and token budget; `path_to` shows how one symbol reaches another and names the weakest hop |
 | **Export formats** | GraphML (Gephi/yEd), Neo4j Cypher, Obsidian vault, JSON, and SVG (SVG needs matplotlib from the `eval` extra) |
 | **Token benchmarking** | `code_review_graph/token_benchmark.py` measures whole-corpus tokens against graph query tokens per question |
 | **Estimated context savings** | `context_savings` metadata (`estimated`, `saved_tokens`, `saved_percent`) on review, impact, detect-changes and architecture responses |
@@ -404,14 +404,19 @@ Qoder also gets `build-graph`, `review-delta` and `review-pr` from the repositor
 ```bash
 code-review-graph install          # Detect and configure all platforms
 code-review-graph install --platform <name>  # One platform
+code-review-graph install --steering  # Claude Code: graph context beside each search and read
 code-review-graph uninstall --dry-run  # Preview removal of installed artifacts
 code-review-graph build            # Parse the whole codebase
+code-review-graph build --follow-symlinks  # Also index symlinked folders
 code-review-graph update           # Incremental update (changed files only)
 code-review-graph status           # Graph statistics
 code-review-graph watch            # Update on file changes
 code-review-graph forget <path>    # Drop already-parsed files from the graph
 code-review-graph dead-code        # Functions and classes with no callers or tests
+code-review-graph query path_to <from> --to <to>  # How one symbol reaches another
+code-review-graph impact --detail-level compact  # Blast radius as ranked file paths
 code-review-graph visualize        # Interactive HTML graph
+code-review-graph visualize --seed-symbol <name>  # Neighbourhood of one symbol
 code-review-graph visualize --format json      # Export graph data as JSON
 code-review-graph visualize --format graphml   # Export as GraphML
 code-review-graph visualize --format svg       # Export as SVG (needs matplotlib)
@@ -422,6 +427,7 @@ code-review-graph detect-changes --brief         # Risk panel + token savings (r
 code-review-graph detect-changes --brief --base main  # Against the merge base of main and HEAD
 code-review-graph update --brief                 # Refresh graph + same panel
 code-review-graph detect-changes --brief --verify  # Cross-check against tiktoken
+code-review-graph detect-changes --details all  # Add graph context to the JSON
 code-review-graph context-history  # Trend of the opt-in savings log (CRG_CONTEXT_HISTORY=1)
 code-review-graph register <path>  # Register repo in the multi-repo registry
 code-review-graph unregister <path|alias>  # Remove repo from the registry
@@ -433,6 +439,7 @@ code-review-graph eval             # Run evaluation benchmarks
 code-review-graph serve            # Start the MCP server (stdio)
 code-review-graph serve --http     # MCP over Streamable HTTP on localhost:5555
 code-review-graph serve --http --multi-repo  # One HTTP server for every registered repo
+code-review-graph serve --multi-worktree  # One child server per linked Git worktree
 ```
 
 This is a selection. `code-review-graph --help` lists every command, and [docs/COMMANDS.md](docs/COMMANDS.md) documents their flags.
@@ -477,7 +484,7 @@ To see these estimates over time, set `CRG_CONTEXT_HISTORY=1` (off by default). 
 <summary><strong>Multi-repo daemon</strong></summary>
 <br>
 
-If your editor does not support hooks (for example Cursor or OpenCode), or you want the graph kept fresh without editor integration, the daemon watches your repositories and updates their graphs. It ships with `code-review-graph`; no separate install.
+If `install` gives your editor no hooks (for example Windsurf or Zed), or you want the graph kept fresh without editor integration, the daemon watches your repositories and updates their graphs. It ships with `code-review-graph`; no separate install.
 
 ```bash
 # 1. Register the repos to watch
@@ -524,9 +531,9 @@ The assistant uses these once the graph is built.
 | `build_or_update_graph_tool` | Build or incrementally update the graph |
 | `run_postprocess_tool` | Re-run flow detection, community detection and FTS indexing |
 | `get_minimal_context_tool` | Compact context (~100 tokens); call this first |
-| `get_impact_radius_tool` | Blast radius of changed files |
+| `get_impact_radius_tool` | Blast radius of changed files; `detail_level="compact"` gives ranked file paths |
 | `get_review_context_tool` | Review context with structural summary |
-| `query_graph_tool` | Callers, callees, tests, imports, inheritance queries |
+| `query_graph_tool` | Callers, callees, tests, imports, inheritance, and `path_to` between two symbols |
 | `traverse_graph_tool` | BFS/DFS traversal from any node with a token budget |
 | `semantic_search_nodes_tool` | Search code entities by name or meaning |
 | `embed_graph_tool` | Compute vector embeddings for semantic search |
@@ -542,7 +549,7 @@ The assistant uses these once the graph is built.
 | `detect_changes_tool` | Risk-scored change impact analysis |
 | `get_hub_nodes_tool` | Most-connected nodes |
 | `get_bridge_nodes_tool` | Chokepoints by betweenness centrality |
-| `get_knowledge_gaps_tool` | Structural weaknesses and untested hotspots |
+| `get_knowledge_gaps_tool` | Structural weaknesses, untested hotspots and import cycles |
 | `get_surprising_connections_tool` | Unexpected cross-community coupling |
 | `get_suggested_questions_tool` | Review questions generated from the analysis |
 | `refactor_tool` | Rename preview, dead code detection, suggestions |
@@ -741,9 +748,8 @@ pytest
 ```
 
 Pull requests target `staging` (the default branch). Changes are promoted
-`staging` → `testing` → `main`, and releases are tagged from `main`. The first
-step runs once a day by itself when `staging` is green; promotion to `main` is
-never automatic. See
+`staging` → `testing` → `main`, and releases are tagged from `main`. No
+promotion is automatic: a person reviews and merges each one. See
 [CONTRIBUTING.md](CONTRIBUTING.md#branching-and-promotion) for the full flow.
 
 To add a built-in language, edit `code_review_graph/parser.py`: add the extension to `EXTENSION_TO_LANGUAGE` and node type mappings to `_CLASS_TYPES`, `_FUNCTION_TYPES`, `_IMPORT_TYPES` and `_CALL_TYPES`. Include a test fixture and open a PR. For a language you only need in one repository, use [`languages.toml`](docs/CUSTOM_LANGUAGES.md) instead.

@@ -62,7 +62,7 @@ code-review-graph install              # detect installed AI coding tools and co
 code-review-graph build                # parse the codebase
 ```
 
-`install` は導入済みの AI コーディングツールを検出し、それぞれに MCP サーバーのエントリを書き込み、プラットフォームが対応していればフックとスキルを入れ、プラットフォームのルールファイルにグラフの説明を追加します。MCP エントリは、Poetry や uv のプロジェクト環境では `poetry run` または `uv run` を、PATH に `uvx` があれば `uvx code-review-graph serve` を、それ以外では現在の Python インタプリタを使います。実行後はエディタやツールを再起動してください。
+`install` は導入済みの AI コーディングツールを検出し、それぞれに MCP サーバーのエントリを書き込み、プラットフォームが対応していればフックとスキルを入れ、プラットフォームのルールファイルにグラフの説明を追加します。MCP エントリは、Poetry や uv のプロジェクト環境では `poetry run` または `uv run` を、PATH に `uvx` があれば `uvx code-review-graph serve` を、それ以外では現在の Python インタプリタを使います。`install` は、変更するファイルを一覧にし、指示ファイルについての質問にあなたが答えるまで、何も書き込みません。`install --dry-run` は各変更を差分で示し、何も書き込みません。実行後はエディタやツールを再起動してください。
 
 <p align="center">
   <img src="diagrams/diagram8_supported_platforms.png" alt="一度のインストールで全プラットフォーム対応: Codex、Claude Code、CodeBuddy Code、Cursor、Windsurf、Zed、Continue、OpenCode、Antigravity、Gemini CLI、Qwen、Qoder、Kiro、GitHub Copilot、GitHub Copilot CLI、Hermes Agent を検出" width="85%" />
@@ -76,6 +76,10 @@ code-review-graph install --platform codebuddy
 ```
 
 設定ファイルの場所は [docs/USAGE.md](docs/USAGE.md#supported-platforms) にあります。Python 3.10+ が必要です。
+
+`install` が書くファイル（`.claude/` や `.mcp.json` など）は、チームでコミットする場合に備えて git から見えるままにしてあります。`install --gitignore` を付けると、その実行で作ったものを `.gitignore` の印付きブロックに追加します。`uninstall` はそのブロックを取り除きます。
+
+Codex の場合、インストーラはさらにグローバルな `code-review-graph` スキルを `$CODEX_HOME/skills/code-review-graph/`（既定: `~/.codex/skills/code-review-graph/`）に置きます。このスキルは CRG の MCP ツールを優先し、MCP が使えないときは同梱の読み取り専用 CLI に切り替えます。グラフがない、空、または古い場合でも、暗黙にビルドや更新を始めることはありません。WSL と Windows の Codex ランタイムは `CODEX_HOME` ディレクトリとツール一覧がそれぞれ別なので、タスクを実行するランタイムの側でインストールと更新を行ってください。
 
 `uninstall` は Git または SVN の作業ツリーから CRG が書いたファイルとエントリを取り除き、ほかの MCP サーバー、フック、スキル、JSONC のコメントはそのまま残します。ツリー内のどこからでも実行できます。共有設定ファイルはアトミックに置き換えるので、書き込みに失敗しても元のファイルは壊れません。
 
@@ -167,7 +171,7 @@ Fedora など SELinux が有効なホストでは、マウントに `:z` を追�
 
 ### 増分更新
 
-フック、pre-commit フック、watch モードが増分更新を起動します。更新では変更ファイルの差分を取り、グラフのインポートエッジと呼び出しエッジから依存先を見つけ、SHA-256 ハッシュが変わったファイルだけを再解析します。約 3,000 ファイルのプロジェクト（django）では、2 ファイルの編集がフックの経路で約 2.5 秒で再インデックスされ、そのうち約 1.4 秒はプロセスの起動時間です。変更がない場合はその起動時間だけで済みます。[増分更新のレイテンシ](docs/REPRODUCING.md#incremental-update-latency)を参照してください。
+エディタのフック、git のフック（pre-commit、post-checkout、post-merge、post-rewrite）、watch モードが増分更新を起動します。更新では変更ファイルの差分を取り、グラフのインポートエッジと呼び出しエッジから依存先を見つけ、SHA-256 ハッシュが変わったファイルだけを再解析します。約 3,000 ファイルのプロジェクト（django）では、2 ファイルの編集がフックの経路で約 2.5 秒で再インデックスされ、そのうち約 1.4 秒はプロセスの起動時間です。変更がない場合はその起動時間だけで済みます。[増分更新のレイテンシ](docs/REPRODUCING.md#incremental-update-latency)を参照してください。
 
 <p align="center">
   <img src="diagrams/diagram4_incremental_update.png" alt="増分更新の流れ: フックまたは watch の更新が git diff を起動し、グラフのエッジから依存先を見つけ、SHA-256 ハッシュが変わったファイルだけを再解析する" width="90%" />
@@ -187,11 +191,11 @@ Fedora など SELinux が有効なホストでは、マウントに `:z` を追�
   <img src="diagrams/diagram9_language_coverage.png" alt="カテゴリ別の言語カバレッジ: Web、バックエンド、システム、モバイル、スクリプト、シェル、ドメイン、その他、加えて Jupyter と Databricks のノートブック" width="90%" />
 </p>
 
-パーサーは関数、クラス、インポート、呼び出し箇所、継承、テストを抽出します。文法がある言語では Tree-sitter を、それ以外では的を絞ったフォールバックを使います。対応: Python、JavaScript/TypeScript/TSX、Go、Rust、Java、C/C++、C#、VB.NET、Ruby、Kotlin、Swift、PHP、Scala、Solidity、Dart、R、Perl、Lua/Luau、Objective-C、シェルスクリプト、Elixir、Zig、PowerShell、Julia、ReScript、GDScript、Nix、Verilog/SystemVerilog、SQL、Terraform/OpenTofu（`.tf`。ほかの `.hcl` ファイルはファイルノードのみ）、Ansible YAML（playbook、role、task）、Spring Boot のアプリケーション設定（`application.properties`、`application.yml`、`application.yaml` とその `application-<profile>` 版。キー名と値の型のみを記録し、値は決して記録しません）、Vue/Svelte の SFC、Astro ファイル（TypeScript の文法で解析）、Jupyter と Databricks のノートブック（`.ipynb`）、Perl XS ファイル（`.xs`）。ほかの YAML とほかの `.properties` ファイルはソースコードとして扱いません。
+パーサーは関数、クラス、インポート、呼び出し箇所、継承、テストを抽出します。文法がある言語では Tree-sitter を、それ以外では的を絞ったフォールバックを使います。対応: Python、JavaScript/TypeScript/TSX（`.mjs`、`.cjs`、`.mts`、`.cts` を含む）、Go、Rust、Java、C/C++、C#、VB.NET、Ruby、Kotlin（`.kt`、`.kts`）、Swift、PHP、Scala、Solidity、Dart、R、Perl、Lua/Luau、Objective-C、シェルスクリプト、Elixir、Zig、PowerShell、Julia、ReScript、GDScript、Nix、Verilog/SystemVerilog、SQL/PL/SQL（Oracle）と dbt モデル、Terraform/OpenTofu（`.tf`。ほかの `.hcl` ファイルはファイルノードのみ）、Ansible YAML（playbook、role、task）、Spring Boot のアプリケーション設定（`application.properties`、`application.yml`、`application.yaml` とその `application-<profile>` 版。キー名と値の型のみを記録し、値は決して記録しません）、値を含まない一般的な YAML の構造（`locales/` などのフォルダにある翻訳ファイルはファイルノードのみ）、XSLT スタイルシート（`.xsl`、`.xslt`）、値を含まない JSON の構造（`.json`。翻訳、テスト、ドキュメント、サンプル、データのファイルはファイルノードのみで、ロックファイルは飛ばします）、Vue/Svelte の SFC、HTML ページ（`.html`、`.htm`。インラインスクリプトと、id を持つ `div`、`section`、`article` のブロックを `DocSection` ノードとして）、Astro ファイル（TypeScript の文法で解析）、Jupyter と Databricks のノートブック（`.ipynb`。加えて Databricks の `.py` エクスポート）、Perl XS ファイル（`.xs`）、Robot Framework のファイル（`.robot`、`.resource`）、Liquid テンプレート（`.liquid`）。ほかの `.properties` ファイルはソースコードとして扱いません。
 
-PHP プロジェクトではさらに、リポジトリ内に閉じた Composer PSR-4 の解決、Blade テンプレートの参照、そしてソースに明示的なフレームワークのインポート、モデルの継承、レシーバの根拠が現れている場合の Laravel Route と Eloquent のエッジが得られます。
+PHP プロジェクトではさらに、リポジトリ内に閉じた Composer PSR-4 の解決、Blade テンプレートの参照、そしてソースに明示的なフレームワークのインポート、モデルの継承、レシーバの根拠が現れている場合の Laravel Route と Eloquent のエッジが得られます。`routes/*.php` 内の静的な Laravel ルートは、Endpoint ノードとコントローラへの HANDLES エッジを生成し、リテラルのグループプレフィックスも反映します。
 
-Java プロジェクトでは、Spring の依存性注入による呼び出し解決、リクエストエンドポイントと WebFlux ルート、スケジュールトリガー、アプリケーションイベントの発行側からリスナーへのエッジ、Temporal のワークフローとアクティビティのエッジが得られます。各リゾルバは解析のあとに動き、注入されたフィールド、発行されるイベント、ワークフローのスタブがリポジトリ内で見えている必要があります。
+Java プロジェクトでは、Spring の依存性注入による呼び出し解決、リクエストエンドポイントと WebFlux ルート、スケジュールトリガー、アプリケーションイベントの発行側からリスナーへのエッジ、Spring AOP のアドバイスから対象へのエッジ、Temporal のワークフローとアクティビティのエッジが得られます。各リゾルバは解析のあとに動き、注入されたフィールド、発行されるイベント、ワークフローのスタブがリポジトリ内で見えている必要があります。
 
 ### 独自の言語を追加する
 
@@ -211,7 +215,7 @@ call_node_types = ["call"]
 
 ### CI でのリスクスコア付き PR レビュー（GitHub Action）
 
-同じ分析が composite の GitHub Action としても動きます。グラフはあなたの CI ランナー上で構築・照会され、ソースコードが外部サービスに送られることはありません。プルリクエストごとに、リスクスコア付きの関数、影響を受ける実行フロー、テストの穴をまとめた固定コメントを 1 件投稿し、プッシュのたびにその場で更新します。任意の `fail-on-risk` 入力を使うと、マージの関門にできます。
+同じ分析が composite の GitHub Action としても動きます。グラフはあなたの CI ランナー上で構築・照会され、ソースコードが外部サービスに送られることはありません。プルリクエストごとに、リスクスコア付きの関数、影響を受ける実行フロー、テストの穴をまとめた固定コメントを 1 件投稿し、プッシュのたびにその場で更新します。任意の `fail-on-risk` 入力を使うと、マージの関門にできます。任意の `details` 入力は、折りたたんでサイズに上限を設けた形でグラフの文脈を追加します。上位の各シンボルがそのスコアになった理由、変更が触れるコミュニティ、ハブ、境界をまたぐつながり、影響範囲、テストのないホットスポット、そしてグラフの出どころです。
 
 ```yaml
 # .github/workflows/code-review-graph.yml
@@ -293,7 +297,9 @@ jobs:
 | gin | 3 | 0.609 | 0.439 | 1.0 |
 | **平均** | **13** | **0.693** | **0.546** | **1.000** |
 
-このベンチマークは**共変更モード**でも動きます。予測器に変更ファイルを 1 つ与え、同じコミットで作者が触れたほかのファイルで採点するもので、根拠はグラフではなく git の履歴です。どちらのモードも結果 CSV に出ます（`ground_truth_mode` 列）。2026-08-02 の計測では、共変更モードは採点対象のどのコミットでも `predicted_files = 0` を返したため、まだ使える計測にはなっておらず、共変更の数字は引用していません。
+この表は 2026-08-02 の計測で、後述するパスの修正より前に取ったものです。そのバグはグラフ由来の正解からも本来の近傍ファイルを落としていたため、ベンチマークを再実行するとこれらの数字は変わります。
+
+このベンチマークは**共変更モード**でも動きます。予測器に変更ファイルを 1 つ与え、同じコミットで作者が触れたほかのファイルで採点するもので、根拠はグラフではなく git の履歴です。どちらのモードも結果 CSV に出ます（`ground_truth_mode` 列）。2026-08-02 の計測では、共変更モードは採点対象のどのコミットでも `predicted_files = 0` を返しました。コードのシード（たとえば `code_review_graph/cli.py` や gin の `context.go`）でも同じです。原因はベンチマークのパスのバグでした。`git diff` はリポジトリからの相対パスを返し、グラフは絶対パスを保存するため、シードがどのノードとも一致しなかったのです。このバグは修正済みですが、ベンチマークはまだ再実行していないので、共変更の数字は引用していません。
 
 </details>
 
@@ -316,7 +322,7 @@ jobs:
 
 ### 制限
 
-- **影響分析の「再現率 1.0」は循環している。** 過去の正解は予測器が辿るのと同じグラフのエッジから作られているので、構造上それは上限です。共変更モードはまだ使える計測になっていません。
+- **影響分析の「再現率 1.0」は循環している。** 過去の正解は予測器が辿るのと同じグラフのエッジから作られているので、構造上それは上限です。共変更の数字は、パスの修正を入れてベンチマークを再実行するまで引用しません。
 - **小さな単一ファイルの変更。** ささいな編集では、グラフの文脈のほうが素のファイル読み込みより大きくなることがあります。その差は、複数ファイルの分析を可能にしている構造メタデータです。
 - **検索の順位付け。** キーワード検索はたいてい正しい結果を上位に出しますが、順位付けには改善が必要です。モジュールパターンの命名のため、Express への問い合わせはヒットなしになることがあります。
 - **フロー検出。** エントリポイントの検出は Python と PHP/Laravel で最も強力です。JavaScript と Go のフロー検出には改善が必要です。
@@ -331,17 +337,17 @@ jobs:
 | **増分更新** | ハッシュが変わったファイルだけを再解析します。約 3,000 ファイルのリポジトリでは、2 ファイルの編集がフックの経路で約 2.5 秒です（[計測値](docs/REPRODUCING.md#incremental-update-latency)）。 |
 | **言語とノートブックの対応** | 上記の[対応言語](#対応言語とノートブック)を参照。 |
 | **フレームワークを理解する PHP 解析** | リポジトリ内に閉じた Composer PSR-4 のインポート、Blade テンプレートの参照、根拠に基づく Laravel Route からコントローラへのエッジと Eloquent のリレーションのエッジ |
-| **フレームワークを理解する Java 解析** | Spring の依存性注入による呼び出し解決、リクエストエンドポイントと WebFlux ルート、スケジュールトリガー、アプリケーションイベントの発行側からリスナーへのエッジ、Temporal のワークフローとアクティビティのエッジ、そして値を含めずにインデックスする Spring Boot の設定キー |
+| **フレームワークを理解する Java 解析** | Spring の依存性注入による呼び出し解決、リクエストエンドポイントと WebFlux ルート、スケジュールトリガー、アプリケーションイベントの発行側からリスナーへのエッジ、Spring AOP のアドバイスのエッジ、Temporal のワークフローとアクティビティのエッジ、そして値を含めずにインデックスする Spring Boot の設定キー |
 | **影響範囲の分析** | 変更によって影響を受けそうな関数、クラス、ファイル |
-| **自動更新フック** | エディタのフック、git の pre-commit フック、watch モードが作業中にグラフを更新 |
+| **自動更新フック** | エディタのフック、git のフック（コミットの前と、チェックアウト、マージ、リベースの後）、watch モードが作業中にグラフを更新 |
 | **セマンティック検索** | 任意のベクトル埋め込み。sentence-transformers、Google Gemini、MiniMax、Voyage AI、あるいは任意の OpenAI 互換エンドポイント（OpenAI、Azure、new-api、LiteLLM、vLLM、LocalAI） |
-| **対話的な可視化** | D3.js の力学モデルグラフ。検索、コミュニティ凡例の切り替え、次数に応じたノードサイズ |
+| **対話的な可視化** | D3.js の力学モデルグラフ。検索、コミュニティ凡例の切り替え、次数に応じたノードサイズ。加えて、シンボル、ファイル、フロー、変更を起点にした近傍ビュー |
 | **ハブとブリッジの検出** | 最も多く接続されたノードとボトルネック（媒介中心性） |
 | **意外度スコア** | 想定外の結合: コミュニティをまたぐ、言語をまたぐ、周辺からハブへのエッジ |
-| **知識のギャップ分析** | 孤立ノード、テストのないホットスポット、薄いコミュニティ |
+| **知識のギャップ分析** | 孤立ノード、テストのないホットスポット、薄いコミュニティ、インポートの循環 |
 | **推奨質問** | ブリッジ、ハブ、意外な結合から生成したレビュー用の質問 |
-| **エッジの信頼度** | 2 段階の信頼度（EXTRACTED/INFERRED）と、エッジ上の浮動小数点スコア |
-| **グラフ探索** | 任意のノードからの BFS/DFS。深さとトークン予算を設定可能 |
+| **エッジの信頼度** | 4 段階（EXTRACTED、INFERRED、AMBIGUOUS、UNRESOLVED）とエッジ上の浮動小数点スコア。グラフが結び付けられなかった呼び出しはそうと分かる |
+| **グラフ探索** | 任意のノードからの BFS/DFS。深さとトークン予算を設定可能。`path_to` はあるシンボルが別のシンボルにどう到達するかを示し、最も弱いホップを挙げる |
 | **エクスポート形式** | GraphML（Gephi/yEd）、Neo4j Cypher、Obsidian vault、JSON、そして SVG（SVG には `eval` エクストラの matplotlib が必要） |
 | **トークンのベンチマーク** | `code_review_graph/token_benchmark.py` が、質問ごとにコーパス全体のトークンとグラフ照会のトークンを計測 |
 | **文脈削減量の推定** | レビュー、影響分析、detect-changes、アーキテクチャの応答に付く `context_savings` メタデータ（`estimated`、`saved_tokens`、`saved_percent`） |
@@ -349,7 +355,7 @@ jobs:
 | **実行フロー** | エントリポイントからの呼び出し連鎖を、重み付けした重要度で並べ替え |
 | **コミュニティ検出** | グラフ規模に応じて解像度を調整する Leiden クラスタリング |
 | **アーキテクチャ概要** | コミュニティ構造に基づくアーキテクチャ図と結合の警告 |
-| **リスクスコア付きレビュー** | `detect_changes` が差分を、影響を受ける関数、フロー、テストの穴に対応づけ |
+| **リスクスコア付きレビュー** | `detect_changes` が差分を、影響を受ける関数、YAML と JSON のパス、フロー、テストの穴に対応づけ |
 | **カスタム言語** | `.code-review-graph/languages.toml` で新しい言語を追加。フォーク不要 |
 | **GitHub Action** | CI でのリスクスコア付き PR レビューの固定コメント。任意の `fail-on-risk` マージ関門つき |
 | **リファクタリング支援** | リネームのプレビュー、フレームワークを理解するデッドコード検出、コミュニティに基づく提案 |
@@ -388,14 +394,19 @@ Qoder にはさらに、このリポジトリの `skills/` ディレクトリか
 ```bash
 code-review-graph install          # Detect and configure all platforms
 code-review-graph install --platform <name>  # One platform
+code-review-graph install --steering  # Claude Code: graph context beside each search and read
 code-review-graph uninstall --dry-run  # Preview removal of installed artifacts
 code-review-graph build            # Parse the whole codebase
+code-review-graph build --follow-symlinks  # Also index symlinked folders
 code-review-graph update           # Incremental update (changed files only)
 code-review-graph status           # Graph statistics
 code-review-graph watch            # Update on file changes
 code-review-graph forget <path>    # Drop already-parsed files from the graph
 code-review-graph dead-code        # Functions and classes with no callers or tests
+code-review-graph query path_to <from> --to <to>  # How one symbol reaches another
+code-review-graph impact --detail-level compact  # Blast radius as ranked file paths
 code-review-graph visualize        # Interactive HTML graph
+code-review-graph visualize --seed-symbol <name>  # Neighbourhood of one symbol
 code-review-graph visualize --format json      # Export graph data as JSON
 code-review-graph visualize --format graphml   # Export as GraphML
 code-review-graph visualize --format svg       # Export as SVG (needs matplotlib)
@@ -406,6 +417,7 @@ code-review-graph detect-changes --brief         # Risk panel + token savings (r
 code-review-graph detect-changes --brief --base main  # Against the merge base of main and HEAD
 code-review-graph update --brief                 # Refresh graph + same panel
 code-review-graph detect-changes --brief --verify  # Cross-check against tiktoken
+code-review-graph detect-changes --details all  # Add graph context to the JSON
 code-review-graph context-history  # Trend of the opt-in savings log (CRG_CONTEXT_HISTORY=1)
 code-review-graph register <path>  # Register repo in the multi-repo registry
 code-review-graph unregister <path|alias>  # Remove repo from the registry
@@ -417,6 +429,7 @@ code-review-graph eval             # Run evaluation benchmarks
 code-review-graph serve            # Start the MCP server (stdio)
 code-review-graph serve --http     # MCP over Streamable HTTP on localhost:5555
 code-review-graph serve --http --multi-repo  # One HTTP server for every registered repo
+code-review-graph serve --multi-worktree  # One child server per linked Git worktree
 ```
 
 これは抜粋です。`code-review-graph --help` がすべてのコマンドを並べ、[docs/COMMANDS.md](docs/COMMANDS.md) がそれぞれのフラグを説明します。
@@ -461,7 +474,7 @@ JSON のエクスポートはローカルのグラフデータディレクトリ
 <summary><strong>マルチリポジトリのデーモン</strong></summary>
 <br>
 
-エディタがフックに対応していない場合（Cursor や OpenCode など）や、エディタ連携なしでグラフを新しく保ちたい場合は、デーモンがリポジトリを監視してグラフを更新します。`code-review-graph` に同梱されているので、別途インストールは要りません。
+`install` がエディタにフックを入れない場合（Windsurf や Zed など）や、エディタ連携なしでグラフを新しく保ちたい場合は、デーモンがリポジトリを監視してグラフを更新します。`code-review-graph` に同梱されているので、別途インストールは要りません。
 
 ```bash
 # 1. Register the repos to watch
@@ -508,9 +521,9 @@ alias = "project-b"
 | `build_or_update_graph_tool` | グラフの構築または増分更新 |
 | `run_postprocess_tool` | フロー検出、コミュニティ検出、FTS インデックスの再実行 |
 | `get_minimal_context_tool` | 小さな文脈（約 100 トークン）。最初にこれを呼ぶ |
-| `get_impact_radius_tool` | 変更ファイルの影響範囲 |
+| `get_impact_radius_tool` | 変更ファイルの影響範囲。`detail_level="compact"` で順位付きのファイルパスを返す |
 | `get_review_context_tool` | 構造の要約つきレビュー文脈 |
-| `query_graph_tool` | 呼び出し元、呼び出し先、テスト、インポート、継承の照会 |
+| `query_graph_tool` | 呼び出し元、呼び出し先、テスト、インポート、継承、そして 2 つのシンボル間の `path_to` の照会 |
 | `traverse_graph_tool` | 任意のノードからの BFS/DFS 探索。トークン予算つき |
 | `semantic_search_nodes_tool` | 名前や意味でコードの実体を検索 |
 | `embed_graph_tool` | セマンティック検索用のベクトル埋め込みを計算 |
@@ -526,7 +539,7 @@ alias = "project-b"
 | `detect_changes_tool` | リスクスコア付きの変更影響分析 |
 | `get_hub_nodes_tool` | 最も多く接続されたノード |
 | `get_bridge_nodes_tool` | 媒介中心性によるボトルネック |
-| `get_knowledge_gaps_tool` | 構造上の弱点とテストのないホットスポット |
+| `get_knowledge_gaps_tool` | 構造上の弱点、テストのないホットスポット、インポートの循環 |
 | `get_surprising_connections_tool` | 想定外のコミュニティ間の結合 |
 | `get_suggested_questions_tool` | 分析から生成したレビュー用の質問 |
 | `refactor_tool` | リネームのプレビュー、デッドコード検出、提案 |
@@ -575,7 +588,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_GIT_TIMEOUT` | Git 操作のタイムアウト（秒。build / update / watch） | `30` |
 | `CRG_DISCOVERY_TIMEOUT` | ファイル一覧が明示されなかったとき、変更内容を特定する各 Git コマンドのタイムアウト（秒）。超過時はエラーを返し、「変更なし」とは報告しない | `5`（`CRG_GIT_TIMEOUT` を明示設定した場合はその値） |
 | `CRG_DATA_DIR` | グラフのデータベースと生成物を置くディレクトリ | - |
-| `CRG_HOOK_WORKTREES` | `1` にすると pre-commit フックをリンク済みの git worktree でも動かす | - |
+| `CRG_HOOK_WORKTREES` | `1` にすると、生成された git フックをリンク済みの git worktree でも動かす | - |
 | `CRG_EMBEDDING_MODEL` | ローカルのベクトル埋め込みの既定モデル | `all-MiniLM-L6-v2` |
 | `CRG_ACCEPT_CLOUD_EMBEDDINGS` | `1` にするとクラウド埋め込みの送信警告を抑制 | - |
 | `CRG_ALLOW_REMOTE_CODE` | `trust_remote_code=True` を要する HuggingFace モデルを許可 | `0` |
@@ -585,7 +598,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_MAX_BFS_DEPTH` | グラフ探索の最大の深さ | `15` |
 | `CRG_MAX_CHANGED_FUNCS` | 1 回の変更レポートで分析する変更関数の最大数 | `500` |
 | `CRG_MAX_DELETION_FILES` | 差分で削除された関数とクラスを挙げるために、1 回の変更レポートで旧版を読むファイルの最大数 | `100` |
-| `CRG_MAX_TRANSITIVE_FRONTIER` | 推移的な呼び出し元・呼び出し先の展開における最大フロンティア数 | `50` |
+| `CRG_MAX_TRANSITIVE_FRONTIER` | `tests_for` と `detect-changes` がテストを探すとき、1 ホップでたどる呼び出し先の最大数。名前順で先頭のものを残すので、同じグラフからは常に同じ答えが出る | `50` |
 | `CRG_CALLER_TEST_ROUTE_DEPTH` | テストのない変更シンボルについて、テスト済みの呼び出し元を探して `CALLS` を遡るホップ数。カバレッジではなく注記として報告されます | `2` |
 | `CRG_CALLER_TEST_ROUTE_MAX_CALLERS` | そのテスト済み呼び出し元を探す際に調べる呼び出し元の最大数 | `500` |
 | `CRG_TOOL_TIMEOUT` | 読み取り専用 MCP ツールのタイムアウト（秒。`0` で無効）。書き込みを行うツール（build / postprocess / embed / wiki / apply-refactor）には適用されない | `0` |
@@ -725,7 +738,7 @@ pytest
 ```
 
 プルリクエストは `staging`（既定のブランチ）に出してください。変更は
-`staging` → `testing` → `main` の順に進み、リリースは `main` からタグを打ちます。全体の流れは
+`staging` → `testing` → `main` の順に進み、リリースは `main` からタグを打ちます。昇格は自動では行われず、毎回人がレビューしてマージします。全体の流れは
 [CONTRIBUTING.md](CONTRIBUTING.md#branching-and-promotion) を参照してください。
 
 組み込みの言語を追加するには `code_review_graph/parser.py` を編集します。拡張子を `EXTENSION_TO_LANGUAGE` に、ノード型の対応を `_CLASS_TYPES`、`_FUNCTION_TYPES`、`_IMPORT_TYPES`、`_CALL_TYPES` に追加してください。テスト用のフィクスチャを添えて PR を出してください。1 つのリポジトリだけで必要な言語なら、代わりに [`languages.toml`](docs/CUSTOM_LANGUAGES.md) を使ってください。

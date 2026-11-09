@@ -62,7 +62,7 @@ code-review-graph install              # detect installed AI coding tools and co
 code-review-graph build                # parse the codebase
 ```
 
-`install` यह पहचानता है कि आपके पास कौन-कौन से AI कोडिंग टूल हैं, हर एक के लिए MCP सर्वर प्रविष्टि लिखता है, जहाँ प्लेटफ़ॉर्म समर्थन करता है वहाँ हुक और स्किल लगाता है, और प्लेटफ़ॉर्म की नियम फ़ाइल में ग्राफ़ संबंधी निर्देश जोड़ता है। Poetry या uv प्रोजेक्ट परिवेश में MCP प्रविष्टि `poetry run` या `uv run` का उपयोग करती है, PATH पर `uvx` होने पर `uvx code-review-graph serve` का, और बाकी स्थितियों में मौजूदा Python इंटरप्रेटर का। उसके बाद एडिटर या टूल को फिर से शुरू करें।
+`install` यह पहचानता है कि आपके पास कौन-कौन से AI कोडिंग टूल हैं, हर एक के लिए MCP सर्वर प्रविष्टि लिखता है, जहाँ प्लेटफ़ॉर्म समर्थन करता है वहाँ हुक और स्किल लगाता है, और प्लेटफ़ॉर्म की नियम फ़ाइल में ग्राफ़ संबंधी निर्देश जोड़ता है। Poetry या uv प्रोजेक्ट परिवेश में MCP प्रविष्टि `poetry run` या `uv run` का उपयोग करती है, PATH पर `uvx` होने पर `uvx code-review-graph serve` का, और बाकी स्थितियों में मौजूदा Python इंटरप्रेटर का। जब तक `install` बदली जाने वाली फ़ाइलों की सूची न दिखा दे और आप निर्देश फ़ाइलों वाले उसके प्रश्न का उत्तर न दे दें, तब तक कुछ भी नहीं लिखा जाता; `install --dry-run` हर बदलाव को diff के रूप में दिखाता है और कुछ नहीं लिखता। उसके बाद एडिटर या टूल को फिर से शुरू करें।
 
 <p align="center">
   <img src="diagrams/diagram8_supported_platforms.png" alt="एक इंस्टॉल, हर प्लेटफ़ॉर्म: Codex, Claude Code, CodeBuddy Code, Cursor, Windsurf, Zed, Continue, OpenCode, Antigravity, Gemini CLI, Qwen, Qoder, Kiro, GitHub Copilot, GitHub Copilot CLI और Hermes Agent को पहचानता है" width="85%" />
@@ -76,6 +76,16 @@ code-review-graph install --platform codebuddy
 ```
 
 कॉन्फ़िग फ़ाइलों के स्थान [docs/USAGE.md](docs/USAGE.md#supported-platforms) में सूचीबद्ध हैं। Python 3.10+ चाहिए।
+
+`install` जो फ़ाइलें लिखता है, जैसे `.claude/` और `.mcp.json`, वे git को दिखती रहती हैं, ताकि आपकी टीम चाहे तो उन्हें कमिट कर सके। `install --gitignore` उस बार बनाई गई फ़ाइलों को `.gitignore` के एक चिह्नित ब्लॉक में जोड़ता है; `uninstall` वह ब्लॉक हटा देता है।
+
+Codex के लिए इंस्टॉलर एक वैश्विक `code-review-graph` स्किल भी
+`$CODEX_HOME/skills/code-review-graph/` में रखता है (डिफ़ॉल्ट:
+`~/.codex/skills/code-review-graph/`)। यह पहले CRG के MCP टूल इस्तेमाल करता है, और MCP
+उपलब्ध न हो तो साथ आए केवल-पढ़ने वाले (read-only) CLI पर लौटता है; ग्राफ़ न हो, खाली हो
+या पुराना हो, तब भी यह अपने आप कभी build या update नहीं चलाता। WSL और Windows के Codex
+रनटाइम की `CODEX_HOME` डायरेक्टरी और टूल सूची अलग-अलग होती हैं, इसलिए उसी रनटाइम में
+इंस्टॉल और रीफ़्रेश करें जो काम चलाएगा।
 
 `uninstall` किसी Git या SVN वर्किंग ट्री से CRG की अपनी फ़ाइलें और प्रविष्टियाँ हटाता है और दूसरे MCP सर्वर, हुक, स्किल तथा JSONC टिप्पणियाँ जैसी की तैसी छोड़ देता है। इसे ट्री के भीतर कहीं से भी चलाया जा सकता है। साझा कॉन्फ़िग फ़ाइलें एटॉमिक तरीके से बदली जाती हैं, इसलिए लिखने में विफलता होने पर मूल फ़ाइल सुरक्षित रहती है।
 
@@ -166,7 +176,7 @@ Fedora जैसे SELinux चालू वाले होस्ट पर म
 
 ### इंक्रीमेंटल अपडेट
 
-हुक, pre-commit हुक और watch मोड इंक्रीमेंटल अपडेट चलाते हैं। अपडेट बदली हुई फ़ाइलों का diff लेता है, ग्राफ़ के इम्पोर्ट और कॉल एज से उनके आश्रित ढूँढता है, और सिर्फ़ उन्हीं फ़ाइलों को दोबारा पार्स करता है जिनका SHA-256 हैश बदला है। लगभग 3,000 फ़ाइलों वाले प्रोजेक्ट (django) में दो फ़ाइलों का संपादन हुक वाले रास्ते पर लगभग 2.5 सेकंड में दोबारा इंडेक्स होता है, जिसमें से लगभग 1.4 सेकंड प्रोसेस के शुरू होने का समय है; कुछ न बदलने पर सिर्फ़ वही समय लगता है। देखें [इंक्रीमेंटल अपडेट विलंब](docs/REPRODUCING.md#incremental-update-latency)।
+एडिटर हुक, git हुक (pre-commit, post-checkout, post-merge, post-rewrite) और watch मोड इंक्रीमेंटल अपडेट चलाते हैं। अपडेट बदली हुई फ़ाइलों का diff लेता है, ग्राफ़ के इम्पोर्ट और कॉल एज से उनके आश्रित ढूँढता है, और सिर्फ़ उन्हीं फ़ाइलों को दोबारा पार्स करता है जिनका SHA-256 हैश बदला है। लगभग 3,000 फ़ाइलों वाले प्रोजेक्ट (django) में दो फ़ाइलों का संपादन हुक वाले रास्ते पर लगभग 2.5 सेकंड में दोबारा इंडेक्स होता है, जिसमें से लगभग 1.4 सेकंड प्रोसेस के शुरू होने का समय है; कुछ न बदलने पर सिर्फ़ वही समय लगता है। देखें [इंक्रीमेंटल अपडेट विलंब](docs/REPRODUCING.md#incremental-update-latency)।
 
 <p align="center">
   <img src="diagrams/diagram4_incremental_update.png" alt="इंक्रीमेंटल अपडेट प्रवाह: हुक या watch अपडेट git diff चलाता है, ग्राफ़ के एज से आश्रित मिलते हैं, और सिर्फ़ वही फ़ाइलें दोबारा पार्स होती हैं जिनका SHA-256 हैश बदला है" width="90%" />
@@ -186,11 +196,11 @@ Fedora जैसे SELinux चालू वाले होस्ट पर म
   <img src="diagrams/diagram9_language_coverage.png" alt="श्रेणी के अनुसार भाषा कवरेज: वेब, बैकएंड, सिस्टम्स, मोबाइल, स्क्रिप्टिंग, शेल, डोमेन और अन्य, साथ में Jupyter और Databricks नोटबुक" width="90%" />
 </p>
 
-पार्सर फ़ंक्शन, क्लास, इम्पोर्ट, कॉल स्थल, इनहेरिटेंस और टेस्ट निकालता है; जहाँ व्याकरण मौजूद है वहाँ Tree-sitter का और बाकी जगह लक्षित फ़ॉलबैक का उपयोग करता है। समर्थित: Python, JavaScript/TypeScript/TSX, Go, Rust, Java, C/C++, C#, VB.NET, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, शेल स्क्रिप्ट, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL, Terraform/OpenTofu (`.tf`; अन्य `.hcl` फ़ाइलें सिर्फ़ फ़ाइल नोड बनती हैं), Ansible YAML (playbook, role, task), Spring Boot ऐप्लिकेशन कॉन्फ़िग (`application.properties`, `application.yml`, `application.yaml` और इनके `application-<profile>` रूप; सिर्फ़ कुंजी नाम और मान के प्रकार, मान कभी नहीं), Vue/Svelte SFC, Astro फ़ाइलें (TypeScript व्याकरण से पार्स), Jupyter और Databricks नोटबुक (`.ipynb`), तथा Perl XS फ़ाइलें (`.xs`)। अन्य YAML और अन्य `.properties` फ़ाइलों को स्रोत कोड नहीं माना जाता।
+पार्सर फ़ंक्शन, क्लास, इम्पोर्ट, कॉल स्थल, इनहेरिटेंस और टेस्ट निकालता है; जहाँ व्याकरण मौजूद है वहाँ Tree-sitter का और बाकी जगह लक्षित फ़ॉलबैक का उपयोग करता है। समर्थित: Python, JavaScript/TypeScript/TSX (`.mjs`, `.cjs`, `.mts` और `.cts` सहित), Go, Rust, Java, C/C++, C#, VB.NET, Ruby, Kotlin (`.kt`, `.kts`), Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, शेल स्क्रिप्ट, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL/PL/SQL (Oracle) और dbt मॉडल, Terraform/OpenTofu (`.tf`; अन्य `.hcl` फ़ाइलें सिर्फ़ फ़ाइल नोड बनती हैं), Ansible YAML (playbook, role, task), Spring Boot ऐप्लिकेशन कॉन्फ़िग (`application.properties`, `application.yml`, `application.yaml` और इनके `application-<profile>` रूप; सिर्फ़ कुंजी नाम और मान के प्रकार, मान कभी नहीं), मान के बिना सामान्य YAML संरचना (`locales/` जैसे फ़ोल्डरों की अनुवाद फ़ाइलें सिर्फ़ फ़ाइल नोड बनती हैं), XSLT स्टाइलशीट (`.xsl`, `.xslt`), मान के बिना JSON संरचना (`.json`; अनुवाद, टेस्ट, docs, उदाहरण और डेटा फ़ाइलें सिर्फ़ फ़ाइल नोड रखती हैं, और lock फ़ाइलें छोड़ दी जाती हैं), Vue/Svelte SFC, HTML पेज (`.html`, `.htm`; इनलाइन स्क्रिप्ट, और id वाले `div`, `section` तथा `article` ब्लॉक `DocSection` नोड के रूप में), Astro फ़ाइलें (TypeScript व्याकरण से पार्स), Jupyter और Databricks नोटबुक (`.ipynb`, साथ में Databricks के `.py` एक्सपोर्ट), Perl XS फ़ाइलें (`.xs`), Robot Framework फ़ाइलें (`.robot`, `.resource`), और Liquid टेम्पलेट (`.liquid`)। अन्य `.properties` फ़ाइलों को स्रोत कोड नहीं माना जाता।
 
-PHP प्रोजेक्ट्स को रिपॉज़िटरी तक सीमित Composer PSR-4 समाधान, Blade टेम्पलेट संदर्भ, और जब स्रोत में स्पष्ट फ़्रेमवर्क इम्पोर्ट, मॉडल इनहेरिटेंस तथा रिसीवर का प्रमाण दिखता है तब Laravel Route और Eloquent एज भी मिलते हैं।
+PHP प्रोजेक्ट्स को रिपॉज़िटरी तक सीमित Composer PSR-4 समाधान, Blade टेम्पलेट संदर्भ, और जब स्रोत में स्पष्ट फ़्रेमवर्क इम्पोर्ट, मॉडल इनहेरिटेंस तथा रिसीवर का प्रमाण दिखता है तब Laravel Route और Eloquent एज भी मिलते हैं। `routes/*.php` में स्थिर Laravel रूट Endpoint नोड और कंट्रोलर तक HANDLES एज बनाते हैं, जिनमें स्थिर (literal) ग्रुप प्रीफ़िक्स भी शामिल हैं।
 
-Java प्रोजेक्ट्स को Spring डिपेंडेंसी इंजेक्शन का कॉल समाधान, रिक्वेस्ट एंडपॉइंट तथा WebFlux रूट, शेड्यूल्ड ट्रिगर, ऐप्लिकेशन इवेंट के प्रकाशक से श्रोता तक के एज, और Temporal वर्कफ़्लो तथा ऐक्टिविटी एज मिलते हैं। हर रिज़ॉल्वर पार्स के बाद चलता है और उसे इंजेक्ट किया गया फ़ील्ड, प्रकाशित इवेंट या वर्कफ़्लो स्टब रिपॉज़िटरी में दिखाई देना चाहिए।
+Java प्रोजेक्ट्स को Spring डिपेंडेंसी इंजेक्शन का कॉल समाधान, रिक्वेस्ट एंडपॉइंट तथा WebFlux रूट, शेड्यूल्ड ट्रिगर, ऐप्लिकेशन इवेंट के प्रकाशक से श्रोता तक के एज, Spring AOP एडवाइस से लक्ष्य तक के एज, और Temporal वर्कफ़्लो तथा ऐक्टिविटी एज मिलते हैं। हर रिज़ॉल्वर पार्स के बाद चलता है और उसे इंजेक्ट किया गया फ़ील्ड, प्रकाशित इवेंट या वर्कफ़्लो स्टब रिपॉज़िटरी में दिखाई देना चाहिए।
 
 ### अपनी भाषा जोड़ें
 
@@ -210,7 +220,7 @@ call_node_types = ["call"]
 
 ### CI में जोखिम-स्कोर वाले PR रिव्यू (GitHub Action)
 
-यही विश्लेषण एक composite GitHub Action के रूप में भी चलता है। ग्राफ़ आपके CI रनर पर ही बनता और पूछा जाता है; कोई स्रोत कोड किसी बाहरी सेवा को नहीं भेजा जाता। हर पुल रिक्वेस्ट पर यह ऐक्शन एक स्थायी टिप्पणी डालता है जिसमें जोखिम-स्कोर वाले फ़ंक्शन, प्रभावित निष्पादन प्रवाह और टेस्ट की कमियाँ होती हैं, और हर पुश पर वहीं अपडेट हो जाती है। वैकल्पिक `fail-on-risk` इनपुट इसे मर्ज गेट बना देता है।
+यही विश्लेषण एक composite GitHub Action के रूप में भी चलता है। ग्राफ़ आपके CI रनर पर ही बनता और पूछा जाता है; कोई स्रोत कोड किसी बाहरी सेवा को नहीं भेजा जाता। हर पुल रिक्वेस्ट पर यह ऐक्शन एक स्थायी टिप्पणी डालता है जिसमें जोखिम-स्कोर वाले फ़ंक्शन, प्रभावित निष्पादन प्रवाह और टेस्ट की कमियाँ होती हैं, और हर पुश पर वहीं अपडेट हो जाती है। वैकल्पिक `fail-on-risk` इनपुट इसे मर्ज गेट बना देता है। वैकल्पिक `details` इनपुट ग्राफ़ का और संदर्भ जोड़ता है, जो मुड़ा हुआ (folded) रहता है और आकार में सीमित है: हर शीर्ष सिंबल को उसका स्कोर क्यों मिला, बदलाव जिन कम्युनिटी, हब और सीमा-पार कड़ियों को छूता है, उसका प्रभाव क्षेत्र, उसके बिना टेस्ट वाले हॉटस्पॉट, और ग्राफ़ कहाँ से आया।
 
 ```yaml
 # .github/workflows/code-review-graph.yml
@@ -292,7 +302,9 @@ jobs:
 | gin | 3 | 0.609 | 0.439 | 1.0 |
 | **औसत** | **13** | **0.693** | **0.546** | **1.000** |
 
-यह बेंचमार्क एक **सह-परिवर्तन मोड** भी चलाता है: भविष्यवक्ता को एक बदली हुई फ़ाइल दी जाती है और उसी कमिट में लेखक द्वारा छुई गई बाकी फ़ाइलों के आधार पर अंक दिए जाते हैं, यानी प्रमाण ग्राफ़ से नहीं बल्कि git इतिहास से आता है। दोनों मोड परिणाम CSV में दिखते हैं (`ground_truth_mode` स्तंभ)। 2026-08-02 के माप में सह-परिवर्तन मोड ने हर अंकित कमिट पर `predicted_files = 0` लौटाया, इसलिए यह अभी उपयोगी माप नहीं है और कोई सह-परिवर्तन आँकड़ा उद्धृत नहीं किया गया है।
+यह तालिका 2026-08-02 के माप से है, जो नीचे बताए गए पथ सुधार से पहले लिया गया था। उस बग ने असली पड़ोसी फ़ाइलों को भी ग्राफ़ से निकले सही उत्तर से बाहर रखा था, इसलिए बेंचमार्क दोबारा चलने पर ये संख्याएँ बदलेंगी।
+
+यह बेंचमार्क एक **सह-परिवर्तन मोड** भी चलाता है: भविष्यवक्ता को एक बदली हुई फ़ाइल दी जाती है और उसी कमिट में लेखक द्वारा छुई गई बाकी फ़ाइलों के आधार पर अंक दिए जाते हैं, यानी प्रमाण ग्राफ़ से नहीं बल्कि git इतिहास से आता है। दोनों मोड परिणाम CSV में दिखते हैं (`ground_truth_mode` स्तंभ)। 2026-08-02 के माप में सह-परिवर्तन मोड ने हर अंकित कमिट पर `predicted_files = 0` लौटाया, कोड वाली सीड फ़ाइलों पर भी (जैसे `code_review_graph/cli.py` और gin की `context.go`)। कारण बेंचमार्क में एक पथ बग था: `git diff` रिपॉज़िटरी-सापेक्ष पथ देता है और ग्राफ़ पूर्ण पथ रखता है, इसलिए सीड कभी किसी नोड से मेल नहीं खाता था। वह बग अब ठीक हो गया है, पर बेंचमार्क अभी दोबारा नहीं चलाया गया, इसलिए कोई सह-परिवर्तन आँकड़ा उद्धृत नहीं किया गया है।
 
 </details>
 
@@ -315,7 +327,7 @@ jobs:
 
 ### सीमाएँ
 
-- **प्रभाव का "रिकॉल 1.0" चक्रीय है।** ऐतिहासिक सही उत्तर उन्हीं ग्राफ़ एज से आता है जिन पर भविष्यवक्ता चलता है, इसलिए वह बनावट से ही एक ऊपरी सीमा है। सह-परिवर्तन मोड अभी उपयोगी माप नहीं है।
+- **प्रभाव का "रिकॉल 1.0" चक्रीय है।** ऐतिहासिक सही उत्तर उन्हीं ग्राफ़ एज से आता है जिन पर भविष्यवक्ता चलता है, इसलिए वह बनावट से ही एक ऊपरी सीमा है। पथ सुधार के साथ बेंचमार्क दोबारा चलने तक सह-परिवर्तन के आँकड़े उद्धृत नहीं किए जाते।
 - **छोटे, एकल-फ़ाइल बदलाव।** मामूली संपादन में ग्राफ़ का संदर्भ सादी फ़ाइल पढ़ने से बड़ा हो सकता है। यह अतिरिक्त हिस्सा वही संरचनात्मक मेटाडेटा है जो बहु-फ़ाइल विश्लेषण संभव बनाता है।
 - **खोज क्रम।** कीवर्ड खोज आमतौर पर सही परिणाम ऊपर ले आती है, पर क्रम तय करने में सुधार बाकी है। मॉड्यूल पैटर्न वाले नामकरण के कारण Express पर की गई क्वेरी बिना परिणाम के लौट सकती है।
 - **प्रवाह पहचान।** प्रवेश बिंदु की पहचान Python और PHP/Laravel में सबसे मज़बूत है। JavaScript और Go की प्रवाह पहचान में सुधार बाकी है।
@@ -330,17 +342,17 @@ jobs:
 | **इंक्रीमेंटल अपडेट** | सिर्फ़ उन्हीं फ़ाइलों को दोबारा पार्स करता है जिनका हैश बदला है। लगभग 3,000 फ़ाइलों वाली रिपॉज़िटरी में दो फ़ाइलों का संपादन हुक वाले रास्ते पर लगभग 2.5 सेकंड लेता है ([मापा गया](docs/REPRODUCING.md#incremental-update-latency))। |
 | **भाषा और नोटबुक समर्थन** | ऊपर [भाषा कवरेज](#भाषा-कवरेज-और-नोटबुक) देखें। |
 | **फ़्रेमवर्क-सचेत PHP पार्सिंग** | रिपॉज़िटरी तक सीमित Composer PSR-4 इम्पोर्ट, Blade टेम्पलेट संदर्भ, प्रमाण पर आधारित Laravel Route-से-कंट्रोलर और Eloquent संबंध एज |
-| **फ़्रेमवर्क-सचेत Java पार्सिंग** | Spring डिपेंडेंसी इंजेक्शन का कॉल समाधान, रिक्वेस्ट एंडपॉइंट तथा WebFlux रूट, शेड्यूल्ड ट्रिगर, ऐप्लिकेशन इवेंट के प्रकाशक से श्रोता तक के एज, Temporal वर्कफ़्लो तथा ऐक्टिविटी एज, और मान के बिना इंडेक्स होने वाली Spring Boot कॉन्फ़िग कुंजियाँ |
+| **फ़्रेमवर्क-सचेत Java पार्सिंग** | Spring डिपेंडेंसी इंजेक्शन का कॉल समाधान, रिक्वेस्ट एंडपॉइंट तथा WebFlux रूट, शेड्यूल्ड ट्रिगर, ऐप्लिकेशन इवेंट के प्रकाशक से श्रोता तक के एज, Spring AOP एडवाइस एज, Temporal वर्कफ़्लो तथा ऐक्टिविटी एज, और मान के बिना इंडेक्स होने वाली Spring Boot कॉन्फ़िग कुंजियाँ |
 | **प्रभाव क्षेत्र विश्लेषण** | किसी बदलाव से कौन-से फ़ंक्शन, क्लास और फ़ाइलें प्रभावित हो सकती हैं |
-| **स्वतः अपडेट हुक** | एडिटर हुक, git pre-commit हुक और watch मोड काम करते-करते ग्राफ़ अद्यतन करते हैं |
+| **स्वतः अपडेट हुक** | एडिटर हुक, git हुक (हर कमिट से पहले, और checkout, merge तथा rebase के बाद) और watch मोड काम करते-करते ग्राफ़ अद्यतन करते हैं |
 | **सिमेंटिक खोज** | वैकल्पिक वेक्टर एम्बेडिंग: sentence-transformers, Google Gemini, MiniMax, Voyage AI, या कोई भी OpenAI-संगत एंडपॉइंट (OpenAI, Azure, new-api, LiteLLM, vLLM, LocalAI) |
-| **इंटरैक्टिव विज़ुअलाइज़ेशन** | D3.js फ़ोर्स-डायरेक्टेड ग्राफ़ जिसमें खोज, कम्युनिटी लेजेंड टॉगल और डिग्री के अनुसार नोड आकार |
+| **इंटरैक्टिव विज़ुअलाइज़ेशन** | D3.js फ़ोर्स-डायरेक्टेड ग्राफ़ जिसमें खोज, कम्युनिटी लेजेंड टॉगल और डिग्री के अनुसार नोड आकार, साथ में किसी सिंबल, फ़ाइल, प्रवाह या बदलाव से शुरू होने वाला पड़ोस दृश्य |
 | **हब और ब्रिज पहचान** | सबसे अधिक जुड़े नोड और अड़चनें (बिटवीननेस सेंट्रैलिटी) |
 | **आश्चर्य स्कोरिंग** | अप्रत्याशित युग्मन: कम्युनिटी-पार, भाषा-पार, परिधि से हब तक के एज |
-| **ज्ञान अंतराल विश्लेषण** | अलग-थलग नोड, बिना टेस्ट वाले हॉटस्पॉट, पतली कम्युनिटी |
+| **ज्ञान अंतराल विश्लेषण** | अलग-थलग नोड, बिना टेस्ट वाले हॉटस्पॉट, पतली कम्युनिटी, इम्पोर्ट चक्र |
 | **सुझाए गए प्रश्न** | ब्रिज, हब और आश्चर्यजनक युग्मनों से बने रिव्यू प्रश्न |
-| **एज विश्वास स्तर** | दो-स्तरीय विश्वास (EXTRACTED/INFERRED) और एज पर फ़्लोट स्कोर |
-| **ग्राफ़ ट्रैवर्सल** | किसी भी नोड से BFS/DFS, गहराई और टोकन बजट सेट किए जा सकते हैं |
+| **एज विश्वास स्तर** | चार स्तर (EXTRACTED, INFERRED, AMBIGUOUS, UNRESOLVED) और एज पर फ़्लोट स्कोर, ताकि जिस कॉल को ग्राफ़ बाँध नहीं सका वह यह बात बताए |
+| **ग्राफ़ ट्रैवर्सल** | किसी भी नोड से BFS/DFS, गहराई और टोकन बजट सेट किए जा सकते हैं; `path_to` बताता है कि एक सिंबल दूसरे तक कैसे पहुँचता है और सबसे कमज़ोर कड़ी का नाम देता है |
 | **निर्यात प्रारूप** | GraphML (Gephi/yEd), Neo4j Cypher, Obsidian वॉल्ट, JSON, और SVG (SVG के लिए `eval` एक्स्ट्रा का matplotlib चाहिए) |
 | **टोकन बेंचमार्किंग** | `code_review_graph/token_benchmark.py` प्रति प्रश्न पूरे कॉर्पस के टोकन और ग्राफ़ क्वेरी के टोकन मापता है |
 | **अनुमानित संदर्भ बचत** | रिव्यू, प्रभाव, detect-changes और आर्किटेक्चर उत्तरों पर `context_savings` मेटाडेटा (`estimated`, `saved_tokens`, `saved_percent`) |
@@ -348,7 +360,7 @@ jobs:
 | **निष्पादन प्रवाह** | प्रवेश बिंदुओं से कॉल श्रृंखलाएँ, भारित महत्ता के क्रम में |
 | **कम्युनिटी पहचान** | Leiden क्लस्टरिंग, रिज़ॉल्यूशन ग्राफ़ के आकार के अनुसार |
 | **आर्किटेक्चर अवलोकन** | कम्युनिटी संरचना पर आधारित आर्किटेक्चर नक्शा और युग्मन चेतावनियाँ |
-| **जोखिम-स्कोर वाले रिव्यू** | `detect_changes` diff को प्रभावित फ़ंक्शन, प्रवाह और टेस्ट की कमियों से जोड़ता है |
+| **जोखिम-स्कोर वाले रिव्यू** | `detect_changes` diff को प्रभावित फ़ंक्शन, YAML और JSON पथ, प्रवाह और टेस्ट की कमियों से जोड़ता है |
 | **कस्टम भाषाएँ** | `.code-review-graph/languages.toml` से नई भाषाएँ, fork की ज़रूरत नहीं |
 | **GitHub Action** | CI में स्थायी, जोखिम-स्कोर वाली PR रिव्यू टिप्पणियाँ, वैकल्पिक `fail-on-risk` मर्ज गेट के साथ |
 | **रीफ़ैक्टरिंग टूल** | नाम बदलने का पूर्वावलोकन, फ़्रेमवर्क-सचेत डेड कोड पहचान, कम्युनिटी आधारित सुझाव |
@@ -387,14 +399,19 @@ Qoder को इस रिपॉज़िटरी की `skills/` डायर
 ```bash
 code-review-graph install          # Detect and configure all platforms
 code-review-graph install --platform <name>  # One platform
+code-review-graph install --steering  # Claude Code: graph context beside each search and read
 code-review-graph uninstall --dry-run  # Preview removal of installed artifacts
 code-review-graph build            # Parse the whole codebase
+code-review-graph build --follow-symlinks  # Also index symlinked folders
 code-review-graph update           # Incremental update (changed files only)
 code-review-graph status           # Graph statistics
 code-review-graph watch            # Update on file changes
 code-review-graph forget <path>    # Drop already-parsed files from the graph
 code-review-graph dead-code        # Functions and classes with no callers or tests
+code-review-graph query path_to <from> --to <to>  # How one symbol reaches another
+code-review-graph impact --detail-level compact  # Blast radius as ranked file paths
 code-review-graph visualize        # Interactive HTML graph
+code-review-graph visualize --seed-symbol <name>  # Neighbourhood of one symbol
 code-review-graph visualize --format json      # Export graph data as JSON
 code-review-graph visualize --format graphml   # Export as GraphML
 code-review-graph visualize --format svg       # Export as SVG (needs matplotlib)
@@ -405,6 +422,7 @@ code-review-graph detect-changes --brief         # Risk panel + token savings (r
 code-review-graph detect-changes --brief --base main  # Against the merge base of main and HEAD
 code-review-graph update --brief                 # Refresh graph + same panel
 code-review-graph detect-changes --brief --verify  # Cross-check against tiktoken
+code-review-graph detect-changes --details all  # Add graph context to the JSON
 code-review-graph context-history  # Trend of the opt-in savings log (CRG_CONTEXT_HISTORY=1)
 code-review-graph register <path>  # Register repo in the multi-repo registry
 code-review-graph unregister <path|alias>  # Remove repo from the registry
@@ -416,6 +434,7 @@ code-review-graph eval             # Run evaluation benchmarks
 code-review-graph serve            # Start the MCP server (stdio)
 code-review-graph serve --http     # MCP over Streamable HTTP on localhost:5555
 code-review-graph serve --http --multi-repo  # One HTTP server for every registered repo
+code-review-graph serve --multi-worktree  # One child server per linked Git worktree
 ```
 
 यह एक चुनी हुई सूची है। `code-review-graph --help` हर कमांड दिखाता है, और [docs/COMMANDS.md](docs/COMMANDS.md) उनके फ़्लैग बताता है।
@@ -460,7 +479,7 @@ JSON निर्यात स्थानीय ग्राफ़ डेटा
 <summary><strong>बहु-रिपॉज़िटरी डीमन</strong></summary>
 <br>
 
-अगर आपका एडिटर हुक का समर्थन नहीं करता (जैसे Cursor या OpenCode), या आप एडिटर एकीकरण के बिना ग्राफ़ ताज़ा रखना चाहते हैं, तो डीमन आपकी रिपॉज़िटरी देखता है और उनके ग्राफ़ अद्यतन करता है। यह `code-review-graph` के साथ आता है; अलग से इंस्टॉल नहीं करना पड़ता।
+अगर `install` आपके एडिटर को कोई हुक नहीं देता (जैसे Windsurf या Zed), या आप एडिटर एकीकरण के बिना ग्राफ़ ताज़ा रखना चाहते हैं, तो डीमन आपकी रिपॉज़िटरी देखता है और उनके ग्राफ़ अद्यतन करता है। यह `code-review-graph` के साथ आता है; अलग से इंस्टॉल नहीं करना पड़ता।
 
 ```bash
 # 1. Register the repos to watch
@@ -507,9 +526,9 @@ alias = "project-b"
 | `build_or_update_graph_tool` | ग्राफ़ बनाना या इंक्रीमेंटल रूप से अद्यतन करना |
 | `run_postprocess_tool` | प्रवाह पहचान, कम्युनिटी पहचान और FTS इंडेक्सिंग फिर से चलाना |
 | `get_minimal_context_tool` | छोटा संदर्भ (लगभग 100 टोकन); सबसे पहले इसे बुलाएँ |
-| `get_impact_radius_tool` | बदली हुई फ़ाइलों का प्रभाव क्षेत्र |
+| `get_impact_radius_tool` | बदली हुई फ़ाइलों का प्रभाव क्षेत्र; `detail_level="compact"` क्रमबद्ध फ़ाइल पथ देता है |
 | `get_review_context_tool` | संरचनात्मक सारांश के साथ रिव्यू संदर्भ |
-| `query_graph_tool` | कॉलर, कॉली, टेस्ट, इम्पोर्ट, इनहेरिटेंस संबंधी क्वेरी |
+| `query_graph_tool` | कॉलर, कॉली, टेस्ट, इम्पोर्ट, इनहेरिटेंस, और दो सिंबल के बीच `path_to` |
 | `traverse_graph_tool` | किसी भी नोड से BFS/DFS ट्रैवर्सल, टोकन बजट के साथ |
 | `semantic_search_nodes_tool` | नाम या अर्थ से कोड इकाइयाँ खोजना |
 | `embed_graph_tool` | सिमेंटिक खोज के लिए वेक्टर एम्बेडिंग बनाना |
@@ -525,7 +544,7 @@ alias = "project-b"
 | `detect_changes_tool` | जोखिम-स्कोर वाला बदलाव प्रभाव विश्लेषण |
 | `get_hub_nodes_tool` | सबसे अधिक जुड़े नोड |
 | `get_bridge_nodes_tool` | बिटवीननेस सेंट्रैलिटी से निकली अड़चनें |
-| `get_knowledge_gaps_tool` | संरचनात्मक कमज़ोरियाँ और बिना टेस्ट वाले हॉटस्पॉट |
+| `get_knowledge_gaps_tool` | संरचनात्मक कमज़ोरियाँ, बिना टेस्ट वाले हॉटस्पॉट और इम्पोर्ट चक्र |
 | `get_surprising_connections_tool` | अप्रत्याशित कम्युनिटी-पार युग्मन |
 | `get_suggested_questions_tool` | विश्लेषण से बने रिव्यू प्रश्न |
 | `refactor_tool` | नाम बदलने का पूर्वावलोकन, डेड कोड पहचान, सुझाव |
@@ -574,7 +593,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_GIT_TIMEOUT` | Git संक्रियाओं की समय सीमा (सेकंड में; build / update / watch) | `30` |
 | `CRG_DISCOVERY_TIMEOUT` | जब फ़ाइल सूची स्पष्ट रूप से नहीं दी गई हो, तब बदलाव पता करने वाली प्रत्येक Git कमांड की समय सीमा (सेकंड में)। सीमा पार होने पर त्रुटि मिलती है, "कोई बदलाव नहीं" नहीं | `5` (`CRG_GIT_TIMEOUT` स्पष्ट रूप से सेट हो तो वही) |
 | `CRG_DATA_DIR` | ग्राफ़ डेटाबेस और बनी हुई फ़ाइलों की डायरेक्टरी | - |
-| `CRG_HOOK_WORKTREES` | `1` करने पर pre-commit हुक जुड़े हुए git worktree में भी चलता है | - |
+| `CRG_HOOK_WORKTREES` | `1` करने पर बनाए गए git हुक जुड़े हुए git worktree में भी चलते हैं | - |
 | `CRG_EMBEDDING_MODEL` | स्थानीय वेक्टर एम्बेडिंग का डिफ़ॉल्ट मॉडल | `all-MiniLM-L6-v2` |
 | `CRG_ACCEPT_CLOUD_EMBEDDINGS` | `1` करने पर क्लाउड एम्बेडिंग की बाहर-भेजने वाली चेतावनी दबती है | - |
 | `CRG_ALLOW_REMOTE_CODE` | `trust_remote_code=True` माँगने वाले HuggingFace मॉडल की अनुमति | `0` |
@@ -584,7 +603,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_MAX_BFS_DEPTH` | ग्राफ़ ट्रैवर्सल की अधिकतम गहराई | `15` |
 | `CRG_MAX_CHANGED_FUNCS` | एक बदलाव रिपोर्ट में विश्लेषित अधिकतम बदले हुए फ़ंक्शन | `500` |
 | `CRG_MAX_DELETION_FILES` | diff से हटाए गए फ़ंक्शन और क्लास बताने के लिए एक बदलाव रिपोर्ट में पुराना संस्करण पढ़ी जाने वाली अधिकतम फ़ाइलें | `100` |
-| `CRG_MAX_TRANSITIVE_FRONTIER` | सकर्मक कॉलर/कॉली विस्तार में अधिकतम फ़्रंटियर आकार | `50` |
+| `CRG_MAX_TRANSITIVE_FRONTIER` | जब `tests_for` और `detect-changes` टेस्ट खोजते हैं, तब हर हॉप पर अधिकतम कितने कॉली देखे जाएँ। नाम के क्रम में पहले वाले रखे जाते हैं, इसलिए एक ग्राफ़ हमेशा एक ही उत्तर देता है | `50` |
 | `CRG_CALLER_TEST_ROUTE_DEPTH` | बिना टेस्ट वाले बदले हुए सिंबल का टेस्ट किया गया कॉलर खोजते समय आने वाले `CALLS` पर ऊपर की ओर कितने हॉप चलें। यह केवल सूचना है, कवरेज नहीं | `2` |
 | `CRG_CALLER_TEST_ROUTE_MAX_CALLERS` | उस टेस्ट किए गए कॉलर की खोज में अधिकतम कितने कॉलर देखे जाएँ | `500` |
 | `CRG_TOOL_TIMEOUT` | केवल-पठन MCP टूल की समय सीमा (सेकंड; `0` से बंद)। लिखने वाले टूल (build / postprocess / embed / wiki / apply-refactor) पर लागू नहीं | `0` |
@@ -724,7 +743,8 @@ pytest
 ```
 
 पुल रिक्वेस्ट `staging` (डिफ़ॉल्ट ब्रांच) पर भेजें। बदलाव
-`staging` → `testing` → `main` के क्रम में आगे बढ़ते हैं, और रिलीज़ `main` से टैग होते हैं। पूरा प्रवाह
+`staging` → `testing` → `main` के क्रम में आगे बढ़ते हैं, और रिलीज़ `main` से टैग होते हैं। कोई भी
+प्रमोशन अपने आप नहीं होता: हर एक को कोई व्यक्ति देखता और मर्ज करता है। पूरा प्रवाह
 [CONTRIBUTING.md](CONTRIBUTING.md#branching-and-promotion) में देखें।
 
 अंतर्निहित भाषा जोड़ने के लिए `code_review_graph/parser.py` संपादित करें: एक्सटेंशन को `EXTENSION_TO_LANGUAGE` में और नोड प्रकार मैपिंग को `_CLASS_TYPES`, `_FUNCTION_TYPES`, `_IMPORT_TYPES` तथा `_CALL_TYPES` में जोड़ें। एक टेस्ट फ़िक्स्चर साथ दें और PR खोलें। अगर भाषा सिर्फ़ एक ही रिपॉज़िटरी में चाहिए, तो उसके बजाय [`languages.toml`](docs/CUSTOM_LANGUAGES.md) का उपयोग करें।
