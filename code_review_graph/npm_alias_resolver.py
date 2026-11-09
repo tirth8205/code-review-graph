@@ -1,4 +1,10 @@
-"""Resolve npm dependency aliases to local workspace packages."""
+"""Resolve npm dependency aliases to local workspace packages.
+
+A package reaches the alias's entry points the same way a workspace member
+does: :meth:`WorkspaceResolver.resolve_in_package` reads ``exports``, then
+``source``/``module``/``main``, retries build output under ``src/``, and
+probes case-exactly (#343).
+"""
 
 from __future__ import annotations
 
@@ -6,15 +12,10 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
-_PROBE_EXTENSIONS = (".ts", ".tsx", ".js", ".jsx", ".vue")
-_TYPESCRIPT_SOURCE_EXTENSIONS = {
-    ".js": (".ts", ".tsx"),
-    ".jsx": (".tsx",),
-    ".mjs": (".ts",),
-    ".cjs": (".ts",),
-}
+from .workspace_resolver import WorkspaceResolver
+
 _DEPENDENCY_SECTIONS = (
     "dependencies",
     "devDependencies",
@@ -43,11 +44,36 @@ class NpmAliasResolver:
     unqueryable package string.
     """
 
-    def __init__(self, repo_root: Optional[Path] = None) -> None:
+    def __init__(
+        self,
+        repo_root: Optional[Path] = None,
+        *,
+        package_resolver: Optional[WorkspaceResolver] = None,
+        path_is_indexed: Optional[Callable[[Path], bool]] = None,
+    ) -> None:
+        """*package_resolver* finds entry points inside a package; ``CodeParser``
+        passes its own so the probes share its case-exact, ``forget``-aware
+        file check. *path_is_indexed* says whether a build indexes a path;
+        a package the build ignores is never a candidate.
+        """
         self._repo_root = Path(repo_root).resolve() if repo_root is not None else None
+        self._package_resolver = package_resolver or WorkspaceResolver(self._repo_root)
+        self._path_is_indexed = path_is_indexed
         self._manifest_cache: dict[Path, Optional[dict]] = {}
         self._alias_cache: dict[Path, dict[str, str]] = {}
         self._package_roots: Optional[dict[str, list[Path]]] = None
+
+    def governs(self, import_str: str, file_path: str) -> bool:
+        """Whether the nearest manifest declares this import's package as an alias.
+
+        Then npm installs the aliased package under that name, so no other
+        resolver (a workspace member with the same name, say) may answer.
+        """
+        if not import_str or import_str.startswith("."):
+            return False
+        return self._longest_matching_alias(
+            import_str, self._aliases_for_file(file_path),
+        ) is not None
 
     def resolve_alias(self, import_str: str, file_path: str) -> Optional[str]:
         """Return a local source file for an npm-aliased import, or ``None``."""
@@ -75,16 +101,20 @@ class NpmAliasResolver:
         # npm installs the version the alias asks for. A local copy at another
         # version is not what the importer loads, so it stays external.
         manifest = self._read_manifest(package_root / "package.json")
-        local_version = manifest.get("version") if manifest is not None else None
-        if not version_satisfies(local_version, version_range):
+        if manifest is None:
             return None
-        subpath = import_str[len(matching_alias):].lstrip("/")
+        if not version_satisfies(manifest.get("version"), version_range):
+            return None
+        subpath = import_str[len(matching_alias) + 1:]
         if not _safe_subpath(subpath):
             return None
 
-        found = self._probe_package_path(package_root, subpath)
-        if found is None:
+        resolved = self._package_resolver.resolve_in_package(
+            package_root, manifest, "./" + subpath if subpath else ".",
+        )
+        if resolved is None:
             return None
+        found = Path(resolved)
 
         try:
             package_root_resolved = package_root.resolve()
@@ -161,6 +191,14 @@ class NpmAliasResolver:
             if "package.json" not in file_names:
                 continue
             current = Path(directory)
+            # A copy under an ignored tree (``dist/``, ``vendor/``, a
+            # ``.code-review-graphignore`` entry) is not a package the graph
+            # holds: it would make the real one look ambiguous, or be picked
+            # alone and name files no node answers to.
+            if self._path_is_indexed is not None and not self._path_is_indexed(
+                current / "package.json",
+            ):
+                continue
             manifest = self._read_manifest(current / "package.json")
             name = manifest.get("name") if manifest is not None else None
             if not isinstance(name, str) or not name:
@@ -183,7 +221,7 @@ class NpmAliasResolver:
         manifest: Optional[dict] = None
         try:
             if path.is_file() and path.stat().st_size <= 1_048_576:
-                data = json.loads(path.read_text(encoding="utf-8"))
+                data = json.loads(path.read_text(encoding="utf-8-sig"))
                 if isinstance(data, dict):
                     manifest = data
         except (OSError, UnicodeError, json.JSONDecodeError, RuntimeError):
@@ -203,12 +241,6 @@ class NpmAliasResolver:
         if not matches:
             return None
         return max(matches, key=len)
-
-    @staticmethod
-    def _probe_package_path(package_root: Path, subpath: str) -> Optional[Path]:
-        if not subpath:
-            return _probe_package_entry(package_root)
-        return _probe_import_path(package_root / subpath)
 
 
 _PACKAGE_NAME = re.compile(r"^(?:@[^/@\s]+/)?[^/@\s]+$")
@@ -411,51 +443,7 @@ def _set_matches(version: _Version, comparators: list[_Comparator]) -> bool:
 def _safe_subpath(subpath: str) -> bool:
     if not subpath:
         return True
-    if "\\" in subpath or any(ord(char) < 32 for char in subpath):
+    if "\\" in subpath or ":" in subpath or any(ord(char) < 32 for char in subpath):
         return False
-    parts = Path(subpath).parts
-    return bool(parts) and all(part not in ("", ".", "..") for part in parts)
+    return all(part not in ("", ".", "..") for part in subpath.split("/"))
 
-
-def _probe_package_entry(package_root: Path) -> Optional[Path]:
-    try:
-        manifest_path = package_root / "package.json"
-        if manifest_path.stat().st_size > 1_048_576:
-            return None
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError, ValueError, RuntimeError):
-        return None
-    if not isinstance(manifest, dict):
-        return None
-
-    for field in ("module", "main"):
-        entry = manifest.get(field)
-        if not isinstance(entry, str) or not _safe_subpath(entry):
-            continue
-        found = _probe_import_path(package_root / entry)
-        if found is not None:
-            return found
-    return _probe_import_path(package_root)
-
-
-def _probe_import_path(base: Path) -> Optional[Path]:
-    try:
-        if base.is_file():
-            return base
-        for extension in _PROBE_EXTENSIONS:
-            candidate = Path(str(base) + extension)
-            if candidate.is_file():
-                return candidate
-        if base.suffix in _TYPESCRIPT_SOURCE_EXTENSIONS:
-            for extension in _TYPESCRIPT_SOURCE_EXTENSIONS[base.suffix]:
-                candidate = base.with_suffix(extension)
-                if candidate.is_file():
-                    return candidate
-        if base.is_dir():
-            for extension in _PROBE_EXTENSIONS:
-                candidate = base / f"index{extension}"
-                if candidate.is_file():
-                    return candidate
-    except (OSError, ValueError, RuntimeError):
-        return None
-    return None

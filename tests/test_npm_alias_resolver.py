@@ -310,3 +310,149 @@ def test_alias_range_must_accept_the_local_version(
 def test_version_ranges_follow_npm(version: str, version_range: str, expected: bool) -> None:
     # Checked against node-semver's satisfies() on 1,700 range and version pairs.
     assert version_satisfies(version, version_range) is expected
+
+
+def _aliased_package(root: Path, manifest: dict, files: dict[str, str]) -> Path:
+    """A local ``@scope/shared`` at 1.0.0 that ``app/`` imports as ``sharedLib``."""
+    package_root = root / "packages" / "shared"
+    _write_json(
+        package_root / "package.json",
+        {"name": "@scope/shared", "version": "1.0.0", **manifest},
+    )
+    for relative, text in files.items():
+        target = package_root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+    _write_json(
+        root / "app" / "package.json",
+        {"dependencies": {"sharedLib": "npm:@scope/shared@^1.0.0"}},
+    )
+    return package_root
+
+
+def _import_from_app(root: Path, specifier: str) -> list[str]:
+    caller = root / "app" / "caller.ts"
+    caller.write_text(f"import '{specifier}';\n", encoding="utf-8")
+    return _imports(root, caller)
+
+
+def test_root_export_wins_over_legacy_main(tmp_path: Path) -> None:
+    package_root = _aliased_package(
+        tmp_path,
+        {"exports": "./src/public.js", "main": "./legacy.js"},
+        {"src/public.ts": "export const a = 1;\n", "legacy.js": "exports.a = 1;\n"},
+    )
+
+    assert _import_from_app(tmp_path, "sharedLib") == [
+        (package_root / "src" / "public.ts").resolve().as_posix(),
+    ]
+
+
+def test_exports_subpath_and_dist_target_reach_source(tmp_path: Path) -> None:
+    # Packages point main and exports at dist/, absent from a clean checkout.
+    package_root = _aliased_package(
+        tmp_path,
+        {
+            "main": "./dist/index.js",
+            "exports": {
+                ".": {"import": "./dist/index.mjs", "require": "./dist/index.js"},
+                "./client": {"types": "./dist/client.d.ts", "import": "./dist/client.mjs"},
+            },
+        },
+        {"src/index.ts": "export const a = 1;\n", "src/client.ts": "export const b = 2;\n"},
+    )
+
+    assert _import_from_app(tmp_path, "sharedLib") == [
+        (package_root / "src" / "index.ts").resolve().as_posix(),
+    ]
+    assert _import_from_app(tmp_path, "sharedLib/client") == [
+        (package_root / "src" / "client.ts").resolve().as_posix(),
+    ]
+    # exports lists no ./internal subpath, so Node refuses it.
+    (package_root / "src" / "internal.ts").write_text("export const c = 3;\n", encoding="utf-8")
+    assert _import_from_app(tmp_path, "sharedLib/src/internal") == ["sharedLib/src/internal"]
+
+
+def test_mjs_import_resolves_to_mts_source(tmp_path: Path) -> None:
+    package_root = _aliased_package(
+        tmp_path, {}, {"util.mts": "export const a = 1;\n"},
+    )
+    assert _import_from_app(tmp_path, "sharedLib/util.mjs") == [
+        (package_root / "util.mts").resolve().as_posix(),
+    ]
+
+    (package_root / "util.ts").write_text("export const b = 1;\n", encoding="utf-8")
+    assert _import_from_app(tmp_path, "sharedLib/util.mjs") == [
+        (package_root / "util.mts").resolve().as_posix(),
+    ]
+    (package_root / "other.cts").write_text("export const c = 1;\n", encoding="utf-8")
+    assert _import_from_app(tmp_path, "sharedLib/other.cjs") == [
+        (package_root / "other.cts").resolve().as_posix(),
+    ]
+
+
+def test_generated_copy_under_ignored_dist_does_not_make_it_ambiguous(
+    tmp_path: Path,
+) -> None:
+    package_root = _aliased_package(tmp_path, {}, {"index.ts": "export const a = 1;\n"})
+    _write_json(
+        tmp_path / "dist" / "shared" / "package.json",
+        {"name": "@scope/shared", "version": "1.0.0"},
+    )
+    (tmp_path / "dist" / "shared" / "index.js").write_text("exports.a = 1;\n", encoding="utf-8")
+
+    assert _import_from_app(tmp_path, "sharedLib") == [
+        (package_root / "index.ts").resolve().as_posix(),
+    ]
+
+
+def test_package_in_ignored_tree_stays_external(tmp_path: Path) -> None:
+    # A root composer.json (a Laravel app, say) makes vendor/ ignored.
+    _write_json(tmp_path / "composer.json", {"name": "acme/app"})
+    _write_json(
+        tmp_path / "vendor" / "real" / "package.json",
+        {"name": "@scope/shared", "version": "1.0.0", "main": "index.ts"},
+    )
+    (tmp_path / "vendor" / "real" / "index.ts").write_text(
+        "export const a = 1;\n", encoding="utf-8",
+    )
+    _write_json(
+        tmp_path / "app" / "package.json",
+        {"dependencies": {"sharedLib": "npm:@scope/shared@^1.0.0"}},
+    )
+
+    assert _import_from_app(tmp_path, "sharedLib") == ["sharedLib"]
+
+
+def test_package_in_graphignore_stays_external(tmp_path: Path) -> None:
+    _aliased_package(tmp_path, {}, {"index.ts": "export const a = 1;\n"})
+    (tmp_path / ".code-review-graphignore").write_text("packages/shared/**\n", encoding="utf-8")
+
+    assert _import_from_app(tmp_path, "sharedLib") == ["sharedLib"]
+
+
+def test_alias_target_without_a_language_stays_external(tmp_path: Path) -> None:
+    _aliased_package(tmp_path, {"exports": "./style.css"}, {"style.css": "a {}\n"})
+
+    assert _import_from_app(tmp_path, "sharedLib") == ["sharedLib"]
+
+
+@pytest.mark.parametrize("member_name", ["shared", "@scope/shared"])
+def test_alias_declaration_hides_a_same_named_workspace_member(
+    tmp_path: Path, member_name: str,
+) -> None:
+    # npm installs @other/real under this name, not the workspace member.
+    _write_json(tmp_path / "package.json", {"name": "root", "workspaces": ["packages/*", "app"]})
+    _write_json(
+        tmp_path / "packages" / "member" / "package.json",
+        {"name": member_name, "version": "1.0.0", "main": "index.ts"},
+    )
+    (tmp_path / "packages" / "member" / "index.ts").write_text(
+        "export const a = 1;\n", encoding="utf-8",
+    )
+    _write_json(
+        tmp_path / "app" / "package.json",
+        {"name": "app", "dependencies": {member_name: "npm:@other/real@^1.0.0"}},
+    )
+
+    assert _import_from_app(tmp_path, member_name) == [member_name]
