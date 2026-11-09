@@ -242,8 +242,13 @@ def test_rust_tested_by_mirror_does_not_keep_the_invented_source(tmp_path):
     assert not any(source.endswith("src/lib.rs::new") for source in sources)
 
 
-def test_inherited_call_is_settled_and_not_pinned_on_another_class(tmp_path):
-    """``self.shared()`` named ``Child.shared``, which does not exist."""
+def test_inherited_call_goes_to_its_ancestor_not_another_class(tmp_path):
+    """``self.shared()`` named ``Child.shared``, which does not exist.
+
+    ``Base`` is the only ancestor and declares ``shared``, so the call is
+    ``Base.shared`` (see ``tests/test_inherited_calls.py``), never
+    ``Other.shared``.
+    """
     store = _build(tmp_path, {
         "base.py": "class Base:\n    def shared(self):\n        return 1\n",
         "other.py": "class Other:\n    def shared(self):\n        return 2\n",
@@ -260,9 +265,9 @@ def test_inherited_call_is_settled_and_not_pinned_on_another_class(tmp_path):
     finally:
         store.close()
 
-    assert row["target"] == "shared"
-    assert row["extra"]["claimed_endpoint"] == f"{root}/child.py::Child.shared"
-    assert row["tier"] == "UNRESOLVED"
+    assert row["target"] == f"{root}/base.py::Base.shared"
+    assert row["extra"]["inherited_endpoint"] == f"{root}/child.py::Child.shared"
+    assert row["tier"] == "INFERRED"
     result = query_graph("callers_of", f"{root}/other.py::Other.shared", str(root))
     assert result["results"] == []
 

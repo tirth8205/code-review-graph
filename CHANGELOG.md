@@ -387,6 +387,24 @@
   the same outside name. `String::new()` in a function and in a test linked the
   two, and so did the invented targets above: ripgrep's `decompress.rs::add`
   claimed 10 tests, none of which reaches it, which lowered its risk score.
+- A call to an inherited method through a subclass now finds the method
+  (#984, building on the idea in #1036 by Anthony Ala). `this.handle()` in
+  `Leaf extends Alpha`, `$this->dispatch()` in a PHP test case and
+  `pet.getName()` on a Java `Pet` that inherits `getName` named no node, so
+  `callers_of` and `tests_for` on the real method found nothing. The edge now
+  goes to the ancestor that declares the method, as `INFERRED`, and its
+  `TESTED_BY` mirror goes with it. A class is known by its file, not its short
+  name, and a parent counts only when the file, its imports, its Java package
+  or its PHP namespace says which class it is; where Python could pick another
+  ancestor, or a parent is outside the graph, the call stays unresolved. An
+  update that adds or removes the method checks the edge again, so it matches a
+  rebuild. A Java or TypeScript receiver's declared type now picks the class
+  even when that class needs no import, and a call on another object no longer
+  lands on the caller's own method when nothing says it is that class. On
+  spring-petclinic, calls bound through a subclass rose from 2 to 86, on a
+  TypeScript DDD example from 0 to 18 and on its PHP twin from 97 to 134, with no
+  new invented targets; 28 self-calls the old rule made up were dropped or
+  moved to the right class.
 - TypeScript and JavaScript imports resolve against `compilerOptions.baseUrl`
   when no `paths` pattern matches them, as `tsc` does. A tsconfig that sets
   `baseUrl` without `paths` resolved no non-relative import at all: on a

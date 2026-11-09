@@ -42,6 +42,8 @@ from .constants import (
     IMPORT_SCOPE_KEY,
     IMPORT_SCOPE_PACKAGE,
     IMPORT_SCOPE_TREE,
+    INHERITED_ENDPOINT_KEY,
+    INHERITED_THROUGH_KEY,
     MAX_IMPACT_DEPTH,
     MAX_IMPACT_NODES,
     env_int,
@@ -50,6 +52,7 @@ from .constants import (
     release_os_memory,
 )
 from .errors import GraphStoreError, is_lock_error
+from .inheritance import InheritanceIndex
 from .migrations import (
     LATEST_VERSION,
     TARGET_RESOLUTION_EXPR,
@@ -542,11 +545,25 @@ _RESOLVER_BOUND_KEYS = (
     "bare_call_target",
     "bare_tested_by_source",
     "cpp_scoped_target",
+    INHERITED_ENDPOINT_KEY,
     "rescript_open_module",
     "scoped_resolved",
     "spring_resolved",
     "temporal_resolved",
 )
+
+#: Receivers that are the calling object itself, so the call means a method of
+#: the caller's class or one it inherits.
+_SELF_RECEIVERS = frozenset({"this", "$this", "self"})
+#: Receivers that start the lookup at the caller's parent.
+_SUPER_RECEIVERS = frozenset({"super", "base"})
+#: Languages whose parser records a receiver's declared type, so a receiver
+#: with none is truly unknown, and ``this`` is a keyword. PHP and JavaScript
+#: are left out: the parser reads no parameter types there, so ``$other`` in
+#: ``equals(Uuid $other)`` looks untyped while it is the caller's own class.
+_TYPED_RECEIVER_LANGUAGES = frozenset({
+    "csharp", "java", "kotlin", "tsx", "typescript",
+})
 
 #: The edges whose endpoint is meant to name a node: (kind, column holding that
 #: endpoint, key ``_resolve_bare_endpoints`` manages it through).
@@ -1089,6 +1106,8 @@ class GraphStore:
             dict[str, set[str]],
             dict[str, set[str]],
             set[str],
+            dict[str, str],
+            dict[str, dict[str, str]],
         ] | None = None
         self._cache_lock = threading.Lock()
         self._cache_epoch = 0
@@ -2836,6 +2855,99 @@ class GraphStore:
             return []
         return []
 
+    @staticmethod
+    def _class_backed_candidates(
+        edge_extra: dict,
+        bare_name: str,
+        caller_class: str,
+        caller_language: str,
+        context_file: str,
+        inheritance: InheritanceIndex,
+    ) -> Optional[tuple[list[str], Optional[str]]]:
+        """(candidates, class inherited through) when the call names its class.
+
+        ``pet.getName()`` on a ``Pet pet`` can only mean ``Pet.getName`` or the
+        ``getName`` that ``Pet`` inherits; a same-named method elsewhere is no
+        answer, not even in the same file. ``$this->run()`` and Java's
+        ``this.run()`` name the caller's own class the same way, and
+        ``super.run()`` its parent. See: #984
+
+        None when the receiver says nothing about a class, so the usual file
+        and import evidence applies.
+        """
+        receiver = edge_extra.get("receiver")
+        owner: Optional[str]
+        if edge_extra.get("receiver_resolution") == "typed_receiver_unresolved":
+            receiver_type = edge_extra.get("receiver_type")
+            owner = (
+                inheritance.resolve_type(receiver_type, context_file, caller_language)
+                if isinstance(receiver_type, str) and receiver_type
+                else None
+            )
+            if owner is None:
+                # Declared outside the graph, or two classes fit. Either way
+                # it is not a same-named method nearby.
+                return [], None
+        elif (
+            receiver in _SELF_RECEIVERS or receiver in _SUPER_RECEIVERS
+        ) and "receiver_binding" not in edge_extra:
+            if not caller_class:
+                return None
+            owner = caller_class
+        elif (
+            caller_language == "java"
+            and isinstance(receiver, str)
+            and receiver[:1].isupper()
+            and "receiver_type" not in edge_extra
+        ):
+            # ``Helper.make()``: a class in the same package needs no import.
+            owner = inheritance.resolve_type(receiver, context_file, "java")
+            if owner is None:
+                return None
+        else:
+            return None
+
+        if receiver not in _SUPER_RECEIVERS:
+            own = inheritance.method_of(owner, bare_name)
+            if own is not None:
+                return [own], None
+        inherited = inheritance.inherited_method(owner, bare_name)
+        if inherited is not None:
+            return [inherited], owner
+        if receiver in _SELF_RECEIVERS or receiver in _SUPER_RECEIVERS:
+            # A trait, or a parent the graph cannot name, may hold it; leave
+            # the call to the usual evidence, as before.
+            return None
+        return [], None
+
+    @staticmethod
+    def _own_method_excluded(
+        edge_extra: dict,
+        bare_name: str,
+        caller_class: str,
+        caller_language: str,
+        inheritance: InheritanceIndex,
+    ) -> Optional[str]:
+        """The caller's own method that a call on another object cannot mean.
+
+        ``h.equals(x)`` inside ``Widget.equals`` calls ``equals`` on whatever
+        ``h`` is. With nothing known about ``h``, sharing a file is no evidence
+        that it is a ``Widget``, and choosing ``Widget.equals`` makes the method
+        call itself.
+        """
+        receiver = edge_extra.get("receiver")
+        if (
+            not caller_class
+            or not isinstance(receiver, str)
+            or receiver in _SELF_RECEIVERS
+            or receiver in _SUPER_RECEIVERS
+            or caller_language not in _TYPED_RECEIVER_LANGUAGES
+            or "receiver_binding" in edge_extra
+            or "receiver_type" in edge_extra
+        ):
+            return None
+        return inheritance.method_of(caller_class, bare_name)
+
     @classmethod
     def _receiver_evidence_admits_candidate(
         cls,
@@ -2847,6 +2959,14 @@ class GraphStore:
         """Row-level form of :meth:`receiver_evidence_admits`."""
         if "receiver_binding" not in edge_extra:
             owner = _claimed_owner(edge_extra)
+            if (
+                owner is None
+                and edge_extra.get("receiver_resolution") == "typed_receiver_unresolved"
+                and isinstance(edge_extra.get("receiver_type"), str)
+            ):
+                # ``pet.getName()`` on a ``Pet`` the resolver could not place:
+                # still only a ``Pet`` method by that name.
+                owner = edge_extra["receiver_type"]
             if owner is None:
                 return True
             # The call named a class: ``h.hashCode()`` on a ``Helper``, or
@@ -2913,6 +3033,9 @@ class GraphStore:
         Returns the number of rows whose classification changed; rows that
         are already right are not rewritten.
         """
+        # The inherited walk first: it needs the name the parser wrote, and it
+        # takes up edges an earlier pass settled.
+        self._resolve_inherited_endpoints()
         self._settle_unbound_endpoints()
         placeholders = ", ".join("?" for _ in TARGET_RESOLUTION_KINDS)
         call_tier = _certainty_tier_sql(f"target_resolution = '{RESOLUTION_UNRESOLVED}'")
@@ -2952,6 +3075,135 @@ class GraphStore:
             raise
         self._settle_collision_endpoints()
         return cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
+
+    def _resolve_inherited_endpoints(self) -> int:
+        """Move a call on a class that only inherits the method to the ancestor.
+
+        ``this.handle()`` in ``Leaf`` is written ``<leaf>::Leaf.handle``, and
+        ``pet.getName()`` on an imported ``Pet`` is ``<pet>::Pet.getName``. When
+        the class does not declare the method, that names no node. If one
+        ancestor surely declares it (see ``InheritanceIndex``), the endpoint
+        moves there, and ``extra`` keeps the name the parser wrote. Every pass
+        checks the move again from that name, so after an update that adds the
+        method nearer, removes it, or leaves the answer unsure, the edge is
+        where a fresh parse and this pass would put it. TESTED_BY mirrors take
+        the same path, so ``tests_for`` on the ancestor finds the test.
+
+        Runs before ``_settle_unbound_endpoints`` and also takes up edges that
+        pass settled earlier. Returns the number of edges changed. See: #984
+        """
+        conn = self._conn
+        work: list[tuple[str, sqlite3.Row, dict, str, str, str]] = []
+        for kind, column in (
+            ("CALLS", "target_qualified"), ("TESTED_BY", "source_qualified"),
+        ):
+            # Only a fixed column name reaches the SQL text.
+            for row in conn.execute(
+                f"SELECT e.id, e.{column} AS endpoint, e.extra FROM edges e "  # noqa: S608
+                f"WHERE e.kind = ? AND (e.extra LIKE ? OR e.extra LIKE ? OR ("
+                f"e.{column} LIKE '%::%' AND NOT EXISTS ("
+                f"SELECT 1 FROM nodes n WHERE n.qualified_name = e.{column})))",
+                (
+                    kind,
+                    f'%"{CLAIMED_ENDPOINT_KEY}"%',
+                    f'%"{INHERITED_ENDPOINT_KEY}"%',
+                ),
+            ).fetchall():
+                extra = _load_edge_extra(row["extra"])
+                managed = extra.get(INHERITED_ENDPOINT_KEY)
+                claimed = extra.get(CLAIMED_ENDPOINT_KEY)
+                if isinstance(managed, str):
+                    written = managed
+                elif any(key in extra for key in _RESOLVER_BOUND_KEYS) or (
+                    "ambiguous_targets" in extra or "unresolved_targets" in extra
+                ):
+                    # Another resolver owns this endpoint.
+                    continue
+                elif isinstance(claimed, str):
+                    written = claimed
+                else:
+                    written = row["endpoint"]
+                if not _is_path_qualified(written):
+                    continue
+                file_part, _, symbol = written.partition("::")
+                class_part, dot, method = symbol.rpartition(".")
+                if not dot or not class_part or not method:
+                    continue
+                work.append((
+                    column, row, extra, written, f"{file_part}::{class_part}", method,
+                ))
+        if not work:
+            return 0
+
+        # Most settled edges name a class with no parent; then there is nothing
+        # to walk, and the full index need not be read.
+        with_parents = {
+            row[0] for row in conn.execute(
+                "SELECT DISTINCT source_qualified FROM edges WHERE kind = 'INHERITS'"
+            )
+        }
+        work = [
+            item for item in work
+            if item[4] in with_parents or INHERITED_ENDPOINT_KEY in item[2]
+        ]
+        if not work:
+            return 0
+        import_targets, _, raw_imports = self._import_evidence()
+        inheritance = InheritanceIndex(conn, import_targets, raw_imports)
+
+        moves: dict[str, list[tuple[str, str, int]]] = {}
+        reverts: dict[str, list[tuple[str, str, str, float, int]]] = {}
+        for column, row, extra, written, owner, method in work:
+            target: Optional[str] = None
+            if (
+                inheritance.is_class(owner)
+                and inheritance.method_of(owner, method) is None
+            ):
+                target = inheritance.inherited_method(owner, method)
+            if target is not None:
+                desired = dict(extra)
+                desired[INHERITED_ENDPOINT_KEY] = written
+                desired.pop(CLAIMED_ENDPOINT_KEY, None)
+                if row["endpoint"] != target or desired != extra:
+                    moves.setdefault(column, []).append(
+                        (target, json.dumps(desired), row["id"]),
+                    )
+            elif INHERITED_ENDPOINT_KEY in extra:
+                # The move no longer holds: put back what a fresh parse writes.
+                # The settle pass then treats it as it treats any other edge.
+                restored = dict(extra)
+                del restored[INHERITED_ENDPOINT_KEY]
+                reverts.setdefault(column, []).append((
+                    written,
+                    json.dumps(restored),
+                    str(restored.get("confidence_tier", TIER_EXTRACTED)),
+                    float(restored.get("confidence", _SCORE_EXTRACTED)),
+                    row["id"],
+                ))
+
+        changed = sum(len(v) for v in moves.values()) + sum(
+            len(v) for v in reverts.values()
+        )
+        if not changed:
+            return 0
+        self._begin_immediate()
+        try:
+            for column, updates in moves.items():
+                move_sql = f"UPDATE edges SET {column} = ?, extra = ? WHERE id = ?"  # noqa: S608
+                for start in range(0, len(updates), _UPDATE_BATCH):
+                    conn.executemany(move_sql, updates[start:start + _UPDATE_BATCH])
+            for column, restores in reverts.items():
+                revert_sql = (
+                    f"UPDATE edges SET {column} = ?, extra = ?, "  # noqa: S608
+                    "confidence_tier = ?, confidence = ? WHERE id = ?"
+                )
+                for start in range(0, len(restores), _UPDATE_BATCH):
+                    conn.executemany(revert_sql, restores[start:start + _UPDATE_BATCH])
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        return changed
 
     def _settle_unbound_endpoints(self) -> int:
         """Stop an edge naming a qualified symbol the graph does not have.
@@ -3337,38 +3589,16 @@ class GraphStore:
                     members.setdefault(directory, set()).add(file_path)
         return members
 
-    def _get_bare_endpoint_context(
-        self, conn: sqlite3.Connection
-    ) -> tuple[
-        dict[str, list[tuple[str, str]]],
-        dict[str, str | None],
-        dict[str, set[str]],
-        dict[str, set[str]],
-        set[str],
-    ]:
-        cached = getattr(self, "_bare_endpoint_context_cache", None)
-        if cached is not None:
-            return cached
-        epoch = self._cache_epoch
+    def _import_evidence(
+        self,
+    ) -> tuple[dict[str, set[str]], dict[str, set[str]], dict[str, dict[str, str]]]:
+        """What each file imports: (files, ambiguous candidates, raw names).
 
-        # bare_name -> [(qualified_name, defining_file)]
-        node_lookup: dict[str, list[tuple[str, str]]] = {}
-        # qualified_name -> owning class, so a receiver known to be an
-        # instance of one class cannot be answered by another class's method.
-        parent_lookup: dict[str, str | None] = {}
-        # A Ruby constant can only name a Ruby class.
-        ruby_nodes: set[str] = set()
-        for row in conn.execute(
-            "SELECT name, qualified_name, file_path, parent_name, language FROM nodes "
-            "WHERE kind IN ('Function', 'Test', 'Class')"
-        ).fetchall():
-            node_lookup.setdefault(row["name"], []).append(
-                (row["qualified_name"], row["file_path"]),
-            )
-            parent_lookup[row["qualified_name"]] = row["parent_name"]
-            if row["language"] == "ruby":
-                ruby_nodes.add(row["qualified_name"])
-
+        One pass over the IMPORTS_FROM edges, with the expansions every
+        resolver needs: C# namespaces, Go packages and Python dotted modules
+        mapped back to the files that declare them.
+        """
+        conn = self._conn
         # call-site file -> explicitly imported files
         import_targets: dict[str, set[str]] = {}
         # Python's repository-suffix resolver keeps a raw import when multiple
@@ -3381,6 +3611,10 @@ class GraphStore:
         # The edge stays one row; the member files are expanded here, once
         # per post-processing pass, rather than stored one edge per member.
         scoped_dirs: dict[str, str] = {}
+        # call-site file -> {short name: full name} for imports that name no
+        # file: ``java.util.Date``, a Java class under another source root, a
+        # PHP ``use`` the file resolver could not place.
+        raw_imports: dict[str, dict[str, str]] = {}
         for row in conn.execute(
             "SELECT DISTINCT file_path, target_qualified, extra FROM edges "
             "WHERE kind = 'IMPORTS_FROM'"
@@ -3388,6 +3622,13 @@ class GraphStore:
             target = row["target_qualified"]
             target_file = target.split("::", 1)[0] if "::" in target else target
             import_targets.setdefault(row["file_path"], set()).add(target_file)
+            if not (
+                PurePosixPath(target_file).is_absolute()
+                or PureWindowsPath(target_file).is_absolute()
+            ):
+                short = target_file.rpartition("\\")[2].rpartition(".")[2]
+                if short:
+                    raw_imports.setdefault(row["file_path"], {})[short] = target_file
             raw_extra = row["extra"]
             if not raw_extra or raw_extra == "{}":
                 continue
@@ -3468,12 +3709,60 @@ class GraphStore:
                         expanded.add(resolved_file)
                 imported |= expanded
 
+        return import_targets, ambiguous_import_targets, raw_imports
+
+    def _get_bare_endpoint_context(
+        self, conn: sqlite3.Connection
+    ) -> tuple[
+        dict[str, list[tuple[str, str]]],
+        dict[str, str | None],
+        dict[str, set[str]],
+        dict[str, set[str]],
+        set[str],
+        dict[str, str],
+        dict[str, dict[str, str]],
+    ]:
+        """The node lookups and import evidence bare resolution reads, cached.
+
+        (names, owning classes, imported files, ambiguous imports, Ruby nodes,
+        function languages, raw import names). A write drops the cache.
+        """
+        cached = getattr(self, "_bare_endpoint_context_cache", None)
+        if cached is not None:
+            return cached
+        epoch = self._cache_epoch
+
+        # bare_name -> [(qualified_name, defining_file)]
+        node_lookup: dict[str, list[tuple[str, str]]] = {}
+        # qualified_name -> owning class, so a receiver known to be an
+        # instance of one class cannot be answered by another class's method.
+        parent_lookup: dict[str, str | None] = {}
+        # A Ruby constant can only name a Ruby class.
+        ruby_nodes: set[str] = set()
+        # function -> its language, to read what a receiver-less call means
+        language_lookup: dict[str, str] = {}
+        for row in conn.execute(
+            "SELECT name, qualified_name, file_path, parent_name, kind, language "
+            "FROM nodes WHERE kind IN ('Function', 'Test', 'Class')"
+        ).fetchall():
+            node_lookup.setdefault(row["name"], []).append(
+                (row["qualified_name"], row["file_path"]),
+            )
+            parent_lookup[row["qualified_name"]] = row["parent_name"]
+            if row["language"] == "ruby":
+                ruby_nodes.add(row["qualified_name"])
+            if row["kind"] != "Class":
+                language_lookup[row["qualified_name"]] = row["language"] or ""
+
+        import_targets, ambiguous_import_targets, raw_imports = self._import_evidence()
         result = (
             node_lookup,
             parent_lookup,
             import_targets,
             ambiguous_import_targets,
             ruby_nodes,
+            language_lookup,
+            raw_imports,
         )
         with self._cache_lock:
             # Publish only if no write invalidated the context meanwhile.
@@ -3529,11 +3818,19 @@ class GraphStore:
             import_targets,
             ambiguous_import_targets,
             ruby_nodes,
+            language_lookup,
+            raw_imports,
         ) = self._get_bare_endpoint_context(conn)
 
         # Stream candidate rows lazily instead of materialising the full set
         # into memory (millions of rows on large graphs, issue #721).
         bare_edges = conn.execute(select_sql, (kind,))
+        inheritance = InheritanceIndex(conn, import_targets, raw_imports)
+        # The function making the call: the edge's source for CALLS, and its
+        # target for TESTED_BY, whose source is the callee.
+        caller_column = (
+            "source_qualified" if endpoint == "target_qualified" else "target_qualified"
+        )
 
         resolved = 0
         # Collect every mutation, then apply them in one transaction at the
@@ -3563,6 +3860,9 @@ class GraphStore:
                     or CLAIMED_ENDPOINT_KEY in edge_extra
                 ):
                     continue
+                if INHERITED_ENDPOINT_KEY in edge_extra:
+                    # ``_resolve_inherited_endpoints`` owns this edge.
+                    continue
                 bare_name = edge_extra.get(raw_key, edge[endpoint])
                 if not isinstance(bare_name, str):
                     continue
@@ -3582,33 +3882,72 @@ class GraphStore:
                     )
 
             context_file = edge["file_path"]
-            imported_files = import_targets.get(context_file, set())
-            # A module receiver names its file outright; when that module
-            # only re-exports the name, the parser stamps the defining file,
-            # which the call site never imports itself.
-            receiver_file = (
-                edge_extra.get("receiver_module")
-                if edge_extra.get("receiver_binding") == "module"
-                else None
+            caller = edge[caller_column]
+            caller_language = language_lookup.get(caller, "")
+            caller_class = caller.rpartition(".")[0] if parent_lookup.get(caller) else ""
+            if not inheritance.is_class(caller_class):
+                caller_class = ""
+            class_backed = self._class_backed_candidates(
+                edge_extra, bare_name, caller_class, caller_language, context_file,
+                inheritance,
             )
-            receiver_class_file = edge_extra.get("receiver_class_file")
-            supported = [
-                qualified
-                for qualified, candidate_file in candidates
-                if candidate_file == context_file
-                or candidate_file in imported_files
-                or candidate_file == receiver_file
-                or candidate_file == receiver_class_file
-                # A Ruby constant path names its class wherever it is defined,
-                # and the receiver check above already held the candidate to it.
-                or receiver_constant
-            ]
-            ambiguous_files = ambiguous_import_targets.get(context_file, set())
-            ambiguity_supported = [
-                qualified
-                for qualified, candidate_file in candidates
-                if candidate_file in ambiguous_files
-            ]
+            if class_backed is not None:
+                # The receiver names a class, so only that class or the
+                # ancestor it inherits the method from can answer the call.
+                supported, inherited_through = class_backed
+                candidates = [(qualified, "") for qualified in supported]
+                ambiguity_supported: list[str] = []
+            else:
+                inherited_through = None
+                imported_files = import_targets.get(context_file, set())
+                # A module receiver names its file outright; when that module
+                # only re-exports the name, the parser stamps the defining
+                # file, which the call site never imports itself.
+                receiver_file = (
+                    edge_extra.get("receiver_module")
+                    if edge_extra.get("receiver_binding") == "module"
+                    else None
+                )
+                receiver_class_file = edge_extra.get("receiver_class_file")
+                java_package = (
+                    inheritance.java_package(context_file)
+                    if caller_language == "java" else None
+                )
+                supported = [
+                    qualified
+                    for qualified, candidate_file in candidates
+                    if candidate_file == context_file
+                    or candidate_file in imported_files
+                    or candidate_file == receiver_file
+                    or candidate_file == receiver_class_file
+                    # Java needs no import for a class in the same package.
+                    # That says which class ``new Helper()`` builds, not which
+                    # method a plain ``ping()`` calls.
+                    or (
+                        java_package is not None
+                        and inheritance.is_class(qualified)
+                        and inheritance.java_package(candidate_file) == java_package
+                    )
+                    # A Ruby constant path names its class wherever it is
+                    # defined, and the receiver check above already held the
+                    # candidate to it.
+                    or receiver_constant
+                ]
+                own_method = self._own_method_excluded(
+                    edge_extra, bare_name, caller_class, caller_language,
+                    inheritance,
+                )
+                if own_method is not None and supported == [own_method]:
+                    # Not a match on its own. Next to other candidates it
+                    # still makes the name ambiguous, so it stays there:
+                    # dropping it would crown the other one on no evidence.
+                    supported = []
+                ambiguous_files = ambiguous_import_targets.get(context_file, set())
+                ambiguity_supported = [
+                    qualified
+                    for qualified, candidate_file in candidates
+                    if candidate_file in ambiguous_files
+                ]
             managed = raw_key in edge_extra
             if (
                 len(supported) != 1
@@ -3619,6 +3958,10 @@ class GraphStore:
                 continue
             desired_extra = dict(edge_extra)
             desired_extra[raw_key] = bare_name
+            if inherited_through and len(supported) == 1:
+                desired_extra[INHERITED_THROUGH_KEY] = inherited_through
+            else:
+                desired_extra.pop(INHERITED_THROUGH_KEY, None)
             if len(supported) == 1:
                 desired_endpoint = supported[0]
                 for key in (

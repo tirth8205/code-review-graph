@@ -333,6 +333,16 @@ IMPORT_SCOPE_KEY = "import_scope"
 #: ``GraphStore._settle_unbound_endpoints``.
 CLAIMED_ENDPOINT_KEY = "claimed_endpoint"
 
+#: ``edges.extra`` key on an edge moved to the ancestor that declares the method
+#: it calls. It holds the endpoint as the parser wrote it (``<file>::Leaf.run``),
+#: so every later pass can check the move again from scratch. See
+#: ``GraphStore._resolve_inherited_endpoints``.
+INHERITED_ENDPOINT_KEY = "inherited_endpoint"
+
+#: ``edges.extra`` key naming the class a call went through when the bare-name
+#: resolver bound it to a method that class inherits.
+INHERITED_THROUGH_KEY = "inherited_through"
+
 #: The target directory's own files are the imported unit; subdirectories are
 #: separate packages and are NOT members. This is Go's rule.
 IMPORT_SCOPE_PACKAGE = "package"
