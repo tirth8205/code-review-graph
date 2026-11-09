@@ -14,6 +14,11 @@ daemon.*
 # Interactions log (runtime, not versioned)
 interactions.jsonl
 
+# The maintainer's local issue export and audit trail. This is a public
+# repository, so these stay on the maintainer's machine.
+issues.jsonl
+events.jsonl
+
 # Push state (runtime, per-machine)
 push-state.json
 
