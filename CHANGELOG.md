@@ -126,6 +126,13 @@
 - `.cjs` files are indexed as JavaScript and `.kts` files as Kotlin, as `.mjs`
   and `.kt` already were. Every build skipped them, so their functions, imports
   and calls were missing from the graph and read as if they did not exist.
+- `crg-daemon stop` clears the health and state files of watchers that were
+  killed outright. A killed watcher cannot clear its own, and on Windows that is
+  every watcher, because `stop` ends the daemon with `TerminateProcess` and the
+  Job Object takes the children with it. The file left behind read as a stalled
+  watcher forever. `stop` also now stops any live watcher when it finds the
+  daemon already gone. Health files for watchers the daemon never ran are left
+  alone.
 - TypeScript and JavaScript imports resolve against `compilerOptions.baseUrl`
   when no `paths` pattern matches them, as `tsc` does. A tsconfig that sets
   `baseUrl` without `paths` resolved no non-relative import at all: on a
