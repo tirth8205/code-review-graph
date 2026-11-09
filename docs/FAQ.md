@@ -63,8 +63,8 @@ Similarity retrieval has no second hop.
 
 **Where RAG-style search is better:** conceptual questions over prose, comments
 and docs ("where is rate limiting discussed?"). CRG's own keyword ranking is a
-known weakness (MRR 0.35; see the limitations in the
-[README](../README.md#benchmarks)).
+known weakness (see the limitations in the
+[README](../README.md#limitations)).
 
 ## Why not just grep?
 
@@ -96,9 +96,11 @@ session.
 
 One caveat on the numbers: the whole-corpus token-reduction figures (about 65x
 median, 36x to 376x range) compare a graph response with reading the whole
-corpus, not with a skilled agentic-grep session (see
-[REPRODUCING.md](REPRODUCING.md) for what each benchmark measures). For
-single-hop lookups in a small repository, grep is cheap and good.
+corpus, not with a skilled agentic-grep session. Against an agent that greps
+and reads the top 3 files, the median is 6.65x (range 4.2x to 72.6x, across 18
+questions on 6 repositories); see [REPRODUCING.md](REPRODUCING.md) for what
+each benchmark measures. For single-hop lookups in a small repository, grep is
+cheap and good.
 
 ## How does it compare to Serena, codegraph, claude-context, and repomix?
 
@@ -131,8 +133,7 @@ analysis, risk scoring and test-coverage tracing with no external services.
 - One-off questions on a repository you will not revisit. The payoff comes from
   reuse across queries and sessions.
 - Flow detection on JavaScript and Go. Entry-point detection is reliable mainly
-  for Python and PHP/Laravel patterns; overall flow recall is 33% (see the
-  README limitations).
+  for Python and PHP/Laravel patterns (see the README limitations).
 
 ## Does it phone home?
 
@@ -205,10 +206,13 @@ more than a 3,000-file repository you touch once.
 ## How does it handle monorepos, git worktrees, and multiple repos?
 
 **Monorepos.** One graph per repository root. Commands find the root by walking
-up to the nearest `.git`, and in git repositories only tracked files
-(`git ls-files`) are indexed, so gitignored build output is skipped. Use
-`.code-review-graphignore` to exclude tracked paths (`vendor/**`, generated
-code), or pass `--repo <path>` to point a command at a specific directory.
+up to the nearest `.git`, and in git repositories only tracked files and
+untracked files git does not ignore are indexed, so gitignored build output is
+skipped. Use `.code-review-graphignore` to exclude other paths (`vendor/**`,
+generated code), or pass `--repo <path>` to point a command at a specific
+directory. Imports between npm, yarn and pnpm workspace packages resolve to the
+package's source files, so `importers_of` and the impact radius cross package
+boundaries.
 
 **Git worktrees.** Each worktree is its own root and gets its own
 `.code-review-graph/` matching its checkout. Do not share one database across

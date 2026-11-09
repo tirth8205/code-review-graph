@@ -50,6 +50,10 @@ A function, method or constructor.
 | signature | Signature text computed by post-processing and indexed by `nodes_fts` (added in v2) |
 | is_test | 1 for test functions |
 
+An XSLT template or `xsl:function` is a Function node too, named by its `name` or written as
+`match=para mode=toc`. `extra.dynamic_apply_count` counts the `xsl:apply-templates` in it
+that gave no edge, because neither a `select` step nor a `mode` narrows the choice.
+
 ### Test
 Same columns as Function, with `kind = 'Test'` and `is_test = 1`. A function is a test when
 any of these hold (`_is_test_function` in `parser.py`):
@@ -62,6 +66,8 @@ any of these hold (`_is_test_function` in `parser.py`):
 - It carries a test annotation: JUnit `@Test`, `@ParameterizedTest`, `@RepeatedTest`,
   `@TestFactory`, or Rust `#[test]`, `#[tokio::test]`, `#[async_std::test]`, `#[rstest]`,
   `#[proptest]`.
+- It is a Ruby block in a test file, such as `it "adds" do`, `describe`, `test "..." do`,
+  `before` or `let`.
 
 ### Type
 A type alias, interface, enum or similar construct where the language parser emits one.
@@ -113,6 +119,12 @@ anchor, such as `#cover`, and its lines are the element's. `extra` holds `html_i
 block has one, its first heading under `docstring`. Search finds a section by its anchor and that
 heading. The body text is not indexed. `CONTAINS` connects the file to each section.
 
+### Variable and Output
+Nodes from Liquid templates (`.liquid`). An `assign` gives a `Variable` node named by the
+variable, and each `{{ ... }}` gives an `Output` node named `output:` plus what it prints. Names
+hold no line number, so a name used twice is one node, and `extra.lines` lists every line.
+`CONTAINS` connects the file to each one. Search finds `Output` nodes only with `kind="Output"`.
+
 ### JsonPath
 A key or array shape parsed from a `.json` file, in the same value-free shape as `YamlPath`: array items share one `[*]` path, an object with more than 200 keys is a table whose keys share one `.*` path, and values never enter the graph. Comments and trailing commas are accepted. Responses expose the same fields as `YamlPath`, without `document_index` or the YAML alias fields, under a nested `json` object.
 
@@ -155,8 +167,8 @@ names the class the call went through. Both are `INFERRED`.
 
 | Kind | Source -> target | Notes |
 |---|---|---|
-| CALLS | caller -> called function | Target may be a bare name until a resolver qualifies it; `target_resolution` records which |
-| IMPORTS_FROM | importing file -> imported module, file or package directory | `file_path` equals the source. `extra.import_scope` marks a DIRECTORY target: `package` (a Go import names a directory of files) or `tree` (a Ruby `require_all` names everything below one). The read path expands a directory to its members; see `import_scope_ancestors` in `graph.py`. `extra.import_context` marks an import that does not run as the file loads: `type_only` (never runs), `deferred` (runs late, inside a function) or `parent_package` (Python `from . import sibling`: the edge to the file's own package) |
+| CALLS | caller -> called function | Target may be a bare name until a resolver qualifies it; `target_resolution` records which. Spring AOP advice gets a call to each method its pointcut matches, with `extra.pointcut_kind` and `extra.advice_kind` (`aop_resolver.py`) |
+| IMPORTS_FROM | importing file -> imported module, file or package directory | `file_path` equals the source. `extra.import_scope` marks a DIRECTORY target: `package` (a Go import names a directory of files) or `tree` (a Ruby `require_all` names everything below one). The read path expands a directory to its members; see `import_scope_ancestors` in `graph.py`. `extra.import_context` marks an import that does not run as the file loads: `type_only` (never runs), `deferred` (runs late, inside a function) or `parent_package` (Python `from . import sibling`: the edge to the file's own package). An HTML `<script src>`, a Liquid `render` or `include` and an XSLT `xsl:import` or `xsl:include` are imports too |
 | INHERITS | child class -> parent class | |
 | IMPLEMENTS | implementing class -> interface | |
 | CONTAINS | file -> class or function; class -> method | Structural containment |
@@ -181,6 +193,8 @@ names the class the call went through. Both are `INFERRED`.
 /absolute/path/to/file.py::function_name                       # top-level function
 /absolute/path/to/file.py::ClassName.method_name               # method
 /absolute/path/to/file.py::OuterClass.InnerClass.method        # nested class method
+/absolute/path/to/Handlers.cs::App.Report.ExportHandler.Run    # C#: namespace, then types
+/absolute/path/to/card.liquid::output:product.title            # Liquid output
 /absolute/path/to/file.yml::yaml:0:$.services[*].metadata.tier # aggregated YAML path in document 0
 /absolute/path/to/file.yml::yaml:0:alias:$.service["<<"]@12    # alias or anchor identity
 /absolute/path/to/package.json::json:$.scripts.build            # JSON path
@@ -333,6 +347,7 @@ CREATE TABLE embeddings (
 | `git_head_sha`, `git_branch` | Builds in a git checkout |
 | `svn_branch`, `svn_revision` | Builds in an SVN working copy |
 | `postprocess_level` | Post-processing |
+| `community_detector` | Community detection: `leiden`, `file`, or both joined by `+` |
 
 ### Indexes
 
@@ -354,6 +369,7 @@ CREATE TABLE embeddings (
 | `idx_edges_composite` | `edges(kind, source_qualified, target_qualified, file_path, line)` | v8 |
 | `idx_nodes_symbol` | `nodes(symbol)` | v10 |
 | `idx_edges_kind_target_resolution` | `edges(kind, target_resolution)` | v11 |
+| `idx_nodes_fts_state_file` | `nodes_fts_state(file_path)` | v12 |
 
 ### Migrations
 

@@ -102,7 +102,7 @@ If some files fail to parse, the build or update result has status `partial` and
 ```
 /code-review-graph:review-delta
 ```
-Reviews the files changed since the last commit plus their graph-derived impact radius. Review and impact responses carry a compact `context_savings` estimate. Across the 6 benchmark repositories, graph queries use about 65x fewer tokens per question (median; range 36x to 376x) than reading the whole corpus. See the [README benchmarks](../README.md#benchmarks) and [REPRODUCING.md](REPRODUCING.md).
+Reviews the files changed since the last commit plus their graph-derived impact radius. Review and impact responses carry a compact `context_savings` estimate. Across the 6 benchmark repositories, graph queries use about 65x fewer tokens per question (median; range 36x to 376x) than reading the whole corpus. That baseline is an upper bound: against an agent that greps and reads the top 3 files, the median is 6.65x (range 4.2x to 72.6x). See the [README benchmarks](../README.md#benchmarks) and [REPRODUCING.md](REPRODUCING.md).
 
 ### 3. Review a PR
 ```
@@ -121,7 +121,7 @@ Updates the graph on every file save.
 code-review-graph visualize
 open .code-review-graph/graph.html
 ```
-Interactive D3.js force-directed graph. It starts collapsed (File nodes only); click a file to expand its children. Use the search bar to filter and click legend edge types to toggle them. `--format json|graphml|svg|obsidian|cypher` writes other formats.
+Interactive D3.js force-directed graph. Past 2,000 nodes it starts collapsed (File nodes only); click a file to expand its children. Past 3,000 nodes or 9,000 edges, the default `--mode auto` draws one node per community instead, or per file when there are no communities. `--seed-symbol`, `--seed-file`, `--seed-changed` and `--seed-flow` draw only the part of the graph around a symbol, file, change or flow. Use the search bar to filter and click legend edge types to toggle them. `--format json|graphml|svg|obsidian|cypher` writes other formats.
 
 ### 6. Semantic search (optional)
 ```bash
@@ -144,7 +144,7 @@ code-review-graph build \
 A refresh only updates a previously embedded graph. On a graph with no embeddings yet it embeds nothing: `build`, `update` (also when it finds no changes) and `postprocess` return `embeddings_refresh_skipped: true` with a warning, and `watch` logs that warning after each update and keeps running. Run `code-review-graph embed` once to create the index. A refresh refuses to migrate vectors to a different provider, model or endpoint, removes vectors for deleted nodes, and turns provider or transport failures into build warnings.
 
 ### 7. Detect changes with risk scoring
-Ask your MCP client: "Review my recent changes with risk scoring". This calls `detect_changes_tool`, which maps the diff to affected functions, YAML and JSON paths, flows, communities and test gaps.
+Ask your MCP client: "Review my recent changes with risk scoring". This calls `detect_changes_tool`, which maps the diff to affected functions, YAML and JSON paths, flows, communities and test gaps. A function or class the diff deletes is listed in `removed_symbols` with the callers, importers and tests that still use it.
 
 From the shell:
 
@@ -168,7 +168,7 @@ Writes one markdown page per detected community, plus an index, to `.code-review
 ```bash
 code-review-graph register /path/to/other/repo --alias mylib
 ```
-Then use `cross_repo_search_tool` to search every registered repository, or pass `repos=["mylib"]` to search a subset.
+Then use `cross_repo_search_tool` to search every registered repository, or pass `repos=["mylib"]` to search a subset. `code-review-graph serve --http --multi-repo` runs one HTTP server for every registered repository; each tool call must then name one in `repo_root`.
 
 `code-review-graph repos` lists each repository's registered `data_dir`, marking
 missing directories with `[MISSING]`. If a registered directory disappears and
@@ -176,6 +176,13 @@ the repository still has a local `.code-review-graph/graph.db`, graph commands
 warn and use normal resolution (`CRG_DATA_DIR`, then the local directory).
 Registering a fresh external directory for a repository with no local graph
 still creates that directory on the next write.
+
+### 11. Python call enrichment (optional)
+```bash
+pip install "code-review-graph[enrichment]"
+code-review-graph build --enrich
+```
+`--enrich` on `build` or `update` uses Jedi to resolve Python method calls on a local variable (`s = make()` then `s.authenticate()`), so `callers_of` and the impact radius find them. It is off by default because it is slow, about a second more per Python file. `CRG_ENABLE_ENRICHMENT=1` turns it on for hooks, the watcher and MCP builds, and `CRG_DISABLE_ENRICHMENT=1` keeps it off even when asked for. Installing the extra alone changes nothing.
 
 ## Context Savings
 
@@ -253,7 +260,7 @@ code-review-graph eval --all
 
 ## Supported Languages
 
-The parser covers Python, JavaScript, TypeScript/TSX, Go, Rust, Java, C/C++, C#, VB.NET, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL/PL/SQL (Oracle), Terraform/OpenTofu (`.tf`; other `.hcl` files become file nodes only), Ansible YAML (playbooks, roles, tasks), value-free generic YAML structure (translation files in folders such as `locales/` become file nodes only), XSLT stylesheets (`.xsl`, `.xslt`), value-free JSON structure (`.json`; translation, test, docs, example and data files keep only a file node, and lock files are skipped), Vue/Svelte single-file components, HTML pages (`.html`, `.htm`; inline scripts, plus `div`, `section` and `article` blocks with an id as `DocSection` nodes), Astro files (parsed with the TypeScript grammar), Jupyter and Databricks notebooks (`.ipynb` and Databricks `.py` exports), Perl XS files (`.xs`), Robot Framework files (`.robot`, `.resource`), and Liquid templates (`.liquid`).
+The parser covers Python, JavaScript, TypeScript/TSX, Go, Rust, Java, C/C++, C#, VB.NET, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL/PL/SQL (Oracle), dbt models (`ref()` and `source()` become imports), Terraform/OpenTofu (`.tf`; other `.hcl` files become file nodes only), Ansible YAML (playbooks, roles, tasks), value-free generic YAML structure (translation files in folders such as `locales/` become file nodes only), XSLT stylesheets (`.xsl`, `.xslt`), value-free JSON structure (`.json`; translation, test, docs, example and data files keep only a file node, and lock files are skipped), Vue/Svelte single-file components, HTML pages (`.html`, `.htm`; inline scripts, plus `div`, `section` and `article` blocks with an id as `DocSection` nodes), Astro files (parsed with the TypeScript grammar), Jupyter and Databricks notebooks (`.ipynb` and Databricks `.py` exports), Perl XS files (`.xs`), Robot Framework files (`.robot`, `.resource`), and Liquid templates (`.liquid`).
 
 Extension-less scripts are detected by shebang for bash/sh/zsh/ksh/dash/ash, Python, Node, Ruby, Perl, Lua, Rscript, and PHP interpreters.
 
@@ -265,18 +272,20 @@ Terraform provider aliases have distinct names (`provider.aws.west`), while the 
 provider retains `provider.aws`. Resource/data `provider` selections and module `providers`
 map values link to provider nodes; ordinary resource expressions retain resource references.
 
-Ruby methods use the full enclosing class/module chain (for example, `Alpha.Same.run`).
-When Python classes in one file share a leaf name, their methods use it too (`Alpha.Same.run`
-and `Beta.Same.run`), and unique Python class-leaf method names retain their existing
-identities. Local calls stay in that lexical class. Rebuild an existing graph to replace rows
-created with colliding identities.
+Members of nested classes use the full enclosing class/module chain (for example,
+`Alpha.Same.run`) in Ruby, Java, Kotlin, Swift, Scala and most other languages. Python and
+C++ keep the leaf class name, but when Python classes in one file share a leaf name, their
+methods use the full chain too (`Alpha.Same.run` and `Beta.Same.run`). C# names carry the
+namespace and the full containing-type path. Local calls stay in that lexical class. Rebuild
+an existing graph to replace rows created with colliding identities.
 
 Storybook CSF files (`*.stories.js`, `.jsx`, `.ts`, `.tsx`) are indexed as test/demo code.
 Their imports, calls, and references alone do not keep application symbols alive in
 dead-code reports. Normal application callers and ordinary test evidence still count.
 
-- **Nodes**: Files, Classes, Functions/Methods, Types, Tests, YamlPaths, DocSections, JsonPaths, plus Endpoints, Schedulers and ConfigProperties where framework enrichment applies
+- **Nodes**: Files, Classes, Functions/Methods, Types, Tests, YamlPaths, DocSections, JsonPaths, Variables and Outputs (Liquid templates), plus Endpoints, Schedulers, Events and ConfigProperties where framework enrichment applies
 - **Edges**: CALLS, IMPORTS_FROM, INHERITS, IMPLEMENTS, CONTAINS, TESTED_BY, DEPENDS_ON, REFERENCES, plus framework-specific kinds (INJECTS, HANDLES, TRIGGERS, PUBLISHES, CONSUMES/PRODUCES, DEPENDS_ON_CONFIG, TEMPORAL_STUB)
+- **Confidence**: each `CALLS`, `REFERENCES` and `TESTED_BY` edge has a `confidence_tier`: `EXTRACTED` (1.0) when the source names a real node, `INFERRED` (0.8, or the resolver's own score) when a resolver chose it, `AMBIGUOUS` (0.4) when several nodes fit, and `UNRESOLVED` (0.2) when none does
 
 See [schema.md](schema.md) for details.
 
@@ -300,7 +309,8 @@ A nested `target/`, `build/`, `.next/` or `.nuxt/` directory is also ignored whe
 
 The default `**/vendor/**` exclusion applies to Composer, Go, Ruby and Cargo projects
 identified by root manifests (`composer.json`, `go.mod`, `go.work`, `Gemfile`,
-`Rakefile`, `Cargo.toml`, or `*.gemspec`). Other repositories retain source packages named
+`Rakefile`, `Cargo.toml`, or `*.gemspec`). One of these manifests in a sub-folder also
+excludes the `vendor/` beside it. Other repositories retain source packages named
 `vendor`; add `vendor/` to `.code-review-graphignore` to exclude them explicitly.
 
 To add patterns, create a `.code-review-graphignore` file in the repository root (same syntax as `.gitignore`):
@@ -311,7 +321,7 @@ vendor/**
 *.generated.ts
 ```
 
-In git repositories, indexing is based on tracked files (`git ls-files`), so gitignored files are skipped. Use `.code-review-graphignore` to exclude tracked files or when git is not available.
+In git repositories, indexing is based on tracked files plus untracked files git does not ignore (`git ls-files` and `git ls-files --others --exclude-standard`), so gitignored files are skipped. Use `.code-review-graphignore` to exclude other files or when git is not available.
 
 ## Symlinked Folders
 

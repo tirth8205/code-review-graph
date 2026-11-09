@@ -268,6 +268,13 @@
 
 ### Fixed
 
+- The docs match the code again. `docs/`, the reference `get_docs_section_tool`
+  serves, `CONTRIBUTING.md`, `SECURITY.md`, `AGENTS.md`, the Copilot
+  instructions, two skills and the VS Code README now cover what the last two
+  release trains added: all 19 query patterns, the search source options, the
+  write lock and exit `75`, the new git and steering hooks, untracked files,
+  Liquid and the other new node kinds, confidence tiers and schema v15. They also
+  drop claims the code no longer backs.
 - `install --dry-run` shows what each file would become, and `install` writes
   nothing until you have answered its question (#173). The dry run used to list
   file names only, and a real install wrote the MCP config before it asked

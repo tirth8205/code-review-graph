@@ -31,6 +31,11 @@ directory when omitted. The one exception is `serve --http --multi-repo`, where
 every call must pass the absolute path of a registered repository (see Server
 below).
 
+Every tool carries `readOnlyHint: true` except the five that write:
+`build_or_update_graph_tool`, `run_postprocess_tool`, `embed_graph_tool`,
+`apply_refactor_tool` and `generate_wiki_tool`. A client can use the hint to
+skip its approval prompt for the read-only ones.
+
 Where a tool takes `base`, a local or remote branch ref (for example
 `origin/main`) resolves to its merge base with `HEAD`, so the diff covers only
 this branch's own commits. Commit ids and revision expressions such as `HEAD~3`
@@ -51,6 +56,13 @@ embedding_model: str | None          # Exact model for embedding_provider
 ```
 If some files fail to parse, `status` is `"partial"` and the `summary` names
 them. Their previous graph rows are kept.
+
+One write runs per repository at a time. When another write to the graph is
+running, this tool, `run_postprocess_tool` and `embed_graph_tool`
+return at once with `status: "contended"`, `skipped: true` and the `holder_pid`;
+retry once it ends. An embedding refresh on a graph with no embeddings yet embeds
+nothing and sets `embeddings_refresh_skipped: true`; run `embed_graph_tool` once
+first.
 
 #### `run_postprocess_tool`
 ```
@@ -78,7 +90,6 @@ max_results: int                 # Nodes to traverse to; default CRG_MAX_IMPACT_
 repo_root: str | None
 base: str = "HEAD~1"
 detail_level: str = "standard"   # "standard", "minimal", or "compact"
-max_results: int = 500          # Traversal budget (nodes)
 max_files: int = 25             # Compact-mode display limit (hard ceiling 200)
 resolution: str = "all"          # "all" or "direct" (only calls bound to a node)
 ```
@@ -87,6 +98,8 @@ An impacted node that calls or references the changed code in one hop carries
 own `file_path`) and `call_site_count` when there is more than one.
 `unresolved_call_sites` counts call sites that name a changed symbol but were
 never bound to it, so an empty radius is not read as proof of absence.
+Changed files the graph has no nodes for are listed in `unmatched_files`, and
+when none of the changed files is in the graph, `risk` is `"unknown"`.
 Responses may include estimated `context_savings` metadata.
 
 Use `detail_level="compact"` when the next step is opening affected files rather
@@ -113,7 +126,9 @@ code-review-graph impact --files src/auth.py --detail-level minimal
 #### `query_graph_tool`
 ```
 pattern: str    # callers_of, references_to, callees_of, imports_of, importers_of,
-                # children_of, tests_for, inheritors_of, file_summary, path_to
+                # children_of, tests_for, inheritors_of, triggers_of, triggered_by,
+                # publishers_of, listeners_of, advises, advised_by, handlers_of,
+                # endpoints_for, consumers_of, file_summary, path_to
 target: str     # Node name, qualified name, or file path
 repo_root: str | None
 detail_level: str = "standard"   # "standard" or "minimal"
@@ -129,7 +144,13 @@ adds `distinct_nodes` and a `resolution_split` of the whole answer. When some of
 the rows are only name matches and `resolution` is `"all"`, a short `confidence`
 sentence says how many. Call sites
 are ordered so every distinct node appears before any node's second call site,
-so truncation never costs a caller.
+so truncation never costs a caller. Within that order, calls bound to a node come
+before bare-name guesses.
+
+A full name that one real symbol has resolves to it, even when tests or test
+helpers share the name; the summary says how many it skipped. When two real
+symbols share the name, `status` is `"ambiguous"` and the response lists
+qualified names to pick from (five short rows in minimal mode).
 
 `path_to` answers how `target` reaches `to`, with one row per hop through calls,
 references, inheritance, imports and containment. It picks the route whose weakest
@@ -176,6 +197,8 @@ gets six turns. No single file may hold more than 40% of the budget.
 `context.source_regions` reports `shown`, `total`, and an `incomplete` map of
 the files whose regions did not all fit. Each list reports its untruncated
 `*_total`, and `context.truncated` / `context.source_truncated` mark any cut.
+Changed files the graph has no nodes for are listed in `unmatched_files`, and
+when none of the changed files is in the graph, `risk` is `"unknown"`.
 Responses may include estimated `context_savings` metadata.
 
 #### `traverse_graph_tool`
@@ -191,16 +214,32 @@ repo_root: str | None
 #### `semantic_search_nodes_tool`
 ```
 query: str           # Search string
-kind: str | None     # File, Class, Function, Type, Test, YamlPath, DocSection, JsonPath
+kind: str | None     # File, Class, Function, Type, Test, YamlPath, DocSection,
+                     # Variable, Output, JsonPath
 limit: int = 20      # At most 100; at most 5 with detail_level "minimal"
 repo_root: str | None
 model: str | None    # Embedding model (falls back to provider-specific env vars)
 provider: str | None # local, openai, google, minimax, voyage
 detail_level: str = "standard"
+include_source: bool = False     # Attach each hit's source lines
+expand_neighbors: bool = False   # With include_source: also the top hits' callers and callees
+max_source_lines: int = 60       # Lines per snippet (1-60)
 ```
 Search ranks three times what it shows. `total` and `result_count` count the
 matches it ranked, `results_omitted` those not shown, and `total_is_lower_bound`
 says there may be more.
+
+`include_source=True` lets you answer from the reply instead of opening the
+files. All snippets share one budget of 240 lines, or 700 with
+`expand_neighbors=True`, which adds up to four callers and callees for each of
+the top three hits. A cut snippet carries `source_truncated`. Source is not
+attached when `detail_level="minimal"`.
+
+`kind` is applied before the hits are cut. Test code ranks below production
+code unless the query asks about tests (`kind="Test"`, or a word such as
+"test", "spec", "fixture" or "mock"). JSON ranks below code unless you ask for
+it (`kind="JsonPath"`, a `$` path or a `.json` name). Liquid `Output` nodes are
+found only with `kind="Output"`.
 
 #### `embed_graph_tool`
 ```
@@ -396,6 +435,16 @@ detail_level: str = "standard"  # "minimal" keeps identifying fields only
 Truncating a rename preview truncates only the response. The stored preview
 keeps every edit, so `apply_refactor_tool` applies the full set.
 
+`old_name` is matched exactly: a name, `Class.method` or a qualified name such as
+`pkg/util.py::helper`. When a bare name belongs to several symbols, the first by
+file and line is renamed and the preview's `qualified_name` says which; pass a
+qualified name to pick another. A name that matches no symbol gives `not_found`.
+The preview also edits the import and export lines that name the symbol. Each
+edit carries the `column` where the old name starts and its `site` (`definition`,
+`call`, `reference`, `import`, `export`, `attribute` or `__all__`), and applying
+replaces the name only there. An edit that no longer matches the file is skipped
+and counted in `edits_skipped`.
+
 #### `apply_refactor_tool`
 ```
 refactor_id: str             # ID from a prior refactor_tool call
@@ -499,13 +548,16 @@ code-review-graph install --platform codex  # Configure Codex MCP, hooks, and gl
 code-review-graph install --steering        # Opt in: graph context beside Claude Code searches and reads
 code-review-graph install --no-steering     # Remove only that hook
 code-review-graph uninstall                 # Remove CRG configs, hooks, skills, and data
+code-review-graph uninstall --dry-run       # List what it would remove; change nothing
+code-review-graph uninstall --keep-data     # Remove integrations, keep graph databases
 code-review-graph uninstall --platform codex  # Unbind one platform (keeps graph data and others)
 
 # Build and update
 code-review-graph build                        # Full build
 code-review-graph build --skip-flows           # Parse + signatures + FTS only
 code-review-graph build --skip-postprocess     # Raw parse only
-code-review-graph build --enrich               # Also resolve Python calls with Jedi (needs [enrichment])
+code-review-graph build --enrich               # Also resolve Python calls with Jedi (needs [enrichment]);
+                                                #   also on update, or CRG_ENABLE_ENRICHMENT=1. Off by default
 code-review-graph update                       # Incremental update from the last-built commit
 code-review-graph update --base origin/main    # Custom base ref
 code-review-graph update --brief               # Update graph, then show the risk panel
@@ -569,7 +621,7 @@ code-review-graph dead-code --kind Function --file-pattern src/ --json
 code-review-graph query callers_of <target>    # Patterns: callers_of, callees_of, imports_of, importers_of,
                                                 #   children_of, tests_for, inheritors_of, file_summary
 code-review-graph query path_to <a> --to <b>  # How a reaches b, hop by hop
-code-review-graph impact [--files F ...] [--depth N] [--base REF]
+code-review-graph impact [--files F ...] [--depth N] [--base REF] [--detail-level compact] [--max-files N]
 code-review-graph search <query> [--kind Function] [--limit N]
 code-review-graph flows [--sort criticality] [--limit N] [--kind KIND]
 code-review-graph flow --id ID | --name NAME [--source]
@@ -600,6 +652,13 @@ code-review-graph daemon remove <path_or_alias>     # Remove a repo from the dae
 
 # Evaluation
 code-review-graph eval                         # Run evaluation benchmarks
+code-review-graph eval --benchmark search_quality --embed  # --embed builds vectors; agent_baseline,
+                                                #   search_quality and multi_hop_retrieval need it
+
+# Hook entry points (the hooks install writes run these; they read the hook event JSON on stdin)
+code-review-graph hook-update                  # Update the graph of the repo that holds the edited file
+code-review-graph hook-status                  # Graph status for the event's cwd
+code-review-graph enrich                       # Graph context for a search or read (the --steering hook)
 
 # Server
 code-review-graph serve                        # Start MCP server (stdio)
@@ -648,10 +707,19 @@ Notes:
   about a second. `update --brief` re-parses changed files first, then prints
   the same panel. Use `update --brief` after a rebase or a large change set,
   or when the graph may be stale.
-- `status`, `detect-changes`, `visualize`, `wiki`, `watch`, `forget` and
-  `dead-code` exit 1 when no graph exists and do not create one. `forget` and
+- `status`, `detect-changes`, `visualize`, `wiki`, `watch`, `forget`,
+  `dead-code` and the read-only graph queries (`query` to `refactor` above)
+  exit 1 when no graph exists and do not create one. `forget` and
   `dead-code` still move a legacy top-level `.code-review-graph.db` into
   `.code-review-graph/graph.db` before running.
+- One write runs per repository at a time. `build`, `update`, `postprocess`,
+  `forget` and `embed` take a lock on `write.lock` next to `graph.db`; if
+  another one holds it, they say so, do nothing and exit 75. Pass `--wait` to
+  wait for it instead. `watch` takes the lock for each write and keeps its
+  changes to retry if the lock is held.
+- `install` lists the files it will change and asks about the instruction
+  files (`CLAUDE.md`, `AGENTS.md` and the rest) before it writes anything;
+  `-y` answers yes. Ctrl-C at the question stops with nothing written.
 - `visualize` without a seed exports the whole repository, and falls back to
   community (or file) bubbles once the rendered graph passes 3000 nodes or
   9000 edges. With `--seed-symbol`, `--seed-file`, `--seed-changed`,
@@ -659,8 +727,8 @@ Notes:
   the nodes within `--depth` hops of the seed and the edges among them, with
   everything else left out of the payload rather than drawn dimmed. A seeded
   page always uses the full renderer and never aggregates.
-- A hop is a semantic edge (`CALLS`, `IMPORTS_FROM`, `INHERITS`, `IMPLEMENTS`,
-  `TESTED_BY`, `DEPENDS_ON`). `CONTAINS` is structural and is not a hop, so a
+- A hop is any edge other than `CONTAINS`, such as `CALLS`, `IMPORTS_FROM`,
+  `INHERITS`, `REFERENCES` or `TESTED_BY`. `CONTAINS` is structural and is not a hop, so a
   depth-2 neighbourhood of one function does not swallow its whole module; the
   containing `File` nodes are still shipped so clustering and collapse work.
 - `--render-depth` (default 1) is how many hops are drawn on open. Clicking a
@@ -687,12 +755,15 @@ Notes:
   non-`html` `--format`; `--sidecar` with a non-`html` `--format`;
   `--mode community` or `--mode file` with a seed (they aggregate, which is
   the opposite of a neighbourhood); and a `--render-depth` above `--depth`.
-- `install` appends a Git `pre-commit` hook that prints a risk summary before
-  each commit. The hook skips linked worktrees unless `CRG_HOOK_WORKTREES=1`
-  is set, so a worktree does not build a second graph for another branch.
+- `install` appends a Git `pre-commit` hook that updates the graph and prints a
+  risk summary before each commit. The hook skips linked worktrees unless
+  `CRG_HOOK_WORKTREES=1` is set, so a worktree does not build a second graph
+  for another branch.
 - `install` also appends `post-checkout`, `post-merge` and `post-rewrite` Git
   hooks that run `update` after a branch switch, a merge and a rebase, with
-  the same worktree rule.
+  the same worktree rule. An existing hook written in a language other than
+  shell is left alone, `--no-hooks` skips all four, and `uninstall` removes
+  them.
 - For an empty or incomplete graph, run `code-review-graph build`. See
   docs/TROUBLESHOOTING.md, "Empty or incomplete graph".
 - `context-history` reads a log that is off by default. Set
