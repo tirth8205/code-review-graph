@@ -9,7 +9,7 @@ Usage:
     code-review-graph forget PATH [PATH ...] [--dry-run]
     code-review-graph watch
     code-review-graph status
-    code-review-graph serve [--auto-watch] [--http] [--host ADDR] [--port PORT]
+    code-review-graph serve [--auto-watch] [--http] [--host ADDR] [--port PORT] [--multi-repo]
     code-review-graph mcp [--auto-watch]
     code-review-graph visualize
     code-review-graph wiki
@@ -1776,6 +1776,14 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PORT",
         help="Port for --http (default: 5555)",
     )
+    serve_cmd.add_argument(
+        "--multi-repo",
+        action="store_true",
+        help=(
+            "With --http, serve every registered repository from one server; "
+            "each tool call must name one in repo_root"
+        ),
+    )
 
     mcp_cmd = sub.add_parser("mcp", help="Alias for serve")
     mcp_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
@@ -1961,6 +1969,29 @@ def _dispatch() -> None:
                 _SUBCOMMANDS["serve"].error("--port requires --http")
             if args.host is not None and not args.http:
                 _SUBCOMMANDS["serve"].error("--host requires --http")
+        multi_repo = getattr(args, "multi_repo", False)
+        if multi_repo:
+            serve_parser = _SUBCOMMANDS["serve"]
+            if not args.http:
+                serve_parser.error("--multi-repo requires --http")
+            if multi_worktree:
+                serve_parser.error("--multi-repo cannot be combined with --multi-worktree")
+            if args.repo:
+                serve_parser.error(
+                    "--multi-repo serves the repositories in the registry; drop --repo "
+                    "and run `code-review-graph register <path>` for each one"
+                )
+            if auto_watch:
+                serve_parser.error(
+                    "--multi-repo cannot be combined with --auto-watch; use "
+                    "`code-review-graph daemon` to watch several repositories"
+                )
+            if os.environ.get("CRG_DATA_DIR", "").strip():
+                serve_parser.error(
+                    "--multi-repo cannot be combined with CRG_DATA_DIR, which would put "
+                    "every repository's graph in one database; use per-repository "
+                    "Registry data_dir entries instead"
+                )
         if multi_worktree:
             if args.command == "serve" and args.http:
                 _SUBCOMMANDS["serve"].error(
@@ -1996,6 +2027,7 @@ def _dispatch() -> None:
                     host=host,
                     port=port,
                     tools=args.tools,
+                    multi_repo=multi_repo,
                 )
             else:
                 serve_main(repo_root=args.repo, auto_watch=auto_watch, tools=args.tools)

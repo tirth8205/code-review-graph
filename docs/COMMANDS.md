@@ -27,7 +27,9 @@ Review a PR or branch diff.
 ## MCP Tools
 
 Every `repo_root` parameter is optional and auto-detected from the current
-directory when omitted.
+directory when omitted. The one exception is `serve --http --multi-repo`, where
+every call must pass the absolute path of a registered repository (see Server
+below).
 
 Where a tool takes `base`, a local or remote branch ref (for example
 `origin/main`) resolves to its merge base with `HEAD`, so the diff covers only
@@ -505,10 +507,24 @@ code-review-graph eval                         # Run evaluation benchmarks
 # Server
 code-review-graph serve                        # Start MCP server (stdio)
 code-review-graph serve --http                 # Streamable HTTP on 127.0.0.1:5555 (--host, --port)
+code-review-graph serve --http --multi-repo    # One HTTP server for every registered repository
 code-review-graph serve --tools query_graph_tool,detect_changes_tool  # Tool allowlist (or CRG_TOOLS)
 code-review-graph serve --multi-worktree --repo /path/to/repo  # One stdio session, one child per linked worktree
 code-review-graph mcp                          # Alias for serve; accepts --repo, --auto-watch and --multi-worktree
 ```
+
+`--multi-repo` lets one `serve --http` process serve several repositories, so
+the embedding model is loaded once. It serves the repositories in the registry
+(`code-review-graph register <path>`), read again on every call, so `register`
+and `unregister` take effect without a restart. Every tool call must pass
+`repo_root`, the absolute path of a registered repository; `list_repos_tool`
+lists them. A call with no `repo_root`, a relative path or a path that is not
+registered is refused with a message saying so. It never falls back to `--repo`
+or the server's working directory. The usual project-root check still applies.
+`--multi-repo` needs `--http` and cannot be combined with `--repo`,
+`--auto-watch`, `--multi-worktree` or `CRG_DATA_DIR`. To keep several graphs
+current, run the daemon (`code-review-graph daemon`). Without `--multi-repo`,
+`serve --http` keeps the old fallback.
 
 `--multi-worktree` is an opt-in stdio mode for parallel reviews. The server
 starts one regular `serve --repo <root>` child lazily for the primary checkout

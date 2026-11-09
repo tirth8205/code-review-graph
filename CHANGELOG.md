@@ -4,6 +4,17 @@
 
 ### Added
 
+- `serve --http --multi-repo` runs one HTTP server for every repository in the
+  registry, so the embedding model is loaded once (#607). Each tool call must
+  name a registered repository in `repo_root`. A call with no `repo_root`, a
+  relative path or a path that is not registered is refused with a clear
+  message. Before, a shared HTTP server quietly answered such a call from
+  `--repo` or its own working directory, which could be a repository the
+  client never named. The registry is read on every call, so `register` and
+  `unregister` take effect without a restart. The flag needs `--http` and
+  cannot be combined with `--repo`, `--auto-watch`, `--multi-worktree` or
+  `CRG_DATA_DIR`; the daemon still watches several repositories. stdio and
+  plain `serve --http` are unchanged.
 - Python modules that replace themselves in `sys.modules` are followed to the
   module they install. A compatibility shim such as
   `sys.modules[__name__] = importlib.import_module("app.services.billing")`

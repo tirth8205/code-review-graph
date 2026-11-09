@@ -232,7 +232,11 @@ code-review-graph unregister api                    # remove by path or alias
 ```
 
 Once registered, `list_repos_tool` and `cross_repo_search_tool` work across
-all of them. To keep several graphs current, the daemon watches registered
+all of them. One HTTP server can also answer for all of them:
+`code-review-graph serve --http --multi-repo` serves every registered repository
+and loads the embedding model once. Each tool call must then pass `repo_root`,
+the absolute path of a registered repository; a call without one, or naming a
+repository that is not registered, is refused. To keep several graphs current, the daemon watches registered
 repositories as child processes:
 
 ```bash
