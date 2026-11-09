@@ -14,6 +14,8 @@ code-review-graph build      # parse the codebase
 
 `--steering` is off by default and only for Claude Code. It adds a hook that puts graph context, such as callers, callees, flows and tests, beside each `Grep`, `Glob`, `grep` or `rg` command and `Read`. That steers the model towards the graph, but it changes what the model sees on every one of those calls: on Flask, about 0.12 seconds and up to about 220 tokens each. `--no-steering` removes only that hook, and `uninstall` removes it too. A failed lookup never stops the tool call.
 
+`install` always adds `.code-review-graph/` to `.gitignore`. The other files it writes, such as `.claude/`, `.mcp.json` and `CLAUDE.md`, stay visible to git, because a team may want to commit them. Pass `--gitignore` to ignore them as well. It adds a block marked `# >>> code-review-graph install files >>>` that lists only the files and folders that run created and git does not track. A file that was already there, tracked or not, is never listed, and a folder the run created is listed whole. Running install again adds to the same block. `uninstall` removes the block and nothing else; to keep a listed file, delete its line.
+
 To configure one platform only:
 
 ```bash

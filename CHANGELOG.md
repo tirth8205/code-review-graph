@@ -256,6 +256,15 @@
   `fastmcp.prompts.prompt` path is gone in 4 and stopped the server from
   starting.
 - The `build-graph`, `review-delta` and `review-pr` skills are written from one source, `DOCUMENTARY_SKILLS` in `skills.py`. `scripts/generate_documentary_skills.py` rewrites them, and a test fails if a file is edited by hand (#822).
+- `install --gitignore` adds the files and folders that run created to a
+  marked block in the repository's `.gitignore` (#471). It is off by default,
+  because `.claude/`, `.mcp.json` and `CLAUDE.md` can be team files. Only
+  paths that did not exist before the run and that git does not track are
+  listed, so a file you wrote or committed is never ignored. A path some rule
+  already ignores is not repeated. Running install again merges into the same
+  block, `--dry-run` shows the lines it would add, and `uninstall` removes the
+  block and nothing else, so `.gitignore` comes back byte for byte. The
+  `.code-review-graph/` entry keeps its own handling.
 
 ### Fixed
 

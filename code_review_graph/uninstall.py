@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
 
-from . import jsonc, skills
+from . import install_gitignore, jsonc, skills
 
 _tomllib: Any = importlib.import_module(
     "tomllib" if sys.version_info >= (3, 11) else "tomli"
@@ -927,12 +927,22 @@ def _remove_gitignore(
     path = repo_root / ".gitignore"
     if not path.exists() or not _safe_path(path, repo_root, report):
         return
-    raw = _read_text(path, report)
-    if raw is None:
+    try:
+        # Bytes, not text mode, so CRLF line endings come back unchanged.
+        raw = path.read_bytes().decode("utf-8")
+    except (OSError, UnicodeError) as exc:
+        report.errors.append(f"{path}: read failed ({exc})")
         return
-    lines = raw.splitlines(keepends=True)
+    # The block ``install --gitignore`` writes (#471). Only its own lines go.
+    without_block, block_state = install_gitignore.remove_block(raw)
+    if block_state == "edited":
+        report.skipped_paths.append(
+            f"{path} (code-review-graph install files block was edited by hand; "
+            "left unchanged)"
+        )
+    lines = without_block.splitlines(keepends=True)
     rewritten: list[str] = []
-    changed = False
+    changed = block_state == "removed"
     index = 0
     while index < len(lines):
         if (

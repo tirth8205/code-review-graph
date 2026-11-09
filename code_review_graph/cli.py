@@ -48,9 +48,12 @@ from functools import partial
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 from pathlib import Path
-from typing import Iterable, TypedDict
+from typing import TYPE_CHECKING, Iterable, TypedDict
 
 from .errors import CodeReviewGraphError, is_lock_error
+
+if TYPE_CHECKING:
+    from .install_gitignore import Plan as _GitignorePlan
 from .neighbourhood import DEFAULT_DEPTH as NB_DEFAULT_DEPTH
 from .neighbourhood import DEFAULT_MAX_NODES as NB_DEFAULT_MAX_NODES
 from .stdio import configure_utf8_stdio as _configure_utf8_stdio
@@ -63,6 +66,11 @@ _PLATFORM_CHOICES = [
     "continue", "opencode", "antigravity", "gemini-cli", "qwen", "kiro", "qoder",
     "copilot", "copilot-cli", "codebuddy", "hermes", "all",
 ]
+
+_GITIGNORE_HELP = (
+    "Also add the files and folders this run creates, and git does not track, "
+    "to a marked block in .gitignore. Off by default; uninstall removes the block"
+)
 
 
 class _EmbeddingRefreshKwargs(TypedDict, total=False):
@@ -318,6 +326,39 @@ def _apply_steering_choice(
             print(f"Installed the steering hook in {path}. Remove it with --no-steering.")
 
 
+def _report_gitignore_block(
+    repo_root: Path, plan: _GitignorePlan, *, dry_run: bool
+) -> None:
+    """Update (or preview) the --gitignore block and say what happened (#471)."""
+    from . import install_gitignore
+
+    result = install_gitignore.apply(repo_root, plan, dry_run=dry_run)
+    lead = "[dry-run] " if dry_run else ""
+    if result.status == "written":
+        if result.added:
+            verb = "Would add" if dry_run else "Added"
+            print(f"{lead}{verb} to .gitignore, in the code-review-graph install files block:")
+            for entry in result.added:
+                print(f"    /{entry}")
+        else:
+            verb = "Would drop" if dry_run else "Dropped"
+            print(f"{lead}{verb} entries for paths that are gone from the .gitignore block.")
+    elif result.status == "unchanged":
+        if result.entries:
+            print(f"{lead}The .gitignore block already lists every file install created.")
+        else:
+            print(f"{lead}No files to add to .gitignore: install created none that git shows.")
+    elif result.status == "edited":
+        print(
+            f"{lead}Left the code-review-graph install files block in .gitignore alone: "
+            "it was edited by hand."
+        )
+    elif result.status == "not-git":
+        print(f"{lead}Skipped --gitignore: {repo_root} is not a Git work tree.")
+    else:
+        print(f"{lead}Could not update .gitignore: {result.detail}", file=sys.stderr)
+
+
 def _handle_init(args: argparse.Namespace) -> None:
     """Set up MCP config for detected AI coding platforms."""
     from .incremental import ensure_repo_gitignore_excludes_crg, find_repo_root
@@ -333,6 +374,25 @@ def _handle_init(args: argparse.Namespace) -> None:
         target = "claude"
     auto_yes = getattr(args, "yes", False)
     skip_instructions = getattr(args, "no_instructions", False)
+    # Platform-native skills and hooks are installed by default where supported
+    # so the graph tools are used proactively. Use --no-skills / --no-hooks /
+    # --no-instructions to opt out.
+    skip_skills = getattr(args, "no_skills", False)
+    skip_hooks = getattr(args, "no_hooks", False)
+
+    # --gitignore (#471, off by default): note what exists before anything is
+    # written, so only files this run creates are added to .gitignore.
+    gitignore_plan: _GitignorePlan | None = None
+    if getattr(args, "gitignore", False):
+        from . import install_gitignore
+
+        gitignore_plan = install_gitignore.plan(
+            repo_root,
+            target,
+            with_skills=not skip_skills,
+            with_hooks=not skip_hooks,
+            with_instructions=not skip_instructions,
+        )
 
     print("Installing MCP server config...")
     configured = install_platform_configs(repo_root, target=target, dry_run=dry_run)
@@ -360,6 +420,8 @@ def _handle_init(args: argparse.Namespace) -> None:
                 skip_hooks=getattr(args, "no_hooks", False), dry_run=True,
             )
         print("\n[dry-run] Would ensure .gitignore ignores .code-review-graph/.")
+        if gitignore_plan is not None:
+            _report_gitignore_block(repo_root, gitignore_plan, dry_run=True)
         print("[dry-run] No files were modified.")
         return
 
@@ -371,11 +433,6 @@ def _handle_init(args: argparse.Namespace) -> None:
     else:
         print(".gitignore already contains .code-review-graph/.")
 
-    # Platform-native skills and hooks are installed by default where supported
-    # so the graph tools are used proactively. Use --no-skills / --no-hooks /
-    # --no-instructions to opt out.
-    skip_skills = getattr(args, "no_skills", False)
-    skip_hooks = getattr(args, "no_hooks", False)
     codex_skill_error: str | None = None
     # Legacy: --skills/--hooks/--all still accepted (no-op, everything is default)
 
@@ -529,6 +586,10 @@ def _handle_init(args: argparse.Namespace) -> None:
             print(f"Installed OpenCode plugin in {plugin_path}")
         except Exception as exc:
             logger.warning("Could not install OpenCode plugin: %s", exc)
+
+    if gitignore_plan is not None:
+        print()
+        _report_gitignore_block(repo_root, gitignore_plan, dry_run=False)
 
     if codex_skill_error and target == "codex":
         raise CodeReviewGraphError(codex_skill_error)
@@ -1385,6 +1446,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Auto-confirm instruction injection without an interactive prompt",
     )
+    install_cmd.add_argument(
+        "--gitignore",
+        action="store_true",
+        help=_GITIGNORE_HELP,
+    )
     # Legacy flags (kept for backwards compat, now no-ops since all is default)
     install_cmd.add_argument("--skills", action="store_true", help=argparse.SUPPRESS)
     install_cmd.add_argument("--hooks", action="store_true", help=argparse.SUPPRESS)
@@ -1431,6 +1497,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--yes",
         action="store_true",
         help="Auto-confirm instruction injection without an interactive prompt",
+    )
+    init_cmd.add_argument(
+        "--gitignore",
+        action="store_true",
+        help=_GITIGNORE_HELP,
     )
     init_cmd.add_argument("--skills", action="store_true", help=argparse.SUPPRESS)
     init_cmd.add_argument("--hooks", action="store_true", help=argparse.SUPPRESS)

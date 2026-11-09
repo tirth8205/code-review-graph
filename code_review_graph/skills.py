@@ -1015,6 +1015,23 @@ def _splice_commented_config(
         return None
 
 
+def platforms_for_target(repo_root: Path, target: str) -> dict[str, dict[str, Any]]:
+    """Return the platforms whose MCP config ``install`` writes for ``target``.
+
+    ``"all"`` means every detected platform, plus Kiro when the repository has
+    a ``.kiro`` folder. An unknown name gives an empty mapping.
+    """
+    if target == "all":
+        selected = {k: v for k, v in PLATFORMS.items() if v["detect"]()}
+        # Workspace-level Kiro detection
+        if "kiro" not in selected and (repo_root / ".kiro").is_dir():
+            selected["kiro"] = PLATFORMS["kiro"]
+        return selected
+    if target in PLATFORMS:
+        return {target: PLATFORMS[target]}
+    return {}
+
+
 def install_platform_configs(
     repo_root: Path,
     target: str = "all",
@@ -1032,10 +1049,7 @@ def install_platform_configs(
     """
     shared_aliases: dict[str, tuple[str, ...]] = {}
     if target == "all":
-        platforms_to_install = {k: v for k, v in PLATFORMS.items() if v["detect"]()}
-        # Workspace-level Kiro detection
-        if "kiro" not in platforms_to_install and (repo_root / ".kiro").is_dir():
-            platforms_to_install["kiro"] = PLATFORMS["kiro"]
+        platforms_to_install = platforms_for_target(repo_root, target)
 
         # Claude Code and CodeBuddy intentionally share the official project
         # .mcp.json/mcpServers contract. Process that exact pair once, but do
