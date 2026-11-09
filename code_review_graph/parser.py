@@ -1827,8 +1827,10 @@ _JS_IMPORT_ORIGINAL_PREFIX_KEY = "__crg_js_import_original__:"
 # one (``from . import cli``). The value is that module's file; a reference to
 # the name belongs to the file node, not to ``<file>::<name>``.
 _PY_MODULE_BINDING_KEY = "__crg_py_module_binding__:"
-# Marks a Rust ``mod name { ... }`` written inline in the file. Its items are
-# named after the file, so ``name::item()`` means ``<file>::item``.
+# Marks an item defined in a Rust ``mod name { ... }`` written inline in the
+# file, as ``<key>name::item``. Its items are named after the file, so
+# ``name::item()`` means ``<file>::item``. A name the module only re-exports
+# with ``pub use`` is not one of them.
 _RUST_INLINE_MODULE_KEY = "__crg_rust_inline_module__:"
 # Value syntax that pins a Python name to a builtin container or scalar. A
 # method called on such a name can never belong to a repository node, so the
@@ -17817,9 +17819,20 @@ class CodeParser:
                 and child.child_by_field_name("body") is not None
             ):
                 name_node = child.child_by_field_name("name")
+                body = child.child_by_field_name("body")
                 if name_node is not None:
                     module_name = name_node.text.decode("utf-8", errors="replace")
-                    import_map[f"{_RUST_INLINE_MODULE_KEY}{module_name}"] = module_name
+                    for item in body.named_children:
+                        if item.type not in func_types and item.type not in class_types:
+                            continue
+                        item_name = self._get_name(
+                            item, language,
+                            "class" if item.type in class_types else "function",
+                        )
+                        if item_name:
+                            import_map[
+                                f"{_RUST_INLINE_MODULE_KEY}{module_name}::{item_name}"
+                            ] = module_name
                 continue
 
             # Collect defined function/class names
@@ -20205,7 +20218,9 @@ class CodeParser:
             return None
         if len(prefix) == 1 and prefix[0] in defined_names:
             return f"{self._qualify(prefix[0], file_path, None)}.{method}"
-        if len(prefix) == 1 and f"{_RUST_INLINE_MODULE_KEY}{prefix[0]}" in import_map:
+        if len(prefix) == 1 and (
+            f"{_RUST_INLINE_MODULE_KEY}{prefix[0]}::{method}" in import_map
+        ):
             return self._qualify(method, file_path, None)
 
         if prefix[0] in import_map:

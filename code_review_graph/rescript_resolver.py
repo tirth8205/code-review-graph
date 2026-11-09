@@ -16,8 +16,11 @@ Resolutions performed:
        module_alias / external_module) → the target file path, so
        ``importers_of(<path>)`` finds every consuming file.
 
-Only the ``target_qualified`` column is updated; source and edge kind are
-preserved. Edges that cannot be resolved are left unchanged.
+Only the ``target_qualified`` column is updated, except that a bare call bound
+through an ``open`` / ``include`` also records that module in
+``extra.rescript_open_module``: the source did not name it, so the edge is an
+inference. Source and edge kind are preserved. Edges that cannot be resolved
+are left unchanged.
 """
 
 from __future__ import annotations
@@ -83,25 +86,37 @@ def resolve_rescript_cross_module(store: GraphStore) -> dict:
 
     # --- 1 + 2. Resolve CALLS edges ---
     call_rows = conn.execute(
-        "SELECT id, source_qualified, target_qualified, file_path "
+        "SELECT id, source_qualified, target_qualified, file_path, extra "
         "FROM edges WHERE kind = 'CALLS'"
     ).fetchall()
 
     call_updates: list[tuple[str, int]] = []
+    open_call_updates: list[tuple[str, str, int]] = []
     for row in call_rows:
         target = row["target_qualified"]
         if "::" in target:
             continue  # already resolved
 
-        resolved = _resolve_call_target(
+        resolved, opened = _resolve_call_target(
             target,
             row["file_path"],
             basename_to_path,
             opens_by_file,
             store,
         )
-        if resolved and resolved != target:
+        if not resolved or resolved == target:
+            continue
+        if opened is None:
             call_updates.append((resolved, row["id"]))
+            continue
+        try:
+            call_extra = json.loads(row["extra"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            call_extra = {}
+        if not isinstance(call_extra, dict):
+            call_extra = {}
+        call_extra["rescript_open_module"] = opened
+        open_call_updates.append((resolved, json.dumps(call_extra), row["id"]))
 
     # --- 3. Resolve IMPORTS_FROM edge targets to file paths ---
     import_updates: list[tuple[str, int]] = []
@@ -126,6 +141,11 @@ def resolve_rescript_cross_module(store: GraphStore) -> dict:
             "UPDATE edges SET target_qualified = ? WHERE id = ?",
             (new_target, edge_id),
         )
+    for new_target, new_extra, edge_id in open_call_updates:
+        cur.execute(
+            "UPDATE edges SET target_qualified = ?, extra = ? WHERE id = ?",
+            (new_target, new_extra, edge_id),
+        )
     for new_target, edge_id in import_updates:
         cur.execute(
             "UPDATE edges SET target_qualified = ? WHERE id = ?",
@@ -136,7 +156,7 @@ def resolve_rescript_cross_module(store: GraphStore) -> dict:
 
     result = {
         "files_indexed": len(basename_to_path),
-        "calls_resolved": len(call_updates),
+        "calls_resolved": len(call_updates) + len(open_call_updates),
         "imports_resolved": len(import_updates),
     }
     logger.info("ReScript cross-module resolution: %s", result)
@@ -149,18 +169,19 @@ def _resolve_call_target(
     basename_to_path: dict[str, str],
     opens_by_file: dict[str, list[str]],
     store: GraphStore,
-) -> str | None:
+) -> tuple[str | None, str | None]:
     """Resolve a CALLS edge's ``target_qualified`` to a canonical qualified
-    node name. Returns None when no resolution is possible.
+    node name, plus the opened module that supplied it when the call named
+    none. Returns ``(None, None)`` when no resolution is possible.
     """
     # Dotted: `Module.fn` or `Module.Sub.fn`.
     if "." in target:
         head, _, rest = target.partition(".")
         target_file = basename_to_path.get(head)
         if target_file is None:
-            return None
+            return None, None
         candidate = _pick_existing_qualified(target_file, rest, store)
-        return candidate
+        return candidate, None
 
     # Bare: `fn` — only resolvable via an open/include in the calling file.
     for opened in opens_by_file.get(file_path, []):
@@ -169,8 +190,8 @@ def _resolve_call_target(
             continue
         candidate = f"{target_file}::{target}"
         if store.get_node(candidate) is not None:
-            return candidate
-    return None
+            return candidate, opened
+    return None, None
 
 
 def _pick_existing_qualified(

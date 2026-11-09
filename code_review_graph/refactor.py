@@ -1757,9 +1757,15 @@ def _rename_edits(
     js_module_symbol = False
     # A bare-name CALLS edge is a guess about which same-named symbol a
     # call means, but it is the only evidence for a call no import spells.
-    bare_edges = store.search_edges_by_target_name(
-        name, kind="CALLS", language=language or None,
-    )
+    # A settled edge named a class, ``h.build()`` on a ``Helper``, and a
+    # same-named method of another class is not what it called.
+    bare_edges = [
+        edge for edge in store.search_edges_by_target_name(
+            name, kind="CALLS", language=language or None,
+        )
+        if CLAIMED_ENDPOINT_KEY not in edge.extra
+        or store.receiver_evidence_admits(edge.extra, node)
+    ]
     bare_files = {edge.file_path for edge in bare_edges}
     python_sites = (
         _python_rename_sites(store, node, sources, bare_files)

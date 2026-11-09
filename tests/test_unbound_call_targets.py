@@ -15,9 +15,9 @@ from pathlib import Path
 import pytest
 
 from code_review_graph.graph import GraphStore
-from code_review_graph.incremental import get_db_path
+from code_review_graph.incremental import full_build, get_db_path, incremental_update
 from code_review_graph.parser import EdgeInfo, NodeInfo
-from code_review_graph.refactor import find_dead_code
+from code_review_graph.refactor import find_dead_code, rename_preview
 from code_review_graph.tools import query_graph
 from code_review_graph.tools.build import build_or_update_graph
 from code_review_graph.uncertainty import MAX_CONFIDENCE_CHARS
@@ -647,3 +647,157 @@ def test_class_used_only_through_an_inherited_method_stays_alive(tmp_path):
         store.close()
 
     assert "Util" not in dead
+
+
+def test_rename_leaves_a_call_named_on_another_class(tmp_path):
+    """``h.build()`` named ``Helper.build``; renaming ``One.build`` must not edit it."""
+    store = _build(tmp_path, {
+        "One.java": "public class One {\n    public int build() { return 1; }\n}\n",
+        "User.java": (
+            "class Helper { }\n"
+            "class User {\n"
+            "    int go() { Helper h = new Helper(); return h.build(); }\n"
+            "}\n"
+        ),
+    })
+    root = tmp_path.resolve()
+    try:
+        settled = [row for row in _edges(store) if row["target"] == "build"]
+        assert settled and settled[0]["extra"]["claimed_endpoint"].endswith(
+            "User.java::Helper.build",
+        )
+        preview = rename_preview(store, f"{root}/One.java::One.build", "make")
+    finally:
+        store.close()
+
+    assert preview is not None
+    assert [edit["file"] for edit in preview["edits"]] == [f"{root}/One.java"]
+
+
+def test_nested_classes_of_the_same_name_are_told_apart(tmp_path):
+    """``Alpha.Inner`` and ``Beta.Inner`` share a last name, not a class."""
+    store = _build(tmp_path, {
+        "a.py": (
+            "class Alpha:\n"
+            "    class Inner:\n"
+            "        def run(self):\n"
+            "            return self.shared()\n"
+            "\n\n"
+            "class Beta:\n"
+            "    class Inner:\n"
+            "        def shared(self):\n"
+            "            return 1\n"
+        ),
+    })
+    root = tmp_path.resolve()
+    try:
+        row = next(row for row in _edges(store) if row["source"].endswith("Inner.run"))
+        assert row["extra"]["claimed_endpoint"] == f"{root}/a.py::Alpha.Inner.shared"
+    finally:
+        store.close()
+
+    result = query_graph("callers_of", f"{root}/a.py::Beta.Inner.shared", str(root))
+
+    assert result["results"] == []
+
+
+def test_a_claim_on_the_last_scope_name_still_matches_the_full_one(tmp_path):
+    """A claim that knew only ``Inner`` is no evidence against ``Outer.Inner``."""
+    root, store = _store(tmp_path)
+    try:
+        caller = _node(store, root / "a.py", "caller")
+        real = _node(store, root / "b.py", "ping", parent="Outer.Inner")
+        store.upsert_edge(EdgeInfo(
+            kind="CALLS", source=caller, target=f"{root}/a.py::Inner.ping",
+            file_path=str(root / "a.py"), line=3,
+        ))
+        store.commit()
+        store.refresh_target_resolution()
+    finally:
+        store.close()
+
+    result = query_graph("callers_of", real, str(root))
+
+    assert [row["name"] for row in result["results"]] == ["caller"]
+
+
+def test_cpp_scoped_call_bound_across_files_is_inferred(tmp_path):
+    store = _build(tmp_path, {
+        "callee.cpp": "void A::unique() {}\n",
+        "caller.cpp": "void test_run() { A::unique(); }\n",
+    })
+    try:
+        call = next(row for row in _edges(store) if row["target"].endswith("A.unique()"))
+        mirror = next(
+            row for row in _edges(store, "TESTED_BY") if row["source"].endswith("A.unique()")
+        )
+    finally:
+        store.close()
+
+    assert call["extra"]["cpp_scoped_target"] == "A::unique"
+    for row in (call, mirror):
+        assert row["tier"] == "INFERRED"
+        assert 0 < row["confidence"] < 1.0
+
+
+def test_rescript_call_bound_through_open_is_inferred(tmp_path):
+    store = _build(tmp_path, {
+        "CurrencyFormatUtils.res": "let format = (x) => x\n",
+        "Caller.res": "open CurrencyFormatUtils\nlet run = () => format(12.0)\n",
+    })
+    try:
+        row = next(
+            row for row in _edges(store)
+            if row["target"].endswith("CurrencyFormatUtils.res::format")
+        )
+    finally:
+        store.close()
+
+    assert row["tier"] == "INFERRED"
+    assert 0 < row["confidence"] < 1.0
+
+
+def test_terraform_reference_binds_when_its_declaration_arrives_later(tmp_path):
+    """An update that adds ``variable "region"`` must link what a rebuild links."""
+    root = tmp_path.resolve()
+    (root / "outputs.tf").write_text(
+        'output "where" {\n  value = var.region\n}\n', encoding="utf-8",
+    )
+    store = GraphStore(root / "graph.db")
+    try:
+        full_build(root, store)
+        (root / "variables.tf").write_text('variable "region" {}\n', encoding="utf-8")
+        incremental_update(root, store, changed_files=["variables.tf"])
+        updated = _edges(store, "REFERENCES")
+        full_build(root, store)
+        rebuilt = _edges(store, "REFERENCES")
+    finally:
+        store.close()
+
+    assert [row["target"] for row in rebuilt] == [f"{root}/variables.tf::var.region"]
+    assert [(row["target"], row["extra"]) for row in updated] == [
+        (row["target"], row["extra"]) for row in rebuilt
+    ]
+
+
+def test_rust_inline_module_call_needs_the_item_in_that_module(tmp_path):
+    """``inner::bar()`` re-exported from elsewhere is not this file's own ``bar``."""
+    store = _build(tmp_path, {
+        "Cargo.toml": CARGO,
+        "src/lib.rs": "pub mod actual;\npub mod helper;\n",
+        "src/actual.rs": "pub fn bar() -> usize { 2 }\n",
+        "src/helper.rs": (
+            "mod inner {\n"
+            "    pub use crate::actual::bar;\n"
+            "}\n"
+            "pub fn bar() -> usize { 1 }\n"
+            "pub fn run() -> usize { inner::bar() }\n"
+        ),
+    })
+    root = tmp_path.resolve()
+    try:
+        targets = [row["target"] for row in _edges(store) if row["source"].endswith("::run")]
+    finally:
+        store.close()
+
+    assert f"{root}/src/helper.rs::bar" not in targets

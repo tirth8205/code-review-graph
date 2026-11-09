@@ -409,6 +409,8 @@ _SCORE_UNRESOLVED = 0.2
 _RESOLVER_BOUND_KEYS = (
     "bare_call_target",
     "bare_tested_by_source",
+    "cpp_scoped_target",
+    "rescript_open_module",
     "scoped_resolved",
     "spring_resolved",
     "temporal_resolved",
@@ -453,9 +455,17 @@ def _claimed_owner(edge_extra: dict) -> Optional[str]:
     return owner if dot and owner else None
 
 
-def _last_dotted(name: Optional[str]) -> str:
-    """``Outer.Inner`` -> ``Inner``; None -> ``""``."""
-    return (name or "").rsplit(".", 1)[-1]
+def _same_owner(parent_name: Optional[str], owner: str) -> bool:
+    """Can a method whose class is *parent_name* be the one *owner* named?
+
+    Scopes are compared from the innermost name out, as far as both go.
+    ``Alpha.Inner`` is not ``Beta.Inner``, but a side that knew only ``Inner``
+    is no evidence against ``Outer.Inner``.
+    """
+    have = (parent_name or "").split(".")
+    want = owner.split(".")
+    depth = min(len(have), len(want))
+    return have[-depth:] == want[-depth:]
 
 
 def _load_edge_extra(extra: Optional[str]) -> dict:
@@ -2072,7 +2082,7 @@ class GraphStore:
             # The call named a class: ``h.hashCode()`` on a ``Helper``, or
             # ``GlobBuilder::new()``. That class's method is missing, and a
             # same-named method of another class is no better a match.
-            return _last_dotted(parent_name) == _last_dotted(owner)
+            return _same_owner(parent_name, owner)
         return bool(cls._receiver_backed_candidates(
             [(qualified_name, file_path)],
             edge_extra,
