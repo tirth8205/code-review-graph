@@ -257,18 +257,32 @@ To follow symlinked folders, pass `--follow-symlinks` to `build`, `update` or `w
 `CRG_FOLLOW_SYMLINKS=1`. Set the variable where hooks, the MCP server and the daemon run too,
 so every update makes the same choice. `--no-follow-symlinks` turns it off for one run.
 
+This suits a project folder that holds links to code kept elsewhere, for example
+`inputs/service-a -> ~/src/service-a`.
+
 When it is on:
 
-- Only links that point inside the repository are followed. A link that points outside it
-  is skipped, and the build log says so.
-- A link that points at a folder holding it (such as `app/up -> ..`) is skipped, and each
-  real folder is read once, so links that point at each other cannot loop.
-- Each file is stored once, under its real path inside the repository, so a link to a
-  folder the graph already indexes adds no copies. A link to a folder Git does not list (an
-  ignored folder, or a nested clone) adds that folder's files.
+- Links to folders inside and outside the repository are both followed.
+- Each file is stored once, under a path inside the repository. A file that lives in the
+  repository keeps its own path, so a link to a folder the graph already indexes adds no
+  copies. A file outside it is stored under the link's path (`inputs/service-a/app.py`),
+  never its real path outside the repository.
+- A link that points at a folder holding it (such as `app/up -> ..`) or holding the
+  repository is skipped, and the log says so. Each real folder is read once, so links that
+  point at each other cannot loop.
+- At most `CRG_MAX_FOLLOWED_FILES` files (default 10,000) are taken through links. When the
+  cap is reached, a warning names it and the rest are left out.
 - Files reached through a link are indexed even when Git ignores them. `.code-review-graphignore`
-  and the default ignore list still apply, to the link's path and to the real path, so use
-  them to leave files out.
+  and the default ignore list still apply, to the path inside the repository, so use them to
+  leave files out.
 - Symlinked files are still never followed.
-- `update` and `watch` add files when a link appears and drop them when it goes, the same
-  as a full build. Turning the option off and running `update` drops them as well.
+- `update` and `watch` add files when a link appears or a file appears behind one, and drop
+  them when they go, the same as a full build. `watch` also watches each followed folder
+  outside the repository. Turning the option off and running `update` drops them all.
+- Tools that read source back (search, review context, flows, rename) read these files
+  through their path inside the repository. Any other path outside the repository is still
+  refused.
+
+Only turn it on for repositories whose links you trust. A link committed by someone else can
+point anywhere on your machine, and with the option on its files are indexed and served to
+your AI tools.

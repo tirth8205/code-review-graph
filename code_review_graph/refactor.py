@@ -59,6 +59,10 @@ _MOCK_NAME_RE = re.compile(
 
 _refactor_lock = threading.Lock()
 _pending_refactors: dict[str, dict] = {}
+# Edit files of a pending refactor that the graph reached through a followed
+# symlinked folder outside the repository (#269). Kept out of the preview so
+# it never reaches a tool response.
+_followed_edit_files: dict[str, frozenset[str]] = {}
 REFACTOR_EXPIRY_SECONDS = 600  # 10 minutes
 
 
@@ -71,6 +75,8 @@ def _cleanup_expired() -> int:
     ]
     for rid in expired:
         del _pending_refactors[rid]
+    for rid in [rid for rid in _followed_edit_files if rid not in _pending_refactors]:
+        del _followed_edit_files[rid]
     return len(expired)
 
 
@@ -1712,9 +1718,17 @@ def rename_preview(
         "created_at": time.time(),
     }
 
+    from .incremental import followed_files
+
+    followed = followed_files(store)
     with _refactor_lock:
         _cleanup_expired()
         _pending_refactors[refactor_id] = preview
+        if followed:
+            _followed_edit_files[refactor_id] = frozenset(
+                normalize_file_path(edit["file"]) for edit in edits
+                if normalize_file_path(edit["file"]) in followed
+            )
 
     logger.info(
         "rename_preview: created refactor %s (%s -> %s, %d edits)",
@@ -2541,11 +2555,19 @@ def apply_refactor(
         return {"status": "ok", "applied": 0, "files_modified": [], "edits_applied": 0}
 
     # --- Path traversal validation ---
+    from .incremental import path_within_repo
+
+    with _refactor_lock:
+        followed = _followed_edit_files.get(refactor_id, frozenset())
     for edit in edits:
         edit_path = Path(edit["file"]).resolve()
         try:
             edit_path.relative_to(repo_root)
         except ValueError:
+            # A file behind a followed symlinked folder is edited through its
+            # in-repo path; nothing else outside the repository is.
+            if followed and path_within_repo(repo_root, edit["file"], followed):
+                continue
             logger.error(
                 "apply_refactor: path traversal blocked for %s (repo_root=%s)",
                 edit_path, repo_root,

@@ -128,8 +128,11 @@ def forget_files(
     #    forgotten files are hidden from import resolution so a still-on-disk
     #    file is not silently re-resolved (forget removes it from the graph,
     #    not from the working tree).
+    from .incremental import _load_followed_dirs, _relink_edges
+
     parser = CodeParser(repo_root)
     parser.exclude_files(forgotten)
+    followed_dirs = _load_followed_dirs(store)
     reparsed: list[str] = []
     for file_path in referrers:
         abs_path = Path(file_path)
@@ -143,6 +146,7 @@ def forget_files(
             source = abs_path.read_bytes()
             fhash = hashlib.sha256(source).hexdigest()
             nodes, edges = parser.parse_bytes(abs_path, source)
+            _relink_edges(edges, Path(repo_root).resolve(), followed_dirs)
             store.store_file_nodes_edges(str(abs_path), nodes, edges, fhash)
             reparsed.append(file_path)
         except (OSError, PermissionError) as exc:

@@ -539,7 +539,8 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_CHURN_WINDOW_DAYS` | `detect-changes --churn`의 커밋 수를 세는 기간 | `90` |
 | `CRG_LEIDEN_SEED` | Leiden 커뮤니티 탐지의 시드 | `42` |
 | `CRG_RECURSE_SUBMODULES` | `1`, `true`, `yes`일 때 git 서브모듈 포함 | - |
-| `CRG_FOLLOW_SYMLINKS` | `1`, `true`, `yes`, `on`일 때 저장소 안을 가리키는 심볼릭 링크 폴더를 따라감. `--follow-symlinks`와 같음. [심볼릭 링크 폴더](docs/USAGE.md#symlinked-folders) 참고 | - |
+| `CRG_FOLLOW_SYMLINKS` | `1`, `true`, `yes`, `on`일 때 심볼릭 링크 폴더(저장소 안팎)를 따라감. `--follow-symlinks`와 같음. [심볼릭 링크 폴더](docs/USAGE.md#symlinked-folders) 참고 | - |
+| `CRG_MAX_FOLLOWED_FILES` | 심볼릭 링크 폴더로 가져오는 파일의 최대 수 | `10000` |
 | `CRG_TOOLS` | 서버로 띄울 때 노출할 MCP 도구의 쉼표 구분 허용 목록 | - |
 | `GOOGLE_API_KEY` | Google Gemini 임베딩의 API 키 | - |
 | `MINIMAX_API_KEY` | MiniMax 임베딩의 API 키 | - |

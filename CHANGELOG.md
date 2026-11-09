@@ -4,17 +4,26 @@
 
 ### Added
 
-- Symlinked folders can be followed, as an opt-in (part of #269). Pass
+- Symlinked folders can be followed, as an opt-in (#269). Pass
   `--follow-symlinks` to `build`, `update` or `watch`, or set
   `CRG_FOLLOW_SYMLINKS=1`; it is off by default, so nothing changes unless you
-  ask. Only links that point inside the repository are followed: a link that
-  points outside it, or at a folder that holds it, is skipped and the log says
-  so, and each real folder is read once, so links cannot loop. Each file is
-  stored once, under its real path, so a link to a folder the graph already
-  holds adds no copies; a link to a folder Git does not list (an ignored
-  folder, a nested clone) adds its files. `.code-review-graphignore` still
-  applies. `update` and `watch` add and drop those files as links come and
-  go, matching a full build. Symlinked files are still never followed.
+  ask. A project folder of links to code kept elsewhere
+  (`inputs/app -> ~/src/app`) now builds a graph instead of an empty one.
+  Links to folders outside the repository are followed too, because you made
+  the link and asked for it, and their files are stored under the link's path
+  inside the repository, never the outside path. A file inside the repository
+  keeps its own path, so a link to a folder the graph already holds adds no
+  copies. A link to a folder that holds it, or holds the repository, is
+  skipped and logged, and each real folder is read once, so links cannot
+  loop. At most `CRG_MAX_FOLLOWED_FILES` files (default 10,000) are taken, and
+  a warning says when the cap is reached. `update` and `watch` add and drop
+  these files as links and the files behind them come and go, matching a full
+  build; `watch` also watches each followed folder outside the repository.
+  Search, review context, flows, rename and `forget` work on these files
+  through their in-repo path, and imports between them point there too. Any
+  other path outside the repository is still refused, and the review context
+  and flow source snippets no longer read one either. Symlinked files are
+  still never followed.
 - Python modules that replace themselves in `sys.modules` are followed to the
   module they install. A compatibility shim such as
   `sys.modules[__name__] = importlib.import_module("app.services.billing")`

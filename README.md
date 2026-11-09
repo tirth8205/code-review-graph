@@ -550,7 +550,8 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_CHURN_WINDOW_DAYS` | Window for `detect-changes --churn` commit counts | `90` |
 | `CRG_LEIDEN_SEED` | Seed for Leiden community detection | `42` |
 | `CRG_RECURSE_SUBMODULES` | Include git submodules when set to `1`, `true` or `yes` | - |
-| `CRG_FOLLOW_SYMLINKS` | Follow symlinked folders that point inside the repository when set to `1`, `true`, `yes` or `on`; same as `--follow-symlinks`. See [Symlinked folders](docs/USAGE.md#symlinked-folders) | - |
+| `CRG_FOLLOW_SYMLINKS` | Follow symlinked folders, inside or outside the repository, when set to `1`, `true`, `yes` or `on`; same as `--follow-symlinks`. See [Symlinked folders](docs/USAGE.md#symlinked-folders) | - |
+| `CRG_MAX_FOLLOWED_FILES` | Most files taken through followed symlinked folders | `10000` |
 | `CRG_TOOLS` | Comma-separated allowlist of MCP tools to expose when serving | - |
 | `GOOGLE_API_KEY` | API key for Google Gemini embeddings | - |
 | `MINIMAX_API_KEY` | API key for MiniMax embeddings | - |

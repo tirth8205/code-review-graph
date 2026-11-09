@@ -518,9 +518,10 @@ def _add_follow_symlinks_arg(command) -> None:
         action=argparse.BooleanOptionalAction,
         default=None,
         help=(
-            "Also index files in symlinked folders that point inside the "
-            "repository. Links that point outside it, and links that loop, "
-            "are never followed. Default: off, or CRG_FOLLOW_SYMLINKS"
+            "Also index files in symlinked folders, inside or outside the "
+            "repository, stored under their path inside it. Links that loop "
+            "are skipped, and at most CRG_MAX_FOLLOWED_FILES files are taken. "
+            "Default: off, or CRG_FOLLOW_SYMLINKS"
         ),
     )
 
