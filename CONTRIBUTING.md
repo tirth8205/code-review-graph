@@ -200,6 +200,8 @@ docs/                      # user documentation
 skills/                    # shipped agent skills, bundled into the wheel
 ```
 
+The text of `skills/build-graph`, `skills/review-delta` and `skills/review-pr` lives in `DOCUMENTARY_SKILLS` in `code_review_graph/skills.py`. Edit it there, then run `uv run python scripts/generate_documentary_skills.py`; a test fails if the files drift.
+
 ## Adding Language Support
 
 If you only need a language for your own repository, you may not need to change this project: add a `.code-review-graph/languages.toml` that maps extensions and node types to any grammar in tree-sitter-language-pack (see [docs/CUSTOM_LANGUAGES.md](docs/CUSTOM_LANGUAGES.md)). To add built-in support:

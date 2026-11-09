@@ -586,11 +586,16 @@ def test_rows_written_with_the_old_identity_are_replaced(tmp_path, monkeypatch, 
     _write_repo(tmp_path)
     m = (tmp_path / 'm.py').as_posix()
     with GraphStore(tmp_path / 'graph.db') as store:
-        # Earlier releases spelled every method with its leaf class only.
+        # Earlier releases spelled every method with its leaf class only, and
+        # their writer collapsed the resulting same-file collisions (#585).
         with monkeypatch.context() as legacy:
             legacy.setattr(
                 CodeParser, '_index_ambiguous_method_scopes',
                 lambda self, root, language, import_map: None, raising=False,
+            )
+            legacy.setattr(
+                GraphStore, '_plan_file_identities',
+                lambda self, file_path, nodes: [self._make_qualified(n) for n in nodes],
             )
             full_build(tmp_path, store)
         old = {n.qualified_name for n in store.get_nodes_by_file(m) if n.kind == 'Function'}
@@ -654,3 +659,216 @@ end
     assert 'thing.rb::Outer.Thing.confirm' in {
         e.target for e in edges if e.kind == 'CALLS' and e.source == caller
     }
+
+
+# ---------------------------------------------------------------------------
+# Generalized nested scope chains for the remaining languages (#934)
+# ---------------------------------------------------------------------------
+
+CSHARP_SAME_LEAF = '''namespace App;
+
+public class Alpha
+{
+    public class Same
+    {
+        public string Run() { return Helper(); }
+        private string Helper() { return "alpha"; }
+    }
+}
+
+public class Beta
+{
+    public class Same
+    {
+        public string Run() { return Helper(); }
+        private string Helper() { return "beta"; }
+    }
+}
+'''
+
+
+def test_csharp_same_leaf_classes_keep_methods_in_their_enclosing_scope(tmp_path):
+    """Two same-named nested classes must not collapse their methods (#934).
+
+    C# identities carry the namespace (#964), and its namespace-aware binder,
+    not the parse-time retargeting, binds the local ``Helper()`` calls.
+    """
+    (tmp_path / 'S.cs').write_text(CSHARP_SAME_LEAF, encoding='utf-8')
+    with GraphStore(tmp_path / '.code-review-graph' / 'graph.db') as store:
+        full_build(tmp_path, store)
+        path = (tmp_path / 'S.cs').as_posix()
+        methods = [n for n in store.get_nodes_by_file(path) if n.kind == 'Function']
+        assert {n.qualified_name for n in methods} == {
+            f'{path}::App.{scope}.Same.{method}'
+            for scope in ['Alpha', 'Beta'] for method in ['Run', 'Helper']
+        }
+        for scope in ['Alpha', 'Beta']:
+            run = f'{path}::App.{scope}.Same.Run'
+            assert {e.target_qualified for e in store.get_edges_by_source(run)
+                    if e.kind == 'CALLS'} == {f'{path}::App.{scope}.Same.Helper'}
+            assert any(e.source_qualified == f'{path}::App.{scope}.Same'
+                       for e in store.get_edges_by_target(run) if e.kind == 'CONTAINS')
+
+
+def test_csharp_deep_nesting_keeps_the_full_scope_chain():
+    """Three levels of nesting must retain every level, not just one (#934)."""
+    parser, nodes, edges = _parse('Deep.cs', '''namespace App;
+public class A { public class B { public class C { public void M() { } } } }
+''')
+    qualified = {parser._node_qualified(n) for n in nodes if n.kind != 'File'}
+    assert qualified == {
+        'Deep.cs::App.A', 'Deep.cs::App.A.B', 'Deep.cs::App.A.B.C', 'Deep.cs::App.A.B.C.M',
+    }
+    # The containment tree follows the same chain: each class is contained by
+    # its enclosing class, and the method by the innermost class.
+    assert _contains_sources(edges, 'Deep.cs::App.A') == {'Deep.cs'}
+    assert _contains_sources(edges, 'Deep.cs::App.A.B') == {'Deep.cs::App.A'}
+    assert _contains_sources(edges, 'Deep.cs::App.A.B.C') == {'Deep.cs::App.A.B'}
+    assert _contains_sources(edges, 'Deep.cs::App.A.B.C.M') == {'Deep.cs::App.A.B.C'}
+
+
+def test_csharp_single_nested_class_carries_full_scope():
+    """A lone nested class still qualifies by its full chain (#934)."""
+    parser, nodes, _ = _parse('One.cs', '''namespace App;
+public class Outer
+{
+    public class Inner
+    {
+        public void Handle() { }
+    }
+}
+''')
+    assert _methods(parser, nodes) == {'One.cs::App.Outer.Inner.Handle'}
+
+
+CHAINED_SAME_LEAF = {
+    'Same.java': '''class Alpha {
+    static class Same {
+        void run() { helper(); this.helper(); }
+        void helper() {}
+    }
+}
+class Beta {
+    static class Same {
+        void run() { helper(); this.helper(); }
+        void helper() {}
+    }
+}
+''',
+    'Same.kt': '''class Alpha {
+    class Same {
+        fun run() {
+            helper()
+            this.helper()
+        }
+        fun helper() {}
+    }
+}
+class Beta {
+    class Same {
+        fun run() {
+            helper()
+            this.helper()
+        }
+        fun helper() {}
+    }
+}
+''',
+    'Same.swift': '''class Alpha {
+    class Same {
+        func run() {
+            helper()
+            self.helper()
+        }
+        func helper() {}
+    }
+}
+class Beta {
+    class Same {
+        func run() {
+            helper()
+            self.helper()
+        }
+        func helper() {}
+    }
+}
+''',
+    'Same.scala': '''object Alpha {
+  class Same {
+    def run(): Unit = { helper(); this.helper() }
+    def helper(): Unit = ()
+  }
+}
+object Beta {
+  class Same {
+    def run(): Unit = { helper(); this.helper() }
+    def helper(): Unit = ()
+  }
+}
+''',
+    'Same.ts': '''class Alpha {
+  static Same = class {
+    run() { return this.helper(); }
+    helper() { return 1; }
+  };
+}
+class Beta {
+  static Same = class {
+    run() { return this.helper(); }
+    helper() { return 2; }
+  };
+}
+''',
+}
+
+
+@pytest.mark.parametrize('filename', sorted(CHAINED_SAME_LEAF))
+def test_chained_languages_bind_local_calls_in_their_own_scope(filename):
+    """A same-leaf nested class's local calls stay in that class (#934).
+
+    Before the chain was kept, both ``Same`` classes shared one set of method
+    nodes. Keeping it must not swap that for ``Beta.Same.run`` calling
+    ``Alpha.Same.helper``, a confident edge into the wrong class.
+    """
+    parser, nodes, edges = _parse(filename, CHAINED_SAME_LEAF[filename])
+    calls = {
+        (e.source, e.target) for e in edges
+        if e.kind == 'CALLS' and e.source.endswith('.run')
+    }
+    if not calls:
+        pytest.skip(f'{filename}: grammar yields no member calls here')
+    for source, target in calls:
+        scope = source.rsplit('.', 1)[0]
+        assert target in (f'{scope}.helper', 'helper'), (source, target)
+    assert any(target.endswith('.helper') for _, target in calls)
+
+
+def test_java_import_of_a_nested_class_targets_its_full_scope_chain(tmp_path):
+    """``import app.Outer.Inner`` names ``Outer.Inner``, whose members now carry
+    the whole chain (#934); a leaf-only ``Outer.java::Inner.pong`` target would
+    name a node that no longer exists."""
+    files = {
+        'app/Outer.java': (
+            'package app;\n'
+            'public class Outer {\n'
+            '    public static class Inner { public void pong() {} }\n'
+            '}\n'
+        ),
+        'other/Caller.java': (
+            'package other;\n'
+            'import app.Outer.Inner;\n'
+            'public class Caller { void go() { Inner x = new Inner(); x.pong(); } }\n'
+        ),
+    }
+    for name, source in files.items():
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source, encoding='utf-8')
+    with GraphStore(tmp_path / '.code-review-graph' / 'graph.db') as store:
+        full_build(tmp_path, store)
+        outer = (tmp_path / 'app/Outer.java').as_posix()
+        callers = {
+            e.source_qualified for e in store.get_edges_by_target(f'{outer}::Outer.Inner.pong')
+            if e.kind == 'CALLS'
+        }
+        assert callers == {f'{(tmp_path / "other/Caller.java").as_posix()}::Caller.go'}

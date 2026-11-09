@@ -56,7 +56,9 @@ def test_the_plugin_hook_tolerates_a_skipped_update():
         for groups in hooks["hooks"].values()
         for group in groups
         for hook in group["hooks"]
+        # The edit hook runs ``hook-update`` since #311.
         if "code-review-graph update" in hook["command"]
+        or "code-review-graph hook-update" in hook["command"]
     ]
 
     assert commands

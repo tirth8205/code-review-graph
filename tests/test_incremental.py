@@ -2,7 +2,10 @@
 
 import hashlib
 import io
+import os
 import subprocess
+import sys
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch  # noqa: F401 – used in tests
 
@@ -10,15 +13,20 @@ import pytest
 
 import code_review_graph.constants as constants_module
 import code_review_graph.incremental as incremental_module
+import code_review_graph.tools as tools_pkg
 from code_review_graph.constants import discovery_timeout
+from code_review_graph.daemon import DaemonConfig, WatchDaemon, WatchRepo
 from code_review_graph.errors import ChangeDiscoveryError
+from code_review_graph.event_resolver import _clear_derived_event_data
 from code_review_graph.graph import GraphStore
 from code_review_graph.incremental import (
     _create_watch_handler,
     _decode_name_status_paths,
+    _get_code_parser_cls,
     _is_binary,
     _load_ignore_patterns,
     _parse_single_file,
+    _prewarm_parser_probes,
     _should_ignore,
     _single_hop_dependents,
     discover_review_changes,
@@ -35,6 +43,9 @@ from code_review_graph.incremental import (
     start_watch_thread,
     watch,
 )
+from code_review_graph.python_resolver import resolve_python_imports
+from code_review_graph.spring_resolver import resolve_spring_di_calls
+from code_review_graph.temporal_resolver import resolve_temporal_calls
 
 
 class TestParseExecutorSelection:
@@ -57,6 +68,119 @@ class TestParseExecutorSelection:
         monkeypatch.setattr(incremental_module.sys.stdin, "isatty", lambda: False)
 
         assert incremental_module._select_executor_kind() == "process"
+
+    def test_windows_nul_stdin_uses_threads(self, monkeypatch):
+        # NUL is a character device, so isatty() is True, but it is no console.
+        monkeypatch.delenv("CRG_PARSE_EXECUTOR", raising=False)
+        monkeypatch.setattr(
+            incremental_module, "_MCP_STDIO_ACTIVE", False, raising=False,
+        )
+        monkeypatch.setattr(incremental_module.sys, "platform", "win32")
+        monkeypatch.setattr(incremental_module.sys.stdin, "isatty", lambda: True)
+        monkeypatch.setattr(incremental_module.sys.stdin, "fileno", lambda: 0)
+        monkeypatch.setattr(
+            incremental_module, "_windows_console_handle", lambda fileno: False,
+        )
+
+        assert incremental_module._select_executor_kind() == "thread"
+
+    def test_windows_console_stdin_keeps_process_default(self, monkeypatch):
+        monkeypatch.delenv("CRG_PARSE_EXECUTOR", raising=False)
+        monkeypatch.setattr(
+            incremental_module, "_MCP_STDIO_ACTIVE", False, raising=False,
+        )
+        monkeypatch.setattr(incremental_module.sys, "platform", "win32")
+        monkeypatch.setattr(incremental_module.sys.stdin, "isatty", lambda: True)
+        monkeypatch.setattr(incremental_module.sys.stdin, "fileno", lambda: 0)
+        monkeypatch.setattr(
+            incremental_module, "_windows_console_handle", lambda fileno: True,
+        )
+
+        assert incremental_module._select_executor_kind() == "process"
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows NUL device only")
+    def test_real_nul_stdin_is_not_interactive_on_windows(self):
+        script = (
+            "import sys; "
+            "from code_review_graph import incremental as m; "
+            "print(sys.stdin.isatty(), m._stdin_is_interactive(), "
+            "m._select_executor_kind())"
+        )
+        env = {k: v for k, v in os.environ.items() if k != "CRG_PARSE_EXECUTOR"}
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            env=env,
+            check=True,
+            timeout=60,
+        )
+
+        assert result.stdout.split() == ["True", "False", "thread"]
+
+    @staticmethod
+    def _fake_windows_console(monkeypatch, get_console_mode):
+        """Stand in for msvcrt and kernel32 so the console check runs anywhere."""
+        import ctypes
+        import types
+
+        monkeypatch.setattr(incremental_module.sys, "platform", "win32")
+        monkeypatch.setitem(
+            sys.modules, "msvcrt",
+            types.SimpleNamespace(get_osfhandle=lambda fileno: 1000 + fileno),
+        )
+        monkeypatch.setattr(
+            ctypes, "windll",
+            types.SimpleNamespace(
+                kernel32=types.SimpleNamespace(GetConsoleMode=get_console_mode),
+            ),
+            raising=False,
+        )
+
+    @pytest.mark.parametrize("console_mode_result, expected", [(1, True), (0, False)])
+    def test_console_check_reads_get_console_mode(
+        self, monkeypatch, console_mode_result, expected,
+    ):
+        seen = []
+
+        def get_console_mode(handle, mode):
+            seen.append(handle)
+            return console_mode_result
+
+        self._fake_windows_console(monkeypatch, get_console_mode)
+
+        assert incremental_module._windows_console_handle(3) is expected
+        assert seen == [1003]
+
+    def test_console_check_without_ctypes_or_msvcrt_is_not_a_console(self, monkeypatch):
+        # Before the check existed, nothing here could raise; it must not now.
+        monkeypatch.setattr(incremental_module.sys, "platform", "win32")
+        monkeypatch.setitem(sys.modules, "msvcrt", None)
+
+        assert incremental_module._windows_console_handle(0) is False
+
+    def test_console_check_survives_a_handle_ctypes_cannot_pass(self, monkeypatch):
+        import ctypes
+
+        def get_console_mode(handle, mode):
+            raise ctypes.ArgumentError("int too long to convert")
+
+        self._fake_windows_console(monkeypatch, get_console_mode)
+
+        assert incremental_module._windows_console_handle(0) is False
+
+    def test_windows_without_stdin_uses_threads(self, monkeypatch):
+        # pythonw and some service hosts start with sys.stdin set to None.
+        monkeypatch.delenv("CRG_PARSE_EXECUTOR", raising=False)
+        monkeypatch.setattr(
+            incremental_module, "_MCP_STDIO_ACTIVE", False, raising=False,
+        )
+        monkeypatch.setattr(incremental_module.sys, "platform", "win32")
+        monkeypatch.setattr(incremental_module.sys, "stdin", None)
+
+        assert incremental_module._stdin_is_interactive() is False
+        assert incremental_module._select_executor_kind() == "thread"
 
     def test_explicit_process_override_wins_in_stdio_mcp(self, monkeypatch):
         monkeypatch.setenv("CRG_PARSE_EXECUTOR", "process")
@@ -844,6 +968,57 @@ class TestFullBuild:
         finally:
             store.close()
 
+    def test_full_build_wires_jedi_enrichment(self, tmp_path):
+        # Regression guard: the [enrichment] extra (jedi) used to be dead
+        # code — enrich_jedi_calls was never invoked by any build path.
+        # full_build must call it with the store + repo root and surface
+        # its stats in the result dict.
+        py_file = tmp_path / "sample.py"
+        py_file.write_text("def hello():\n    pass\n")
+        (tmp_path / ".git").mkdir()
+
+        db_path = tmp_path / "test.db"
+        store = GraphStore(db_path)
+        try:
+            with patch(
+                "code_review_graph.incremental.get_all_tracked_files",
+                return_value=["sample.py"],
+            ), patch(
+                "code_review_graph.jedi_resolver.enrich_jedi_calls",
+                return_value={"resolved": 3, "files": 1},
+            ) as mock_enrich:
+                result = full_build(tmp_path, store, enrich=True)
+            assert result["jedi_enrichment"] == {"resolved": 3, "files": 1}
+            assert mock_enrich.call_count == 1
+            assert mock_enrich.call_args[0][0] is store
+            assert mock_enrich.call_args[0][1] == tmp_path
+        finally:
+            store.close()
+
+    def test_full_build_jedi_enrichment_skips_when_disabled(self, tmp_path, monkeypatch):
+        # The opt-out must skip enrichment without failing the build and
+        # report the skip in the stats.
+        py_file = tmp_path / "sample.py"
+        py_file.write_text("def hello():\n    pass\n")
+        (tmp_path / ".git").mkdir()
+
+        db_path = tmp_path / "test.db"
+        store = GraphStore(db_path)
+        try:
+            monkeypatch.setenv("CRG_DISABLE_ENRICHMENT", "1")
+            monkeypatch.setenv("CRG_ENABLE_ENRICHMENT", "1")
+            with patch(
+                "code_review_graph.incremental.get_all_tracked_files",
+                return_value=["sample.py"],
+            ):
+                result = full_build(tmp_path, store, enrich=True)
+            assert result["jedi_enrichment"] == {
+                "skipped": True,
+                "reason": "disabled via CRG_DISABLE_ENRICHMENT",
+            }
+        finally:
+            store.close()
+
     def test_full_build_removes_nodes_left_without_a_file_node(self, tmp_path):
         from code_review_graph.parser import EdgeInfo, NodeInfo
 
@@ -896,6 +1071,102 @@ class TestIncrementalUpdate:
         try:
             result = incremental_update(tmp_path, store, changed_files=[])
             assert result["files_updated"] == 0
+        finally:
+            store.close()
+
+    def test_incremental_update_wires_jedi_enrichment(self, tmp_path):
+        # Jedi enrichment must re-run when Python files changed, and be
+        # skipped entirely when nothing Python-related was updated.
+        py_file = tmp_path / "app.py"
+        py_file.write_text("def app():\n    pass\n")
+        db_path = tmp_path / "test.db"
+        store = GraphStore(db_path)
+        try:
+            with patch(
+                "code_review_graph.jedi_resolver.enrich_jedi_calls",
+                return_value={"resolved": 1, "files": 1},
+            ) as mock_enrich:
+                result = incremental_update(
+                    tmp_path, store, changed_files=["app.py"], enrich=True,
+                )
+                assert result["jedi_enrichment"] == {"resolved": 1, "files": 1}
+                assert mock_enrich.call_count == 1
+
+                mock_enrich.reset_mock()
+                result = incremental_update(
+                    tmp_path, store, changed_files=[], enrich=True,
+                )
+                # Nothing was re-parsed, so the Jedi step does not run.
+                assert result.get("jedi_enrichment") is None
+                mock_enrich.assert_not_called()
+        finally:
+            store.close()
+
+    def test_incremental_update_scopes_jedi_to_reparsed_files(self, tmp_path):
+        # Review of PR #823: an incremental update must not make Jedi read
+        # every Python file again. Only the files re-parsed in this update
+        # lost their Jedi edges, so only those are passed to the scan.
+        for i in range(5):
+            (tmp_path / f"mod{i}.py").write_text(f"def f{i}():\n    pass\n")
+        store = GraphStore(tmp_path / "test.db")
+        try:
+            incremental_update(
+                tmp_path, store, changed_files=[f"mod{i}.py" for i in range(5)]
+            )
+            (tmp_path / "mod2.py").write_text("def f2():\n    return 2\n")
+            with patch(
+                "code_review_graph.jedi_resolver.enrich_jedi_calls",
+                return_value={"resolved": 0, "files": 0},
+            ) as mock_enrich:
+                incremental_update(
+                    tmp_path, store, changed_files=["mod2.py"], enrich=True,
+                )
+            assert mock_enrich.call_count == 1
+            scoped = mock_enrich.call_args.kwargs["files"]
+            assert [Path(f).name for f in scoped] == ["mod2.py"]
+        finally:
+            store.close()
+
+    def test_jedi_scan_reads_only_the_given_files(self, tmp_path):
+        # enrich_jedi_calls(files=...) must read only those files from disk.
+        pytest.importorskip("jedi")
+        from code_review_graph.jedi_resolver import enrich_jedi_calls
+
+        (tmp_path / "svc.py").write_text(
+            "class Service:\n    def authenticate(self):\n        return True\n\n"
+            "def make():\n    return Service()\n"
+        )
+        (tmp_path / "app.py").write_text(
+            "from svc import make\n\ndef run():\n    s = make()\n"
+            "    return s.authenticate()\n"
+        )
+        for i in range(3):
+            (tmp_path / f"other{i}.py").write_text(f"def g{i}():\n    pass\n")
+        store = GraphStore(tmp_path / "test.db")
+        try:
+            with patch.dict(os.environ, {"CRG_DISABLE_ENRICHMENT": "1"}):
+                incremental_update(
+                    tmp_path, store,
+                    changed_files=["svc.py", "app.py"] + [f"other{i}.py" for i in range(3)],
+                )
+            read: list[str] = []
+            real_read_bytes = Path.read_bytes
+
+            def spy(self):
+                read.append(self.name)
+                return real_read_bytes(self)
+
+            with patch.object(Path, "read_bytes", spy):
+                enrich_jedi_calls(store, tmp_path, files=[str(tmp_path / "app.py")])
+            assert read == ["app.py"]
+
+            # Without a scope (full build) every Python file is read.
+            read.clear()
+            with patch.object(Path, "read_bytes", spy):
+                enrich_jedi_calls(store, tmp_path)
+            assert sorted(read) == sorted(
+                ["app.py", "svc.py"] + [f"other{i}.py" for i in range(3)]
+            )
         finally:
             store.close()
 
@@ -1804,6 +2075,11 @@ class TestWatchReconciliation:
     def test_watch_dispatch_ignores_irrelevant_events(self, tmp_path, event_factory):
         from watchdog import events
 
+        # FileClosedNoWriteEvent arrived in watchdog 5. Our code filters on the
+        # event_type string, so the watchdog 4 floor is fine at runtime.
+        if not hasattr(events, event_factory):
+            pytest.skip(f"this watchdog has no {event_factory}")
+
         store = GraphStore(tmp_path / "graph.db")
         debouncer = MagicMock()
         with patch(
@@ -1850,12 +2126,11 @@ class TestWatchReconciliation:
             nonlocal callback_count
             callback_count += 1
 
+        stop = threading.Event()
+        stop.set()  # the loop ends at its first tick
         try:
-            with (
-                patch("watchdog.observers.Observer") as observer,
-                patch("time.sleep", side_effect=KeyboardInterrupt),
-            ):
-                watch(tmp_path, store, on_files_updated=on_files_updated)
+            with patch("watchdog.observers.Observer") as observer:
+                watch(tmp_path, store, on_files_updated=on_files_updated, stop_event=stop)
             assert callback_count == 1
             assert store.get_all_files() == []
             observer.return_value.start.assert_called_once()
@@ -1872,10 +2147,11 @@ class TestWatchReconciliation:
         store = GraphStore(tmp_path / "graph.db")
         incremental_update(tmp_path, store, changed_files=["offline.py"])
         deleted.unlink()
+        stop = threading.Event()
+        stop.set()  # if startup ever passes, the loop ends at its first tick
         try:
             with (
                 patch("watchdog.observers.Observer") as observer,
-                patch("time.sleep", side_effect=KeyboardInterrupt),
                 # Patch the entry point post-processing calls, not the
                 # rebuild underneath it: whether a sync rebuilds or applies
                 # a delta depends on how much of the graph moved, and this
@@ -1889,7 +2165,7 @@ class TestWatchReconciliation:
                     match="post-processing reported warnings",
                 ),
             ):
-                watch(tmp_path, store, on_files_updated=run_post_processing)
+                watch(tmp_path, store, on_files_updated=run_post_processing, stop_event=stop)
 
             # The observer starts before startup work (PR #1108), so failing
             # closed means it is stopped and joined before watch() raises.
@@ -2759,3 +3035,210 @@ class TestUntrackedScope:
         assert get_staged_and_unstaged(tmp_path) == [
             "brandnew/a.py", "pkg/newmod.py", "src/a.py", "weird/",
         ]
+
+
+_JEDI_SERVICES = (
+    "class OldService:\n    def authenticate(self):\n        return True\n\n"
+    "class NewService:\n    def authenticate(self):\n        return False\n\n"
+)
+_JEDI_APP = (
+    "from svc import make\n\ndef run():\n    s = make()\n    return s.authenticate()\n"
+)
+
+
+def _jedi_repo(root: Path, returned: str = "OldService") -> None:
+    (root / ".git").mkdir(exist_ok=True)
+    (root / "svc.py").write_text(
+        _JEDI_SERVICES + f"def make():\n    return {returned}()\n", encoding="utf-8",
+    )
+    (root / "app.py").write_text(_JEDI_APP, encoding="utf-8")
+
+
+def _authenticate_edges(store: GraphStore, root: Path) -> list[tuple[str, dict, str]]:
+    import json
+
+    rows = store._conn.execute(
+        "SELECT target_qualified, extra, target_resolution FROM edges"
+        " WHERE kind = 'CALLS' AND file_path = ? AND line = 5",
+        (str(root.resolve() / "app.py"),),
+    ).fetchall()
+    return [
+        (r["target_qualified"].rsplit("/", 1)[-1], json.loads(r["extra"]), r["target_resolution"])
+        for r in rows
+    ]
+
+
+class TestJediEnrichment:
+    """Review of PR #823: the Jedi step must improve the edges a build stores."""
+
+    def test_build_without_jedi_skips_the_step(self, tmp_path, monkeypatch):
+        import sys
+
+        # The enrichment extra is optional: without it a build only notes the skip.
+        monkeypatch.setitem(sys.modules, "jedi", None)
+        _jedi_repo(tmp_path)
+        with GraphStore(tmp_path / "test.db") as store:
+            with patch(
+                "code_review_graph.incremental.get_all_tracked_files",
+                return_value=["svc.py", "app.py"],
+            ):
+                result = full_build(tmp_path, store, enrich=True)
+            assert result["jedi_enrichment"] == {
+                "skipped": True, "reason": "jedi not installed",
+            }
+            [(target, _extra, resolution)] = _authenticate_edges(store, tmp_path)
+            assert (target, resolution) == ("authenticate", "unresolved")
+
+    def test_full_build_refines_the_bare_call_edge(self, tmp_path):
+        pytest.importorskip("jedi")
+        _jedi_repo(tmp_path)
+        with GraphStore(tmp_path / "test.db") as store:
+            with patch(
+                "code_review_graph.incremental.get_all_tracked_files",
+                return_value=["svc.py", "app.py"],
+            ):
+                result = full_build(tmp_path, store, enrich=True)
+
+            assert result["jedi_enrichment"]["resolved"] == 1
+            assert result["jedi_enrichment"]["refined"] == 1
+            # One edge, now naming the method the factory's object has.
+            [(target, extra, resolution)] = _authenticate_edges(store, tmp_path)
+            assert target == "svc.py::OldService.authenticate"
+            assert extra["call_resolution"] == "jedi"
+            assert extra["receiver"] == "s"
+            assert resolution == "direct"
+
+    def test_update_refreshes_an_unchanged_dependent(self, tmp_path):
+        pytest.importorskip("jedi")
+        _jedi_repo(tmp_path)
+        with GraphStore(tmp_path / "test.db") as store:
+            incremental_update(
+                tmp_path, store, changed_files=["svc.py", "app.py"], enrich=True,
+            )
+            [(target, _extra, _res)] = _authenticate_edges(store, tmp_path)
+            assert target == "svc.py::OldService.authenticate"
+
+            # Only svc.py changes; app.py's bytes do not.
+            _jedi_repo(tmp_path, returned="NewService")
+            result = incremental_update(
+                tmp_path, store, changed_files=["svc.py"], enrich=True,
+            )
+
+            assert "app.py" in result["dependent_files"]
+            [(target, _extra, _res)] = _authenticate_edges(store, tmp_path)
+            assert target == "svc.py::NewService.authenticate"
+
+    def test_target_outside_the_graph_keeps_the_bare_edge(self, tmp_path):
+        pytest.importorskip("jedi")
+        _jedi_repo(tmp_path)
+        # svc.py is ignored, so no node answers to what Jedi finds there; an
+        # unrelated authenticate() keeps the name among the project's functions.
+        (tmp_path / ".code-review-graphignore").write_text("svc.py\n", encoding="utf-8")
+        (tmp_path / "other.py").write_text("def authenticate():\n    pass\n", encoding="utf-8")
+        with GraphStore(tmp_path / "test.db") as store:
+            incremental_update(
+                tmp_path, store, changed_files=["svc.py", "app.py", "other.py"],
+                enrich=True,
+            )
+            [(target, extra, _res)] = _authenticate_edges(store, tmp_path)
+            assert target == "authenticate"
+            assert "call_resolution" not in extra
+
+
+class TestJediEnrichmentIsOptIn:
+    """Review of PR #823: having jedi installed (``[all]``) is not a request."""
+
+    @staticmethod
+    def _build(tmp_path, **kwargs):
+        _jedi_repo(tmp_path)
+        store = GraphStore(tmp_path / "test.db")
+        with patch(
+            "code_review_graph.incremental.get_all_tracked_files",
+            return_value=["svc.py", "app.py"],
+        ), patch("code_review_graph.jedi_resolver.enrich_jedi_calls") as mock_enrich:
+            mock_enrich.return_value = {"resolved": 0, "files": 0}
+            result = full_build(tmp_path, store, **kwargs)
+        return store, result, mock_enrich
+
+    def test_not_asked_for_means_jedi_never_runs(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("CRG_ENABLE_ENRICHMENT", raising=False)
+        monkeypatch.delenv("CRG_DISABLE_ENRICHMENT", raising=False)
+        store, result, mock_enrich = self._build(tmp_path)
+        try:
+            mock_enrich.assert_not_called()
+            assert result["jedi_enrichment"] == {"skipped": True, "reason": "not requested"}
+            [(target, _extra, _res)] = _authenticate_edges(store, tmp_path)
+            assert target == "authenticate"
+        finally:
+            store.close()
+
+    def test_update_not_asked_for_never_runs(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("CRG_ENABLE_ENRICHMENT", raising=False)
+        _jedi_repo(tmp_path)
+        with GraphStore(tmp_path / "test.db") as store:
+            with patch("code_review_graph.jedi_resolver.enrich_jedi_calls") as mock_enrich:
+                result = incremental_update(
+                    tmp_path, store, changed_files=["svc.py", "app.py"],
+                )
+            mock_enrich.assert_not_called()
+            assert result["jedi_enrichment"] == {"skipped": True, "reason": "not requested"}
+
+    def test_env_var_asks_for_it(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CRG_ENABLE_ENRICHMENT", "1")
+        monkeypatch.delenv("CRG_DISABLE_ENRICHMENT", raising=False)
+        store, result, mock_enrich = self._build(tmp_path)
+        store.close()
+        assert mock_enrich.call_count == 1
+        assert result["jedi_enrichment"] == {"resolved": 0, "files": 0}
+
+    def test_explicit_false_beats_the_env_var(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CRG_ENABLE_ENRICHMENT", "1")
+        store, result, mock_enrich = self._build(tmp_path, enrich=False)
+        store.close()
+        mock_enrich.assert_not_called()
+        assert result["jedi_enrichment"]["reason"] == "not requested"
+
+    def test_disable_overrides_an_explicit_request(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CRG_DISABLE_ENRICHMENT", "1")
+        store, result, mock_enrich = self._build(tmp_path, enrich=True)
+        store.close()
+        mock_enrich.assert_not_called()
+        assert result["jedi_enrichment"]["reason"] == "disabled via CRG_DISABLE_ENRICHMENT"
+
+
+class TestIncrementalDirectHelpers:
+    def test_incremental_and_build_helpers_direct(self, tmp_path: Path):
+        parser_cls = _get_code_parser_cls()
+        assert incremental_module.__getattr__("CodeParser") is parser_cls
+        with pytest.raises(AttributeError):
+            incremental_module.__getattr__("nonexistent_attr")
+
+        assert callable(tools_pkg.__getattr__("build_or_update_graph"))
+        with pytest.raises(AttributeError):
+            tools_pkg.__getattr__("nonexistent_tool")
+
+        parser = parser_cls(tmp_path)
+        _prewarm_parser_probes(parser, ["a.py", "b.ts"])
+
+        store = GraphStore(tmp_path / "inc.db")
+        try:
+            deps = _single_hop_dependents(store, "/nonexistent/a.py")
+            assert deps == set()
+
+            assert _clear_derived_event_data(store) == (0, 0)
+            assert resolve_python_imports(store)["files_indexed"] == 0
+            assert isinstance(resolve_spring_di_calls(store), dict)
+            assert isinstance(resolve_temporal_calls(store), dict)
+        finally:
+            store.close()
+
+        daemon = WatchDaemon(
+            config=DaemonConfig(repos=[]),
+            config_path=tmp_path / "watch.toml",
+        )
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(
+                args=["crg"], returncode=0, stdout="", stderr=""
+            )
+            daemon._initial_build(WatchRepo(path=str(tmp_path), alias="demo"))
+            assert mock_run.called

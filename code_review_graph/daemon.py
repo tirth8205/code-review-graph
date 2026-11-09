@@ -33,7 +33,7 @@ else:
     except ImportError:
         tomllib = None  # type: ignore[assignment]
 
-from .constants import crg_home, env_float
+from .constants import crg_home, env_float, release_os_memory
 
 logger = logging.getLogger(__name__)
 
@@ -898,19 +898,54 @@ def reap_orphaned_watchers(
 ) -> list[dict[str, Any]]:
     """Terminate every orphaned watcher and forget the state that named them.
 
+    Only called with no daemon running, so every watcher the state names is
+    finished by the end of this, including those already dead. Their health
+    files go too. A watcher killed outright cannot clear its own, which is every
+    watcher on Windows: ``stop`` ends the daemon with ``TerminateProcess`` and the
+    Job Object takes the children with it, so no shutdown code runs. A file left
+    behind reads as a stalled watcher forever.
+
     Returns the entries that were signalled, so the caller can report them.
     """
+    state = load_state(state_path)
     orphans = find_orphaned_watchers(state_path)
     for orphan in orphans:
         pid = int(orphan["pid"])
         logger.info(
             "Reaping orphaned watcher for '%s' (PID %d)", orphan["alias"], pid
         )
-        clear_watch_health(orphan["path"])
         _signal_until_dead(pid, timeout=timeout)
-    if orphans:
+    # After the signals: a watcher still running could publish again.
+    for entry in state.values():
+        if isinstance(entry, dict) and entry.get("path"):
+            _clear_health_left_by(str(entry["path"]), entry.get("pid"))
+    if state:
         clear_state(state_path)
     return orphans
+
+
+def _clear_health_left_by(repo_path: str, pid: Any) -> None:
+    """Drop the health file our watcher on *repo_path* left, not a replacement's.
+
+    Health files are keyed by repository, so a watcher started by hand after
+    ours died publishes to the same file. Deleting it would let the next
+    ``start`` miss that watcher and launch a second writer on the same database.
+    """
+    health = read_watch_health(repo_path)
+    publisher = health.get("pid") if isinstance(health, dict) else None
+    if (
+        isinstance(publisher, int)
+        and publisher != pid
+        and _is_pid_alive(publisher)
+        and is_our_watcher(publisher, repo_path)
+    ):
+        logger.info(
+            "Keeping the health file for '%s': live watcher PID %d publishes it",
+            repo_path,
+            publisher,
+        )
+        return
+    clear_watch_health(repo_path)
 
 
 def _signal_until_dead(pid: int, *, timeout: float = 5.0) -> bool:
@@ -1783,3 +1818,4 @@ class WatchDaemon:
                 result.returncode,
                 result.stderr.strip(),
             )
+        release_os_memory()

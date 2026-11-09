@@ -8,12 +8,14 @@ from pathlib import Path, PurePath
 from typing import Any
 
 from ..changes import (  # noqa: F401
+    DiffRanges,
     analyze_changes,
     compute_risk_score,
     is_test_gap_exempt,
     parse_diff_ranges,
     parse_git_diff_ranges,
 )
+from ..context_history import CallInfo
 from ..context_savings import attach_context_savings, estimate_file_tokens
 from ..errors import ChangeDiscoveryError
 from ..flows import get_affected_flows as _get_affected_flows
@@ -21,6 +23,8 @@ from ..graph import GraphNode, GraphStore, edge_to_dict, node_to_dict
 from ..hints import generate_hints, get_session
 from ..incremental import (
     discover_review_changes,
+    followed_files,
+    path_within_repo,
     resolve_review_base,
 )
 from ..parser import is_test_file, normalize_file_path
@@ -49,6 +53,8 @@ _MAX_REVIEW_SOURCE_LINES = 800
 _MAX_LINES_PER_FILE = 500
 _MAX_CHANGED_FUNCTIONS = 100
 _MAX_DETECT_SOURCE_LINES = 600
+# Symbols a diff deleted, each with up to three users: ~180 tokens a row.
+_MAX_REMOVED_SYMBOLS = 25
 
 # The source budget above used to be spent first come first served over the
 # changed-file list, which is the order Git happened to emit. One
@@ -499,6 +505,10 @@ def get_review_context(
             unmatched_files, 5 if detail_level == "minimal" else max_files, _MAX_REVIEW_FILES,
         )
         original_tokens = estimate_file_tokens(root, changed_files)
+        history_call = CallInfo(
+            data_dir=store.db_path.parent, tool="get_review_context_tool",
+            detail_level=detail_level, files=len(changed_files), depth=max_depth,
+        )
         impact = store.get_impact_radius(graph_files, max_depth=max_depth)
         impacted_count = impact.get("total_impacted", len(impact["impacted_nodes"]))
         risk = (
@@ -534,7 +544,7 @@ def get_review_context(
                 1 for f in changed_funcs
                 if (
                     f.qualified_name not in tested_qualified
-                    and not is_test_gap_exempt(f)
+                    and not is_test_gap_exempt(f, root)
                 )
             )
 
@@ -564,7 +574,7 @@ def get_review_context(
                     "get_impact_radius_tool",
                 ],
             }
-            attach_context_savings(result, original_tokens=original_tokens)
+            attach_context_savings(result, original_tokens=original_tokens, call=history_call)
             return result
 
         # Build review context. Every list below scales with the change set,
@@ -636,9 +646,15 @@ def get_review_context(
             file_lines: dict[str, list[str]] = {}
             regions_by_file: dict[str, list[tuple[int, int]]] = {}
             snippets: dict[str, str] = {}
+            followed = followed_files(store)
             for rel_path in shown_files:
                 full_path = root / rel_path
                 if not full_path.is_file():
+                    continue
+                if not path_within_repo(root, full_path, followed):
+                    # Never read outside the repository, unless through a
+                    # symlinked folder the graph was asked to follow.
+                    snippets[rel_path] = "(outside the repository)"
                     continue
                 try:
                     lines = full_path.read_text(
@@ -738,7 +754,7 @@ def get_review_context(
             "summary": "\n".join(summary_parts),
             "context": context,
         }
-        attach_context_savings(result, original_tokens=original_tokens)
+        attach_context_savings(result, original_tokens=original_tokens, call=history_call)
         return result
     except ChangeDiscoveryError as exc:
         # Distinct from the "no changed files" answer above, and deliberately
@@ -783,7 +799,7 @@ def _generate_review_guidance(
         if f.qualified_name not in tested_funcs
         and not f.is_test
         and not is_test_file(f.file_path, repo_root)
-        and not is_test_gap_exempt(f)
+        and not is_test_gap_exempt(f, repo_root)
     ]
     if untested:
         routes: dict = {}
@@ -1020,6 +1036,7 @@ def detect_changes_func(
                 "risk_score": 0.0,
                 "changed_functions": [],
                 "changed_yaml_paths": [],
+                "changed_json_paths": [],
                 "affected_flows": [],
                 "test_gaps": [],
                 "review_priorities": [],
@@ -1036,11 +1053,12 @@ def detect_changes_func(
         # to be non-empty, so an unreadable line-level diff costs precision,
         # not honesty. analyze_changes records the degradation.
         diff_ranges = parse_diff_ranges(str(root), base)
-        # Remap to absolute paths so they match graph file_paths.
-        abs_ranges: dict[str, list[tuple[int, int]]] = {}
-        for rel_path, ranges in diff_ranges.items():
-            abs_path = normalize_file_path(root / rel_path)
-            abs_ranges[abs_path] = ranges
+        # Remap to absolute paths so they match graph file_paths. The
+        # remapped ranges keep the old side of any pure-deletion hunk, which
+        # is what lets analyze_changes name the symbols a diff removed.
+        if not isinstance(diff_ranges, DiffRanges):
+            diff_ranges = DiffRanges(diff_ranges)
+        abs_ranges = diff_ranges.remapped(root)
 
         analysis = analyze_changes(
             store,
@@ -1060,6 +1078,7 @@ def detect_changes_func(
         # whole-repo diff into a 30k-token ``changed_functions`` list.
         if include_source:
             budget = _MAX_DETECT_SOURCE_LINES
+            followed = followed_files(store)
             for func in analysis.get("changed_functions", []):
                 if budget <= 0:
                     break
@@ -1068,7 +1087,7 @@ def detect_changes_func(
                 le = func.get("line_end")
                 if fp and ls and le:
                     file_path = Path(fp)
-                    if file_path.is_file():
+                    if file_path.is_file() and path_within_repo(root, file_path, followed):
                         try:
                             lines = file_path.read_text(encoding="utf-8",
                                 errors="replace"
@@ -1095,7 +1114,9 @@ def detect_changes_func(
                 "risk_score": analysis.get("risk_score", 0.0),
                 "changed_file_count": len(changed_files),
                 "changed_yaml_path_count": len(analysis.get("changed_yaml_paths", [])),
+                "changed_json_path_count": len(analysis.get("changed_json_paths", [])),
                 "test_gap_count": len(analysis.get("test_gaps", [])),
+                "removed_symbol_count": analysis.get("removed_symbols_total", 0),
                 "review_priorities": top_priorities,
                 # Minimal mode still has to say when the score it reports is
                 # missing the change-frequency term.
@@ -1121,9 +1142,24 @@ def detect_changes_func(
                 analysis.get("changed_yaml_paths", []),
                 max_results, _MAX_CHANGED_FUNCTIONS,
             )
+            json_paths, json_paths_total, json_paths_cut = _bounded(
+                analysis.get("changed_json_paths", []),
+                max_results, _MAX_CHANGED_FUNCTIONS,
+            )
+            removed, _, removed_cut = _bounded(
+                analysis.get("removed_symbols", []),
+                max_results, _MAX_REMOVED_SYMBOLS,
+            )
+            # The analysis looks up users for a bounded number of removed
+            # symbols, so its own total is the honest one.
+            removed_total = analysis.get("removed_symbols_total", len(removed))
+            removed_cut = removed_cut or removed_total > len(removed)
             any_cut = (
                 funcs_cut or gaps_cut or flows_cut or files_cut or yaml_paths_cut
+                or json_paths_cut
+                or removed_cut
                 or bool(analysis.get("yaml_paths_truncated"))
+                or bool(analysis.get("json_paths_truncated"))
             )
             summary = analysis.get("summary", "")
             if any_cut:
@@ -1131,8 +1167,17 @@ def detect_changes_func(
                     "\n  - Response bounded: "
                     f"{len(funcs)} of {funcs_total} changed function(s), "
                     f"{len(yaml_paths)} of {yaml_paths_total} changed YAML path(s), "
-                    f"{len(gaps)} of {gaps_total} test gap(s), "
-                    f"{len(flows)} of {flows_total} flow(s) shown"
+                    + (
+                        f"{len(json_paths)} of {json_paths_total} changed JSON path(s), "
+                        if json_paths_total else ""
+                    )
+                    + f"{len(gaps)} of {gaps_total} test gap(s), "
+                    f"{len(flows)} of {flows_total} flow(s)"
+                    + (
+                        f", {len(removed)} of {removed_total} removed symbol(s)"
+                        if removed_total else ""
+                    )
+                    + " shown"
                 )
             result = {
                 "status": "ok",
@@ -1144,8 +1189,12 @@ def detect_changes_func(
                 "changed_functions_total": funcs_total,
                 "changed_yaml_paths": yaml_paths,
                 "changed_yaml_paths_total": yaml_paths_total,
+                "changed_json_paths": json_paths,
+                "changed_json_paths_total": json_paths_total,
                 "test_gaps": gaps,
                 "test_gaps_total": gaps_total,
+                "removed_symbols": removed,
+                "removed_symbols_total": removed_total,
                 "affected_flows": _project(flows, _DETECT_FLOW_FIELDS),
                 "affected_flows_total": flows_total,
                 "truncated": any_cut,
@@ -1153,7 +1202,14 @@ def detect_changes_func(
         result["_hints"] = generate_hints(
             "detect_changes_tool", result, get_session()
         )
-        attach_context_savings(result, original_tokens=original_tokens)
+        attach_context_savings(
+            result,
+            original_tokens=original_tokens,
+            call=CallInfo(
+                data_dir=store.db_path.parent, tool="detect_changes_tool",
+                detail_level=detail_level, files=len(changed_files), depth=max_depth,
+            ),
+        )
         return result
     except Exception as exc:
         return {"status": "error", "error": str(exc)}

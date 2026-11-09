@@ -131,6 +131,17 @@ class Plan:
             raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), str(path))
         return planned.after
 
+    def lexists(self, path: PathLike) -> bool:
+        """Return whether ``path`` will exist, as a file or as a folder of one."""
+        planned = self._planned(path)
+        if planned is not None:
+            return planned.after is not None
+        key = _real_key(path)
+        for entry in self._files.values():
+            if entry.after is not None and key in entry.path.parents:
+                return True
+        return os.path.lexists(path)
+
     def mode(self, path: PathLike) -> int | None:
         """Return the permission bits ``path`` will have, if known."""
         planned = self._planned(path)
@@ -293,6 +304,12 @@ def is_file(path: PathLike) -> bool:
     return plan.is_file(path) if plan is not None else Path(path).is_file()
 
 
+def lexists(path: PathLike) -> bool:
+    """Like ``os.path.lexists``, counting files and folders the plan creates."""
+    plan = active()
+    return plan.lexists(path) if plan is not None else os.path.lexists(path)
+
+
 def read_bytes(path: PathLike) -> bytes:
     plan = active()
     return plan.read_bytes(path) if plan is not None else Path(path).read_bytes()
@@ -314,6 +331,17 @@ def write_text(path: PathLike, text: str, encoding: str = "utf-8") -> None:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(text, encoding=encoding)
+
+
+def write_bytes(path: PathLike, data: bytes) -> None:
+    """Write ``data`` as it is, with no line ending change, creating parent folders."""
+    plan = active()
+    if plan is not None:
+        plan.write_bytes(path, data)
+        return
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(data)
 
 
 def copy_file(source: PathLike, destination: PathLike) -> None:

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -1551,6 +1553,211 @@ class TestDaemonCLI:
             assert mock_print.call_count == 3
             printed_lines = [str(c.args[0]) for c in mock_print.call_args_list]
             assert printed_lines == ["line3", "line4", "line5"]
+
+
+class TestStopClearsWatcherHealth:
+    """A watcher killed outright cannot clear its own health file. See: #925, #1160
+
+    That is every watcher on Windows, where ``crg-daemon stop`` ends the daemon
+    with ``TerminateProcess`` and the Job Object takes the children with it, so
+    none of the shutdown code runs. These use real processes so that the
+    ``windows-native`` CI job drives the real Windows paths: a plain sleeping
+    child has no signal handler, so killing one runs no cleanup anywhere.
+    """
+
+    @staticmethod
+    def _dead_pid() -> int:
+        proc = subprocess.Popen([sys.executable, "-c", ""])
+        proc.wait(timeout=30)
+        return proc.pid
+
+    @staticmethod
+    def _publish_health(repo: Path, pid: int) -> Path:
+        """What a watch child publishes: its own PID and a fresh heartbeat."""
+        from code_review_graph.daemon import watch_health_path
+
+        path = watch_health_path(repo)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"pid": pid, "updated_at": time.time(), "observer_alive": True}),
+            encoding="utf-8",
+        )
+        return path
+
+    def _left_behind_by(self, tmp_path: Path, pid: int) -> tuple[Path, Path]:
+        """A state file and a frozen health file for one watcher."""
+        from code_review_graph.daemon import default_state_path
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        state = default_state_path()
+        state.parent.mkdir(parents=True, exist_ok=True)
+        state.write_text(
+            json.dumps({"repo": {"pid": pid, "path": str(repo)}}), encoding="utf-8",
+        )
+        return self._publish_health(repo, pid), state
+
+    def test_stop_clears_health_when_the_daemon_is_killed_outright(self, tmp_path, capsys):
+        from code_review_graph.daemon import write_pid
+        from code_review_graph.daemon_cli import _handle_stop
+
+        health, state = self._left_behind_by(tmp_path, self._dead_pid())
+        daemon = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        try:
+            write_pid(daemon.pid)
+            # Reap concurrently: an unreaped zombie reads as alive on POSIX.
+            reaper = threading.Thread(target=daemon.wait, daemon=True)
+            reaper.start()
+            with patch("code_review_graph.daemon.is_daemon_running", return_value=True):
+                _handle_stop(MagicMock())
+            reaper.join(timeout=30)
+        finally:
+            if daemon.poll() is None:
+                daemon.kill()
+                daemon.wait()
+
+        assert not health.exists()
+        assert not state.exists()
+        assert "Daemon stopped." in capsys.readouterr().out
+
+    def test_stop_clears_health_when_the_daemon_is_already_gone(self, tmp_path, capsys):
+        from code_review_graph.daemon import write_pid
+        from code_review_graph.daemon_cli import _handle_stop
+
+        health, state = self._left_behind_by(tmp_path, self._dead_pid())
+        write_pid(self._dead_pid())
+        with patch("code_review_graph.daemon.is_daemon_running", return_value=True):
+            _handle_stop(MagicMock())
+
+        assert not health.exists()
+        assert not state.exists()
+        assert "already gone" in capsys.readouterr().out
+
+    def test_stop_stops_a_live_watcher_when_the_daemon_is_already_gone(self, tmp_path, capsys):
+        from code_review_graph.daemon import write_pid
+        from code_review_graph.daemon_cli import _handle_stop
+
+        watcher = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        try:
+            reaper = threading.Thread(target=watcher.wait, daemon=True)
+            reaper.start()
+            health, _state = self._left_behind_by(tmp_path, watcher.pid)
+            write_pid(self._dead_pid())
+            with (
+                patch("code_review_graph.daemon.is_daemon_running", return_value=True),
+                patch("code_review_graph.daemon.is_our_watcher", return_value=True),
+            ):
+                _handle_stop(MagicMock())
+            reaper.join(timeout=30)
+            assert watcher.poll() is not None
+        finally:
+            if watcher.poll() is None:
+                watcher.kill()
+                watcher.wait()
+
+        assert not health.exists()
+        assert "outlived the daemon" in capsys.readouterr().out
+
+    def test_stop_with_no_daemon_clears_what_a_dead_one_left(self, tmp_path, capsys):
+        from code_review_graph.daemon_cli import _handle_stop
+
+        health, state = self._left_behind_by(tmp_path, self._dead_pid())
+
+        with pytest.raises(SystemExit) as caught:
+            _handle_stop(MagicMock())
+
+        assert caught.value.code == 1
+        assert "not running" in capsys.readouterr().out
+        assert not health.exists()
+        assert not state.exists()
+
+    def test_health_is_cleared_after_the_watcher_stops_not_before(self, tmp_path):
+        """A heartbeat published on the way down must not survive the reap."""
+        from code_review_graph import daemon as daemon_module
+
+        repo = tmp_path / "repo"
+        health, _state = self._left_behind_by(tmp_path, os.getpid())
+
+        def last_heartbeat(_pid, *, timeout):
+            self._publish_health(repo, os.getpid())
+            return True
+
+        with (
+            patch.object(daemon_module, "is_our_watcher", return_value=True),
+            patch.object(daemon_module, "_signal_until_dead", side_effect=last_heartbeat),
+        ):
+            reaped = daemon_module.reap_orphaned_watchers()
+
+        assert [orphan["pid"] for orphan in reaped] == [os.getpid()]
+        assert not health.exists()
+
+    def test_a_stranger_on_a_recycled_pid_is_left_alone_but_the_file_goes(self, tmp_path):
+        """The recorded PID now names someone else, so our watcher is gone."""
+        from code_review_graph import daemon as daemon_module
+
+        health, state = self._left_behind_by(tmp_path, os.getpid())
+
+        with (
+            patch.object(daemon_module, "is_our_watcher", return_value=False),
+            patch.object(daemon_module, "_signal_until_dead") as signalled,
+        ):
+            reaped = daemon_module.reap_orphaned_watchers()
+
+        assert reaped == []
+        signalled.assert_not_called()
+        assert not health.exists()
+        assert not state.exists()
+
+    def test_health_of_a_watcher_the_daemon_never_ran_is_left_alone(self, tmp_path):
+        """``code-review-graph watch`` run by hand publishes health too."""
+        from code_review_graph import daemon as daemon_module
+
+        hand_run = tmp_path / "hand-run"
+        hand_run.mkdir()
+        other = self._publish_health(hand_run, os.getpid())
+        self._left_behind_by(tmp_path, self._dead_pid())
+
+        daemon_module.reap_orphaned_watchers()
+
+        assert other.exists()
+
+    def test_a_live_replacement_on_the_same_repo_keeps_its_health(self, tmp_path):
+        """A watcher started by hand after ours died publishes to the same file.
+
+        Deleting it would let the next ``start`` miss that watcher and launch a
+        second writer on the same database.
+        """
+        from code_review_graph import daemon as daemon_module
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        replacement = subprocess.Popen(
+            [
+                sys.executable, "-c", "import time; time.sleep(60)",
+                "code-review-graph", "watch", "--repo", str(repo),
+            ]
+        )
+        try:
+            reaper = threading.Thread(target=replacement.wait, daemon=True)
+            reaper.start()
+            state = daemon_module.default_state_path()
+            state.parent.mkdir(parents=True, exist_ok=True)
+            state.write_text(
+                json.dumps({"repo": {"pid": self._dead_pid(), "path": str(repo)}}),
+                encoding="utf-8",
+            )
+            health = self._publish_health(repo, replacement.pid)
+
+            reaped = daemon_module.reap_orphaned_watchers()
+
+            assert reaped == []
+            assert replacement.poll() is None
+            assert health.exists()
+            assert not state.exists()
+        finally:
+            if replacement.poll() is None:
+                replacement.kill()
+            replacement.wait()
 
 
 class TestPerUserStateLocation:

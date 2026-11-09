@@ -139,11 +139,19 @@ def _plant_user_files(sandbox: Sandbox) -> None:
     (repo / "AGENTS.md").write_text("# Agents\n\nBe brief.\n", encoding="utf-8")
     (repo / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
     (repo / ".gemini").mkdir()
-    # Two writers touch this one file: the MCP entry, then the hooks.
-    (repo / ".gemini" / "settings.json").write_text('{"theme": "dark"}\n', encoding="utf-8")
+    # Two writers touch this one file: the MCP entry, then the hooks. Both
+    # keep its comment (#1157).
+    (repo / ".gemini" / "settings.json").write_text(
+        '{\n  // dark, please\n  "theme": "dark"\n}\n', encoding="utf-8"
+    )
     (repo / ".claude").mkdir()
+    # Commented hook settings are spliced, not rewritten (#1157), and the
+    # steering hook is merged into the same file after the other hooks.
     (repo / ".claude" / "settings.json").write_text(
-        '{"permissions": {"allow": ["Bash"]}}\n', encoding="utf-8"
+        '{\n  // team rule\n  "permissions": {"allow": ["Bash"]}\n}\n', encoding="utf-8"
+    )
+    (home / ".cursor" / "hooks.json").write_text(
+        '{\n  // mine\n  "version": 1,\n  "hooks": {}\n}\n', encoding="utf-8"
     )
     (repo / "opencode.jsonc").write_text(
         '{\n  // keep this note\n  "theme": "dark"\n}\n', encoding="utf-8"
@@ -160,16 +168,26 @@ def _plant_user_files(sandbox: Sandbox) -> None:
     )
 
 
+# The opt-in steps write files too: the steering hook (#1155) and the
+# .gitignore block (#471). Each must be planned with the rest.
+_OPT_INS = {"plain": {}, "opt-ins": {"steering": True, "gitignore": True}}
+
+
+@pytest.mark.parametrize("opt_ins", sorted(_OPT_INS))
 @pytest.mark.parametrize("lived_in", [False, True], ids=["fresh", "lived-in"])
 @pytest.mark.parametrize("key", PLATFORM_KEYS)
-def test_install_writes_exactly_what_the_dry_run_showed(sandbox, key, lived_in, plans):
+def test_install_writes_exactly_what_the_dry_run_showed(
+    sandbox, key, lived_in, opt_ins, plans
+):
     if lived_in:
         _plant_user_files(sandbox)
+    extra = _OPT_INS[opt_ins]
     before = _snapshot(sandbox)
-    cli._handle_init(_args(sandbox, key, dry_run=True))
+    cli._handle_init(_args(sandbox, key, dry_run=True, **extra))
+    assert _snapshot(sandbox) == before
     planned = {str(change.path): change for change in plans[0].changes()}
 
-    cli._handle_init(_args(sandbox, key))
+    cli._handle_init(_args(sandbox, key, **extra))
 
     after = _snapshot(sandbox)
     changed = {
@@ -184,10 +202,12 @@ def test_install_writes_exactly_what_the_dry_run_showed(sandbox, key, lived_in, 
             assert stat.S_IMODE(os.stat(path).st_mode) == change.mode
 
 
+@pytest.mark.parametrize("opt_ins", sorted(_OPT_INS))
 @pytest.mark.parametrize("key", ["claude", "all"])
 def test_nothing_is_written_before_the_question_is_answered(
-    sandbox, key, monkeypatch, capsys
+    sandbox, key, opt_ins, monkeypatch, capsys
 ):
+    _plant_user_files(sandbox)
     before = _snapshot(sandbox)
     asked: list[tuple[bool, str]] = []
 
@@ -196,7 +216,9 @@ def test_nothing_is_written_before_the_question_is_answered(
         return False
 
     monkeypatch.setattr(cli, "_confirm_yes_no", answer)
-    cli._handle_init(_args(sandbox, key, yes=False))
+    (sandbox.repo / "CLAUDE.md").unlink()
+    before = _snapshot(sandbox)
+    cli._handle_init(_args(sandbox, key, yes=False, **_OPT_INS[opt_ins]))
 
     assert len(asked) == 1
     untouched, shown = asked[0]
@@ -518,3 +540,117 @@ def test_unlinking_a_symlink_removes_the_link_not_its_target(tmp_path):
 
     assert not os.path.lexists(link)
     assert real.read_text(encoding="utf-8") == "shared\n"
+
+
+# -- writers that came with the 2026-11-09 merge train ------------------------
+
+
+def test_dry_run_shows_the_steering_hook_and_writes_nothing(sandbox, plans, capsys):
+    before = _snapshot(sandbox)
+
+    cli._handle_init(_args(sandbox, "claude", dry_run=True, steering=True))
+
+    out = capsys.readouterr().out
+    assert _snapshot(sandbox) == before
+    assert "[dry-run] Would add the steering hook" in out
+    settings = sandbox.repo / ".claude" / "settings.json"
+    planned = {change.path: change for change in plans[0].changes()}[settings]
+    assert b"PreToolUse" in planned.after and b"enrich" in planned.after
+
+    cli._handle_init(_args(sandbox, "claude", steering=True))
+
+    assert settings.read_bytes() == planned.after
+
+
+def test_no_steering_removes_what_install_just_planned(sandbox, plans):
+    """``--no-steering`` reads the hooks planned a moment before, not the disk."""
+    cli._handle_init(_args(sandbox, "claude", steering=True))
+    settings = sandbox.repo / ".claude" / "settings.json"
+    with_steering = settings.read_bytes()
+    before = _snapshot(sandbox)
+
+    cli._handle_init(_args(sandbox, "claude", dry_run=True, steering=False))
+
+    assert _snapshot(sandbox) == before
+    planned = {change.path: change for change in plans[1].changes()}[settings]
+    assert planned.after != with_steering
+
+    cli._handle_init(_args(sandbox, "claude", steering=False))
+
+    assert settings.read_bytes() == planned.after
+    # The other hooks the same run planned are still there.
+    assert b"hook-update" in planned.after
+
+
+def test_dry_run_keeps_comments_in_hook_settings(sandbox, plans, capsys):
+    settings = sandbox.repo / ".claude" / "settings.json"
+    settings.parent.mkdir()
+    original = '{\n  // team rule\n  "permissions": {"allow": ["Bash"]}\n}\n'
+    settings.write_text(original, encoding="utf-8")
+
+    cli._handle_init(_args(sandbox, "claude", dry_run=True))
+
+    out = capsys.readouterr().out
+    assert "   // team rule" in out
+    assert "-  // team rule" not in out
+    assert settings.read_text(encoding="utf-8") == original
+    planned = {change.path: change for change in plans[0].changes()}
+    assert b"// team rule" in planned[settings].after
+    # The backup holds what the user wrote, also only in the plan.
+    assert planned[settings.with_name("settings.json.bak")].after == original.encode()
+
+    cli._handle_init(_args(sandbox, "claude"))
+
+    assert settings.read_bytes() == planned[settings].after
+
+
+def test_dry_run_says_which_hook_settings_it_would_leave_alone(sandbox, capsys):
+    settings = sandbox.repo / ".claude" / "settings.json"
+    settings.parent.mkdir()
+    settings.write_text("{ not json\n", encoding="utf-8")
+    before = _snapshot(sandbox)
+
+    cli._handle_init(_args(sandbox, "claude", dry_run=True))
+
+    out = capsys.readouterr().out
+    assert _snapshot(sandbox) == before
+    assert "left unchanged to avoid data loss" in out
+    assert "+++ b/.claude/settings.json" not in out
+
+
+def _git_block(repo: Path) -> list[str]:
+    from code_review_graph import install_gitignore
+
+    lines = (repo / ".gitignore").read_text(encoding="utf-8").splitlines()
+    inner = lines[lines.index(install_gitignore.BLOCK_START) + 1 :]
+    inner = inner[: inner.index(install_gitignore.BLOCK_END)]
+    return [line for line in inner if not line.startswith("#")]
+
+
+def test_dry_run_shows_the_gitignore_block_it_would_write(sandbox, plans, capsys):
+    before = _snapshot(sandbox)
+
+    cli._handle_init(_args(sandbox, "claude", dry_run=True, gitignore=True))
+
+    out = capsys.readouterr().out
+    assert _snapshot(sandbox) == before
+    assert "+# >>> code-review-graph install files >>>" in out
+    assert "+/.mcp.json" in out
+    gitignore = sandbox.repo / ".gitignore"
+    planned = {change.path: change for change in plans[0].changes()}[gitignore]
+
+    cli._handle_init(_args(sandbox, "claude", gitignore=True))
+
+    assert gitignore.read_bytes() == planned.after
+    assert _git_block(sandbox.repo) == ["/.claude/", "/.mcp.json", "/CLAUDE.md"]
+
+
+def test_saying_no_keeps_instruction_files_out_of_the_gitignore_block(
+    sandbox, monkeypatch
+):
+    monkeypatch.setattr(cli, "_confirm_yes_no", lambda *a, **k: False)
+
+    cli._handle_init(_args(sandbox, "claude", yes=False, gitignore=True))
+
+    assert not (sandbox.repo / "CLAUDE.md").exists()
+    assert _git_block(sandbox.repo) == ["/.claude/", "/.mcp.json"]

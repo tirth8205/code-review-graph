@@ -6,6 +6,7 @@ from collections import Counter
 from typing import Any
 
 from ..communities import get_architecture_overview, get_communities
+from ..context_history import CallInfo
 from ..context_savings import attach_context_savings
 from ..graph import node_to_dict
 from ..hints import generate_hints, get_session
@@ -332,7 +333,15 @@ def get_architecture_overview_func(
             "get_architecture_overview_tool", result, get_session()
         )
         if detail_level == "minimal":
-            attach_context_savings(result, original_context=full_overview)
+            attach_context_savings(
+                result,
+                original_context=full_overview,
+                call=CallInfo(
+                    data_dir=store.db_path.parent,
+                    tool="get_architecture_overview_tool",
+                    detail_level=detail_level,
+                ),
+            )
         return result
     except Exception as exc:
         return {"status": "error", "error": str(exc)}

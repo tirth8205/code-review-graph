@@ -16,7 +16,10 @@ returns immediately and names the process that owns the work, so a queue of
 pending hook invocations collapses into a single build of the newest state.
 ``postprocess`` takes the same lock: it rewrites derived data (flows,
 communities, FTS) for a graph another process may be half way through
-building, which was the other half of the report in #1073.
+building, which was the other half of the report in #1073. So do ``forget`` and
+``embed``, for their whole run. ``watch`` takes it for each write and lets go
+between them: it runs for days, and holding it throughout would stop every
+build for as long as the watcher lived.
 
 Properties this relies on, all of them deliberate:
 

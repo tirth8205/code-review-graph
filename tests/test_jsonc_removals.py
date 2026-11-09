@@ -372,3 +372,66 @@ def test_comma_after_a_value_comment_is_dropped_and_the_comment_kept():
     assert "/* why */" in rewritten and "// after" in rewritten
     assert _exposed_trailing_commas(rewritten) == []
     assert json.loads(_comment_free(rewritten)) == {"keep": 1}
+
+
+# --- set_member keeps comments where the user put them --------------------------
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        (
+            '{\n  "a": 1 // why\n}\n',
+            '{\n  "a": 1, // why\n  "b": 2\n}\n',
+        ),
+        (
+            '{\n  "a": 1, // why\n}\n',
+            '{\n  "a": 1, // why\n  "b": 2\n}\n',
+        ),
+        (
+            '{\n  "a": 1 /* why */\n}\n',
+            '{\n  "a": 1, /* why */\n  "b": 2\n}\n',
+        ),
+        (
+            '{\n  "a": 1\n  // about the next one\n}\n',
+            '{\n  "a": 1,\n  "b": 2\n  // about the next one\n}\n',
+        ),
+        (
+            '{\r\n  "a": 1 // why\r\n}\r\n',
+            '{\r\n  "a": 1, // why\n  "b": 2\r\n}\r\n',
+        ),
+        (
+            '{\n  // nothing yet\n}\n',
+            '{\n  // nothing yet\n  "b": 2\n}\n',
+        ),
+    ],
+)
+def test_set_member_keeps_a_comment_with_what_it_describes(raw, expected):
+    assert jsonc.set_member(raw, ("b",), 2) == expected
+
+
+def test_value_has_comments_looks_only_inside_the_value():
+    raw = '{\n  // outside\n  "a": [1],\n  "b": [\n    // inside\n    2\n  ]\n}\n'
+
+    assert jsonc.value_has_comments(raw, ("a",)) is False
+    assert jsonc.value_has_comments(raw, ("b",)) is True
+
+
+def test_value_has_comments_ignores_slashes_in_strings():
+    assert jsonc.value_has_comments('{"a": "https://x"}', ("a",)) is False
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("/* never closed", True),
+        ('{"a": 1} /* never closed\n', True),
+        ('{"a": 1} /* closed */ /* never closed', True),
+        ('{"a": 1} /* closed */\n', False),
+        ('{"a": "/* in a string"}\n', False),
+        ('{"a": 1} // a line comment /* is not a block\n', False),
+        ('{"a": 1}\n', False),
+    ],
+)
+def test_has_unclosed_comment(raw, expected):
+    assert jsonc.has_unclosed_comment(raw) is expected

@@ -44,7 +44,6 @@ IGNORED: dict[str, str] = {
     "flows.updated_at": "wall-clock time the row was written",
     "communities.id": "autoincrement surrogate key; resolved to the community name",
     "communities.created_at": "wall-clock time the row was written",
-    "risk_index.last_computed": "wall-clock time the row was written",
     "metadata.last_updated": "wall-clock time of the build",
     "metadata.last_postprocessed_at": "wall-clock time of post-processing",
     "sqlite_sequence": "SQLite's own autoincrement bookkeeping for the ignored id columns",
@@ -62,9 +61,6 @@ _COVERED_TABLES = {
     "flows",
     "flow_memberships",
     "communities",
-    "community_summaries",
-    "flow_snapshots",
-    "risk_index",
     "nodes_fts",
     "nodes_fts_state",
     "embeddings",
@@ -360,54 +356,6 @@ def dump_database(db_path: Path, repo_root: Path) -> dict[str, list[str]]:
                 conn,
                 "SELECT qualified_name, community_id FROM nodes "
                 "WHERE community_id IS NOT NULL",
-            )
-        )
-
-        sections["community_summaries"] = sorted(
-            _canon(
-                [
-                    communities.get(r["community_id"], f"<missing:{r['community_id']}>"),
-                    r["name"], r["purpose"], r["key_symbols"], r["risk"], r["size"],
-                    r["dominant_language"],
-                ],
-                roots,
-            )
-            for r in _rows(
-                conn,
-                "SELECT community_id, name, purpose, key_symbols, risk, size, "
-                "dominant_language FROM community_summaries",
-            )
-        )
-
-        sections["flow_snapshots"] = sorted(
-            _canon(
-                [
-                    flows.get(r["flow_id"], f"<missing-flow:{r['flow_id']}>"),
-                    r["name"], r["entry_point"], r["critical_path"],
-                    f"{r['criticality']:.6f}", r["node_count"], r["file_count"],
-                ],
-                roots,
-            )
-            for r in _rows(
-                conn,
-                "SELECT flow_id, name, entry_point, critical_path, criticality, "
-                "node_count, file_count FROM flow_snapshots",
-            )
-        )
-
-        sections["risk_index"] = sorted(
-            _canon(
-                [
-                    nodes.get(r["node_id"], f"<missing-node:{r['node_id']}>"),
-                    r["qualified_name"], f"{r['risk_score']:.6f}", r["caller_count"],
-                    r["test_coverage"], r["security_relevant"],
-                ],
-                roots,
-            )
-            for r in _rows(
-                conn,
-                "SELECT node_id, qualified_name, risk_score, caller_count, "
-                "test_coverage, security_relevant FROM risk_index",
             )
         )
 

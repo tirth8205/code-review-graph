@@ -54,6 +54,9 @@ def _hook_commands(settings: dict, event: str) -> list[str]:
         "code-review-graph update",
         "code-review-graph detect-changes",
         "code-review-graph update --skip-flows --verbose",
+        # The edit hook's shape with someone's own command added after it.
+        "command -v code-review-graph >/dev/null 2>&1 && code-review-graph hook-update;"
+        " cat >/dev/null || true; notify-team",
         # One of our scripts handed to someone else's script as an argument is
         # their command, not ours: the program being run is ``run.sh``.
         "bash /opt/acrg-tools/run.sh /home/u/.cursor/hooks/crg-update.sh",
@@ -87,6 +90,9 @@ def test_user_hook_commands_are_not_claimed(command: str) -> None:
         'cat >/dev/null || true; command -v code-review-graph >/dev/null 2>&1 || exit 0;'
         ' git rev-parse --git-dir >/dev/null 2>&1 && code-review-graph update'
         ' --skip-flows --repo "$(git rev-parse --show-toplevel 2>/dev/null)" || true',
+        # The edit hook that forwards the event JSON to hook-update (#311).
+        "command -v code-review-graph >/dev/null 2>&1 && code-review-graph hook-update;"
+        " cat >/dev/null || true",
         "bash .gemini/hooks/crg-update.sh",
         "/home/u/.cursor/hooks/crg-session-start.sh",
         "bash /previous/checkout/.gemini/hooks/crg-update.sh",
@@ -482,6 +488,312 @@ def test_opencode_reinstall_keeps_comments_when_replacing_a_stale_entry(
     assert "// installed by an older release" in text
     data = _read_jsonc(config)
     assert data["mcp"]["code-review-graph"]["command"][-1] == str(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# Hook settings the installer cannot read as strict JSON
+# ---------------------------------------------------------------------------
+
+# Each of these used to fail json.loads, fall through to an empty dict and
+# overwrite the whole file with nothing but our hooks, with no backup: not just
+# the comments, every setting the user had. Found while building #1155.
+HOOK_WRITERS = {
+    "claude": (lambda repo: skills.install_hooks(repo), "repo/.claude/settings.json"),
+    "qoder": (
+        lambda repo: skills.install_hooks(repo, platform="qoder"),
+        "repo/.qoder/settings.json",
+    ),
+    "codebuddy": (skills.install_codebuddy_hooks, "repo/.codebuddy/settings.json"),
+    "gemini": (skills.install_gemini_cli_hooks, "repo/.gemini/settings.json"),
+    "codex": (skills.install_codex_hooks, ".codex/hooks.json"),
+    "cursor": (lambda _repo: skills.install_cursor_hooks(), ".cursor/hooks.json"),
+}
+
+COMMENTED_SETTINGS = (
+    "{\n"
+    "  // the whole team reads this file\n"
+    '  "permissions": {"allow": ["Bash(ls:*)"]}, // keep this short\n'
+    '  "model": "opus" /* pinned for now */\n'
+    "}\n"
+)
+
+
+@pytest.fixture(params=sorted(HOOK_WRITERS))
+def hook_writer(request, tmp_path, monkeypatch):
+    """Yield (install, settings path, repo) for one writer, in a throwaway home."""
+    monkeypatch.setattr("code_review_graph.skills.Path.home", lambda: tmp_path)
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    install, relative = HOOK_WRITERS[request.param]
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    path = tmp_path / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return install, path, repo
+
+
+def _our_commands(settings: dict) -> list[str]:
+    found = []
+    for groups in settings.get("hooks", {}).values():
+        for group in groups:
+            nested = group.get("hooks", [group]) if isinstance(group, dict) else []
+            found.extend(hook.get("command", "") for hook in nested)
+    return [command for command in found if skills._is_generated_hook_command(command)]
+
+
+def test_hook_install_keeps_a_commented_settings_file(hook_writer) -> None:
+    install, path, repo = hook_writer
+    path.write_text(COMMENTED_SETTINGS, encoding="utf-8")
+
+    assert install(repo) == path
+
+    text = path.read_text(encoding="utf-8")
+    assert "// the whole team reads this file" in text
+    assert "// keep this short" in text
+    assert "/* pinned for now */" in text
+    data = _read_jsonc(path)
+    assert data["permissions"] == {"allow": ["Bash(ls:*)"]}
+    assert data["model"] == "opus"
+    assert _our_commands(data)
+    backup = path.with_name(path.name + ".bak")
+    assert backup.read_text(encoding="utf-8") == COMMENTED_SETTINGS
+
+
+def test_hook_install_keeps_a_comment_with_the_setting_it_belongs_to(hook_writer) -> None:
+    """The new member must land after a trailing comment, not take it over."""
+    install, path, repo = hook_writer
+    path.write_text(COMMENTED_SETTINGS, encoding="utf-8")
+
+    install(repo)
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert any('"permissions"' in line and "// keep this short" in line for line in lines)
+    assert any('"model"' in line and "/* pinned for now */" in line for line in lines)
+
+
+def test_hook_install_keeps_settings_with_a_trailing_comma(hook_writer) -> None:
+    install, path, repo = hook_writer
+    path.write_text('{\n  "model": "opus",\n}\n', encoding="utf-8")
+
+    install(repo)
+
+    data = _read_jsonc(path)
+    assert data["model"] == "opus"
+    assert _our_commands(data)
+
+
+def test_hook_install_keeps_comments_in_a_users_other_hooks(hook_writer) -> None:
+    install, path, repo = hook_writer
+    path.write_text(
+        "{\n"
+        '  "hooks": {\n'
+        "    // the team's nightly job\n"
+        '    "OtherEvent": [{"matcher": "x", "hooks": [{"command": "notify-team"}]}]\n'
+        "  }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    install(repo)
+
+    text = path.read_text(encoding="utf-8")
+    assert "// the team's nightly job" in text
+    data = _read_jsonc(path)
+    assert data["hooks"]["OtherEvent"][0]["hooks"][0]["command"] == "notify-team"
+    assert _our_commands(data)
+
+
+def test_hook_install_keeps_a_comment_only_file(hook_writer) -> None:
+    install, path, repo = hook_writer
+    path.write_text("// nothing here yet\n", encoding="utf-8")
+
+    install(repo)
+
+    assert "// nothing here yet" in path.read_text(encoding="utf-8")
+    assert _our_commands(_read_jsonc(path))
+
+
+def test_hook_reinstall_leaves_a_commented_file_byte_identical(hook_writer) -> None:
+    install, path, repo = hook_writer
+    path.write_text(COMMENTED_SETTINGS, encoding="utf-8")
+    install(repo)
+    first = path.read_text(encoding="utf-8")
+    backup = path.with_name(path.name + ".bak")
+
+    install(repo)
+
+    assert path.read_text(encoding="utf-8") == first
+    # The backup still holds what the user wrote, not our first edit of it.
+    assert backup.read_text(encoding="utf-8") == COMMENTED_SETTINGS
+
+
+@pytest.mark.parametrize(
+    "contents, reason",
+    [
+        ('{"model": "opus", oops}\n', "unparseable"),
+        ('[{"model": "opus"}]\n', "not a top-level object"),
+        ('{"model": "opus", "hooks": ["team-script"]}\n', "'hooks'"),
+    ],
+)
+def test_hook_install_leaves_a_file_it_cannot_merge_alone(
+    hook_writer, capsys, contents: str, reason: str,
+) -> None:
+    install, path, repo = hook_writer
+    path.write_text(contents, encoding="utf-8")
+
+    assert install(repo) is None
+
+    assert path.read_text(encoding="utf-8") == contents
+    out = capsys.readouterr().out
+    assert str(path) in out
+    assert reason in out
+
+
+def test_hook_install_leaves_an_event_of_the_wrong_shape_alone(hook_writer, capsys) -> None:
+    install, path, repo = hook_writer
+    events = ("SessionStart", "sessionStart")
+    contents = json.dumps(
+        {"model": "opus", "hooks": {event: {"mine": True} for event in events}}
+    )
+    path.write_text(contents, encoding="utf-8")
+
+    assert install(repo) is None
+
+    assert path.read_text(encoding="utf-8") == contents
+    assert str(path) in capsys.readouterr().out
+
+
+def test_hook_install_refuses_when_our_edit_would_lose_a_comment(
+    hook_writer, capsys,
+) -> None:
+    """A comment inside an event's own list cannot survive replacing that list."""
+    install, path, repo = hook_writer
+    event = "afterFileEdit" if path.parent.name == ".cursor" else "SessionStart"
+    contents = (
+        "{\n"
+        '  "hooks": {\n'
+        f'    "{event}": [\n'
+        "      // do not reorder this\n"
+        '      {"matcher": "x", "hooks": [{"command": "team-script"}]}\n'
+        "    ]\n"
+        "  }\n"
+        "}\n"
+    )
+    path.write_text(contents, encoding="utf-8")
+
+    assert install(repo) is None
+
+    assert path.read_text(encoding="utf-8") == contents
+    assert str(path) in capsys.readouterr().out
+
+
+def test_hook_install_does_not_write_non_utf8_settings_back(hook_writer, capsys) -> None:
+    install, path, repo = hook_writer
+    contents = b'{"model": "caf\xe9"}\n'
+    path.write_bytes(contents)
+
+    assert install(repo) is None
+
+    assert path.read_bytes() == contents
+    assert str(path) in capsys.readouterr().out
+
+
+def test_refused_gemini_and_cursor_install_write_no_scripts(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("code_review_graph.skills.Path.home", lambda: tmp_path)
+    cursor = tmp_path / ".cursor"
+    cursor.mkdir()
+    (cursor / "hooks.json").write_text("{oops", encoding="utf-8")
+    gemini = tmp_path / ".gemini"
+    gemini.mkdir()
+    (gemini / "settings.json").write_text("{oops", encoding="utf-8")
+
+    assert skills.install_cursor_hooks() is None
+    assert skills.install_gemini_cli_hooks(tmp_path) is None
+
+    assert not (cursor / "hooks").exists()
+    assert not (gemini / "hooks").exists()
+
+
+@pytest.mark.parametrize(
+    "contents",
+    [
+        "/* settings still being edited\n",
+        '{"model": "opus"} /* settings still being edited\n',
+    ],
+)
+def test_hook_install_leaves_a_comment_that_never_closes_alone(
+    hook_writer, capsys, contents: str,
+) -> None:
+    """Anything written after an open ``/*`` would sit inside the comment, unused."""
+    install, path, repo = hook_writer
+    path.write_text(contents, encoding="utf-8")
+
+    assert install(repo) is None
+
+    assert path.read_text(encoding="utf-8") == contents
+    assert str(path) in capsys.readouterr().out
+
+
+def test_refused_gemini_install_keeps_the_scripts_it_found(tmp_path) -> None:
+    """The unchanged settings still name these scripts, so they stay as they were."""
+    gemini = tmp_path / ".gemini"
+    (gemini / "hooks").mkdir(parents=True)
+    contents = (
+        "{\n"
+        '  "hooks": {\n'
+        '    "SessionStart": [\n'
+        "      // do not reorder this\n"
+        '      {"matcher": "", "hooks": [{"command": "bash .gemini/hooks/team.sh"}]}\n'
+        "    ]\n"
+        "  }\n"
+        "}\n"
+    )
+    (gemini / "settings.json").write_text(contents, encoding="utf-8")
+    scripts = {
+        name: gemini / "hooks" / name for name in skills._GEMINI_CLI_HOOK_FILENAMES
+    }
+    for script in scripts.values():
+        script.write_text("#!/usr/bin/env bash\necho the user's own\n", encoding="utf-8")
+
+    assert skills.install_gemini_cli_hooks(tmp_path) is None
+
+    assert (gemini / "settings.json").read_text(encoding="utf-8") == contents
+    for script in scripts.values():
+        assert script.read_text(encoding="utf-8") == "#!/usr/bin/env bash\necho the user's own\n"
+
+
+def test_cursor_install_backs_up_what_it_replaces(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("code_review_graph.skills.Path.home", lambda: tmp_path)
+    hooks = tmp_path / ".cursor" / "hooks.json"
+    hooks.parent.mkdir()
+    original = '{"version": 1, "hooks": {"stop": [{"command": "team-script"}]}}'
+    hooks.write_text(original, encoding="utf-8")
+
+    skills.install_cursor_hooks()
+
+    assert hooks.with_name("hooks.json.bak").read_text(encoding="utf-8") == original
+
+
+def test_commented_settings_survive_install_then_uninstall(tmp_path, monkeypatch) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: home)
+    repo = tmp_path / "repo"
+    (repo / ".git" / "hooks").mkdir(parents=True)
+    path = repo / ".claude" / "settings.json"
+    path.parent.mkdir()
+    path.write_text(COMMENTED_SETTINGS, encoding="utf-8")
+
+    skills.install_hooks(repo)
+    report = uninstall.run(repo=repo, keep_data=True)
+
+    assert not report.errors
+    text = path.read_text(encoding="utf-8")
+    assert "// the whole team reads this file" in text
+    assert "// keep this short" in text
+    assert "/* pinned for now */" in text
+    data = _read_jsonc(path)
+    assert data["model"] == "opus"
+    assert not _our_commands(data)
 
 
 # ---------------------------------------------------------------------------
