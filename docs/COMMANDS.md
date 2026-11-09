@@ -88,13 +88,15 @@ Responses may include estimated `context_savings` metadata.
 
 Use `detail_level="compact"` when the next step is opening affected files rather
 than inspecting individual call sites. It returns ranked repository-relative
-`changed_files` and `impacted_files`, with `impacted_file_count`,
-`impacted_files_omitted`, `total_impacted`, `truncated`, and
-`unresolved_call_sites`. Paths outside the repository keep their absolute identity.
+`changed_files` and `impacted_files`, with `changed_file_count`,
+`changed_files_omitted`, `impacted_file_count`, `impacted_files_omitted`,
+`total_impacted`, `truncated`, and `unresolved_call_sites`. `unmatched_files`
+(with `unmatched_files_total`) lists the changed files the graph has no nodes for.
+Paths outside the repository keep their absolute identity.
 Files follow the graph's best-first node ranking. Counts describe the traversed
-radius; `truncated` remains true when traversal or the file display was bounded.
+radius; `truncated` remains true when traversal or a file list was bounded.
 The mode omits node/edge records and repeated qualified names. `max_files` limits
-only the displayed files, independently of the `max_results` traversal budget.
+each displayed file list, independently of the `max_results` traversal budget.
 Standard output and its existing limits are unchanged; minimal output remains a
 summary without file paths.
 

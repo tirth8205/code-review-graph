@@ -163,6 +163,65 @@ def test_compact_keeps_unindexed_requested_paths(impact_repo):
     )
     assert result["changed_files"] == ["src/core.py", "unindexed.py"]
     assert result["impacted_file_count"] == 3
+    # The same marker standard and minimal output carry: without it a caller
+    # cannot tell that part of the change was never traversed.
+    assert result["unmatched_files"] == ["unindexed.py"]
+    assert result["unmatched_files_total"] == 1
+    assert result["unmatched_files_truncated"] is False
+
+
+def test_compact_bounds_the_changed_file_list(impact_repo):
+    """A whole-repo diff must not make the compact answer as long as the repo."""
+    many = ["src/core.py"] + [f"src/generated_{i}.py" for i in range(300)]
+    result = query.get_impact_radius(
+        changed_files=many, repo_root=str(impact_repo),
+        detail_level="compact", max_files=5,
+    )
+    assert result["changed_files"] == many[:5]
+    assert result["changed_file_count"] == 301
+    assert result["changed_files_omitted"] == 296
+    assert len(result["unmatched_files"]) == 5
+    assert result["unmatched_files_total"] == 300
+    assert result["unmatched_files_truncated"] is True
+    assert result["truncated"] is True
+    assert result["impacted_file_count"] == 3
+
+
+def test_compact_keeps_a_directory_named_like_the_checkout(tmp_path):
+    """``django/x.py`` in a checkout called ``django`` is not ``x.py``.
+
+    A changed file that the change deleted, and a graph row whose file has
+    gone since the build, are both absent from disk. Neither may lose its
+    leading directory just because that directory shares the root's name.
+    """
+    root = tmp_path / "django"
+    (root / "django").mkdir(parents=True)
+    store = GraphStore(root / ".code-review-graph" / "graph.db")
+    core = root / "django" / "core.py"
+    gone = root / "django" / "gone.py"
+    core.write_text("def execute():\n    pass\n")
+    for path, name in ((core, "execute"), (gone, "old")):
+        store.upsert_node(NodeInfo(
+            kind="File", name=str(path), file_path=str(path),
+            line_start=1, line_end=2, language="python",
+        ))
+        store.upsert_node(NodeInfo(
+            kind="Function", name=name, file_path=str(path),
+            line_start=1, line_end=2, language="python",
+        ))
+    store.upsert_edge(EdgeInfo(
+        kind="CALLS", source=f"{gone.as_posix()}::old",
+        target=f"{core.as_posix()}::execute", file_path=str(gone), line=1,
+    ))
+    store.commit()
+    store.close()
+
+    result = query.get_impact_radius(
+        changed_files=["django/core.py", "django/removed.py"], repo_root=str(root),
+        detail_level="compact",
+    )
+    assert result["changed_files"] == ["django/core.py", "django/removed.py"]
+    assert result["impacted_files"] == ["django/gone.py"]
 
 
 def test_compact_displays_cwd_relative_graph_paths_from_repo_root(tmp_path):

@@ -250,6 +250,23 @@ BUDGETS: dict[str, dict[str, Any]] = {
         # the same lists at the same caps.
         "worst_max": 50_000,
     },
+    "get_impact_radius_tool:compact": {
+        "tool": "get_impact_radius_tool",
+        "default": {"changed_files": "LEAF", "detail_level": "compact"},
+        "worst": {
+            "changed_files": "ALL", "max_depth": 5, "max_results": HUGE,
+            "detail_level": "compact", "max_files": HUGE,
+        },
+        # File paths only, each list held to max_files under the 200-file
+        # ceiling, and repository-relative, so the cost does not depend on
+        # where the checkout lives. Measured 164 and 492 under the len/4
+        # fallback; the worst case echoes all 78 changed files. The ceilings
+        # leave room for tiktoken, which splits paths finer, and still fail
+        # at once if node or edge records come back (the standard response
+        # costs tens of thousands here).
+        "default_max": 600,
+        "worst_max": 2_000,
+    },
     "query_graph_tool": {
         "default": {"pattern": "callers_of", "target": "helper_0_0_0"},
         "worst": {

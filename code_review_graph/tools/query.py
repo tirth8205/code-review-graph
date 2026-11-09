@@ -246,17 +246,29 @@ def _rank_disambiguation_candidates(
 
 def _compact_impact_response(
     result: dict[str, Any], root: Path, changed_files: list[str],
-    max_files: int, resolution: str, unresolved_call_sites: int,
+    unmatched_files: list[str], max_files: int, resolution: str,
+    unresolved_call_sites: int,
 ) -> dict[str, Any]:
     """Project the radius onto files without serializing its graph records."""
-    def display_path(path: str) -> str:
+    def requested_path(path: str) -> str:
+        # The caller named this file, so show it as named, made relative to
+        # the repository when it was given as an absolute path inside it.
+        relative = repo_relative_path(path, root)
+        return path if relative is None else relative
+
+    def graph_path(path: str) -> str:
         relative = repo_relative_path(path, root)
         if relative is None:
             # A graph may include an external file: retain its identity.
             return path
-        if not (root / relative).exists():
+        stored_relative = repo_relative_path(path) is not None
+        if stored_relative and not (root / relative).exists():
             # A cwd-relative graph path (``fixtures/repo/src/app.py`` for root
             # ``.../fixtures/repo``) starts with the root's trailing parts.
+            # Only a path the graph stored relative gets this: an absolute
+            # one under the root is exact already, and a file deleted since
+            # the build must not lose a directory that shares the root's name
+            # (``django/x.py`` in a checkout called ``django``).
             parts = relative.split("/")
             for k in range(min(len(root.parts), len(parts) - 1), 0, -1):
                 if tuple(parts[:k]) == root.parts[-k:]:
@@ -273,15 +285,30 @@ def _compact_impact_response(
     ranked_set = set(ranked_files)
     ranked_files.extend(sorted(file_set - ranked_set))
     shown, total, cut = _bounded(ranked_files, max_files, _MAX_IMPACT_FILES)
+    # The changed-file list is the caller's own, and a whole-repo diff makes
+    # it as long as the repository: it gets the same display limit.
+    changed_shown, changed_total, changed_cut = _bounded(
+        changed_files, max_files, _MAX_IMPACT_FILES,
+    )
+    unmatched_shown, unmatched_total, unmatched_cut = _bounded(
+        unmatched_files, max_files, _MAX_IMPACT_FILES,
+    )
     return {
         "status": "ok",
         "summary": f"Showing {len(shown)} of {total} impacted files (best-first).",
-        "changed_files": [display_path(path) for path in changed_files],
-        "impacted_files": [display_path(path) for path in shown],
+        "changed_files": [requested_path(path) for path in changed_shown],
+        "changed_file_count": changed_total,
+        "changed_files_omitted": changed_total - len(changed_shown),
+        # Changed files the graph has no nodes for, so a short radius is not
+        # read as a small one.
+        "unmatched_files": [requested_path(path) for path in unmatched_shown],
+        "unmatched_files_total": unmatched_total,
+        "unmatched_files_truncated": unmatched_cut,
+        "impacted_files": [graph_path(path) for path in shown],
         "impacted_file_count": total,
         "impacted_files_omitted": total - len(shown),
         "total_impacted": result["total_impacted"],
-        "truncated": result["truncated"] or cut,
+        "truncated": result["truncated"] or cut or changed_cut or unmatched_cut,
         "resolution": resolution,
         "unresolved_call_sites": unresolved_call_sites,
     }
@@ -340,7 +367,7 @@ def get_impact_radius(
                 return _compact_impact_response(
                     {"impacted_files": [], "impacted_nodes": [],
                      "total_impacted": 0, "truncated": False},
-                    root, [], max_files, resolution, 0,
+                    root, [], [], max_files, resolution, 0,
                 )
             return {
                 "status": "ok",
@@ -367,7 +394,7 @@ def get_impact_radius(
 
         if detail_level == "compact":
             compact_response = _compact_impact_response(
-                result, root, changed_files, max_files, resolution,
+                result, root, changed_files, unmatched_files, max_files, resolution,
                 store.count_unresolved_call_sites({
                     n.name for n in result["changed_nodes"] if n.kind != "File"
                 }),
