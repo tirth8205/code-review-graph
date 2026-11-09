@@ -12,7 +12,7 @@
   extra that no build ever ran. It is off unless you ask for it, with the
   flag or `CRG_ENABLE_ENRICHMENT=1` (for hooks, the watcher and MCP builds),
   because it is slow: on an 88-file Python repository a full build went from
-  26 to 104 seconds and resolved 44 more calls. Having the extra installed,
+  about 5 to 32 seconds and resolved 43 more calls. Having the extra installed,
   for example through `[all]`, changes nothing on its own: the graph and the
   build time stay the same. `CRG_DISABLE_ENRICHMENT=1` keeps it off even
   when asked for. With it on, `update` scans only the Python files it
