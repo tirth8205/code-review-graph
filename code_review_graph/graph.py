@@ -3806,6 +3806,88 @@ class GraphStore:
                     results.append(edge)
         return results
 
+    def get_edges_touching(self, names: set[str]) -> list[GraphEdge]:
+        """Return edges whose stored source or target is in *names*, oldest first.
+
+        Each edge appears once, in the order a read of the whole table gives.
+        """
+        if not names:
+            return []
+        wanted = list(names)
+        found: dict[int, GraphEdge] = {}
+        batch_size = 450  # Stay well under SQLite's default 999 limit
+        for column in ("source_qualified", "target_qualified"):
+            for i in range(0, len(wanted), batch_size):
+                batch = wanted[i:i + batch_size]
+                placeholders = ",".join("?" for _ in batch)
+                rows = self._conn.execute(  # nosec B608
+                    f"SELECT * FROM edges WHERE {column} IN ({placeholders})",
+                    batch,
+                ).fetchall()
+                for row in rows:
+                    if row["id"] not in found:
+                        found[row["id"]] = self._row_to_edge(row)
+        return [found[edge_id] for edge_id in sorted(found)]
+
+    def iter_edge_end_counts(self, column: str) -> Iterator[tuple[str, int]]:
+        """Yield each distinct value of an edge end and how many edges have it.
+
+        Reads an index rather than the edge rows, however large the table is.
+        """
+        if column not in ("source_qualified", "target_qualified"):
+            raise ValueError(f"not an edge end: {column!r}")
+        rows = self._conn.execute(  # nosec B608
+            f"SELECT {column} AS name, COUNT(*) AS edges FROM edges GROUP BY {column}"
+        )
+        for row in rows:
+            yield row["name"], row["edges"]
+
+    def iter_edge_targets_from(self, sources: Iterable[str]) -> Iterator[str]:
+        """Yield the target of every edge leaving one of *sources*."""
+        wanted = list(sources)
+        batch_size = 450
+        for i in range(0, len(wanted), batch_size):
+            batch = wanted[i:i + batch_size]
+            placeholders = ",".join("?" for _ in batch)
+            rows = self._conn.execute(  # nosec B608
+                f"SELECT target_qualified FROM edges WHERE source_qualified IN ({placeholders})",
+                batch,
+            )
+            for row in rows:
+                yield row["target_qualified"]
+
+    def get_files_with_edges(self, file_paths: Iterable[str]) -> set[str]:
+        """Return which of *file_paths* appear as the file of at least one edge."""
+        wanted = list(file_paths)
+        found: set[str] = set()
+        batch_size = 450
+        for i in range(0, len(wanted), batch_size):
+            batch = wanted[i:i + batch_size]
+            placeholders = ",".join("?" for _ in batch)
+            rows = self._conn.execute(  # nosec B608
+                f"SELECT DISTINCT file_path FROM edges WHERE file_path IN ({placeholders})",
+                batch,
+            ).fetchall()
+            found.update(row["file_path"] for row in rows)
+        return found
+
+    def iter_node_identities(self) -> Iterator[sqlite3.Row]:
+        """Yield the few columns that identify each node, in export order.
+
+        ``listed`` follows the rule :meth:`get_all_files` uses to keep virtual
+        nodes out of the file inventory.
+        """
+        return iter(self._conn.execute(
+            "SELECT id, qualified_name, name, kind, file_path, community_id, "
+            "(extra IS NULL OR json_valid(extra) = 0 "
+            "OR COALESCE(json_extract(extra, '$.virtual'), 0) != 1) AS listed "
+            "FROM nodes ORDER BY file_path, id"
+        ))
+
+    def get_nodes_by_qualified_names(self, qualified_names: set[str]) -> list[GraphNode]:
+        """Return the nodes with these qualified names, in no particular order."""
+        return self._batch_get_nodes(qualified_names)
+
     def _batch_get_nodes(self, qualified_names: set[str]) -> list[GraphNode]:
         """Batch-fetch nodes by qualified name, staying under SQLite variable limits."""
         if not qualified_names:
@@ -3976,6 +4058,9 @@ class GraphStore:
         )
 
 
+_NAME_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f]")
+
+
 def _sanitize_name(s: str, max_len: int = 256) -> str:
     """Strip ASCII control characters and truncate to prevent prompt injection.
 
@@ -3985,6 +4070,10 @@ def _sanitize_name(s: str, max_len: int = 256) -> str:
     that names flowing through MCP tool responses cannot easily influence AI
     agent behaviour.
     """
+    # Almost no name needs changing, and the walk below is the slow part of
+    # exporting a large graph.
+    if len(s) <= max_len and not _NAME_CONTROL_CHARS.search(s):
+        return s
     # Strip control chars 0x00-0x1F except \t (0x09) and \n (0x0A)
     cleaned = "".join(
         ch for ch in s
