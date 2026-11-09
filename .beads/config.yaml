@@ -43,6 +43,9 @@
 #   interval: 15m      # Minimum time between auto-exports
 #   git-push: false    # Disable git push (export locally only)
 #   git-repo: ""       # Separate git repo for backups (default: project repo)
+# This is a public repository: back up locally only, never push tracker data.
+backup:
+  git-push: false
 
 # Integration settings (access with 'bd config get/set')
 # These are stored in the database, not in this file:
