@@ -524,12 +524,24 @@ def test_full_postprocess_consumes_the_flow_invalidation(tmp_path):
         assert store.get_metadata("csharp_flows_dirty") is None
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="forget re-parses C# referrers but never re-runs the C# binder (audit of #964)",
-)
+def _flow_paths(store: GraphStore, root: Path) -> list[list[str]]:
+    from code_review_graph.flows import get_flows
+
+    prefix = f"{root}/"
+    paths = []
+    for flow in get_flows(store, limit=100):
+        rows = store._conn.execute(
+            "SELECT n.qualified_name FROM flow_memberships m "
+            "JOIN nodes n ON n.id = m.node_id WHERE m.flow_id = ? ORDER BY m.position",
+            (flow["id"],),
+        ).fetchall()
+        paths.append([row[0].replace(prefix, "") for row in rows])
+    return sorted(paths)
+
+
 def test_forget_leaves_csharp_referrers_bound_like_a_fresh_build(tmp_path):
     from code_review_graph.forget import forget_files
+    from code_review_graph.postprocessing import run_post_processing
 
     caller = (
         "using Other; namespace App; class C { "
@@ -544,7 +556,9 @@ def test_forget_leaves_csharp_referrers_bound_like_a_fresh_build(tmp_path):
     _write(fresh_root, {k: v for k, v in files.items() if k != "Other.cs"})
     with _store(fresh_root) as store:
         full_build(fresh_root, store)
+        run_post_processing(store)
         expected = _calls(store, fresh_root)
+        expected_flows = _flow_paths(store, fresh_root)
     assert expected == [
         ("Caller.cs::App.C.Go", "Caller.cs::App.C.Helper"),
         ("Caller.cs::App.C.Go", "Service::Run"),
@@ -557,6 +571,8 @@ def test_forget_leaves_csharp_referrers_bound_like_a_fresh_build(tmp_path):
         forget_files(store, root, [str(root / "Other.cs")])
         # forget promises the graph a build without the file would produce.
         assert _calls(store, root) == expected
+        assert _flow_paths(store, root) == expected_flows
+        assert expected_flows
 
 
 @pytest.mark.xfail(
