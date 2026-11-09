@@ -9,6 +9,7 @@ from typing import Any
 
 from ..config_keys import normalize_spring_config_key
 from ..constants import IMPORT_SCOPE_KEY
+from ..context_history import CallInfo
 from ..context_savings import attach_context_savings, estimate_file_tokens
 from ..embeddings import EmbeddingStore
 from ..errors import ChangeDiscoveryError
@@ -299,6 +300,10 @@ def get_impact_radius(
 
         # Resolve user-facing paths to the file paths stored in the graph.
         original_tokens = estimate_file_tokens(root, changed_files)
+        history_call = CallInfo(
+            data_dir=store.db_path.parent, tool="get_impact_radius_tool",
+            detail_level=detail_level, files=len(changed_files), depth=max_depth,
+        )
         abs_files, unmatched_files = _resolve_graph_file_paths_with_unmatched(
             store, root, changed_files,
         )
@@ -442,7 +447,9 @@ def get_impact_radius(
             }
             if confidence:
                 minimal_response["confidence"] = confidence
-            attach_context_savings(minimal_response, original_tokens=original_tokens)
+            attach_context_savings(
+                minimal_response, original_tokens=original_tokens, call=history_call,
+            )
             return minimal_response
 
         response: dict[str, Any] = {
@@ -468,7 +475,7 @@ def get_impact_radius(
         }
         if confidence:
             response["confidence"] = confidence
-        attach_context_savings(response, original_tokens=original_tokens)
+        attach_context_savings(response, original_tokens=original_tokens, call=history_call)
         return response
     except ChangeDiscoveryError as exc:
         # Distinct from the "no changed files" answer above, and deliberately

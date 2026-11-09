@@ -4,6 +4,19 @@
 
 ### Added
 
+- An opt-in local log of context savings, and a `context-history` command to
+  read it (#813). Set `CRG_CONTEXT_HISTORY=1` and every response that carries
+  a `context_savings` estimate (the impact, review-context, detect-changes and
+  compact architecture tools, and the `detect-changes`, `update --brief`,
+  `impact` and `architecture` commands) adds one JSON line to
+  `context-history.jsonl` next to `graph.db`: the time, the tool, the
+  estimated full, graph and saved tokens, and where the call has them
+  `detail_level`, the changed-file count and the depth. No file names, paths,
+  symbol names or source text are written, nothing is sent anywhere, and the
+  log rolls over at 1 MiB, so it never takes much more than 2 MiB. `code-review-graph
+  context-history` prints it per UTC day or, with `--by tool`, per tool, with
+  `--days N` and `--json`. Off by default; nothing is written in read-only
+  mode.
 - Python modules that replace themselves in `sys.modules` are followed to the
   module they install. A compatibility shim such as
   `sys.modules[__name__] = importlib.import_module("app.services.billing")`

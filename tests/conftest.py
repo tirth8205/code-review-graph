@@ -44,6 +44,9 @@ def isolated_crg_home(tmp_path_factory, monkeypatch):
     # Tests that exercise the Codex default patch Path.home() to a temporary
     # directory; clear an external override so it cannot escape that scope.
     monkeypatch.delenv("CODEX_HOME", raising=False)
+    # A developer who records their own context history (#813) must not
+    # have the suite append lines to every scratch repository it builds.
+    monkeypatch.delenv("CRG_CONTEXT_HISTORY", raising=False)
     return home
 
 

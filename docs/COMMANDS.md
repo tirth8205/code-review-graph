@@ -432,6 +432,8 @@ code-review-graph update --embedding-provider local --embedding-model all-MiniLM
 # Monitor and inspect
 code-review-graph status                       # Graph statistics (no graph: exit 1, no DB created)
 code-review-graph status --json                # One JSON object
+code-review-graph context-history              # Per-day trend of the opt-in context savings log
+code-review-graph context-history --by tool --days 7  # Per tool, last 7 UTC days (--json for JSON)
 code-review-graph watch                        # Auto-update on file changes (needs an existing graph)
 code-review-graph visualize                    # Interactive HTML graph (needs an existing graph)
 code-review-graph visualize --format graphml   # Formats: html, json, graphml, cypher, obsidian, svg
@@ -582,6 +584,9 @@ Notes:
   the same worktree rule.
 - For an empty or incomplete graph, run `code-review-graph build`. See
   docs/TROUBLESHOOTING.md, "Empty or incomplete graph".
+- `context-history` reads a log that is off by default. Set
+  `CRG_CONTEXT_HISTORY=1` where the MCP server or the CLI runs to turn it on.
+  See [USAGE.md](USAGE.md#context-history).
 
 ## Standalone Daemon CLI (`crg-daemon`)
 

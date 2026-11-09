@@ -149,6 +149,9 @@ The only network activity is opt-in:
   egress warning on stderr until you set `CRG_ACCEPT_CLOUD_EMBEDDINGS=1`; the
   warning is skipped when the endpoint is localhost.
 
+The context history log (`CRG_CONTEXT_HISTORY=1`) is off by default and is a
+local file only.
+
 See [LEGAL.md](LEGAL.md).
 
 ## How do I verify it is working?
