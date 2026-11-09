@@ -3871,6 +3871,13 @@ class GraphStore:
             found.update(row["file_path"] for row in rows)
         return found
 
+    def has_edge_with_backslash_path(self) -> bool:
+        """Return whether any edge's file path still holds a backslash (before #774)."""
+        row = self._conn.execute(
+            "SELECT 1 FROM edges WHERE instr(file_path, char(92)) > 0 LIMIT 1"
+        ).fetchone()
+        return row is not None
+
     def iter_node_identities(self) -> Iterator[sqlite3.Row]:
         """Yield the few columns that identify each node, in export order.
 

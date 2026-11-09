@@ -257,6 +257,10 @@ def _read_node_identities(store: GraphStore) -> list[dict] | None:
     have cut, so two nodes can share it; ``stored_name`` is the one in the table.
     Returns None when a stored path differs from the one a full read looks up.
     """
+    # A full read looks each edge's file up with forward slashes, so a
+    # backslash path can still show the nodes of the file it names.
+    if store.has_edge_with_backslash_path():
+        return None
     identities: list[dict] = []
     listed_files: set[str] = set()
     for row in store.iter_node_identities():

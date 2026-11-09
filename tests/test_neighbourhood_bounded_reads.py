@@ -386,6 +386,26 @@ def test_a_control_character_in_an_edge_end_takes_the_full_read(tmp_path):
     assert "far.py::far" in view["neighbourhood"]["hops"]
 
 
+def test_a_legacy_backslash_edge_path_takes_the_full_read(tmp_path):
+    """A full read looks this edge's file up as ``__events__/shown`` and finds the marker."""
+    store = GraphStore(tmp_path / "graph.db")
+    try:
+        store.upsert_node(_node("seed", "seed.py"))
+        store.upsert_node(_node("evt_shown", "__events__/shown", extra={"virtual": True}))
+        store.upsert_edge(_edge("REFERENCES", "seed.py::seed", "evt_shown", "__events__/shown"))
+        # Written before paths were stored with forward slashes (#774).
+        store._conn.execute("UPDATE edges SET file_path = ?", ("__events__\\shown",))
+        store.commit()
+
+        seed_args = {"seed_symbols": ["__events__/shown::evt_shown"], "depth": 1}
+        view = export_graph_data(store, **seed_args)
+        _assert_same_view(store, **seed_args)
+    finally:
+        store.close()
+
+    assert "seed.py::seed" in view["neighbourhood"]["hops"]
+
+
 def test_an_edge_with_an_unresolvable_source_is_not_counted(tmp_path):
     store = GraphStore(tmp_path / "graph.db")
     try:
