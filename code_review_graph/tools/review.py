@@ -534,7 +534,7 @@ def get_review_context(
                 1 for f in changed_funcs
                 if (
                     f.qualified_name not in tested_qualified
-                    and not is_test_gap_exempt(f)
+                    and not is_test_gap_exempt(f, root)
                 )
             )
 
@@ -783,7 +783,7 @@ def _generate_review_guidance(
         if f.qualified_name not in tested_funcs
         and not f.is_test
         and not is_test_file(f.file_path, repo_root)
-        and not is_test_gap_exempt(f)
+        and not is_test_gap_exempt(f, repo_root)
     ]
     if untested:
         routes: dict = {}

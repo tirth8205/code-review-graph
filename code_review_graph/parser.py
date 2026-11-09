@@ -15287,11 +15287,13 @@ class CodeParser:
                         )
                     ):
                         call_extra["go_method_receiver"] = True
-                elif method_name and language == "python":
+                elif method_name and language in ("python", "php"):
                     # ``os.environ.get(...)``: a member call whose receiver is
                     # an expression, not a name. Without this marker the edge
                     # is indistinguishable from a plain ``get(...)`` and the
                     # resolvers below happily bind it to any same-named node.
+                    # In PHP, ``$this->service->run()`` inside a test named
+                    # ``run`` was bound to that test itself (#850).
                     call_extra["receiver_form"] = "expression"
                 if language == "java" and child.type == "method_reference":
                     call_extra["call_syntax"] = "method_reference"

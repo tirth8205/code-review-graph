@@ -102,6 +102,12 @@ adds `distinct_nodes` and a `resolution_split` of the whole answer. Call sites
 are ordered so every distinct node appears before any node's second call site,
 so truncation never costs a caller.
 
+`tests_for` rows that are guesses carry `inferred_by`, in minimal mode too:
+`naming_convention` for a test found by its name, and `ambiguous_call` for a PHP
+test whose call could mean this method or a same-named one in another class the
+test imports, as with `app(Service::class)->run()`. The summary says how many
+rows are guesses. A guess is never counted as coverage.
+
 #### `get_review_context_tool`
 ```
 changed_files: list[str] | None

@@ -85,7 +85,9 @@ of grep, read and reasoning:
   false hits the agent has to read to rule out.
 - Tests for: `query_graph_tool(pattern="tests_for")` maps code to tests through
   parsed edges and naming conventions; `detect_changes_tool` adds transitive
-  coverage. Grep only finds tests that mention the name literally.
+  coverage. A row found by name, or by a PHP call the graph could not pin to one
+  class, carries `inferred_by` and is a guess, not coverage. Grep only finds
+  tests that mention the name literally.
 - Affected flows: "which execution paths does this change touch?" has no grep
   equivalent.
 

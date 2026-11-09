@@ -1584,6 +1584,106 @@ class GraphStore:
 
         return results
 
+    def get_ambiguous_call_tests(self, qualified_name: str) -> list[str]:
+        """Tests with a call that may mean this PHP symbol, but was never pinned.
+
+        A Laravel test reaches a class through the container, as in
+        ``app(Service::class)->run()``, so nothing in the file says which class
+        ``run`` belongs to. When more than one class the test file imports (or
+        the test file itself) defines ``run``, the call stays unresolved and the
+        resolver keeps those classes' methods on the edge as
+        ``ambiguous_targets``. This returns each test whose list holds
+        *qualified_name*. That is a guess, never coverage: risk scoring and the
+        test-gap report do not read it.
+
+        A test that builds one of those classes itself, as in
+        ``(new UpdateBooks)->handle()``, is taken to call that class's method,
+        so it is not a guess for the others.
+
+        Only PHP is answered (#850). A class or file target is expanded to its
+        methods, as :meth:`get_transitive_tests` does. A list cut at 20
+        entries can leave a guess out, never put a wrong one in.
+        """
+        conn = self._conn
+        built_by_test: dict[str, set[str]] = {}
+
+        def owner(method_qn: str) -> str:
+            path, _, tail = method_qn.rpartition("::")
+            return f"{path}::{tail.rpartition('.')[0]}"
+
+        def built(test: str) -> set[str]:
+            # ``new Cart()`` in a test is a traced call to the class node.
+            if test not in built_by_test:
+                built_by_test[test] = {
+                    r["source_qualified"] for r in conn.execute(
+                        "SELECT e.source_qualified FROM edges e "
+                        "JOIN nodes n ON n.qualified_name = e.source_qualified "
+                        "WHERE e.kind = 'TESTED_BY' AND e.target_qualified = ? "
+                        "AND n.kind = 'Class'",
+                        (test,),
+                    ).fetchall()
+                }
+            return built_by_test[test]
+
+        row = conn.execute(
+            "SELECT qualified_name, kind, name, file_path, language FROM nodes "
+            "WHERE qualified_name = ?",
+            (qualified_name,),
+        ).fetchone()
+        if not row or row["language"] != "php":
+            return []
+        if row["kind"] == "Class":
+            symbol_rows = conn.execute(
+                "SELECT n.qualified_name, n.name FROM edges e "
+                "JOIN nodes n ON n.qualified_name = e.target_qualified "
+                "WHERE e.source_qualified = ? AND e.kind = 'CONTAINS' "
+                "AND n.kind = 'Function'",
+                (qualified_name,),
+            ).fetchall()
+        elif row["kind"] == "File":
+            symbol_rows = conn.execute(
+                "SELECT qualified_name, name FROM nodes "
+                "WHERE file_path = ? AND kind = 'Function'",
+                (row["file_path"],),
+            ).fetchall()
+        elif row["kind"] == "Function":
+            symbol_rows = [row]
+        else:
+            return []
+
+        tests: list[str] = []
+        for symbol_qn, symbol_name in (
+            (r["qualified_name"], r["name"]) for r in symbol_rows
+        ):
+            # The edge's source stays the bare name while it is ambiguous. The
+            # text match only narrows the rows; the parsed list decides.
+            for edge in conn.execute(
+                "SELECT target_qualified, extra FROM edges "
+                "WHERE kind = 'TESTED_BY' AND source_qualified = ? "
+                "AND instr(extra, ?) > 0",
+                (symbol_name, json.dumps(symbol_qn)),
+            ).fetchall():
+                try:
+                    extra = json.loads(edge["extra"] or "{}")
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                candidates = extra.get("ambiguous_targets") if isinstance(extra, dict) else None
+                test = edge["target_qualified"]
+                if (
+                    not isinstance(candidates, list)
+                    or symbol_qn not in candidates
+                    or test == symbol_qn
+                    or test in tests
+                ):
+                    continue
+                owners = built(test) & {
+                    owner(c) for c in candidates if isinstance(c, str)
+                }
+                if owners and owner(symbol_qn) not in owners:
+                    continue
+                tests.append(test)
+        return tests
+
     def _get_test_helper_routes(
         self, seeds: list[str], max_depth: int, max_callers: int, repo_root: str | None,
     ) -> dict[str, dict[str, Any]]:
