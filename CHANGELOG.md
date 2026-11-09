@@ -4,6 +4,15 @@
 
 ### Added
 
+- HTML pages (`.html`, `.htm`) are indexed (#521). They used to give nothing at
+  all. Inline scripts are parsed as JavaScript or TypeScript with the page's own
+  line numbers, and a `<script src>` becomes an import of the local file, so
+  `importers_of` lists the pages that load a script. An `onclick` that calls a
+  function on the page becomes a call. A `div`, `section` or `article` with an id
+  becomes a new `DocSection` node, which you can find by its anchor or its first
+  heading. The body text is not indexed. Style blocks and heading anchors stay
+  out, and pages over 2 MB keep only their file node. Run `build` to pick up
+  pages in a graph you already have.
 - Python modules that replace themselves in `sys.modules` are followed to the
   module they install. A compatibility shim such as
   `sys.modules[__name__] = importlib.import_module("app.services.billing")`

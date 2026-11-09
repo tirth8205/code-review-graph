@@ -1127,6 +1127,8 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
     ".scala": "scala",
     ".sol": "solidity",
     ".vue": "vue",
+    ".html": "html",
+    ".htm": "html",
     ".dart": "dart",
     ".r": "r",  # .lower() in detect_language handles .R → .r
     ".mjs": "javascript",
@@ -3137,6 +3139,120 @@ def _yaml_scalar(node: object) -> Optional[str]:
     return None
 
 
+# Elements that make a ``DocSection`` when they carry an id. Headings stay out:
+# nested inside a section they add a second node for the same place.
+_HTML_SECTION_TAGS = frozenset({"article", "div", "section"})
+_HTML_HEADING_TAGS = frozenset({"h1", "h2", "h3", "h4", "h5", "h6"})
+_HTML_TEMPLATE_MARKERS = ("{{", "{%", "<%", "${")
+# The ``type`` values of a script a browser runs. Anything else holds data
+# (``application/json``) or text for a template engine (``text/x-template``).
+_HTML_JAVASCRIPT_TYPES = frozenset({
+    "",
+    "application/ecmascript",
+    "application/javascript",
+    "application/x-javascript",
+    "module",
+    "text/babel",
+    "text/ecmascript",
+    "text/javascript",
+    "text/jsx",
+})
+_HTML_TYPESCRIPT_TYPES = frozenset({"application/typescript", "text/typescript"})
+
+
+def _html_start_tag(element: Any) -> Any:
+    """Return the opening tag of an element, if the page has one."""
+    for child in element.children:
+        if child.type in ("start_tag", "self_closing_tag"):
+            return child
+    return None
+
+
+def _html_tag_name(start_tag: Any) -> str:
+    for child in start_tag.children:
+        if child.type == "tag_name":
+            return child.text.decode("utf-8", errors="replace").lower()
+    return ""
+
+
+def _html_attributes(start_tag: Any) -> dict[str, str]:
+    """Read a tag's attributes. HTML names ignore case; the first one wins."""
+    attributes: dict[str, str] = {}
+    for attribute in start_tag.children:
+        if attribute.type != "attribute":
+            continue
+        name = ""
+        value = ""
+        for part in attribute.children:
+            if part.type == "attribute_name":
+                name = part.text.decode("utf-8", errors="replace").lower()
+            elif part.type == "attribute_value":
+                value = part.text.decode("utf-8", errors="replace")
+            elif part.type == "quoted_attribute_value":
+                for inner in part.children:
+                    if inner.type == "attribute_value":
+                        value = inner.text.decode("utf-8", errors="replace")
+        if name and name not in attributes:
+            attributes[name] = html.unescape(value)
+    return attributes
+
+
+def _html_script_language(attributes: dict[str, str]) -> Optional[str]:
+    """Return the grammar for a script's text, or None when it holds data."""
+    if attributes.get("lang", "").strip().lower() in ("ts", "typescript"):
+        return "typescript"
+    script_type = attributes.get("type", "").split(";")[0].strip().lower()
+    if script_type in _HTML_TYPESCRIPT_TYPES:
+        return "typescript"
+    return "javascript" if script_type in _HTML_JAVASCRIPT_TYPES else None
+
+
+def _html_is_local_src(src: str) -> bool:
+    """Whether a script's ``src`` names a file, not a URL or a template."""
+    if not src or src.startswith("//") or re.match(r"[A-Za-z][A-Za-z0-9+.-]*:", src):
+        return False
+    return not any(marker in src for marker in _HTML_TEMPLATE_MARKERS)
+
+
+def _html_first_heading(element: Any, max_chars: int) -> Optional[str]:
+    """Return a section's first heading, in its own words and capped.
+
+    A nested section keeps its heading to itself. The prose is left out on
+    purpose: this is a label for finding the section, not its content.
+    """
+    stack = list(reversed(element.children))
+    while stack:
+        node = stack.pop()
+        if node.type != "element":
+            continue
+        start_tag = _html_start_tag(node)
+        tag = _html_tag_name(start_tag) if start_tag is not None else ""
+        if tag in _HTML_HEADING_TAGS:
+            # Entities are leaves of their own: ``Caf&eacute;`` is two pieces
+            # with no gap between them, so pieces join with a space only where
+            # the page had one or a tag.
+            pieces: list[str] = []
+            last_end: Optional[int] = None
+            parts = list(reversed(node.children))
+            while parts:
+                part = parts.pop()
+                if part.type in ("text", "entity"):
+                    if last_end is not None and part.start_byte != last_end:
+                        pieces.append(" ")
+                    pieces.append(part.text.decode("utf-8", errors="replace"))
+                    last_end = part.end_byte
+                else:
+                    parts.extend(reversed(part.children))
+            heading = " ".join(html.unescape("".join(pieces)).split())
+            return heading[:max_chars] or None
+        if tag in _HTML_SECTION_TAGS and start_tag is not None and (
+            _html_attributes(start_tag).get("id", "").strip()
+        ):
+            continue
+        stack.extend(reversed(node.children))
+    return None
+
+
 _YAML_SIMPLE_PATH_SEGMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
 
 
@@ -3208,6 +3324,9 @@ class CodeParser:
     """Parses source files using Tree-sitter and extracts structural information."""
 
     _MODULE_CACHE_MAX = 15_000  # Evict cache to cap memory on huge monorepos
+    _MAX_HTML_BYTES = 2_097_152
+    _MAX_HTML_SECTIONS = 500
+    _MAX_HTML_HEADING_CHARS = 200
     _MAX_GENERIC_YAML_BYTES = 1_048_576
     _MAX_YAML_DEPTH = 100
     _MAX_YAML_NODES = 10_000
@@ -3502,6 +3621,10 @@ class CodeParser:
         # Svelte SFCs: same approach as Vue — extract <script> blocks
         if language == "svelte":
             return self._parse_svelte(path, source)
+
+        # HTML pages: inline scripts as code, id-anchored blocks as sections
+        if language == "html":
+            return self._parse_html(path, source)
 
         # Jupyter notebooks: extract code cells and parse as Python
         if language == "notebook":
@@ -4126,6 +4249,316 @@ class CodeParser:
                     ))
 
         return all_nodes, all_edges
+
+    def _parse_html(
+        self, path: Path, source: bytes,
+    ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
+        """Parse a page: its scripts as code and its anchored blocks as sections.
+
+        Scripts go to the JS/TS parsers as Vue and Svelte blocks do. A
+        ``div``, ``section`` or ``article`` with an id becomes a ``DocSection``
+        carrying its anchor and first heading, which is what a query can find:
+        the prose itself is not indexed.
+        """
+        html_parser = self._get_parser("html")
+        if not html_parser:
+            return [], []
+
+        file_path_str = normalize_file_path(path)
+        test_file = self._is_test_path(file_path_str)
+        file_node = NodeInfo(
+            kind="File",
+            name=file_path_str,
+            file_path=file_path_str,
+            line_start=1,
+            line_end=source.count(b"\n") + 1,
+            language="html",
+            is_test=test_file,
+        )
+        if len(source) > self._MAX_HTML_BYTES:
+            # Generated, most likely. The file node keeps it visible to change
+            # detection and listings.
+            file_node.extra["html_truncated"] = True
+            return [file_node], []
+
+        tree = html_parser.parse(source)
+        all_nodes: list[NodeInfo] = [file_node]
+        all_edges: list[EdgeInfo] = []
+        scripts: list[Any] = []
+        sections: dict[str, NodeInfo] = {}
+        handlers: list[tuple[str, str, int]] = []
+
+        # Iterative: page nesting comes from the input, so it has no safe bound.
+        stack = [tree.root_node]
+        while stack:
+            node = stack.pop()
+            if node.type == "script_element":
+                scripts.append(node)
+                continue
+            if node.type == "style_element":
+                continue
+            # An element never closed has no ``element`` node: the grammar
+            # leaves its opening tag directly under the error.
+            if node.type == "element" or (
+                node.type in ("start_tag", "self_closing_tag")
+                and node.parent is not None
+                and node.parent.type == "ERROR"
+            ):
+                start_tag = node if node.type != "element" else _html_start_tag(node)
+                if start_tag is not None:
+                    attributes = _html_attributes(start_tag)
+                    line = start_tag.start_point[0] + 1
+                    for name, value in attributes.items():
+                        if name.startswith("on") and value:
+                            handlers.append((name, value, line))
+                    self._add_html_section(
+                        node, _html_tag_name(start_tag), attributes, file_path_str,
+                        test_file, sections, file_node,
+                    )
+            stack.extend(reversed(node.children))
+
+        for section in sections.values():
+            all_nodes.append(section)
+            all_edges.append(EdgeInfo(
+                kind="CONTAINS",
+                source=file_path_str,
+                target=self._qualify(section.name, file_path_str, None),
+                file_path=file_path_str,
+                line=section.line_start,
+            ))
+
+        classic_nodes = self._extract_html_scripts(
+            scripts, file_path_str, all_nodes, all_edges,
+        )
+
+        # An inline handler is how a page reaches its own functions. Only names
+        # the page defines are linked: ``alert`` and ``obj.run`` say nothing.
+        # A handler runs in global scope, so a module's functions are out of reach.
+        page_functions = {
+            node.name: self._qualify(node.name, file_path_str, None)
+            for node in classic_nodes
+            if node.kind in ("Function", "Test") and not node.parent_name
+        }
+        for event, value, line in handlers if page_functions else []:
+            seen: set[str] = set()
+            for called in self._html_handler_calls(value):
+                if called in page_functions and called not in seen:
+                    seen.add(called)
+                    all_edges.append(EdgeInfo(
+                        kind="CALLS",
+                        source=file_path_str,
+                        target=page_functions[called],
+                        file_path=file_path_str,
+                        line=line,
+                        extra={"html_event": event},
+                    ))
+
+        # Not only on test pages: a ``test_`` function is a test anywhere, as in
+        # a ``.js`` file.
+        test_qnames = {
+            self._qualify(n.name, n.file_path, n.parent_name)
+            for n in all_nodes
+            if n.is_test and n.kind != "File"
+        }
+        if test_qnames:
+            for edge in list(all_edges):
+                if edge.kind == "CALLS" and edge.source in test_qnames:
+                    all_edges.append(EdgeInfo(
+                        kind="TESTED_BY",
+                        source=edge.target,
+                        target=edge.source,
+                        file_path=edge.file_path,
+                        line=edge.line,
+                    ))
+
+        return all_nodes, all_edges
+
+    def _add_html_section(
+        self,
+        element: Any,
+        tag: str,
+        attributes: dict[str, str],
+        file_path: str,
+        test_file: bool,
+        sections: dict[str, NodeInfo],
+        file_node: NodeInfo,
+    ) -> None:
+        """Record one anchored block. A repeated id keeps the first, as browsers do."""
+        html_id = attributes.get("id", "").strip()
+        if (
+            tag not in _HTML_SECTION_TAGS
+            or not html_id
+            or any(marker in html_id for marker in _HTML_TEMPLATE_MARKERS)
+        ):
+            return
+        name = f"#{html_id}"
+        existing = sections.get(name)
+        if existing is not None:
+            existing.extra["html_id_occurrences"] += 1
+            return
+        if len(sections) >= self._MAX_HTML_SECTIONS:
+            file_node.extra["html_truncated"] = True
+            return
+        extra: dict[str, Any] = {
+            "html_id": html_id,
+            "html_tag": tag,
+            "html_id_occurrences": 1,
+        }
+        heading = _html_first_heading(element, self._MAX_HTML_HEADING_CHARS)
+        if heading:
+            extra["docstring"] = heading
+        sections[name] = NodeInfo(
+            kind="DocSection",
+            name=name,
+            file_path=file_path,
+            line_start=element.start_point[0] + 1,
+            line_end=element.end_point[0] + 1,
+            language="html",
+            is_test=test_file,
+            extra=extra,
+        )
+
+    def _extract_html_scripts(
+        self,
+        scripts: list[Any],
+        file_path: str,
+        all_nodes: list[NodeInfo],
+        all_edges: list[EdgeInfo],
+    ) -> list[NodeInfo]:
+        """Extract a page's scripts, in page order, into the node and edge lists.
+
+        Returns the nodes of the classic scripts: the page's globals.
+        """
+        blocks: list[tuple[Any, bytes, str, int, dict[str, str], set[str], bool]] = []
+        shared_imports: dict[str, str] = {}
+        shared_names: set[str] = set()
+        for script in scripts:
+            start_tag = _html_start_tag(script)
+            attributes = _html_attributes(start_tag) if start_tag is not None else {}
+            if "src" in attributes:
+                # A browser ignores the text of a script that has a ``src``.
+                self._add_html_script_import(
+                    attributes["src"], file_path, script.start_point[0] + 1, all_edges,
+                )
+                continue
+            script_lang = _html_script_language(attributes)
+            raw_text = next(
+                (child for child in script.children if child.type == "raw_text"),
+                None,
+            )
+            if script_lang is None or raw_text is None or not raw_text.text.strip():
+                continue
+            script_parser = self._get_parser(script_lang)
+            if not script_parser:
+                continue
+            script_tree = script_parser.parse(raw_text.text)
+            import_map, defined_names = self._collect_file_scope(
+                script_tree.root_node, script_lang, raw_text.text, file_path,
+            )
+            is_module = attributes.get("type", "").strip().lower() == "module"
+            blocks.append((
+                script_tree.root_node, raw_text.text, script_lang,
+                raw_text.start_point[0], import_map, defined_names, is_module,
+            ))
+            # Classic scripts on a page share one global scope, so a block can
+            # call what another defines. A module's names stay inside it.
+            if not is_module:
+                shared_imports.update(import_map)
+                shared_names |= defined_names
+
+        extracted: list[tuple[list[NodeInfo], list[EdgeInfo], dict[str, str], bool]] = []
+        classic_nodes: list[NodeInfo] = []
+        for root, text, script_lang, line_offset, import_map, defined_names, is_module in blocks:
+            nodes: list[NodeInfo] = []
+            edges: list[EdgeInfo] = []
+            self._extract_from_tree(
+                root, text, script_lang, file_path, nodes, edges,
+                import_map={**shared_imports, **import_map},
+                # A name a module imports shadows a page global of that name.
+                defined_names=(shared_names - import_map.keys()) | defined_names,
+            )
+            for node in nodes:
+                node.line_start += line_offset
+                node.line_end += line_offset
+                node.language = "html"
+            for edge in edges:
+                edge.line += line_offset
+            extracted.append((nodes, edges, import_map, is_module))
+            if not is_module:
+                classic_nodes.extend(nodes)
+
+        # Same-file resolution, as for a script file (``app.handle()`` to the
+        # ``app.handle`` the page assigns), over what each block can see.
+        for nodes, edges, import_map, is_module in extracted:
+            visible = classic_nodes
+            if is_module:
+                visible = nodes + [
+                    node for node in classic_nodes if node.name not in import_map
+                ]
+            all_nodes.extend(nodes)
+            all_edges.extend(self._resolve_call_targets(visible, edges, file_path))
+        return classic_nodes
+
+    def _html_handler_calls(self, handler: str) -> list[str]:
+        """Names an inline handler calls, read with the JavaScript grammar.
+
+        Only a call of a plain name counts: not ``obj.run()``, and nothing in a
+        string or a comment.
+        """
+        js_parser = self._get_parser("javascript")
+        if not js_parser:
+            return []
+        called: list[str] = []
+        stack = [js_parser.parse(handler.encode("utf-8", errors="replace")).root_node]
+        while stack:
+            node = stack.pop()
+            if node.type == "call_expression":
+                function = node.child_by_field_name("function")
+                if function is not None and function.type == "identifier":
+                    called.append(function.text.decode("utf-8", errors="replace"))
+            stack.extend(reversed(node.children))
+        return called
+
+    def _add_html_script_import(
+        self, src: str, file_path: str, line: int, edges: list[EdgeInfo],
+    ) -> None:
+        """Link a page to the script file it loads. URLs and templates say nothing."""
+        src = src.strip()
+        if not _html_is_local_src(src):
+            return
+        relative = src.split("#", 1)[0].split("?", 1)[0]
+        if not relative:
+            return
+        resolved: Optional[str] = None
+        if relative.startswith("/"):
+            if self._repo_root is not None:
+                # As a browser reads the path: ``..`` stops at the root.
+                parts: list[str] = []
+                for part in relative.split("/"):
+                    if part == "..":
+                        if parts:
+                            parts.pop()
+                    elif part not in ("", "."):
+                        parts.append(part)
+                try:
+                    candidate = self._repo_root.joinpath(*parts).resolve()
+                    found = bool(parts) and candidate.is_file()
+                except (OSError, RuntimeError):
+                    found = False
+                if found:
+                    canonical = normalize_file_path(candidate)
+                    if canonical not in self._excluded_files:
+                        resolved = canonical
+        else:
+            module = relative if relative.startswith(".") else f"./{relative}"
+            resolved = self._resolve_module_to_file(module, file_path, "javascript")
+        edges.append(EdgeInfo(
+            kind="IMPORTS_FROM",
+            source=file_path,
+            target=resolved or relative,
+            file_path=file_path,
+            line=line,
+        ))
 
     def _parse_notebook(
         self, path: Path, source: bytes,

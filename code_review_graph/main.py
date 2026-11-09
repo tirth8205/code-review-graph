@@ -559,7 +559,7 @@ async def semantic_search_nodes_tool(
 
     Args:
         query: Search string to match against node names.
-        kind: Optional filter: File, Class, Function, Type, Test, or YamlPath.
+        kind: Optional filter: File, Class, Function, Type, Test, YamlPath, or DocSection.
         limit: Maximum results. Default: 20.
         repo_root: Repository root path. Auto-detected if omitted.
         model: Embedding model for query vectors. Must match the model used
@@ -694,7 +694,7 @@ async def find_large_functions_tool(
 
     Args:
         min_lines: Minimum line count to flag. Default: 50.
-        kind: Optional filter: Function, Class, File, Test, or YamlPath.
+        kind: Optional filter: Function, Class, File, Test, YamlPath, or DocSection.
         file_path_pattern: Filter by file path substring (e.g. "components/").
         limit: Maximum results. Default: 50.
         repo_root: Repository root path. Auto-detected if omitted.
@@ -1324,7 +1324,7 @@ async def cross_repo_search_tool(
 
     Args:
         query: Search string to match against node names.
-        kind: Optional filter: File, Class, Function, Type, Test, or YamlPath.
+        kind: Optional filter: File, Class, Function, Type, Test, YamlPath, or DocSection.
         limit: Maximum results per repo. Default: 20.
         max_results: Maximum merged results across searched repos; total
             reports the untruncated merged count. Default: 50.

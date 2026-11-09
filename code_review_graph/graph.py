@@ -1,6 +1,6 @@
 """SQLite-backed knowledge graph storage and query engine.
 
-Stores code structure as nodes (File, Class, Function, Type, Test, YamlPath) and
+Stores code structure as nodes (File, Class, Function, Type, Test, YamlPath, DocSection) and
 edges (CALLS, IMPORTS_FROM, INHERITS, IMPLEMENTS, CONTAINS, TESTED_BY, DEPENDS_ON, REFERENCES).
 Supports impact-radius queries and subgraph extraction.
 """
@@ -63,8 +63,9 @@ _UPDATE_BATCH = 50_000
 
 # These are the canonical language values stored for the JavaScript ecosystem.
 # JSX files are stored as ``javascript`` and Astro files as ``typescript`` by
-# ``EXTENSION_TO_LANGUAGE``; TSX keeps its own grammar name.
-_JAVASCRIPT_LANGUAGE_FAMILY = ("javascript", "typescript", "tsx")
+# ``EXTENSION_TO_LANGUAGE``; TSX keeps its own grammar name. Nodes from an HTML
+# page's inline scripts are stored as ``html``, and call into script files.
+_JAVASCRIPT_LANGUAGE_FAMILY = ("javascript", "typescript", "tsx", "html")
 _JAVASCRIPT_LANGUAGE_FAMILY_SET = frozenset(_JAVASCRIPT_LANGUAGE_FAMILY)
 
 
@@ -1334,9 +1335,9 @@ class GraphStore:
         returns nothing.
 
         When ``language`` is given, only edges whose source node has a compatible
-        language are returned. JavaScript, TypeScript, and TSX form one family
-        because calls and inheritance routinely cross those source types (JSX is
-        stored as JavaScript; Astro as TypeScript). Other languages require an
+        language are returned. JavaScript, TypeScript, TSX and HTML pages form
+        one family because calls and inheritance routinely cross those source
+        types (JSX is stored as JavaScript; Astro as TypeScript). Other languages require an
         exact match. Bare names are ambiguous across the whole graph, so without
         this filter a common method name like ``clone`` can match a same-named
         method in an unrelated language (#708).

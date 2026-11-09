@@ -1010,6 +1010,7 @@ __SIDECAR_SCRIPT__
   <label class="filter-item"><input type="checkbox" data-kind="Test" checked> Test</label>
   <label class="filter-item"><input type="checkbox" data-kind="Type" checked> Type</label>
   <label class="filter-item"><input type="checkbox" data-kind="YamlPath" checked> YAML Path</label>
+  <label class="filter-item"><input type="checkbox" data-kind="DocSection" checked> Doc Section</label>
 </div>
 <div id="controls">
   <input id="search" type="text" placeholder="Search nodes&#8230;" autocomplete="off" spellcheck="false" aria-label="Search graph nodes by name" aria-controls="search-results" aria-expanded="false">
@@ -1069,10 +1070,10 @@ __SIDECAR_SCRIPT__
 <script>
 "use strict";
 var graphData = __GRAPH_DATA__;
-var KIND_COLOR  = { File:"#58a6ff", Class:"#f0883e", Function:"#3fb950", Test:"#d2a8ff", Type:"#8b949e", YamlPath:"#39c5cf" };
-var KIND_RADIUS = { File:18, Class:12, Function:6, Test:6, Type:5, YamlPath:5 };
-var KIND_AREA   = { File:1018, Class:452, Function:113, Test:113, Type:79, YamlPath:79 };
-var KIND_SHAPE  = { File:d3.symbolCircle, Class:d3.symbolSquare, Function:d3.symbolTriangle, Test:d3.symbolDiamond, Type:d3.symbolCross, YamlPath:d3.symbolWye };
+var KIND_COLOR  = { File:"#58a6ff", Class:"#f0883e", Function:"#3fb950", Test:"#d2a8ff", Type:"#8b949e", YamlPath:"#39c5cf", DocSection:"#e3b341" };
+var KIND_RADIUS = { File:18, Class:12, Function:6, Test:6, Type:5, YamlPath:5, DocSection:5 };
+var KIND_AREA   = { File:1018, Class:452, Function:113, Test:113, Type:79, YamlPath:79, DocSection:79 };
+var KIND_SHAPE  = { File:d3.symbolCircle, Class:d3.symbolSquare, Function:d3.symbolTriangle, Test:d3.symbolDiamond, Type:d3.symbolCross, YamlPath:d3.symbolWye, DocSection:d3.symbolStar };
 var EDGE_COLOR  = { CALLS:"#3fb950", IMPORTS_FROM:"#f0883e", INHERITS:"#d2a8ff", CONTAINS:"rgba(139,148,158,0.15)", IMPLEMENTS:"#f9e2af", TESTED_BY:"#f38ba8", DEPENDS_ON:"#fab387", REFERENCES:"#39c5cf" };
 var communityColorScale = d3.scaleOrdinal(d3.schemeTableau10);
 var communityColoringOn = false;
@@ -2129,7 +2130,8 @@ function escH(s) { return !s ? "" : s.replace(/&/g,"&amp;").replace(/</g,"&lt;")
 
 var KIND_COLOR = {
   Community: "#1f6feb", File: "#58a6ff", Class: "#f0883e",
-  Function: "#3fb950", Test: "#d2a8ff", Type: "#8b949e", YamlPath: "#39c5cf"
+  Function: "#3fb950", Test: "#d2a8ff", Type: "#8b949e", YamlPath: "#39c5cf",
+  DocSection: "#e3b341"
 };
 var EDGE_COLOR = {
   CROSS_COMMUNITY: "#58a6ff", DEPENDS_ON: "#f0883e",
