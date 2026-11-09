@@ -29,9 +29,11 @@ dependencies = [
     # .github/workflows/ci.yml and .github/requirements-minimum.txt.
     "mcp>=1.29.0,<3",
     # fastmcp >=3.2.4 is required for Message-based prompts and includes the
-    # CVE-2025-62800/62801/66416 fixes; <4 prevents the next major release
-    # from breaking the server the way fastmcp 3.0 did. See: #488
-    "fastmcp>=3.2.4,<4",
+    # CVE-2025-62800/62801/66416 fixes. 4.x is tested: it brings the mcp SDK
+    # 2.x, which also serves the 2026-07-28 protocol (server/discover, #919).
+    # <5 stops the next major release from breaking the server the way
+    # fastmcp 3.0 did. See: #488, #970
+    "fastmcp>=3.2.4,<5",
     # main.py imports anyio directly: the MCP tool offload has to use the
     # same thread limiter FastMCP dispatches sync tool bodies through, not
     # asyncio's smaller default executor. A direct import gets a direct

@@ -149,6 +149,14 @@
 - Plain C headers skip the C++ parse through a prefilter (#876, #802).
 - The dev dependency range allows pytest 9 (#1140).
 - Builds and updates use less memory and fewer database commits. The MCP server loads its tool modules on first use, so an idle server holds about 89 MB instead of 144 MB; new flows, flow members and summary rows are written in one transaction each; the files that depend on a changed file come from one query; and community detection no longer decodes every edge's metadata. The graph itself is unchanged (#1139).
+- fastmcp 4 is allowed (`fastmcp>=3.2.4,<5`) and `uv.lock` pins 4.1.6 (#970).
+  fastmcp 4 brings the mcp SDK 2.x, so the server now answers
+  `server/discover` and serves clients on the 2026-07-28 protocol, which
+  issue #919 found it could not do. Older clients still use the
+  `initialize` handshake as before. The prompts import `Message` from
+  `fastmcp.prompts`, which works on fastmcp 3 and 4; the old
+  `fastmcp.prompts.prompt` path is gone in 4 and stopped the server from
+  starting.
 
 ### Fixed
 

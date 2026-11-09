@@ -1,6 +1,6 @@
 """Tests for MCP prompt templates."""
 
-from fastmcp.prompts.prompt import Message
+from fastmcp.prompts import Message
 
 from code_review_graph.prompts import (
     architecture_map_prompt,
