@@ -85,6 +85,15 @@
 - `find_dead_code` collects its edge evidence once, not once per function (#1082, #982).
 - Plain C headers skip the C++ parse through a prefilter (#876, #802).
 - The dev dependency range allows pytest 9 (#1140).
+- `install --gitignore` adds the files and folders that run created to a
+  marked block in the repository's `.gitignore` (#471). It is off by default,
+  because `.claude/`, `.mcp.json` and `CLAUDE.md` can be team files. Only
+  paths that did not exist before the run and that git does not track are
+  listed, so a file you wrote or committed is never ignored. A path some rule
+  already ignores is not repeated. Running install again merges into the same
+  block, `--dry-run` shows the lines it would add, and `uninstall` removes the
+  block and nothing else, so `.gitignore` comes back byte for byte. The
+  `.code-review-graph/` entry keeps its own handling.
 
 ### Fixed
 

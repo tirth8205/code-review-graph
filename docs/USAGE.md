@@ -12,6 +12,8 @@ code-review-graph build      # parse the codebase
 
 `install` detects which AI coding tools you have, writes an MCP server entry for each, installs hooks and skills where the platform supports them, and adds graph instructions to the platform's rules file (`CLAUDE.md`, `AGENTS.md`, and others). `--no-hooks`, `--no-skills` and `--no-instructions` skip those steps; `--dry-run` shows what would be written. Restart the editor or tool afterwards.
 
+`install` always adds `.code-review-graph/` to `.gitignore`. The other files it writes, such as `.claude/`, `.mcp.json` and `CLAUDE.md`, stay visible to git, because a team may want to commit them. Pass `--gitignore` to ignore them as well. It adds a block marked `# >>> code-review-graph install files >>>` that lists only the files and folders that run created and git does not track. A file that was already there, tracked or not, is never listed, and a folder the run created is listed whole. Running install again adds to the same block. `uninstall` removes the block and nothing else; to keep a listed file, delete its line.
+
 To configure one platform only:
 
 ```bash

@@ -77,6 +77,8 @@ code-review-graph install --platform codebuddy
 
 Config file locations are listed in [docs/USAGE.md](docs/USAGE.md#supported-platforms). Requires Python 3.10+.
 
+The files `install` writes, such as `.claude/` and `.mcp.json`, stay visible to git in case your team commits them. `install --gitignore` adds the ones that run created to a marked block in `.gitignore`; `uninstall` removes the block.
+
 For Codex, the installer also places a global `code-review-graph` Skill under
 `$CODEX_HOME/skills/code-review-graph/` (default:
 `~/.codex/skills/code-review-graph/`). It prefers CRG MCP tools and falls back
