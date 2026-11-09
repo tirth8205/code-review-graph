@@ -88,6 +88,22 @@
 
 ### Fixed
 
+- Imports through an npm alias resolve to the local package (#343, PR #880).
+  With `"sharedLib": "npm:@scope/shared@^1.0.0"` in an app's `package.json`,
+  `import x from 'sharedLib/some/module'` was stored as a bare string, so
+  `importers_of` and the impact radius found none of the apps that use the
+  shared package. Now, when one package in the repository is named
+  `@scope/shared`, the import reaches its file. Entry points are read as for a
+  workspace member (`exports`, then `source`, `module` and `main`, with
+  `dist/` tried under `src/`). A wrong edge is worse than a missing one, so
+  the import stays bare when the nearest `package.json` that names the
+  dependency gives it an ordinary version, when the local package's
+  `version` is outside the alias range, when two local packages share the
+  name, when that `package.json` cannot be read, or when the package or file
+  is one the build ignores. tsconfig `paths` still win. An alias also wins
+  over a workspace member with the same name, because npm installs the
+  aliased package under it. `update` does not re-parse importers when only a
+  `package.json` changes; run `build` after changing an alias.
 - TypeScript and JavaScript imports resolve against `compilerOptions.baseUrl`
   when no `paths` pattern matches them, as `tsc` does. A tsconfig that sets
   `baseUrl` without `paths` resolved no non-relative import at all: on a
