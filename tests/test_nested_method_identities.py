@@ -734,3 +734,105 @@ public class Outer
 }
 ''')
     assert _methods(parser, nodes) == {'One.cs::App.Outer.Inner.Handle'}
+
+
+CHAINED_SAME_LEAF = {
+    'Same.java': '''class Alpha {
+    static class Same {
+        void run() { helper(); this.helper(); }
+        void helper() {}
+    }
+}
+class Beta {
+    static class Same {
+        void run() { helper(); this.helper(); }
+        void helper() {}
+    }
+}
+''',
+    'Same.kt': '''class Alpha {
+    class Same {
+        fun run() {
+            helper()
+            this.helper()
+        }
+        fun helper() {}
+    }
+}
+class Beta {
+    class Same {
+        fun run() {
+            helper()
+            this.helper()
+        }
+        fun helper() {}
+    }
+}
+''',
+    'Same.swift': '''class Alpha {
+    class Same {
+        func run() {
+            helper()
+            self.helper()
+        }
+        func helper() {}
+    }
+}
+class Beta {
+    class Same {
+        func run() {
+            helper()
+            self.helper()
+        }
+        func helper() {}
+    }
+}
+''',
+    'Same.scala': '''object Alpha {
+  class Same {
+    def run(): Unit = { helper(); this.helper() }
+    def helper(): Unit = ()
+  }
+}
+object Beta {
+  class Same {
+    def run(): Unit = { helper(); this.helper() }
+    def helper(): Unit = ()
+  }
+}
+''',
+    'Same.ts': '''class Alpha {
+  static Same = class {
+    run() { return this.helper(); }
+    helper() { return 1; }
+  };
+}
+class Beta {
+  static Same = class {
+    run() { return this.helper(); }
+    helper() { return 2; }
+  };
+}
+''',
+}
+
+
+@pytest.mark.parametrize('filename', sorted(CHAINED_SAME_LEAF))
+def test_chained_languages_bind_local_calls_in_their_own_scope(filename):
+    """A same-leaf nested class's local calls stay in that class (#934).
+
+    Before the chain was kept, both ``Same`` classes shared one set of method
+    nodes. Keeping it must not swap that for ``Beta.Same.run`` calling
+    ``Alpha.Same.helper``, a confident edge into the wrong class.
+    """
+    parser, nodes, edges = _parse(filename, CHAINED_SAME_LEAF[filename])
+    calls = {
+        (e.source, e.target) for e in edges
+        if e.kind == 'CALLS' and e.source.endswith('.run')
+    }
+    if not calls:
+        pytest.skip(f'{filename}: grammar yields no member calls here')
+    for source, target in calls:
+        scope = source.rsplit('.', 1)[0]
+        assert target in (f'{scope}.helper', 'helper'), (source, target)
+    assert any(target.endswith('.helper') for _, target in calls)

@@ -2813,6 +2813,12 @@ def _php_docblock_marks_test(node) -> bool:
     )
 
 
+# Languages with their own rule for nested member scopes: Python and C++ keep
+# leaf spellings, Julia joins its own way, and the namespace-aware pass binds
+# C# calls (#934, #964). Every other language keeps the full scope chain.
+_SEPARATE_SCOPE_RULE_LANGUAGES = frozenset({"python", "cpp", "julia", "csharp"})
+
+
 class _OuterBinding(str):
     """A C# binding declared *levels* containing types out from its use.
 
@@ -6727,20 +6733,24 @@ class CodeParser:
             if node.language == "python" and node.parent_name
             and "." in node.parent_name and node.kind in ("Function", "Test")
         }
-        # Every nested Ruby class has a dotted scope, so a dot proves nothing
-        # there. A Ruby leaf is ambiguous only when two scopes really share it.
-        ruby_scopes_by_leaf: dict[str, set[str]] = {}
+        # Ruby and every language that keeps the full nested scope chain
+        # (#934) give each nested member a dotted scope, so a dot proves
+        # nothing there. A leaf is ambiguous only when two scopes share it.
+        chained_scopes_by_leaf: dict[str, set[str]] = {}
         for node in nodes:
-            if node.language == "ruby" and node.parent_name and node.kind in ("Function", "Test"):
-                ruby_scopes_by_leaf.setdefault(
+            if (
+                node.language not in _SEPARATE_SCOPE_RULE_LANGUAGES
+                and node.parent_name and node.kind in ("Function", "Test")
+            ):
+                chained_scopes_by_leaf.setdefault(
                     node.parent_name.rsplit(".", 1)[-1], set(),
                 ).add(node.parent_name)
         disambiguated_leaves.update(
-            leaf for leaf, scopes in ruby_scopes_by_leaf.items() if len(scopes) > 1
+            leaf for leaf, scopes in chained_scopes_by_leaf.items() if len(scopes) > 1
         )
         disambiguated_scopes = {
             node.parent_name for node in nodes
-            if node.language in ("python", "ruby") and node.parent_name
+            if node.language not in ("cpp", "julia", "csharp") and node.parent_name
             and node.kind in ("Function", "Test")
             and node.parent_name.rsplit(".", 1)[-1] in disambiguated_leaves
         }
@@ -6775,7 +6785,7 @@ class CodeParser:
                 scope in disambiguated_scopes
                 and edge.kind in ("CALLS", "REFERENCES")
                 and "::" not in edge.target
-                and (not has_receiver or receiver == "self")
+                and (not has_receiver or receiver in ("self", "this"))
             ):
                 entries = candidate_entries(edge.target, edge.kind)
                 local = [qualified for qualified, parent in entries if parent == scope]
