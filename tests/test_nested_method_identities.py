@@ -836,3 +836,34 @@ def test_chained_languages_bind_local_calls_in_their_own_scope(filename):
         scope = source.rsplit('.', 1)[0]
         assert target in (f'{scope}.helper', 'helper'), (source, target)
     assert any(target.endswith('.helper') for _, target in calls)
+
+
+def test_java_import_of_a_nested_class_targets_its_full_scope_chain(tmp_path):
+    """``import app.Outer.Inner`` names ``Outer.Inner``, whose members now carry
+    the whole chain (#934); a leaf-only ``Outer.java::Inner.pong`` target would
+    name a node that no longer exists."""
+    files = {
+        'app/Outer.java': (
+            'package app;\n'
+            'public class Outer {\n'
+            '    public static class Inner { public void pong() {} }\n'
+            '}\n'
+        ),
+        'other/Caller.java': (
+            'package other;\n'
+            'import app.Outer.Inner;\n'
+            'public class Caller { void go() { Inner x = new Inner(); x.pong(); } }\n'
+        ),
+    }
+    for name, source in files.items():
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source, encoding='utf-8')
+    with GraphStore(tmp_path / '.code-review-graph' / 'graph.db') as store:
+        full_build(tmp_path, store)
+        outer = (tmp_path / 'app/Outer.java').as_posix()
+        callers = {
+            e.source_qualified for e in store.get_edges_by_target(f'{outer}::Outer.Inner.pong')
+            if e.kind == 'CALLS'
+        }
+        assert callers == {f'{(tmp_path / "other/Caller.java").as_posix()}::Caller.go'}

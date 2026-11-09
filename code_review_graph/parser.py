@@ -2819,6 +2819,23 @@ def _php_docblock_marks_test(node) -> bool:
 _SEPARATE_SCOPE_RULE_LANGUAGES = frozenset({"python", "cpp", "julia", "csharp"})
 
 
+def _nested_import_chain(module: str, resolved: str, symbol: str) -> str:
+    """Return the in-file scope chain a JVM import of a nested class names.
+
+    ``import app.Outer.Inner`` resolves to ``app/Outer.java``; the class it
+    names is ``Outer.Inner`` there, and its members carry that whole chain
+    (#934). Any other import keeps *symbol* unchanged.
+    """
+    parts = module.split(".")
+    if len(parts) < 2 or parts[-1] != symbol:
+        return symbol
+    stem = Path(resolved).stem
+    for index in range(len(parts) - 2, -1, -1):
+        if parts[index] == stem:
+            return ".".join(parts[index:])
+    return symbol
+
+
 class _OuterBinding(str):
     """A C# binding declared *levels* containing types out from its use.
 
@@ -20481,6 +20498,8 @@ class CodeParser:
         export_target = self._resolve_exported_symbol(resolved, symbol_name)
         if export_target:
             return export_target
+        if language in ("java", "kotlin", "scala"):
+            symbol_name = _nested_import_chain(module, resolved, symbol_name)
         return self._qualify(symbol_name, resolved, None)
 
     def _python_reexport_origin(self, module_file: str, symbol_name: str) -> str:
