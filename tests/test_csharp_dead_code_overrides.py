@@ -2,8 +2,6 @@
 
 from pathlib import Path
 
-import pytest
-
 from code_review_graph.graph import GraphStore
 from code_review_graph.incremental import full_build
 from code_review_graph.refactor import find_dead_code
@@ -16,13 +14,6 @@ def _write(root: Path, files: dict[str, str]) -> None:
         path.write_text(source, encoding="utf-8")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "INHERITS targets stay bare while C# parent_name now carries "
-        "the namespace, so the override check never matches (#964)"
-    ),
-)
 def test_dead_code_keeps_csharp_overrides_of_called_base_members(tmp_path):
     # Callers of ISink.Emit / SinkBase.Flush reach every implementation at
     # run time. find_dead_code honours that by matching the INHERITS target
@@ -61,3 +52,25 @@ def test_dead_code_keeps_csharp_overrides_of_called_base_members(tmp_path):
 
     assert "Emit" not in dead_functions
     assert "Flush" not in dead_functions
+
+
+def test_dead_code_still_reports_a_csharp_namesake_that_overrides_nothing(tmp_path):
+    # Matching the base by its namespaced parent must not keep every same-named
+    # method alive: a type with no INHERITS edge to the called base stays dead.
+    (tmp_path / ".git").mkdir()
+    _write(tmp_path, {
+        "Contracts.cs": "namespace Lib { public interface ISink { void Emit(); } }\n",
+        "Loose.cs": "namespace Lib.Other { public class Loose { public void Emit() {} } }\n",
+        "Logger.cs": (
+            "namespace Lib { public class Logger { private readonly ISink _sink;"
+            " public void Write() { _sink.Emit(); } } }\n"
+        ),
+    })
+    with GraphStore(tmp_path / ".code-review-graph" / "graph.db") as store:
+        full_build(tmp_path, store)
+        dead = {
+            d["qualified_name"].rsplit("::", 1)[-1]
+            for d in find_dead_code(store) if d["kind"] == "Function"
+        }
+
+    assert "Lib.Other.Loose.Emit" in dead
