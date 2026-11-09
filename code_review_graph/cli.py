@@ -914,13 +914,16 @@ def _handle_build_update(args, repo_root: Path, embedding_refresh_kwargs) -> Non
                         brief_lock.release()
 
 
-def _handle_forget(args, repo_root: Path, db_path: Path) -> None:
+def _handle_forget(args, repo_root: Path, db_path: Path, *, legacy: bool = False) -> None:
     """Drop files from the graph. A real run holds the write lock throughout.
 
     Another writer does not cover this work, so standing down says nothing was
-    forgotten. A dry run writes nothing and takes no lock.
+    forgotten. A dry run takes no lock, so it opens the graph read-only: a
+    writable open would upgrade an older schema. *legacy* means the graph is
+    still the old top-level ``.code-review-graph.db``; a real run moves it into
+    *db_path* only once it holds the lock, and a dry run reads it where it is.
     """
-    from .incremental import assert_graph_serves_root
+    from .incremental import _prepare_db_path, assert_graph_serves_root
 
     lock = None
     if not args.dry_run:
@@ -933,7 +936,17 @@ def _handle_forget(args, repo_root: Path, db_path: Path) -> None:
             _exit_if_contended(contended)
     store = None
     try:
-        store = _open_graph_store(db_path, args.command)
+        if args.dry_run:
+            from .graph import GraphStore
+
+            store = GraphStore(
+                repo_root / ".code-review-graph.db" if legacy else db_path,
+                read_only=True,
+            )
+        else:
+            if legacy:
+                _prepare_db_path(repo_root, db_path)
+            store = _open_graph_store(db_path, args.command)
         assert_graph_serves_root(repo_root, store)
         stored_files = store.get_all_files()
         targets = _match_files_to_forget(stored_files, args.paths, repo_root)
@@ -2370,6 +2383,7 @@ def _dispatch() -> None:
         _handle_build_update(args, repo_root, embedding_refresh_kwargs)
         return
 
+    legacy_pending = False
     if args.command in (*_read_only_db_cmds, "dead-code", "forget"):
         if read_only_explicit_data_dir:
             db_path = Path(args.data_dir).expanduser().resolve() / "graph.db"
@@ -2384,13 +2398,18 @@ def _dispatch() -> None:
             and legacy_db.exists()
         ):
             # Preserve the established one-time legacy migration, but do not
-            # materialize graph state when neither database exists.
-            db_path = get_db_path(repo_root)
+            # materialize graph state when neither database exists. ``forget``
+            # moves it itself, once it holds the write lock.
+            if args.command == "forget":
+                legacy_pending = True
+            else:
+                db_path = get_db_path(repo_root)
     else:
         db_path = get_db_path(repo_root)
     if (
         args.command in ("dead-code", "forget", *_read_only_db_cmds)
         and not db_path.exists()
+        and not legacy_pending
     ):
         print(
             f"No graph found at {db_path}. Run `code-review-graph build` first.",
@@ -2398,7 +2417,7 @@ def _dispatch() -> None:
         )
         raise SystemExit(1)
     if args.command == "forget":
-        _handle_forget(args, repo_root, db_path)
+        _handle_forget(args, repo_root, db_path, legacy=legacy_pending)
         return
     store = _open_graph_store(db_path, args.command)
 

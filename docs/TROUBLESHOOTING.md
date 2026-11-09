@@ -243,7 +243,8 @@ exit `75` (`EX_TEMPFAIL`).
 
 - `forget` and `embed` take the same lock and exit `75` the same way, but nothing
   else does their work, so the message says so: run them again, or pass `--wait`.
-  `forget --dry-run` writes nothing and takes no lock.
+  `forget --dry-run` writes nothing and takes no lock. It reads the graph
+  read-only, so a graph from an older release needs an `update` first.
 - `watch` takes the lock for each write and lets go between them, so a running
   watcher does not stop a build. If another writer holds the lock, the watcher
   keeps its changes and tries again a second later, and it can still be stopped

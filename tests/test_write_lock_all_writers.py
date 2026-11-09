@@ -9,10 +9,13 @@ stop every build for as long as the watcher lived.
 
 from __future__ import annotations
 
+import shutil
+import sqlite3
 import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 
 import pytest
 from watchdog.events import FileModifiedEvent
@@ -20,6 +23,7 @@ from watchdog.events import FileModifiedEvent
 from code_review_graph import cli, incremental
 from code_review_graph.graph import GraphStore
 from code_review_graph.locking import WriteLock
+from code_review_graph.migrations import LATEST_VERSION
 from code_review_graph.tools import docs as docs_module
 from tests.test_watch_robustness import FakeObserver
 
@@ -110,6 +114,78 @@ def test_forget_dry_run_writes_nothing_so_needs_no_lock(repo, held, monkeypatch,
     assert code == 0
     assert "[dry-run]" in capsys.readouterr().out
     assert "dropHelper" in _names(repo, repo / "drop.py")
+
+
+def _schema_version(db) -> int:
+    with sqlite3.connect(db) as conn:
+        row = conn.execute(
+            "SELECT value FROM metadata WHERE key = 'schema_version'"
+        ).fetchone()
+    return int(row[0])
+
+
+def test_forget_dry_run_never_upgrades_an_older_graph(repo, held, monkeypatch, capsys):
+    """A writable open migrates, so the preview reads the graph read-only."""
+    db = incremental.get_db_path(repo, read_only=True)
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "UPDATE metadata SET value = ? WHERE key = 'schema_version'",
+            (str(LATEST_VERSION - 1),),
+        )
+    conn.close()
+
+    code = _run_cli(monkeypatch, "forget", "drop.py", "--dry-run", "--repo", str(repo))
+
+    assert code == 1
+    assert "code-review-graph update" in capsys.readouterr().err
+    assert _schema_version(db) == LATEST_VERSION - 1
+
+
+@pytest.fixture
+def legacy_repo(repo):
+    """The same graph in the old top-level ``.code-review-graph.db`` layout."""
+    data_dir = repo / ".code-review-graph"
+    source = sqlite3.connect(data_dir / "graph.db")
+    target = sqlite3.connect(repo / ".code-review-graph.db")
+    try:
+        source.backup(target)
+    finally:
+        source.close()
+        target.close()
+    shutil.rmtree(data_dir)
+    return repo
+
+
+def test_forget_leaves_a_legacy_graph_alone_when_it_stands_down(legacy_repo, monkeypatch):
+    lock = WriteLock(legacy_repo / ".code-review-graph" / "graph.db")
+    assert lock.acquire()
+    try:
+        code = _run_cli(monkeypatch, "forget", "drop.py", "--repo", str(legacy_repo))
+    finally:
+        lock.release()
+
+    assert code == cli.EXIT_TEMPFAIL
+    assert (legacy_repo / ".code-review-graph.db").is_file()
+    assert not (legacy_repo / ".code-review-graph" / "graph.db").exists()
+
+
+def test_forget_dry_run_reads_a_legacy_graph_where_it_is(legacy_repo, monkeypatch, capsys):
+    code = _run_cli(
+        monkeypatch, "forget", "drop.py", "--dry-run", "--repo", str(legacy_repo),
+    )
+
+    assert code == 0
+    assert "drop.py" in capsys.readouterr().out
+    assert (legacy_repo / ".code-review-graph.db").is_file()
+    assert not (legacy_repo / ".code-review-graph" / "graph.db").exists()
+
+
+def test_forget_moves_a_legacy_graph_under_the_lock_then_forgets(legacy_repo, monkeypatch):
+    assert _run_cli(monkeypatch, "forget", "drop.py", "--repo", str(legacy_repo)) == 0
+
+    assert not (legacy_repo / ".code-review-graph.db").exists()
+    assert _names(legacy_repo, legacy_repo / "drop.py") == set()
+    assert "keepHelper" in _names(legacy_repo, legacy_repo / "keep.py")
 
 
 def test_forget_wait_runs_once_the_writer_has_finished(repo, held, monkeypatch):
@@ -208,6 +284,38 @@ def test_embed_holds_the_lock_while_it_works_then_lets_go(repo, monkeypatch):
     assert _lock_is_free(repo)
 
 
+def test_embed_writes_the_graph_whose_lock_it_holds(repo, monkeypatch, tmp_path):
+    """The path is resolved once: a registration that changes during ``--wait``
+    must not send the embeddings to a graph whose lock this run never took."""
+    locked = (repo / ".code-review-graph" / "graph.db").resolve()
+    elsewhere = tmp_path / "elsewhere"
+    used: list[Path] = []
+
+    class Recording(_FakeEmbeddingStore):
+        def __init__(self, db_path, *_args, **_kwargs) -> None:
+            used.append(Path(db_path).resolve())
+
+    def embed_all(store, _emb_store):
+        used.append(Path(store.db_path).resolve())
+        return 0
+
+    real_lock_or_skip = docs_module._lock_or_skip
+
+    def moved_while_waiting(*args, **kwargs):
+        outcome = real_lock_or_skip(*args, **kwargs)
+        monkeypatch.setenv("CRG_DATA_DIR", str(elsewhere))
+        return outcome
+
+    monkeypatch.setattr(docs_module, "EmbeddingStore", Recording)
+    monkeypatch.setattr(docs_module, "embed_all_nodes", embed_all)
+    monkeypatch.setattr(docs_module, "_lock_or_skip", moved_while_waiting)
+
+    assert docs_module.embed_graph(repo_root=str(repo))["status"] == "ok"
+
+    assert used == [locked, locked]
+    assert not (elsewhere / "graph.db").exists()
+
+
 def test_embed_lets_go_of_the_lock_when_it_fails(repo):
     result = docs_module.embed_graph(repo_root=str(repo), provider="moonbase")
 
@@ -297,6 +405,30 @@ def test_watch_batch_failure_still_lets_go_of_the_lock(repo):
             handler.raise_if_failed()
 
     assert _lock_is_free(repo)
+
+
+def test_a_recursive_watch_is_not_woken_by_its_own_write_lock(repo):
+    """Taking the lock rewrites ``write.lock``. A watch on the whole repository
+    sees that, and acting on it took the lock again, once a debounce, for ever."""
+    from watchdog.observers import Observer
+
+    with GraphStore(incremental.get_db_path(repo)) as store:
+        handler = incremental._create_watch_handler(repo, store, None)
+        observer = Observer()
+        observer.schedule(handler, str(repo), recursive=True)
+        handler.start()
+        observer.start()
+        try:
+            handler.dispatch(_edit(repo, "oneBatch"))
+            assert _wait_for(lambda: handler.events_seen > 0)
+            time.sleep(1.5)  # the batch's own graph writes come back once
+            settled = handler.events_seen
+            time.sleep(1.5)
+            assert handler.events_seen == settled
+        finally:
+            observer.stop()
+            observer.join(timeout=_BOUND)
+            handler.stop()
 
 
 # --- watch, start-up ----------------------------------------------------------

@@ -6,8 +6,9 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from ..constants import read_only_requested
 from ..embeddings import EmbeddingStore, embed_all_nodes
-from ..incremental import find_project_root, get_db_path
+from ..incremental import _prepare_db_path, find_project_root, get_db_path
 from ._common import (
     _get_store,
     _resolve_root,
@@ -68,17 +69,22 @@ def embed_graph(
         stood down because another writer holds the graph's write lock returns
         ``status: contended`` and embeds nothing.
     """
+    # Resolved once and used throughout: resolving again after a ``--wait``
+    # could find a newly registered data directory whose lock this run never
+    # took.
+    root = _resolve_root(repo_root)
+    db_path = get_db_path(root, read_only=True)
     lock, contended = _lock_or_skip(
-        get_db_path(_resolve_root(repo_root), read_only=True),
-        wait_for_lock,
-        outcome="nothing was embedded",
+        db_path, wait_for_lock, outcome="nothing was embedded",
     )
     if contended is not None:
         return contended
     try:
-        store, root = _get_store(repo_root)
+        if not read_only_requested():
+            # What ``get_db_path(root)`` did here before, now under the lock.
+            _prepare_db_path(root, db_path)
+        store, root = _get_store(str(root), db_path=db_path)
         try:
-            db_path = get_db_path(root)
             try:
                 emb_store = EmbeddingStore(db_path, provider=provider, model=model)
             except ValueError as exc:

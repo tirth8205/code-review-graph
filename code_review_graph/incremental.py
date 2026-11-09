@@ -33,7 +33,7 @@ from .constants import (
 )
 from .errors import ChangeDiscoveryError, GraphRootMismatchError, GraphStoreError
 from .graph import GraphStore
-from .locking import WriteLock
+from .locking import WriteLock, write_lock_path
 from .parser import CodeParser, normalize_file_path
 
 _MAX_PARSE_WORKERS = env_int("CRG_PARSE_WORKERS", min(os.cpu_count() or 4, 8))
@@ -3429,6 +3429,19 @@ class _WatchSupervisor:
             pass
 
 
+def _event_only_touches(event: Any, target: Path) -> bool:
+    """True when every path *event* names is *target*, however it is spelled."""
+    paths = [
+        os.fsdecode(path)
+        for path in (event.src_path, getattr(event, "dest_path", ""))
+        if path
+    ]
+    if not paths or any(os.path.basename(path) != target.name for path in paths):
+        return False
+    wanted = os.path.normcase(os.path.realpath(target))
+    return all(os.path.normcase(os.path.realpath(path)) == wanted for path in paths)
+
+
 def _create_watch_handler(
     repo_root: Path,
     store: GraphStore,
@@ -3663,12 +3676,18 @@ def _create_watch_handler(
 
     processor = WatchBatchProcessor()
     debouncer = _WatchDebouncer(_DEBOUNCE_SECONDS, processor.process)
+    write_lock_file = write_lock_path(store.db_path)
 
     class GraphUpdateHandler(FileSystemEventHandler):
         def dispatch(self, event: FileSystemEvent) -> None:
             if event.event_type not in {"created", "modified", "deleted", "moved"}:
                 return
             if event.is_directory and event.event_type == "modified":
+                return
+            if _event_only_touches(event, write_lock_file):
+                # Every batch rewrites the lock file when it takes the lock. A
+                # watch on the whole repository sees that, and acting on it
+                # would take the lock again, once a debounce, for ever.
                 return
             if event.is_directory and on_directory_changed is not None:
                 on_directory_changed()
