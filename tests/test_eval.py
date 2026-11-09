@@ -612,13 +612,6 @@ def test_impact_accuracy_emits_both_ground_truth_modes():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         repo_path = _make_repo(tmpdir, two_file_commit=True)
-        # The runner resolves the clone path before full_build (see
-        # runner.run_eval). The parser resolves cross-file import/call
-        # targets, so building from a non-canonical root (macOS /var vs
-        # /private/var) stores node names and edge targets under different
-        # prefixes and no edge ever matches a node. Build and run against
-        # the resolved root, exactly as production eval does.
-        repo_path = repo_path.resolve()
         store = _build_store(repo_path)
         try:
             results = impact_accuracy.run(repo_path, store, _mock_config())
@@ -661,6 +654,35 @@ def test_impact_accuracy_emits_both_ground_truth_modes():
     assert co["true_positives"] >= 1
     assert 0.0 <= co["precision"] <= 1.0
     assert 0.0 <= co["recall"] <= 1.0
+
+
+def test_impact_accuracy_joins_paths_under_the_resolved_root(tmp_path):
+    """Review of #823: a symlinked root still matches the stored paths."""
+    from code_review_graph.eval.benchmarks import impact_accuracy
+
+    repo_path = _make_repo(tmp_path, two_file_commit=True)
+    link = tmp_path / "linked_repo"
+    try:
+        link.symlink_to(repo_path, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are not available here")
+
+    store = _build_store(link)
+    try:
+        results = impact_accuracy.run(link, store, _mock_config())
+    finally:
+        store.close()
+
+    [co] = [r for r in results if r["ground_truth_mode"] == impact_accuracy.MODE_CO_CHANGE]
+    assert co["status"] == "ok"
+    assert co["seed_file"] == "helper.py"
+    assert co["predicted_files"] > 0
+    assert co["true_positives"] >= 1
+    [graph_row] = [
+        r for r in results if r["ground_truth_mode"] == impact_accuracy.MODE_GRAPH_DERIVED
+    ]
+    assert graph_row["status"] == "ok"
+    assert graph_row["predicted_files"] >= 2
 
 
 def test_impact_accuracy_co_change_skipped_for_single_file_commit():

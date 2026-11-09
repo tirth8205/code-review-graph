@@ -136,15 +136,13 @@ def run(repo_path: Path, store, config: dict) -> list[dict]:
 
     results = []
     repo = config["name"]
-    # Join against the root exactly as handed to full_build: the runner
-    # resolves the clone path once and builds the graph against it, so any
-    # resolution done here must match the stored node paths. Forcing a
-    # resolve() here would break graphs built from a non-canonical root
-    # (e.g. macOS /var vs /private/var symlinks).
-    root = Path(repo_path)
+    # full_build stores paths under the resolved root (``expanduser`` and
+    # ``resolve``), so join against the same form. A relative or symlinked
+    # spelling (macOS /var is /private/var) would otherwise match no node.
+    root = Path(repo_path).expanduser().resolve()
     for tc in config.get("test_commits", []):
         sha = tc["sha"]
-        changed = _get_changed_files(repo_path, sha)
+        changed = _get_changed_files(root, sha)
         if not changed:
             continue
 
@@ -163,7 +161,7 @@ def run(repo_path: Path, store, config: dict) -> list[dict]:
         # --- Mode 1: graph-derived ground truth (circular — upper bound) ---
         try:
             analysis = analyze_changes(
-                store, sorted(changed_abs), repo_root=str(repo_path),
+                store, sorted(changed_abs), repo_root=str(root),
                 base=sha + "~1",
             )
         except Exception as exc:
