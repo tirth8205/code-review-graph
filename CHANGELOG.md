@@ -10,9 +10,9 @@
   `xsl:call-template` becomes a call. `xsl:apply-templates` is chosen from the
   input document when the stylesheet runs, so it becomes a call only where its
   `select` names a step or its `mode` narrows the choice. Where neither does, no
-  edge is added and `dynamic_apply_count` on the template says so. Match templates
-  are never reported as dead code. Run `build` to pick up stylesheets in a graph
-  you already have.
+  edge is added and `dynamic_apply_count` on the template says so. A template with
+  a `match`, named or not, is never reported as dead code. Run `build` to pick up
+  stylesheets in a graph you already have.
 - Python modules that replace themselves in `sys.modules` are followed to the
   module they install. A compatibility shim such as
   `sys.modules[__name__] = importlib.import_module("app.services.billing")`

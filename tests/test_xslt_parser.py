@@ -6,6 +6,7 @@ transform XML, as many C# ones do. See: #1052
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
@@ -112,6 +113,21 @@ def test_same_match_and_mode_keep_both_templates(parsed):
         edge.target for edge in edges
         if edge.kind == "CONTAINS" and "match=para mode=toc" in edge.target
     } == {parser._node_qualified(node) for node in para}
+
+
+def test_one_pattern_three_times_on_one_line_keeps_all_three():
+    """A compact stylesheet can repeat a pattern on one line. See: #1161"""
+    source = _stylesheet(
+        '<xsl:template match="p" priority="3"/><xsl:template match="p" priority="2"/>'
+        '<xsl:template match="p" priority="1"/>',
+    )
+    parser = CodeParser()
+
+    nodes, edges = parser.parse_bytes(Path("/repo/a.xsl"), source)
+
+    qualified = {parser._node_qualified(node) for node in nodes if node.kind == "Function"}
+    assert len(qualified) == 3
+    assert {edge.target for edge in edges if edge.kind == "CONTAINS"} == qualified
 
 
 def test_contains_edges_link_the_file_to_each_template(parsed):
@@ -237,6 +253,27 @@ def test_select_dot_with_a_mode_links_inside_that_mode():
     assert [edge.target for edge in _calls(edges)] == ["/repo/a.xsl::match=b mode=m"]
 
 
+def test_a_template_with_a_name_and_a_match_is_reached_both_ways():
+    """``name`` and ``match`` together are legal; either can run it. See: #1161"""
+    source = _stylesheet(
+        """<xsl:template match="/">
+  <xsl:apply-templates select="item"/>
+  <xsl:call-template name="render"/>
+</xsl:template>
+<xsl:template name="render" match="item"/>""",
+    )
+
+    nodes, edges = _parse(source)
+
+    assert _templates(nodes)["render"].extra["match"] == "item"
+    assert [edge.target for edge in _calls(edges)] == [
+        "/repo/a.xsl::render", "/repo/a.xsl::render",
+    ]
+    assert [edge.extra["xslt_call"] for edge in _calls(edges)] == [
+        "apply-templates", "call-template",
+    ]
+
+
 def test_a_large_mode_is_not_fanned_out(monkeypatch):
     monkeypatch.setattr(CodeParser, "_MAX_XSLT_MODE_FANOUT", 2)
     source = _stylesheet(
@@ -310,6 +347,38 @@ def test_another_prefix_for_the_xslt_namespace():
 
     assert set(_templates(nodes)) == {"real"}
     assert [edge.target for edge in _calls(edges)] == ["other"]
+
+
+def test_the_default_namespace_can_be_xslt():
+    """No prefix at all is valid XSLT too. See: #1161"""
+    source = b"""<stylesheet version="1.0" xmlns="http://www.w3.org/1999/XSL/Transform">
+  <template match="/"><call-template name="b"/></template>
+  <template name="b"/>
+</stylesheet>"""
+
+    nodes, edges = _parse(source)
+
+    assert set(_templates(nodes)) == {"match=/", "b"}
+    assert _call_pairs(edges) == {("/repo/a.xsl::match=/", "/repo/a.xsl::b")}
+
+
+def test_every_prefix_in_scope_is_read_where_it_is_declared():
+    """Two aliases, one bound on a template only, and one rebound to another namespace."""
+    source = b"""<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
+    xmlns:x="http://www.w3.org/1999/XSL/Transform">
+  <x:template name="a"><xsl:call-template name="b"/></x:template>
+  <xsl:template name="b" xmlns:q="http://www.w3.org/1999/XSL/Transform">
+    <q:call-template name="a"/>
+    <out xmlns:xsl="http://example.com/not-xslt"><xsl:call-template name="fake"/></out>
+  </xsl:template>
+</xsl:stylesheet>"""
+
+    nodes, edges = _parse(source)
+
+    assert set(_templates(nodes)) == {"a", "b"}
+    assert _call_pairs(edges) == {
+        ("/repo/a.xsl::a", "/repo/a.xsl::b"), ("/repo/a.xsl::b", "/repo/a.xsl::a"),
+    }
 
 
 def test_a_simplified_stylesheet_links_from_the_file():
@@ -413,6 +482,19 @@ def test_deep_nesting_does_not_overflow_the_stack():
     assert nodes[0].kind == "File"
 
 
+def test_many_templates_parse_in_linear_time():
+    """The named-template index is built once, not once per template. See: #1161"""
+    body = "\n".join(f'<xsl:template name="t{i}"/>' for i in range(20_000))
+
+    started = time.perf_counter()
+    nodes, _ = _parse(_stylesheet(body))
+    elapsed = time.perf_counter() - started
+
+    assert len(nodes) == 20_001
+    # Linear is about a second here; rebuilding the index per template is about 30.
+    assert elapsed < 10
+
+
 def _build(tmp_path: Path) -> Path:
     root = tmp_path.resolve()
     (root / "sample_xslt.xsl").write_text(FIXTURE.read_text())
@@ -483,3 +565,19 @@ def test_match_templates_are_not_called_dead(tmp_path):
 
     assert "match=legacy" not in dead
     assert "match=/" not in dead
+
+
+def test_a_named_template_with_a_match_is_not_called_dead(tmp_path):
+    """The processor can pick it by its match, so no caller is normal. See: #1161"""
+    root = tmp_path.resolve()
+    (root / ".git").mkdir()
+    (root / "a.xsl").write_bytes(_stylesheet('<xsl:template name="item.row" match="item"/>'))
+    store = GraphStore(get_db_path(root))
+    try:
+        full_build(root, store)
+        run_post_processing(store)
+        dead = {row["name"] for row in find_dead_code(store, root=root)}
+    finally:
+        store.close()
+
+    assert "item.row" not in dead

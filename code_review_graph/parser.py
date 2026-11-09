@@ -3173,6 +3173,25 @@ def _xml_attributes(element: Any) -> dict[str, str]:
     return attributes
 
 
+def _xml_scope(element: Any, parent: dict[str, str]) -> dict[str, str]:
+    """The namespaces in scope on *element*: its parent's, plus what it declares.
+
+    The default namespace is keyed by the empty prefix.
+    """
+    declared = {
+        name[len("xmlns:"):] if name.startswith("xmlns:") else "": value
+        for name, value in _xml_attributes(element).items()
+        if name == "xmlns" or name.startswith("xmlns:")
+    }
+    return {**parent, **declared} if declared else parent
+
+
+def _xslt_local_name(element: Any, scope: dict[str, str]) -> str:
+    """The local name of an XSLT element, or "" when it is in another namespace."""
+    prefix, _, local = _xml_name(element).rpartition(":")
+    return local if scope.get(prefix) == _XSLT_NAMESPACE else ""
+
+
 def _xml_child_elements(element: Any) -> list[Any]:
     """Return the elements directly inside *element*, in document order."""
     children: list[Any] = []
@@ -3232,10 +3251,16 @@ class _XsltTemplate:
     """One top-level template or function, as read before its body is walked."""
 
     element: Any
+    scope: dict[str, str]
     node: NodeInfo
     qualified: str
     modes: set[str]
     steps: set[str]
+
+    @property
+    def matches(self) -> bool:
+        """Can the processor pick it by its ``match``, whether or not it has a name?"""
+        return self.node.extra["xslt_kind"] != "function" and "match" in self.node.extra
 
 
 _YAML_SIMPLE_PATH_SEGMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
@@ -4278,27 +4303,22 @@ class CodeParser:
         if root is None:
             return nodes, edges
 
-        # The prefix is the author's choice. Only the namespace makes it XSLT.
-        prefix = next(
-            (
-                name[len("xmlns:"):]
-                for name, value in _xml_attributes(root).items()
-                if name.startswith("xmlns:") and value == _XSLT_NAMESPACE
-            ),
-            "xsl",
-        )
-        tag = f"{prefix}:"
+        # The prefix is the author's choice, and any element may bind its own,
+        # the default namespace included. Only the namespace makes it XSLT. An
+        # ``xsl`` prefix that nothing declares is still read as XSLT.
+        root_scope = _xml_scope(root, {"xsl": _XSLT_NAMESPACE})
 
         templates: list[_XsltTemplate] = []
         seen: set[str] = set()
         top_level = _xml_child_elements(root)
-        is_stylesheet = _xml_name(root) in (f"{tag}stylesheet", f"{tag}transform")
+        is_stylesheet = _xslt_local_name(root, root_scope) in ("stylesheet", "transform")
         for element in top_level if is_stylesheet else []:
-            name = _xml_name(element)
-            if name in (f"{tag}import", f"{tag}include"):
-                self._add_xslt_import(element, name[len(tag):], file_path, edges)
-            elif name in (f"{tag}template", f"{tag}function"):
-                template = self._xslt_template(element, name[len(tag):], tag, file_path, seen)
+            scope = _xml_scope(element, root_scope)
+            local = _xslt_local_name(element, scope)
+            if local in ("import", "include"):
+                self._add_xslt_import(element, local, file_path, edges)
+            elif local in ("template", "function"):
+                template = self._xslt_template(element, local, scope, file_path, seen)
                 if template is not None:
                     templates.append(template)
                     nodes.append(template.node)
@@ -4310,14 +4330,21 @@ class CodeParser:
                         line=template.node.line_start,
                     ))
 
+        # Built once: per template, it made parsing quadratic in their number.
+        named = {
+            template.node.name: template.qualified
+            for template in templates
+            if template.node.extra["xslt_kind"] == "named_template"
+        }
         for template in templates:
             self._walk_xslt_body(
-                template.element, tag, template, templates, file_path, edges,
+                template.element, template.scope, template, templates, named,
+                file_path, edges,
             )
         if not is_stylesheet:
             # A simplified stylesheet is one literal element with no templates,
             # so what it calls can only be called by the file.
-            self._walk_xslt_body(root, tag, None, templates, file_path, edges)
+            self._walk_xslt_body(root, root_scope, None, templates, named, file_path, edges)
         return nodes, edges
 
     def _add_xslt_import(
@@ -4348,7 +4375,7 @@ class CodeParser:
         self,
         element: Any,
         local_name: str,
-        tag: str,
+        scope: dict[str, str],
         file_path: str,
         seen: set[str],
     ) -> Optional[_XsltTemplate]:
@@ -4379,15 +4406,19 @@ class CodeParser:
         params = [
             _xml_attributes(child).get("name", "")
             for child in _xml_child_elements(element)
-            if _xml_name(child) == f"{tag}param"
+            if _xslt_local_name(child, _xml_scope(child, scope)) == "param"
         ]
 
         # A pattern and mode may repeat under different priorities. Both are
-        # real, so the second takes its line into its identity instead of
-        # overwriting the first.
+        # real, so a repeat takes its line into its identity instead of
+        # overwriting the first, and its column too when the line has one.
         line_start = element.start_point[0] + 1
-        identity = None if name not in seen else f"{name}@L{line_start}"
-        seen.add(name)
+        identity = None
+        if name in seen:
+            identity = f"{name}@L{line_start}"
+            if identity in seen:
+                identity = f"{identity}C{element.start_point[1] + 1}"
+        seen.add(identity or name)
         node = NodeInfo(
             kind="Function",
             name=name,
@@ -4401,6 +4432,7 @@ class CodeParser:
         )
         return _XsltTemplate(
             element=element,
+            scope=scope,
             node=node,
             qualified=self._qualify(identity or name, file_path, None),
             modes=set(mode.split()) or {"#default"},
@@ -4410,25 +4442,22 @@ class CodeParser:
     def _walk_xslt_body(
         self,
         element: Any,
-        tag: str,
+        scope: dict[str, str],
         owner: Optional[_XsltTemplate],
         templates: list[_XsltTemplate],
+        named: dict[str, str],
         file_path: str,
         edges: list[EdgeInfo],
     ) -> None:
         """Add the calls written inside a template, however deep they sit."""
         source = owner.qualified if owner is not None else file_path
-        named = {
-            template.node.name: template.qualified
-            for template in templates
-            if template.node.extra["xslt_kind"] == "named_template"
-        }
-        stack = list(reversed(_xml_child_elements(element)))
+        stack = [(child, scope) for child in reversed(_xml_child_elements(element))]
         while stack:
-            child = stack.pop()
-            name = _xml_name(child)
+            child, parent_scope = stack.pop()
+            child_scope = _xml_scope(child, parent_scope)
+            name = _xslt_local_name(child, child_scope)
             line = child.start_point[0] + 1
-            if name == f"{tag}call-template":
+            if name == "call-template":
                 called = " ".join(_xml_attributes(child).get("name", "").split())
                 if called:
                     edges.append(EdgeInfo(
@@ -4439,9 +4468,12 @@ class CodeParser:
                         line=line,
                         extra={"xslt_call": "call-template"},
                     ))
-            elif name == f"{tag}apply-templates":
+            elif name == "apply-templates":
                 self._add_xslt_apply(child, owner, source, templates, file_path, line, edges)
-            stack.extend(reversed(_xml_child_elements(child)))
+            stack.extend(
+                (grandchild, child_scope)
+                for grandchild in reversed(_xml_child_elements(child))
+            )
 
     def _add_xslt_apply(
         self,
@@ -4462,7 +4494,7 @@ class CodeParser:
             modes = owner.modes if owner is not None else {"#default"}
         in_mode = [
             template for template in templates
-            if template.node.extra["xslt_kind"] == "match_template"
+            if template.matches
             and ("#all" in template.modes or modes & template.modes)
         ]
         steps = _xslt_named_steps(select) if select else set()
