@@ -280,6 +280,12 @@
 
 ### Fixed
 
+- The determinism check reorders the file list again. Since `build` started
+  reading the file list through a new function, the check's reorder never
+  reached it, so the three file-order tests built the same order twice: two
+  passed for no reason and the known node-id bug looked fixed, which failed the
+  release gate. The check now reorders the function `build` uses, and fails if a
+  reordered build never read the reordered list.
 - The docs match the code again. `docs/`, the reference `get_docs_section_tool`
   serves, `CONTRIBUTING.md`, `SECURITY.md`, `AGENTS.md`, the Copilot
   instructions, two skills and the VS Code README now cover what the last two
