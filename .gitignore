@@ -47,6 +47,23 @@ code-review-graph-vscode/dist/
 .qoder/
 QODER.md
 
+# What `code-review-graph install` writes when a contributor tries it in this
+# checkout. AGENTS.md, CLAUDE.md, GEMINI.md, .mcp.json and
+# .github/copilot-instructions.md are tracked, so they are not listed here.
+# tests/test_install_outputs_are_ignored.py fails if a platform writes a new
+# path that is missing from this list.
+.cursor/
+.cursorrules
+.windsurfrules
+.gemini/
+.kiro/
+.mimocode/
+opencode.json
+opencode.jsonc
+.codebuddy/
+CODEBUDDY.md
+.github/instructions/code-review-graph.instructions.md
+
 # Coverage
 htmlcov/
 .coverage

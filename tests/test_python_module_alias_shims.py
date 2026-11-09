@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import ast
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -553,8 +552,13 @@ def test_module_too_deep_for_ast_keeps_the_file_as_the_module(repo, tmp_path, mo
         SHIM.format(module="app.services.billing")
         + "x = " + "+".join(["1"] * 60000) + "\n",
     )
-    if sys.version_info < (3, 11):
-        # Python 3.10 accepts this chain, so the failure has to be forced there.
+    try:
+        ast.parse(shim.read_text(encoding="utf-8"))
+    except RecursionError:
+        pass  # This interpreter really fails on the chain: the case under test.
+    else:
+        # Python 3.10 and 3.14 accept this chain (3.14 counts stack bytes, not
+        # depth), so the failure has to be forced there.
         real_parse = ast.parse
 
         def too_deep(source, *args, **kwargs):

@@ -9,6 +9,14 @@ uv sync --extra dev                  # requires uv
 uv run pytest tests/ --tb=short -q   # check the setup
 ```
 
+`uv sync` uses the newest Python it finds. CI tests 3.10 to 3.13, so add
+`--python 3.13` to `uv sync` to match it.
+
+You can run `install` inside this checkout: the root `.gitignore` lists what
+each platform writes here. Claude Code, CodeBuddy, Antigravity and Gemini CLI
+also change the tracked `CLAUDE.md`, `GEMINI.md` or `.mcp.json`; do not commit
+those changes by accident.
+
 ## Running Tests
 
 ```bash
