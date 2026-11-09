@@ -28,7 +28,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     # runtime, so neither spelling has to be imported where it is deprecated.
     from importlib.resources.abc import Traversable
 
-from . import dsh, install_plan, jsonc
+from . import install_plan, jsonc
 from ._legacy_instructions import LEGACY_INSTRUCTION_SECTIONS
 
 logger = logging.getLogger(__name__)
@@ -152,6 +152,23 @@ def _hermes_config_path() -> Path:
     return _hermes_home() / "config.yaml"
 
 
+def _dsh_home() -> Path:
+    """Return the DeepSeek Harness home, as DSH resolves it.
+
+    ``DSH_HOME`` wins when it is not blank; otherwise ``~/.dsh`` on every
+    platform (DSH's ``@deepseek-ai/dsh-home-paths``).
+    """
+    override = os.environ.get("DSH_HOME", "")
+    if override.strip():
+        return Path(override).expanduser()
+    return Path.home() / ".dsh"
+
+
+def _dsh_config_path() -> Path:
+    """Return DSH's home-level patch layer, which every DSH profile applies."""
+    return _dsh_home() / "cordis.patch.yml"
+
+
 def _opencode_config_path(repo_root: Path) -> Path:
     """Return OpenCode's existing project config, preferring JSONC."""
     for name in ("opencode.jsonc", "opencode.json"):
@@ -162,14 +179,6 @@ def _opencode_config_path(repo_root: Path) -> Path:
 
 
 PLATFORMS: dict[str, dict[str, Any]] = {
-    "dsh": {
-        "name": "DeepSeek Harness",
-        "config_path": dsh.config_path,
-        "key": "dsh.profile.bundles",
-        "detect": lambda: shutil.which("dsh") is not None,
-        "format": "native-bundle",
-        "needs_type": False,
-    },
     "codex": {
         "name": "Codex",
         "config_path": lambda root: _codex_home() / "config.toml",
@@ -297,6 +306,15 @@ PLATFORMS: dict[str, dict[str, Any]] = {
         "format": "yaml",
         "needs_type": False,
     },
+    "dsh": {
+        "name": "DeepSeek Harness",
+        "config_path": lambda root: _dsh_config_path(),
+        # One ``insert`` operation in DSH's patch list, not a key in a mapping.
+        "key": "insert",
+        "detect": lambda: _dsh_home().exists(),
+        "format": "dsh-patch",
+        "needs_type": False,
+    },
     "codebuddy": {
         "name": "CodeBuddy Code",
         "config_path": lambda root: root / ".mcp.json",
@@ -409,13 +427,16 @@ def _build_server_entry(
         return {"type": "local", "command": opencode_command}
 
     entry: dict[str, Any] = {"command": command, "args": args}
-    if key == "hermes":
+    if key in ("hermes", "dsh"):
         # No repo is pinned here, deliberately. Hermes Agent is a long-lived
         # assistant that moves between projects, and its stdio schema has no
         # ``cwd``, so a baked-in ``--repo`` would silently answer every
         # question about whichever repo happened to be installed from. Every
         # tool takes an explicit ``repo_root``; without a default, omitting it
-        # fails loudly instead of returning another project's graph.
+        # fails loudly instead of returning another project's graph. DSH's
+        # home-level patch layer applies to every profile and workspace, so
+        # the same holds there; the server starts in the folder DSH was
+        # started from.
         return entry
     # Include cwd so the MCP server can find the graph database
     if repo_root is not None:
@@ -894,6 +915,52 @@ def _merge_yaml_mcp_server(
     return True
 
 
+def _merge_dsh_patch_server(config_path: Path, server_entry: dict[str, Any]) -> bool | None:
+    """Add the MCP client row to DSH's home patch layer, keeping the rest as it is.
+
+    Same contract as :func:`_merge_yaml_mcp_server`: True when the file was
+    (or, in a plan, would be) changed, False when the row is already there,
+    None when the edit was refused (the reason is printed).
+    """
+    from . import dsh
+
+    raw = ""
+    row = dsh.server_row(server_entry)
+    try:
+        if install_plan.exists(config_path):
+            try:
+                raw = install_plan.read_text(config_path, encoding="utf-8")
+            except UnicodeDecodeError as exc:
+                # Writing a replaced character back would corrupt the file.
+                raise dsh.PatchError("it is not UTF-8") from exc
+        document, found = dsh.find_owned(raw)
+        replace: int | None = None
+        if found:
+            op_index, row_index = found[0]
+            current = document[op_index]["insert"][row_index]
+            owned = (
+                len(found) == 1
+                and dsh.removable(document, found) == op_index
+                and dsh.is_generated_row(current, _is_generated_server_entry)
+            )
+            if not owned:
+                # Not ours to rewrite, and not something to claim as installed.
+                _report_user_owned_entry(config_path)
+                return None
+            if current == row:
+                return False
+            replace = op_index
+        rewritten = dsh.with_row(raw, row, replace)
+    except dsh.PatchError as exc:
+        print(
+            f"  {config_path}: {exc} — skipping to avoid data loss. "
+            f"Please add the MCP config manually."
+        )
+        return None
+    install_plan.write_text(config_path, rewritten)
+    return True
+
+
 def _indent_block(text: str, indent: int) -> str:
     """Indent every non-empty line of ``text`` by ``indent`` spaces."""
     pad = " " * indent
@@ -1042,7 +1109,6 @@ def install_platform_configs(
     repo_root: Path,
     target: str = "all",
     dry_run: bool = False,
-    dsh_profile: str = "web",
 ) -> list[str]:
     """Install MCP config for one or all detected platforms.
 
@@ -1058,13 +1124,11 @@ def install_platform_configs(
     """
     if dry_run and install_plan.active() is None:
         with install_plan.planning():
-            return _install_platform_configs(repo_root, target, True, dsh_profile)
-    return _install_platform_configs(repo_root, target, dry_run, dsh_profile)
+            return _install_platform_configs(repo_root, target, dry_run=True)
+    return _install_platform_configs(repo_root, target, dry_run=dry_run)
 
 
-def _install_platform_configs(
-    repo_root: Path, target: str, dry_run: bool, dsh_profile: str = "web",
-) -> list[str]:
+def _install_platform_configs(repo_root: Path, target: str, dry_run: bool) -> list[str]:
     """Do the work of :func:`install_platform_configs`.
 
     Writes go through :mod:`install_plan`, so under a dry run (always inside a
@@ -1104,25 +1168,21 @@ def _install_platform_configs(
         configured.extend(PLATFORMS[alias]["name"] for alias in shared_aliases.get(key, ()))
 
     for key, plat in platforms_to_install.items():
-        if plat["format"] == "native-bundle":
-            from .dsh import config_path as dsh_config_path
-            from .dsh import configure
-            if configure(dsh_config_path(repo_root, dsh_profile), install=True, dry_run=dry_run):
-                _record_configured(key, plat)
-            continue
         if key == "opencode":
             _warn_legacy_opencode_config(repo_root)
         config_path: Path = plat["config_path"](repo_root)
         server_key = plat["key"]
         server_entry = _build_server_entry(plat, key=key, repo_root=repo_root)
 
-        if plat["format"] in ("toml", "yaml"):
+        if plat["format"] in ("toml", "yaml", "dsh-patch"):
             if plat["format"] == "toml":
                 changed = _merge_toml_mcp_server(
                     config_path,
                     "code-review-graph",
                     server_entry,
                 )
+            elif plat["format"] == "dsh-patch":
+                changed = _merge_dsh_patch_server(config_path, server_entry)
             else:
                 changed = _merge_yaml_mcp_server(
                     config_path,
@@ -2930,7 +2990,7 @@ def inject_claude_md(repo_root: Path) -> str:
 # Used to filter writes when the user passes --platform <X>: only files
 # whose owner set includes the target (or "all") are written.
 _PLATFORM_INSTRUCTION_FILES: dict[str, tuple[str, ...]] = {
-    "AGENTS.md": ("cursor", "opencode", "antigravity", "codex", "hermes"),
+    "AGENTS.md": ("cursor", "opencode", "antigravity", "codex", "hermes", "dsh"),
     "GEMINI.md": ("antigravity", "gemini-cli"),
     ".cursorrules": ("cursor",),
     ".windsurfrules": ("windsurf",),

@@ -41,10 +41,7 @@ def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # real config. Re-point it inside this fake home so the Hermes platform
     # is exercised within the user-scope boundary uninstall enforces.
     monkeypatch.setenv("HERMES_HOME", str(home / ".hermes"))
-    # DSH prefers DSH_HOME over Path.home(); re-point it inside the fake home
-    # so native-bundle writes stay inside the user-scope boundary this suite
-    # is exercising (the shared autouse fixture already keeps it out of the
-    # real profile).
+    # The same holds for DSH_HOME, which conftest also pins.
     monkeypatch.setenv("DSH_HOME", str(home / ".dsh"))
     return home
 
@@ -62,34 +59,28 @@ def test_uninstall_removes_mcp_entry_for_every_current_platform_spec(
     platform_name: str,
     fake_repo: Path,
     fake_home: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The uninstall inventory follows PLATFORMS, including future path changes."""
     spec = skills.PLATFORMS[platform_name]
     config_path = spec["config_path"](fake_repo)
-    if spec["format"] == "native-bundle":
-        from code_review_graph import dsh
-        _write_json(config_path, {"dependencies": {dsh.BUNDLE: "0.1.0", "other": "1"},
-                                 "dsh": {"profile": {"bundles": [dsh.BUNDLE, "other"]}},
-                                 "theme": "dark"})
-
-        def remove(path: Path, *, install: bool, dry_run: bool = False) -> bool:
-            assert path == config_path and not install
-            if not dry_run:
-                data = _read_jsonc(path)
-                data["dependencies"].pop(dsh.BUNDLE)
-                data["dsh"]["profile"]["bundles"].remove(dsh.BUNDLE)
-                _write_json(path, data)
-            return True
-
-        monkeypatch.setattr(dsh, "configure", remove)
-    elif spec["format"] == "toml":
+    if spec["format"] == "toml":
         _write(
             config_path,
             "theme = \"dark\"\n\n"
             "[mcp_servers.code-review-graph]\n"
             "command = \"code-review-graph\"\n\n"
             "[mcp_servers.other]\ncommand = \"other\"\n",
+        )
+    elif spec["format"] == "dsh-patch":
+        _write(
+            config_path,
+            "- id: model\n"
+            "  config: {theme: dark}\n"
+            "- insert:\n"
+            "    - id: mcp-code-review-graph\n"
+            "      name: '@deepseek-ai/dsh-mcp-client'\n"
+            "      config: {serverName: code-review-graph, transport: stdio,\n"
+            "               command: code-review-graph, args: [serve]}\n",
         )
     elif spec["format"] == "yaml":
         _write(
@@ -117,16 +108,15 @@ def test_uninstall_removes_mcp_entry_for_every_current_platform_spec(
     report = uninstall.run(repo=fake_repo, keep_data=True)
 
     assert report.errors == []
-    if spec["format"] == "native-bundle":
-        data = _read_jsonc(config_path)
-        assert data["dependencies"] == {"other": "1"}
-        assert data["dsh"]["profile"]["bundles"] == ["other"]
-        assert data["theme"] == "dark"
-    elif spec["format"] == "toml":
+    if spec["format"] == "toml":
         text = config_path.read_text(encoding="utf-8")
         assert "[mcp_servers.code-review-graph]" not in text
         assert "[mcp_servers.other]" in text
         assert 'theme = "dark"' in text
+    elif spec["format"] == "dsh-patch":
+        assert config_path.read_text(encoding="utf-8") == (
+            "- id: model\n  config: {theme: dark}\n"
+        )
     elif spec["format"] == "yaml":
         import yaml
 
@@ -141,53 +131,6 @@ def test_uninstall_removes_mcp_entry_for_every_current_platform_spec(
         else:
             assert set(container) == {"other"}
         assert data["theme"] == "dark"
-
-
-def test_failed_native_bundle_removal_is_reported(
-    fake_repo: Path,
-    fake_home: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A bundle that survives a failed native removal is never silence.
-
-    ``configure`` returns False both for "nothing to remove" and for a failed
-    ``dsh plugin remove``; uninstall must report the second instead of
-    exiting 0 with the bundle still installed (review of #1101).
-    """
-    from code_review_graph import dsh
-
-    config_path = skills.PLATFORMS["dsh"]["config_path"](fake_repo)
-    _write_json(config_path, {"dependencies": {dsh.BUNDLE: "0.1.2"}})
-    monkeypatch.setattr(
-        dsh, "configure", lambda path, *, install, dry_run=False: False
-    )
-
-    report = uninstall.run(repo=fake_repo, platforms=["dsh"], keep_data=True)
-
-    assert report.errors, "failed native removal was silently swallowed"
-    assert dsh.BUNDLE in report.errors[0]
-    assert _read_jsonc(config_path) == {"dependencies": {dsh.BUNDLE: "0.1.2"}}
-
-
-def test_absent_native_bundle_is_not_an_error(
-    fake_repo: Path,
-    fake_home: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Another plugin in the DSH profile must not turn into an uninstall error."""
-    from code_review_graph import dsh
-
-    config_path = skills.PLATFORMS["dsh"]["config_path"](fake_repo)
-    _write_json(config_path, {"dependencies": {"other": "1"}})
-
-    def never(path: Path, *, install: bool, dry_run: bool = False) -> bool:
-        raise AssertionError("configure called although the bundle is absent")
-
-    monkeypatch.setattr(dsh, "configure", never)
-
-    report = uninstall.run(repo=fake_repo, platforms=["dsh"], keep_data=True)
-
-    assert report.errors == []
 
 
 def test_platform_inventory_is_derived_not_hard_coded(

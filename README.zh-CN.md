@@ -73,12 +73,9 @@ code-review-graph build                # parse the codebase
 ```bash
 code-review-graph install --platform cursor
 code-review-graph install --platform codebuddy
-code-review-graph install --platform dsh --dsh-profile web
 ```
 
 配置文件的位置列在 [docs/USAGE.md](docs/USAGE.md#supported-platforms) 中。需要 Python 3.10+。
-
-DeepSeek Harness 使用[原生 DSH bundle](docs/DSH.md)，包含交互式 Web/Desktop 图谱侧边栏和基于文件系统的重构。请用 `npx dsh-code-review-graph@0.1.2 prepare` 显式准备其隔离引擎；Desktop 安装由应用自带的原生插件管理器负责。
 
 `uninstall` 会从 Git 或 SVN 工作树中移除 CRG 自己写入的文件和配置项，不动其他 MCP 服务器、钩子、技能和 JSONC 注释。在工作树内的任意位置运行即可。共享配置文件采用原子替换，写入失败时原文件保持完整。
 

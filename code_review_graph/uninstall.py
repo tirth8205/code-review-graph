@@ -312,6 +312,50 @@ def _remove_toml_entry(
     )
 
 
+def _remove_dsh_patch_entry(
+    path: Path,
+    boundary: Path,
+    report: UninstallReport,
+    *,
+    dry_run: bool,
+) -> None:
+    """Cut the code-review-graph ``insert`` operation out of a DSH patch layer.
+
+    Only that operation's lines go; comments, ``!!js`` values and every other
+    operation stay byte-for-byte. A row someone merged into an ``insert`` of
+    their own is reported, not edited.
+    """
+    from . import dsh
+
+    if not path.exists() or not _safe_path(path, boundary, report):
+        return
+    raw = _read_text(path, report)
+    if raw is None:
+        return
+    try:
+        document, found = dsh.find_owned(raw)
+        if not found:
+            return
+        op_index = dsh.removable(document, found)
+        if op_index is None:
+            report.skipped_paths.append(
+                f"{path} (the {_ENTRY_NAME} row shares an insert with other rows; "
+                "left unchanged, remove it by hand)"
+            )
+            return
+        rewritten = dsh.without_row(raw, op_index)
+    except dsh.PatchError as exc:
+        report.skipped_paths.append(f"{path} ({exc}; left unchanged)")
+        return
+    _write_text(
+        path,
+        rewritten,
+        report,
+        detail=f"removed the {dsh.ENTRY_ID} insert",
+        dry_run=dry_run,
+    )
+
+
 def _remove_yaml_entry(
     path: Path,
     key: str,
@@ -1001,6 +1045,10 @@ def _scope_for_config(
     hermes_home = _absolute(skills._hermes_home())
     if _is_lexical_child(path, hermes_home):
         return "user", hermes_home
+    # ``DSH_HOME`` can move DeepSeek Harness' patch layer out of home the same way.
+    dsh_home = _absolute(skills._dsh_home())
+    if _is_lexical_child(path, dsh_home):
+        return "user", dsh_home
     for boundary in extra_user_boundaries:
         if _is_lexical_child(path, boundary):
             return "user", boundary
@@ -1015,7 +1063,6 @@ def _process_platform_configs(
     scope: str,
     dry_run: bool,
     platforms: frozenset[str] | None = None,
-    dsh_profile: str = "web",
 ) -> None:
     seen: set[tuple[Path, str, str]] = set()
     active_codex_home: Path | None = None
@@ -1029,34 +1076,13 @@ def _process_platform_configs(
         if platforms is not None and platform_name not in platforms:
             continue
         try:
-            path = _absolute(spec["config_path"](repo_root, dsh_profile) if platform_name == "dsh"
-                             else spec["config_path"](repo_root))
+            path = _absolute(spec["config_path"](repo_root))
             key = str(spec["key"])
             format_name = str(spec["format"])
         except (KeyError, OSError, TypeError, ValueError) as exc:
             report.skipped_paths.append(
                 f"{platform_name} config (invalid platform specification: {exc})"
             )
-            continue
-        if format_name == "native-bundle":
-            from . import dsh
-            if scope != "user":
-                continue
-            # ``configure`` returns False both when the bundle is absent and
-            # when native removal failed. Uninstall must never report the
-            # second as success, so check presence first and surface a real
-            # failure as an error (review of #1101).
-            if dsh.installed(path):
-                if dsh.configure(path, install=False, dry_run=dry_run):
-                    _record_edit(
-                        report, path,
-                        "removed CRG-owned DSH bundle through native CLI", dry_run,
-                    )
-                else:
-                    report.errors.append(
-                        f"{path}: {dsh.BUNDLE} is still installed; native "
-                        "DSH removal failed (see the message above)"
-                    )
             continue
         destination = _scope_for_config(
             path,
@@ -1087,6 +1113,8 @@ def _process_platform_configs(
                 _remove_yaml_entry(
                     path, entry_key, boundary, report, dry_run=dry_run
                 )
+            elif format_name == "dsh-patch":
+                _remove_dsh_patch_entry(path, boundary, report, dry_run=dry_run)
             elif format_name in {"object", "array"}:
                 _remove_mcp_entry(
                     path,
@@ -1170,11 +1198,9 @@ def _process_repo(
     keep_data: bool,
     dry_run: bool,
     platforms: frozenset[str] | None = None,
-    dsh_profile: str = "web",
 ) -> None:
     _process_platform_configs(
-        repo_root, home, report, scope="repo", dry_run=dry_run, platforms=platforms,
-        dsh_profile=dsh_profile,
+        repo_root, home, report, scope="repo", dry_run=dry_run, platforms=platforms
     )
     if platforms is not None:
         # Platform-scoped unbind: remove only the MCP registration for the
@@ -1294,11 +1320,9 @@ def _process_user(
     keep_data: bool,
     dry_run: bool,
     platforms: frozenset[str] | None = None,
-    dsh_profile: str = "web",
 ) -> None:
     _process_platform_configs(
-        reference_repo, home, report, scope="user", dry_run=dry_run, platforms=platforms,
-        dsh_profile=dsh_profile,
+        reference_repo, home, report, scope="user", dry_run=dry_run, platforms=platforms
     )
     if platforms is not None:
         # See _process_repo: platform-scoped unbind touches MCP config only.
@@ -1466,7 +1490,6 @@ def run(
     keep_user_configs: bool = False,
     dry_run: bool = False,
     platforms: Sequence[str] | None = None,
-    dsh_profile: str = "web",
 ) -> UninstallReport:
     """Uninstall CRG artifacts and return a precise action report.
 
@@ -1495,7 +1518,6 @@ def run(
             keep_data=keep_data,
             dry_run=dry_run,
             platforms=platform_filter,
-            dsh_profile=dsh_profile,
         )
 
     if not keep_user_configs:
@@ -1507,6 +1529,5 @@ def run(
             keep_data=keep_data,
             dry_run=dry_run,
             platforms=platform_filter,
-            dsh_profile=dsh_profile,
         )
     return report

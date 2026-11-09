@@ -45,7 +45,15 @@ code-review-graph install --platform codebuddy
 | GitHub Copilot | `copilot` | `.vscode/mcp.json` |
 | GitHub Copilot CLI | `copilot-cli` | `~/.copilot/mcp-config.json` |
 | Hermes Agent | `hermes` | `~/.hermes/config.yaml` (or `$HERMES_HOME/config.yaml`) |
-| DeepSeek Harness | `dsh` | `$DSH_HOME/profiles/<profile>/package.json` (default `~/.dsh/profiles/web/package.json`); native bundle, see [DSH](DSH.md) |
+| DeepSeek Harness | `dsh` | `~/.dsh/cordis.patch.yml` (or `$DSH_HOME/cordis.patch.yml`) + `AGENTS.md` |
+
+DeepSeek Harness reads `cordis.patch.yml` in its home folder for every profile,
+Desktop too. Install adds one `insert` entry for DSH's own MCP client
+(`@deepseek-ai/dsh-mcp-client`) and leaves the rest of the file as it is;
+uninstall takes that entry out again. The entry pins no repository: the
+server starts in the folder DSH was started from. DSH does not pass on environment
+variables whose names contain `KEY`, `TOKEN`, `SECRET` or `PASSWORD`, so add
+a cloud embedding key to the entry's `env` yourself if you need one.
 
 Using Zed over SSH? See
 [Zed troubleshooting](TROUBLESHOOTING.md#6-zed-native-agent-cannot-see-mcp-in-an-ssh-project).

@@ -356,6 +356,82 @@ def test_install_leaves_a_hand_tuned_entry_alone(tmp_path: Path, capsys) -> None
     assert "hand-written" in capsys.readouterr().out
 
 
+def _dsh_row(**config: object) -> dict:
+    return {
+        "id": "mcp-code-review-graph",
+        "name": "@deepseek-ai/dsh-mcp-client",
+        "config": {"serverName": "code-review-graph", "transport": "stdio", **config},
+    }
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"command": "uvx", "args": ["code-review-graph", "serve"]},
+        {"command": "code-review-graph", "args": ["serve"]},
+        {
+            "command": "/opt/previous-release/bin/python3.9",
+            "args": ["-m", "code_review_graph", "serve"],
+        },
+    ],
+)
+def test_a_generated_dsh_row_is_claimed(entry: dict) -> None:
+    from code_review_graph import dsh
+
+    row = _dsh_row(**entry)
+    assert dsh.is_generated_row(row, skills._is_generated_server_entry) is True
+    assert row == dsh.server_row(entry)
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        _dsh_row(command="uvx", args=["code-review-graph", "serve"], cwd="/home/me/repo"),
+        _dsh_row(command="uvx", args=["code-review-graph", "serve"], env={"OPENAI_API_KEY": "x"}),
+        _dsh_row(**{k: v for k, v in HAND_TUNED_ENTRY.items() if k != "type"}),
+        {**_dsh_row(command="uvx", args=["code-review-graph", "serve"]), "disabled": True},
+        {**_dsh_row(command="uvx", args=["code-review-graph", "serve"]), "id": "my-graph"},
+        {
+            "id": "mcp-code-review-graph",
+            "name": "@deepseek-ai/dsh-mcp-client",
+            "config": {
+                "serverName": "code-review-graph",
+                "transport": "streamable-http",
+                "url": "http://127.0.0.1:8000/mcp",
+            },
+        },
+    ],
+)
+def test_a_hand_written_dsh_row_is_not_claimed(row: dict) -> None:
+    from code_review_graph import dsh
+
+    assert dsh.is_generated_row(row, skills._is_generated_server_entry) is False
+
+
+def test_dsh_layer_comments_survive_install_then_uninstall(tmp_path: Path, monkeypatch) -> None:
+    home = tmp_path / "dsh"
+    home.mkdir()
+    monkeypatch.setenv("DSH_HOME", str(home))
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    layer = home / "cordis.patch.yml"
+    original = (
+        "# Proxy for work\n"
+        "- id: http-proxy  # keep\n"
+        "  config:\n"
+        "    url: !!js process.env.HTTPS_PROXY\n"
+        "\n"
+        "# end of my patches\n"
+    )
+    layer.write_text(original, encoding="utf-8")
+
+    skills.install_platform_configs(repo, target="dsh")
+    assert layer.read_text(encoding="utf-8").startswith(original)
+    uninstall.run(repo=repo, platforms=["dsh"])
+
+    assert layer.read_text(encoding="utf-8") == original
+
+
 def test_install_leaves_a_hand_tuned_codex_table_alone(tmp_path: Path) -> None:
     config = tmp_path / "config.toml"
     original = (

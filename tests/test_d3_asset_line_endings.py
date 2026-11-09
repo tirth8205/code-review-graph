@@ -1,4 +1,8 @@
-"""Windows source checkouts keep the pinned renderer usable offline."""
+"""A CRLF checkout of the bundled D3 renderer still verifies against its pinned SRI.
+
+From PR #1101. Only a line-ending change that restores the pinned bytes is
+accepted; any other difference still falls back to the CDN.
+"""
 import base64
 import hashlib
 from unittest.mock import Mock

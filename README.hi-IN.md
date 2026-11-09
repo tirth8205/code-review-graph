@@ -73,12 +73,9 @@ code-review-graph build                # parse the codebase
 ```bash
 code-review-graph install --platform cursor
 code-review-graph install --platform codebuddy
-code-review-graph install --platform dsh --dsh-profile web
 ```
 
 कॉन्फ़िग फ़ाइलों के स्थान [docs/USAGE.md](docs/USAGE.md#supported-platforms) में सूचीबद्ध हैं। Python 3.10+ चाहिए।
-
-DeepSeek Harness [नेटिव DSH बंडल](docs/DSH.md) का उपयोग करता है, जिसमें इंटरैक्टिव Web/Desktop ग्राफ़ साइडबार और फ़ाइल-सिस्टम आधारित रिफ़ैक्टरिंग शामिल है। इसका अलग इंजन `npx dsh-code-review-graph@0.1.2 prepare` से स्पष्ट रूप से तैयार करें; Desktop इंस्टॉलेशन ऐप के नेटिव प्लगइन मैनेजर का काम है।
 
 `uninstall` किसी Git या SVN वर्किंग ट्री से CRG की अपनी फ़ाइलें और प्रविष्टियाँ हटाता है और दूसरे MCP सर्वर, हुक, स्किल तथा JSONC टिप्पणियाँ जैसी की तैसी छोड़ देता है। इसे ट्री के भीतर कहीं से भी चलाया जा सकता है। साझा कॉन्फ़िग फ़ाइलें एटॉमिक तरीके से बदली जाती हैं, इसलिए लिखने में विफलता होने पर मूल फ़ाइल सुरक्षित रहती है।
 

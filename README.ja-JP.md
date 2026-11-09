@@ -73,12 +73,9 @@ code-review-graph build                # parse the codebase
 ```bash
 code-review-graph install --platform cursor
 code-review-graph install --platform codebuddy
-code-review-graph install --platform dsh --dsh-profile web
 ```
 
 設定ファイルの場所は [docs/USAGE.md](docs/USAGE.md#supported-platforms) にあります。Python 3.10+ が必要です。
-
-DeepSeek Harness は[ネイティブ DSH バンドル](docs/DSH.md)を使用し、インタラクティブな Web/Desktop グラフサイドバーとファイルシステム経由のリファクタリングを提供します。分離されたエンジンは `npx dsh-code-review-graph@0.1.2 prepare` で明示的に準備してください。Desktop へのインストールはアプリケーションのネイティブプラグインマネージャーが担当します。
 
 `uninstall` は Git または SVN の作業ツリーから CRG が書いたファイルとエントリを取り除き、ほかの MCP サーバー、フック、スキル、JSONC のコメントはそのまま残します。ツリー内のどこからでも実行できます。共有設定ファイルはアトミックに置き換えるので、書き込みに失敗しても元のファイルは壊れません。
 

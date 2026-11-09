@@ -50,43 +50,35 @@ def test_codex_skill_install_failure_is_reported_without_traceback(
 
 
 def test_dsh_install_reinstall_uninstall_lifecycle(monkeypatch, tmp_path):
-    """Native bundles belong to DSH; the public installer edits no repository files."""
+    """DSH gets its MCP row in the home patch layer and AGENTS.md (PR #1101)."""
     from code_review_graph import dsh
 
     repo = tmp_path / "repo"
     (repo / ".git" / "hooks").mkdir(parents=True)
-    monkeypatch.setenv("DSH_HOME", str(tmp_path / "dsh"))
-    config = dsh.config_path(repo)
-    config.parent.mkdir(parents=True)
-    config.write_text(json.dumps({"dependencies": {"other": "1"},
-                                  "dsh": {"profile": {"bundles": ["other"]}},
-                                  "theme": "dark"}), encoding="utf-8")
-    calls = []
+    dsh_home = tmp_path / "dsh"
+    dsh_home.mkdir()
+    monkeypatch.setenv("DSH_HOME", str(dsh_home))
+    config = dsh_home / "cordis.patch.yml"
+    user_layer = "# mine\n- id: model\n  config: {temperature: 1}\n"
+    config.write_text(user_layer, encoding="utf-8")
+    args = _args(repo, "dsh")
+    args.no_instructions = False
 
-    def native_cli(argv, **kwargs):
-        assert argv[:4] == ["fake-dsh", "plugin", "--profile", "web"]
-        calls.append(argv)
-        data = json.loads(config.read_text())
-        if argv[4] == "add":
-            data["dependencies"][dsh.BUNDLE] = "0.1.0"
-            data["dsh"]["profile"]["bundles"].append(dsh.BUNDLE)
-        else:
-            data["dependencies"].pop(dsh.BUNDLE)
-            data["dsh"]["profile"]["bundles"].remove(dsh.BUNDLE)
-        config.write_text(json.dumps(data), encoding="utf-8")
-
-    monkeypatch.setattr(dsh.shutil, "which", lambda _: "fake-dsh")
-    monkeypatch.setattr(dsh.subprocess, "run", native_cli)
-    _handle_init(_args(repo, "dsh"))
+    _handle_init(args)
     first = config.read_bytes()
-    _handle_init(_args(repo, "dsh"))
-    assert config.read_bytes() == first and len(calls) == 1
-    assert not (repo / "CLAUDE.md").exists() and not (repo / ".gitignore").exists()
+    _handle_init(args)
+
+    assert config.read_bytes() == first
+    document = dsh.load(config.read_text(encoding="utf-8"))
+    assert document[0] == {"id": "model", "config": {"temperature": 1}}
+    assert document[1]["insert"][0]["id"] == dsh.ENTRY_ID
+    assert skills._CLAUDE_MD_SECTION_MARKER in (repo / "AGENTS.md").read_text(encoding="utf-8")
+    assert not (repo / "CLAUDE.md").exists()
+
     report = uninstall.run(repo=repo, platforms=["dsh"])
-    assert not report.errors and len(calls) == 2
-    assert json.loads(config.read_text()) == {"dependencies": {"other": "1"},
-                                            "dsh": {"profile": {"bundles": ["other"]}},
-                                            "theme": "dark"}
+
+    assert not report.errors
+    assert config.read_text(encoding="utf-8") == user_layer
 
 
 def test_copilot_cli_install_reinstall_uninstall_lifecycle(

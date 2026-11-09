@@ -1675,15 +1675,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Target platform for MCP config (default: all detected)",
     )
 
-    for command in (install_cmd, init_cmd):
-        command.add_argument("--dsh-profile", default="web", help="DSH profile (default: web)")
-
     uninstall_cmd = sub.add_parser(
         "uninstall",
         help="Safely remove code-review-graph data, configs, hooks, and generated skills",
-    )
-    uninstall_cmd.add_argument(
-        "--dsh-profile", default="web", help="DSH profile to unbind (default: web)",
     )
     uninstall_cmd.add_argument(
         "--repo",
@@ -2748,8 +2742,6 @@ def _dispatch() -> None:
             "keep_user_configs": args.keep_user_configs,
             "platforms": scoped_platforms,
         }
-        if getattr(args, "dsh_profile", "web") != "web":
-            options["dsh_profile"] = args.dsh_profile
 
         def _print_report(report: UninstallReport) -> None:
             for action in report.removed_paths:
