@@ -2813,6 +2813,22 @@ def _php_docblock_marks_test(node) -> bool:
     )
 
 
+class _OuterBinding(str):
+    """A C# binding declared *levels* containing types out from its use.
+
+    A field of ``Outer`` used inside ``Outer.Inner`` names its type from
+    ``Outer``, where an ``Inner.Service`` cannot shadow it. The value is still
+    the type text, so every other consumer reads it as a plain string.
+    """
+
+    levels: int
+
+    def __new__(cls, value: str, levels: int) -> "_OuterBinding":
+        binding = super().__new__(cls, value)
+        binding.levels = levels
+        return binding
+
+
 def _csharp_name(node) -> str:
     """Read a C# name without folding trivia into its identity."""
     parts = []
@@ -7158,7 +7174,12 @@ class CodeParser:
                 fields = self._collect_class_typed_fields(
                     node, language, function_types, class_types,
                 )
-                class_bindings = dict(bindings)
+                class_bindings: dict[str, str] = dict(bindings)
+                if language == "csharp":
+                    for name, type_name in bindings.items():
+                        class_bindings[name] = _OuterBinding(
+                            type_name, getattr(type_name, "levels", 0) + 1,
+                        )
                 class_bindings.update(fields)
                 for child in node.children:
                     walk(child, class_bindings, fields, depth + 1)
@@ -7629,6 +7650,10 @@ class CodeParser:
                     if separator and scope:
                         extra["receiver_scope"] = scope
                     resolved_target = edge.target
+                    levels = getattr(type_name, "levels", 0)
+                    if language == "csharp" and levels:
+                        # The binder looks the type up where it was declared.
+                        extra["csharp_receiver_levels"] = levels
                 edge = EdgeInfo(
                     kind=edge.kind,
                     source=edge.source,

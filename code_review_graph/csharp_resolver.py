@@ -307,7 +307,14 @@ def resolve_csharp_calls(store: GraphStore, repo_root: Path | None = None) -> di
                         and projects[type_files[c]] == projects[row["file_path"]]
                     ]
             else:
-                candidates = type_targets(receiver, owner, scopes, row["file_path"])
+                type_owner = owner
+                levels = extra.get("csharp_receiver_levels")
+                if isinstance(levels, int) and levels > 0:
+                    # A field of an enclosing type names its type from there.
+                    if owner.count(".") < levels:
+                        return []
+                    type_owner = owner.rsplit(".", levels)[0]
+                candidates = type_targets(receiver, type_owner, scopes, row["file_path"])
             if len(candidates) > 1:
                 owners = {projects[type_files[c]] for c in candidates}
                 if (

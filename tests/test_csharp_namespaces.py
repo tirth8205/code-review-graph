@@ -792,3 +792,32 @@ def test_outward_lookup_still_reaches_an_enclosing_static_without_bases(tmp_path
         # Outer's own base does not hide Outer.Run, which Outer declares.
         found, = _calls(store, "App.Outer.Inner.Go")
         assert found["target_qualified"] == f"{tmp_path / 'Case.cs'}::App.Outer.Run"
+
+
+@pytest.mark.parametrize(("declaration", "expected"), [
+    # ``s`` is Outer's field, so ``Service`` means Outer.Service, not the
+    # Inner.Service that shadows it at the call site (Copilot review of #964).
+    ("static Service s;", "App.Outer.Service.Run"),
+    ("static Service s { get; set; }", "App.Outer.Service.Run"),
+])
+def test_typed_receiver_resolves_its_type_where_the_field_is_declared(
+    tmp_path, declaration, expected,
+):
+    with _build(tmp_path, {"Case.cs":
+        "namespace App { class Outer { " + declaration + " "
+        "public class Service { public void Run() {} } "
+        "class Inner { class Service { public void Run() {} } "
+        "void Go() { s.Run(); } } } }"
+    }) as store:
+        found, = _calls(store, "App.Outer.Inner.Go")
+        assert found["target_qualified"] == f"{tmp_path / 'Case.cs'}::{expected}"
+
+
+def test_typed_receiver_declared_in_the_calling_type_still_uses_its_scope(tmp_path):
+    with _build(tmp_path, {"Case.cs":
+        "namespace App { class Outer { public class Service { public void Run() {} } "
+        "class Inner { class Service { public void Run() {} } static Service s; "
+        "void Go() { s.Run(); } } } }"
+    }) as store:
+        found, = _calls(store, "App.Outer.Inner.Go")
+        assert found["target_qualified"] == f"{tmp_path / 'Case.cs'}::App.Outer.Inner.Service.Run"
