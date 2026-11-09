@@ -158,6 +158,15 @@ def resolve_csharp_calls(store: GraphStore, repo_root: Path | None = None) -> di
             if extra.get("csharp_static"):
                 static_methods.add(qualified)
 
+    # Types with a base list. Inherited members are not modelled, so a type
+    # that may inherit the called name ends outward lookup unresolved.
+    based = {
+        row[0] for row in conn.execute(
+            "SELECT DISTINCT e.source_qualified FROM edges e "
+            "JOIN nodes n ON n.qualified_name = e.source_qualified "
+            "WHERE e.kind IN ('INHERITS', 'IMPLEMENTS') AND n.language = 'csharp'",
+        )
+    }
     imports: dict[tuple[str, int], list[tuple[str, dict]]] = {}
     global_imports: dict[str, list[tuple[str, dict]]] = {}
     csharp_files_sql = "SELECT file_path FROM nodes WHERE kind = 'File' AND language = 'csharp'"
@@ -313,6 +322,10 @@ def resolve_csharp_calls(store: GraphStore, repo_root: Path | None = None) -> di
                 if enclosing != owner and (len(found) != 1 or found[0] not in static_methods):
                     return []
                 return found
+            if kind == "unqualified" and any(c in based for c in candidates):
+                # Simple-name lookup searches inherited members before the
+                # containing type, and a base may declare this name.
+                return []
         return []
 
     resolved = 0

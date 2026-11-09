@@ -761,3 +761,34 @@ def test_escaped_identifier_calls_bind_to_their_declaration(tmp_path, call):
         found, = _calls(store, "App.C.Go")
         assert found["target_qualified"] == f"{tmp_path / 'Case.cs'}::App.C.Run"
         assert "@" not in json.loads(found["extra"])["csharp_raw_target"]
+
+
+@pytest.mark.parametrize("source", [
+    # The nearer type inherits a ``Run`` that simple-name lookup finds first.
+    "namespace App { class Base { protected void Run() {} } "
+    "class Outer { static void Run() {} class Inner : Base { void Go() { Run(); } } } }",
+    # The base list sits on another partial declaration of the nearer type.
+    "namespace App { class Base { protected void Run() {} } "
+    "class Outer { static void Run() {} partial class Inner : Base {} "
+    "partial class Inner { void Go() { Run(); } } } }",
+    # The base is outside the index, so nothing proves it lacks a ``Run``.
+    "namespace App { class Outer { static void Run() {} "
+    "class Inner : System.Exception { void Go() { Run(); } } } }",
+])
+def test_outward_lookup_stops_where_a_base_type_may_supply_the_member(tmp_path, source):
+    # Inherited members are not modelled, so binding the enclosing static
+    # method would be a confident wrong edge (Copilot review of #964).
+    with _build(tmp_path, {"Case.cs": source}) as store:
+        found, = _calls(store, "App.Outer.Inner.Go")
+        assert found["target_qualified"] == "Run"
+        assert "unresolved_targets" in json.loads(found["extra"])
+
+
+def test_outward_lookup_still_reaches_an_enclosing_static_without_bases(tmp_path):
+    with _build(tmp_path, {"Case.cs":
+        "namespace App { class Base {} class Outer : Base { static void Run() {} "
+        "class Inner { void Go() { Run(); } } } }"
+    }) as store:
+        # Outer's own base does not hide Outer.Run, which Outer declares.
+        found, = _calls(store, "App.Outer.Inner.Go")
+        assert found["target_qualified"] == f"{tmp_path / 'Case.cs'}::App.Outer.Run"
