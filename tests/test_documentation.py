@@ -140,3 +140,39 @@ def test_codex_install_docs_cover_global_skill_and_runtime_scope():
         assert "skills/code-review-graph" in content
         assert "WSL" in content or "Windows" in content
         assert "read-only CLI" in content
+
+
+def test_release_version_is_current_everywhere_it_is_written_down():
+    """The package version, in every place a release has to move it.
+
+    A release bumps ``pyproject.toml`` and ``__version__``; the copy-paste
+    Action pins, the user guide, the feature list, the changelog heading and
+    the bug-report form each have to move with them, and the form had asked
+    for 2.3.5 through four releases.
+    """
+    from code_review_graph import __version__
+
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    declared = re.search(r'^version = "([^"]+)"$', pyproject, re.MULTILINE)
+    assert declared is not None and declared.group(1) == __version__, (
+        "pyproject.toml and code_review_graph.__version__ disagree"
+    )
+
+    for name in README_FILES + ("docs/GITHUB_ACTION.md",):
+        content = (ROOT / name).read_text(encoding="utf-8")
+        pins = set(re.findall(r"tirth8205/code-review-graph@v([0-9][^\s]*)", content))
+        assert pins == {__version__}, (
+            f"{name} pins the Action at {sorted(pins)}; expected v{__version__}"
+        )
+
+    expected = {
+        "docs/USAGE.md": f"Applies to code-review-graph {__version__}.",
+        "docs/FEATURES.md": f"## v{__version__} (Current)",
+        "CHANGELOG.md": f"## [{__version__}] - ",
+        ".github/ISSUE_TEMPLATE/bug_report.yml": f'placeholder: "{__version__}"',
+    }
+    for name, text in expected.items():
+        content = (ROOT / name).read_text(encoding="utf-8")
+        assert text in content, f"{name} does not say {text!r}"
+    features = (ROOT / "docs/FEATURES.md").read_text(encoding="utf-8")
+    assert features.count("(Current)") == 1, "docs/FEATURES.md marks more than one Current"

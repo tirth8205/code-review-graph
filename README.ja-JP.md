@@ -231,7 +231,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: tirth8205/code-review-graph@v2.3.9
+      - uses: tirth8205/code-review-graph@v2.4.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 ```
@@ -598,6 +598,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_MAX_BFS_DEPTH` | グラフ探索の最大の深さ | `15` |
 | `CRG_MAX_CHANGED_FUNCS` | 1 回の変更レポートで分析する変更関数の最大数 | `500` |
 | `CRG_MAX_DELETION_FILES` | 差分で削除された関数とクラスを挙げるために、1 回の変更レポートで旧版を読むファイルの最大数 | `100` |
+| `CRG_MAX_CHANGED_YAML_PATHS` | 1 回の変更レポートで分析する変更 YAML パスの最大数。JSON パスにも別に同じ上限がかかる | `200` |
 | `CRG_MAX_TRANSITIVE_FRONTIER` | `tests_for` と `detect-changes` がテストを探すとき、1 ホップでたどる呼び出し先の最大数。名前順で先頭のものを残すので、同じグラフからは常に同じ答えが出る | `50` |
 | `CRG_CALLER_TEST_ROUTE_DEPTH` | テストのない変更シンボルについて、テスト済みの呼び出し元を探して `CALLS` を遡るホップ数。カバレッジではなく注記として報告されます | `2` |
 | `CRG_CALLER_TEST_ROUTE_MAX_CALLERS` | そのテスト済み呼び出し元を探す際に調べる呼び出し元の最大数 | `500` |

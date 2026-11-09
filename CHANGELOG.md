@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-11-10
+
+Two new platforms, MiMo Code and DeepSeek Harness, so `install` now supports
+18. HTML, XSLT, Liquid, JSON and plain YAML files are indexed, and so are
+`.cjs` and `.kts` files, which every build used to skip. The graph links calls,
+imports and tests more carefully: a call it could not check no longer looks
+like a real link, every call edge says how sure it is, calls to inherited
+methods and imports of workspace packages are followed, and `tests_for` finds
+Java, Ruby and PHP tests. The graph schema moves from 13 to 15. Several new
+settings are off unless you turn them on. Read *Upgrade notes* at the end of
+this section before you upgrade.
+
 ### Added
 
 - DeepSeek Harness is a supported platform (#1100, #1101, thanks @sumingwang233).
@@ -31,7 +43,6 @@
 - CI now installs every direct dependency at its declared minimum, on each
   supported Python, and runs the test suite there. `tests/test_dependency_floors.py`
   keeps `pyproject.toml` and the pinned list in step in both directions. (#896)
-
 - A `Dockerfile` that works with Docker and Podman, so the tool can run from a
   container. It installs this source, includes Git, and runs as a non-root user.
   Mount a repository at `/workspace`; the graph stays in that repository. It
@@ -46,7 +57,6 @@
   and a repeated name is one node that lists every line. `Output` nodes are found
   by search only with `kind="Output"`: on Shopify's Dawn theme they otherwise took
   all ten top hits for "product". (#878, #348)
-
 - `get_impact_radius_tool(detail_level="compact")` and `code-review-graph impact
   --detail-level compact` return the blast radius as ranked repository-relative
   file paths and counts, with no node or edge records. `max_files` (default 25,
@@ -231,10 +241,11 @@
   a newer `anyio` than the old minimum of 4.0. Ranges stay ranges; pin exact
   versions in your own lockfile if you need them. (#896, #265)
 - `staging` is no longer promoted to `testing` automatically. The `Auto promote` workflow and its script are gone, so a person reviews and merges every promotion, and a test fails if any workflow merges a pull request.
-- After upgrading, run `build` once to pick up generic YAML and workspace imports: `update` only re-parses files that changed.
 - Generic `.yml` and `.yaml` files are indexed as `YamlPath` nodes that hold key
   paths and value types, never values. `detect_changes` reports them as
-  `changed_yaml_paths`, bounded by `max_results`. `pnpm-lock.yaml` is ignored at
+  `changed_yaml_paths`, bounded by `max_results`; the analysis behind it takes
+  at most `CRG_MAX_CHANGED_YAML_PATHS` (200) YAML paths, and as many JSON
+  paths. `pnpm-lock.yaml` is ignored at
   any depth.
 - Search ranks test code below production code unless the query asks about
   tests (`kind="Test"`, or a word such as "test", "spec", "fixture" or
@@ -255,6 +266,12 @@
   Grep (0 of 4 moved). `tests/test_server_instructions.py` keeps every tool and
   query pattern the text names registered.
 - Stored vectors are scored with numpy when it is installed, about 20 times faster, and numpy stays optional (#1090, #1089).
+- `CRG_VECTOR_CACHE=1` keeps the decoded embedding vectors in memory between
+  searches instead of reading them all back from SQLite on every query. A
+  search over 42,000 vectors of 4,096 dimensions goes from 2.3 s to 0.40 s once
+  the cache is warm, with the same ranking. It is off by default because it
+  costs RAM and holds a read connection open for the life of the process, and
+  on Windows that keeps `graph.db` from being deleted or replaced.
 - `find_dead_code` collects its edge evidence once, not once per function (#1082, #982).
 - Plain C headers skip the C++ parse through a prefilter (#876, #802).
 - The dev dependency range allows pytest 9 (#1140).
@@ -827,6 +844,64 @@
     HTTP calls are not traced (#851 is the full fix).
 - Migration `up` and `down` methods are not test gaps when the file is in a
   `migrations` or `migrate` folder inside the repository (#850).
+
+### Upgrade notes
+
+- **Schema version: 13 → 15.** Two migrations run by themselves the first time
+  any command opens the graph. Both are quick, as neither rewrites a table:
+  - v14 clears the stored hash of every Ruby file, so the next `update` parses
+    those files again and gives Ruby classes and methods their full names, such
+    as `Auth.User.to_s`. Until that update, Ruby rows keep their old names.
+  - v15 drops `community_summaries`, `flow_snapshots` and `risk_index`, which
+    nothing read, and three indexes that other indexes cover. The file keeps its
+    size and reuses the space; to shrink it, delete it and run `build`, or run
+    `VACUUM`.
+
+  Rolling back needs a rebuild. Migrations only go forward. 2.3.9 refuses a v15
+  graph with "was written by a newer code-review-graph (schema v15; this build
+  understands v13)", so to go back, delete `.code-review-graph/graph.db` and
+  run `code-review-graph build` with the older release.
+- **The VS Code extension has to be updated as well.** 0.3.0 accepts v13 and
+  answers a v15 database with "Database was created with a newer version
+  (schema v15). Update the extension." This repository now carries 0.4.0,
+  which accepts v15. The extension is published apart from the Python package,
+  so until a 0.4.0 `.vsix` is built and installed, the Code Graph panel shows
+  that error once the CLI has moved the graph to v15.
+- **Run `code-review-graph build` once.** `update` only parses files that
+  changed, so most fixes in this release reach a file only when it is parsed
+  again: the new file types (HTML, XSLT, Liquid, JSON, plain YAML, `.cjs` and
+  `.kts`), translation files losing their key nodes, `vendor/` folders that
+  hold source, workspace and npm alias imports, tsconfig `baseUrl` and
+  `extends`, `extra.import_context` on import edges, the call and test fixes
+  (#984, inherited methods, `tests_for` for Java, Ruby and PHP) and the
+  confidence tiers. Ruby files (v14 above), files with nested classes and C#
+  files are the exception: the next `update` parses them again by itself. If
+  the graph has embeddings, run `code-review-graph embed` after that, because
+  renamed C# nodes leave their old vectors behind.
+- **Upgrade the package, then run `code-review-graph install` again.** The
+  hooks and instruction blocks an earlier release wrote do not update
+  themselves. Install now also writes `post-checkout`, `post-merge` and
+  `post-rewrite` git hooks; the edit hook for Claude Code, Qoder and CodeBuddy,
+  and the Codex hooks, call the new `hook-update` and `hook-status` commands;
+  and the instruction block has new search guidance. Upgrade first: an older
+  CLI has no `hook-update`, so the new edit hook would do nothing. Install and
+  uninstall still recognise everything 2.3.9 and earlier releases wrote.
+- **New settings are off by default.** Nothing changes unless you turn them on:
+  `--enrich` or `CRG_ENABLE_ENRICHMENT=1` (needs the `enrichment` extra),
+  `install --steering`, `install --gitignore`, `--follow-symlinks` or
+  `CRG_FOLLOW_SYMLINKS=1`, `CRG_CONTEXT_HISTORY=1`, `CRG_VECTOR_CACHE=1`,
+  `serve --http --multi-repo`, `serve --multi-worktree` and the Action's
+  `details` input.
+- **Output and dependency changes.** Build results no longer carry
+  `summaries_computed` or `summaries_s`. On `find_large_functions_tool`,
+  `semantic_search_nodes_tool` and `traverse_graph_tool`, `result_count` is now
+  the count before the cut. The lowest supported versions of `mcp`, `anyio`,
+  `tree-sitter`, `tree-sitter-language-pack` and `pyyaml` are higher, and
+  fastmcp 4 is allowed (see *Changed*).
+- **GitHub Action cache.** The cache key segment moves from `schema13` to
+  `schema15`, so the first run after upgrading restores no graph cache and
+  builds from scratch. Self-hosted runners can delete the old
+  `code-review-graph-schema13-*` entries.
 
 ## [2.3.9] - 2026-09-18
 
