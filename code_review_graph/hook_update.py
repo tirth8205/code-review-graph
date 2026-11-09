@@ -10,6 +10,7 @@ to the file (#311).
 from __future__ import annotations
 
 import json
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -92,11 +93,47 @@ def _superproject(repo_root: Path) -> Path | None:
     return Path(root).resolve() if root else None
 
 
+def _recorded_root(db_path: Path) -> Path | None:
+    """The repository root a graph says it was built for, read without writing."""
+    # As in GraphStore: ``immutable`` reads a checkpointed WAL database
+    # without creating its ``-shm`` sidecar.
+    sidecars = (db_path.with_name(db_path.name + s) for s in ("-wal", "-shm"))
+    query = "mode=ro" if any(p.exists() for p in sidecars) else "mode=ro&immutable=1"
+    try:
+        conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?{query}", uri=True, timeout=1)
+        try:
+            row = conn.execute(
+                "SELECT value FROM metadata WHERE key = ?", ("repo_root",)
+            ).fetchone()
+        finally:
+            conn.close()
+    except (sqlite3.Error, OSError, ValueError):
+        return None
+    if not row or not isinstance(row[0], str) or not row[0]:
+        return None
+    try:
+        return Path(row[0]).resolve()
+    except (OSError, RuntimeError):
+        return None
+
+
 def _has_graph(repo_root: Path) -> bool:
+    """True when ``repo_root`` has a graph of its own.
+
+    A graph in the default data directory, or at the legacy
+    ``.code-review-graph.db`` that the update migrates, is the repository's.
+    One anywhere else (``CRG_DATA_DIR`` or a registered ``--data-dir``) can be
+    the database every repository resolves to, so it counts only when it
+    records this repository as the one it was built for.
+    """
     from .incremental import get_db_path
 
     try:
-        return get_db_path(repo_root, read_only=True).is_file()
+        db_path = get_db_path(repo_root, read_only=True)
+        default_dir = (repo_root / ".code-review-graph").resolve()
+        if db_path.parent.resolve() == default_dir:
+            return db_path.is_file() or (repo_root / ".code-review-graph.db").is_file()
+        return db_path.is_file() and _recorded_root(db_path) == repo_root.resolve()
     except (OSError, ValueError):
         return False
 

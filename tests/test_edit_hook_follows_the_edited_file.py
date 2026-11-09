@@ -214,6 +214,73 @@ def test_a_submodule_without_a_graph_hands_the_edit_to_its_superproject(
     assert _targets(monkeypatch, _edit(workspace, submodule / "mod.py")) == [submodule]
 
 
+def _shared_graph(data_dir: Path, built_for: Path) -> None:
+    """A ``CRG_DATA_DIR`` graph, recording the repository it was built for."""
+    from code_review_graph.graph import GraphStore
+
+    data_dir.mkdir(parents=True, exist_ok=True)
+    store = GraphStore(data_dir / "graph.db")
+    try:
+        store.set_metadata("repo_root", str(built_for))
+        store.commit()
+    finally:
+        store.close()
+
+
+def test_a_shared_data_dir_graph_belongs_only_to_the_repo_it_was_built_for(
+    monkeypatch, tmp_path
+):
+    """Every repo resolves to one ``CRG_DATA_DIR`` database; only one owns it."""
+    workspace = tmp_path / "workspace"
+    repo_a = _repo(workspace / "repo-a")
+    repo_b = _repo(workspace / "repo-b")
+    shared = tmp_path / "shared"
+    _shared_graph(shared, repo_a)
+    monkeypatch.setenv("CRG_DATA_DIR", str(shared))
+
+    assert _targets(monkeypatch, _edit(workspace, repo_a / "a.py")) == [repo_a]
+    # Updating repo-b would rebuild repo-a's graph with repo-b's files.
+    assert _targets(monkeypatch, _edit(workspace, repo_b / "b.py")) == []
+    assert _targets(monkeypatch, _edit(repo_a, repo_b / "b.py")) == []
+    assert _targets(monkeypatch, _edit(repo_a, repo_a / "a.py")) == [repo_a]
+
+
+def test_a_submodule_reaches_its_superproject_through_a_shared_data_dir(
+    monkeypatch, tmp_path
+):
+    library = _repo(tmp_path / "library", commit=True)
+    superproject = _repo(tmp_path / "super", commit=True)
+    _git(
+        superproject,
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        "-q",
+        str(library),
+        "vendor/library",
+    )
+    submodule = (superproject / "vendor" / "library").resolve()
+    shared = tmp_path / "shared"
+    _shared_graph(shared, superproject)
+    monkeypatch.setenv("CRG_DATA_DIR", str(shared))
+
+    assert _targets(monkeypatch, _edit(tmp_path, submodule / "mod.py")) == [superproject]
+
+
+def test_a_graph_at_the_legacy_location_counts_as_built(monkeypatch, tmp_path):
+    """The update migrates ``.code-review-graph.db``; detection must not skip it."""
+    workspace = tmp_path / "workspace"
+    repo = _repo(workspace / "repo")
+    legacy = repo / ".code-review-graph.db"
+    legacy.write_bytes(b"")
+
+    assert _targets(monkeypatch, _edit(workspace, repo / "x.py")) == [repo]
+    # Detection itself moves nothing.
+    assert legacy.is_file()
+    assert not (repo / ".code-review-graph").exists()
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="runs the POSIX hook command")
 def test_installed_claude_hook_updates_the_sibling_that_was_edited(tmp_path):
     """The command ``install`` writes, end to end, from a folder of siblings."""
