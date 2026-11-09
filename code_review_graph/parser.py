@@ -35,6 +35,7 @@ from .constants import (
     IMPORT_SCOPE_KEY,
     IMPORT_SCOPE_PACKAGE,
     IMPORT_SCOPE_TREE,
+    normalize_file_path,
     release_os_memory,
 )
 from .custom_languages import CustomLanguage, load_custom_languages
@@ -1117,25 +1118,6 @@ def _read_php_composer_psr4(
 # ---------------------------------------------------------------------------
 # Data models for extracted entities
 # ---------------------------------------------------------------------------
-
-
-def normalize_file_path(path: "str | PurePath") -> str:
-    """Return *path* as a forward-slash (POSIX) string for graph identity.
-
-    ``file_path`` values and the path component of qualified names are graph
-    identity: they must be separator-stable across operating systems so a
-    graph built on Windows produces the same identifiers as one built on
-    Linux/macOS, and so consumers that reconstruct identifiers from ``Path``
-    objects always agree with the parser. See issue #774.
-
-    Only apply this to file *paths* — never to symbol names: PHP namespace
-    identifiers (``App\\Domain\\Job``) legitimately contain backslashes.
-    """
-    if isinstance(path, str):
-        return path.replace("\\", "/") if "\\" in path else path
-    if isinstance(path, PurePath):
-        return path.as_posix()
-    return str(path).replace("\\", "/")
 
 
 @dataclass

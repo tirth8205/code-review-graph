@@ -1214,7 +1214,6 @@ class EmbeddingStore:
         )
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA cache_size=-2000")
-        self._conn.execute("PRAGMA temp_store=MEMORY")
         self._conn.executescript(_EMBEDDINGS_SCHEMA)
         # The file this connection holds open. If graph.db is later replaced,
         # the connection keeps reading the old file; see _cached_vectors().
@@ -1243,7 +1242,6 @@ class EmbeddingStore:
         except sqlite3.Error:
             pass
         self._conn.close()
-        release_os_memory()
 
     def embed_nodes(self, nodes: list[GraphNode], batch_size: int = 64) -> int:
         """Compute and store embeddings for a list of nodes."""

@@ -840,20 +840,15 @@ def detect_communities(
         List of community dicts with keys: name, level, size, cohesion,
         dominant_language, description, members, member_qns.
     """
+    # Detection reads only kind and endpoints, so skip building a GraphEdge
+    # (and decoding its JSON extra) for every edge in the graph.
+    all_edges: Sequence[GraphEdge | _CommunityEdge] = [
+        _CommunityEdge(row[0], row[1], row[2])
+        for row in store._conn.execute(
+            "SELECT kind, source_qualified, target_qualified FROM edges"
+        ).fetchall()
+    ]
     # Gather all nodes (exclude File nodes to focus on code entities)
-    all_edges: Sequence[GraphEdge | _CommunityEdge]
-    if (
-        type(store).get_all_edges is GraphStore.get_all_edges
-        and "get_all_edges" not in store.__dict__
-    ):
-        all_edges = [
-            _CommunityEdge(row[0], row[1], row[2])
-            for row in store._conn.execute(
-                "SELECT kind, source_qualified, target_qualified FROM edges"
-            ).fetchall()
-        ]
-    else:
-        all_edges = store.get_all_edges()
     unique_nodes = store.get_all_nodes(exclude_files=True)
 
     logger.info(

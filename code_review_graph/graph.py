@@ -888,13 +888,15 @@ class GraphStore:
         release_os_memory()
 
     def close(self) -> None:
+        # No gc.collect() here: every MCP tool call opens and closes a store,
+        # and a full collection costs ~10 ms or more per call. Builds release
+        # memory once, through shrink_memory(), when they finish.
         self._invalidate_cache()
         try:
             self._conn.execute("PRAGMA shrink_memory")
         except sqlite3.Error:
             pass
         self._conn.close()
-        release_os_memory()
 
     # --- Write operations ---
 
@@ -1334,6 +1336,30 @@ class GraphStore:
 
     def get_edges_by_target(self, qualified_name: str) -> list[GraphEdge]:
         return list(self.iter_edges_by_target(qualified_name))
+
+    def get_direct_dependent_files(self, file_path: str) -> set[str]:
+        """Files that import *file_path* or point an edge at a node in it.
+
+        One indexed query instead of one lookup per node in the file. The
+        node edges counted are CALLS, IMPORTS_FROM, INHERITS and IMPLEMENTS;
+        *file_path* itself is never its own dependent.
+        """
+        norm_fp = normalize_file_path(file_path)
+        rows = self._conn.execute(
+            "SELECT file_path FROM edges INDEXED BY idx_edges_target_kind "
+            "WHERE target_qualified IN (?, ?) AND kind = 'IMPORTS_FROM' "
+            "UNION "
+            "SELECT e.file_path FROM nodes n "
+            "JOIN edges e INDEXED BY idx_edges_target_kind "
+            "ON e.target_qualified = n.qualified_name "
+            "WHERE n.file_path = ? "
+            "AND e.kind IN ('CALLS', 'IMPORTS_FROM', 'INHERITS', 'IMPLEMENTS')",
+            (file_path, norm_fp, norm_fp),
+        ).fetchall()
+        dependents = {row[0] for row in rows}
+        dependents.discard(file_path)
+        dependents.discard(norm_fp)
+        return dependents
 
     def iter_edges_by_target(self, qualified_name: str) -> Iterator[GraphEdge]:
         """Yield incoming edges without first materializing the complete set."""
@@ -2039,6 +2065,10 @@ class GraphStore:
 
         Returns the number of resolved edges.
         """
+        # This pass and resolve_bare_tested_by_sources share one evidence
+        # context. Fill it fresh here so a write that bypassed the store's
+        # invalidation (a resolver using the raw connection) is never missed.
+        self._drop_bare_endpoint_context()
         return self._resolve_bare_endpoints("CALLS", "target_qualified")
 
     # -- Target-resolution certainty --------------------------------------
@@ -2051,7 +2081,8 @@ class GraphStore:
         stale for exactly the edges the distinction is about. One set-based
         UPDATE over the edge table, not a per-row query.
 
-        Returns the number of rows classified.
+        Returns the number of rows whose classification changed; rows that
+        are already right are not rewritten.
         """
         placeholders = ", ".join("?" for _ in TARGET_RESOLUTION_KINDS)
         self._begin_immediate()
@@ -2319,7 +2350,17 @@ class GraphStore:
 
         Returns the number of resolved edges.
         """
-        return self._resolve_bare_endpoints("TESTED_BY", "source_qualified")
+        try:
+            return self._resolve_bare_endpoints("TESTED_BY", "source_qualified")
+        finally:
+            # The pair is done: do not keep a copy of every node name alive
+            # for the rest of the store's life (watch mode keeps one open).
+            self._drop_bare_endpoint_context()
+
+    def _drop_bare_endpoint_context(self) -> None:
+        with self._cache_lock:
+            self._cache_epoch += 1
+            self._bare_endpoint_context_cache = None
 
     @staticmethod
     def _directory_member_files(
@@ -2371,7 +2412,15 @@ class GraphStore:
 
         # call-site file -> explicitly imported files
         import_targets: dict[str, set[str]] = {}
+        # Python's repository-suffix resolver keeps a raw import when multiple
+        # indexed modules match and records the candidate files in edge metadata.
+        # Carry that evidence into bare CALLS / TESTED_BY endpoints so a graph
+        # first built in the ambiguous state cannot fall back to a name-only
+        # caller match for every candidate.
         ambiguous_import_targets: dict[str, set[str]] = {}
+        # Directory-scoped targets: a Go import names a package, not a file.
+        # The edge stays one row; the member files are expanded here, once
+        # per post-processing pass, rather than stored one edge per member.
         scoped_dirs: dict[str, str] = {}
         for row in conn.execute(
             "SELECT DISTINCT file_path, target_qualified, extra FROM edges "
@@ -2404,10 +2453,15 @@ class GraphStore:
                         if isinstance(candidate, str)
                     )
 
+        # C# `using X.Y;` directives store IMPORTS_FROM targets as raw
+        # namespace strings rather than file paths, so the path-keyed
+        # evidence above never matches a candidate's defining file. Map
+        # declared namespaces back to the files declaring them and add
+        # those files as import evidence. See: #310, #792
         namespace_files: dict[str, set[str]] = {}
         for row in conn.execute(
             "SELECT file_path, extra FROM nodes "
-            'WHERE kind = \'File\' AND extra LIKE \'%"csharp_namespaces"%\''
+            "WHERE kind = 'File' AND extra LIKE '%\"csharp_namespaces\"%'"
         ).fetchall():
             try:
                 node_extra = json.loads(row["extra"] or "{}")
@@ -2438,6 +2492,13 @@ class GraphStore:
                     grown |= members.get(target, set())
                 imported |= grown
 
+        # Python imports the repository-suffix resolver could not map to a file
+        # keep their raw dotted module as the IMPORTS_FROM target — the standard
+        # `src` layout, or framework-mediated packages such as Odoo's
+        # `odoo.addons.*`. Path-keyed evidence can never match a dotted module,
+        # so map each dotted module back to the file that could define it. Only
+        # an unambiguous match counts: a module answered by two indexed files is
+        # no more evidence than a bare name. See: #903
         module_files = self._python_module_file_index(conn)
         if module_files:
             for imported in import_targets.values():

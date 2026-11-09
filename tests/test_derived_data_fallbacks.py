@@ -157,3 +157,113 @@ def test_custom_language_probes_its_grammar_not_its_alias(monkeypatch):
     incremental._prewarm_parser_probes(FakeParser(), ["a.ml"])
 
     assert probed == ["python"]
+
+
+def _bare_call_graph(tmp_path):
+    """b.py calls a bare ``helper`` that a.py defines, with no import yet."""
+    a, b = str(tmp_path / "a.py"), str(tmp_path / "b.py")
+    store = GraphStore(str(tmp_path / "graph.db"))
+    for path, name in ((a, "helper"), (b, "caller")):
+        store.upsert_node(NodeInfo(
+            kind="File", name=path, file_path=path,
+            line_start=1, line_end=9, language="python",
+        ))
+        store.upsert_node(NodeInfo(
+            kind="Function", name=name, file_path=path,
+            line_start=2, line_end=5, language="python",
+        ))
+    store.upsert_edge(EdgeInfo(
+        kind="CALLS", source=f"{b}::caller", target="helper", file_path=b, line=3,
+    ))
+    store.commit()
+    return store, a, b
+
+
+def _call_target(store):
+    return store._conn.execute(
+        "SELECT target_qualified FROM edges WHERE kind = 'CALLS'"
+    ).fetchone()[0]
+
+
+def test_a_raw_connection_write_reaches_the_next_resolution_pass(tmp_path):
+    """Post-build resolvers write through ``store._conn``, which skips the
+    store's cache invalidation. The next pass must still see the new import
+    (review of #1139: a cached context resolved nothing here).
+    """
+    store, a, b = _bare_call_graph(tmp_path)
+    try:
+        store.resolve_bare_call_targets()
+        assert _call_target(store) == "helper"  # no evidence yet
+
+        store._conn.execute(
+            "INSERT INTO edges (kind, source_qualified, target_qualified, "
+            "file_path, line, extra, updated_at) "
+            "VALUES ('IMPORTS_FROM', ?, ?, ?, 1, '{}', 0)",
+            (b, a, b),
+        )
+        store.resolve_bare_call_targets()
+
+        assert _call_target(store) == f"{a}::helper"
+    finally:
+        store.close()
+
+
+def test_the_resolution_context_does_not_outlive_its_pass(tmp_path):
+    """The context holds every node name; a long-lived store must not keep it."""
+    store, _, _ = _bare_call_graph(tmp_path)
+    try:
+        store.resolve_bare_call_targets()
+        store.resolve_bare_tested_by_sources()
+
+        assert store._bare_endpoint_context_cache is None
+    finally:
+        store.close()
+
+
+def test_closing_a_store_does_not_run_a_full_collection(tmp_path, monkeypatch):
+    """Every MCP tool call closes a store; a gc pass there costs each call."""
+    import code_review_graph.graph as graph_module
+
+    def collect():
+        raise AssertionError("close() must stay cheap")
+
+    monkeypatch.setattr(graph_module, "release_os_memory", collect)
+    store = _seed(tmp_path)
+
+    store.close()
+
+
+def test_direct_dependents_follow_imports_and_node_edges_only(tmp_path):
+    """The one-query dependents lookup keeps the per-node lookup's rules."""
+    target = str(tmp_path / "core.py")
+    store = GraphStore(str(tmp_path / "graph.db"))
+    try:
+        store.upsert_node(NodeInfo(
+            kind="Class", name="Core", file_path=target,
+            line_start=1, line_end=9, language="python",
+        ))
+        core = f"{target}::Core"
+        for name, kind, edge_target in (
+            ("importer", "IMPORTS_FROM", target),
+            ("caller", "CALLS", core),
+            ("child", "INHERITS", core),
+            ("impl", "IMPLEMENTS", core),
+            ("referrer", "REFERENCES", core),
+            ("tester", "TESTED_BY", core),
+            ("core", "CALLS", core),
+        ):
+            path = target if name == "core" else str(tmp_path / f"{name}.py")
+            store.upsert_edge(EdgeInfo(
+                kind=kind, source=path, target=edge_target, file_path=path, line=1,
+            ))
+        store.commit()
+
+        assert store.get_direct_dependent_files(target) == {
+            str(tmp_path / f"{name}.py")
+            for name in ("importer", "caller", "child", "impl")
+        }
+        assert incremental._single_hop_dependents(store, target) == (
+            store.get_direct_dependent_files(target)
+        )
+    finally:
+        store.close()

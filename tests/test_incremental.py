@@ -12,12 +12,11 @@ import code_review_graph.constants as constants_module
 import code_review_graph.incremental as incremental_module
 import code_review_graph.tools as tools_pkg
 from code_review_graph.constants import discovery_timeout
-from code_review_graph.errors import ChangeDiscoveryError
 from code_review_graph.daemon import DaemonConfig, WatchDaemon, WatchRepo
+from code_review_graph.errors import ChangeDiscoveryError
 from code_review_graph.event_resolver import _clear_derived_event_data
 from code_review_graph.graph import GraphStore
 from code_review_graph.incremental import (
-    _can_batch_store,
     _create_watch_handler,
     _decode_name_status_paths,
     _get_code_parser_cls,
@@ -2787,7 +2786,6 @@ class TestIncrementalDirectHelpers:
 
         store = GraphStore(tmp_path / "inc.db")
         try:
-            assert _can_batch_store(store, parser) is True
             deps = _single_hop_dependents(store, "/nonexistent/a.py")
             assert deps == set()
 

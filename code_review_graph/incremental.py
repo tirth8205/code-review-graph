@@ -14,7 +14,6 @@ import logging
 import os
 import re
 import signal
-import sqlite3
 import subprocess
 import sys
 import threading
@@ -1849,65 +1848,12 @@ _MAX_DEPENDENT_FILES = 500
 
 
 def _single_hop_dependents(store: GraphStore, file_path: str) -> set[str]:
-    """Find files that directly depend on *file_path* (single hop)."""
-    if (
-        type(getattr(store, "_conn", None)) is sqlite3.Connection
-        and getattr(type(store), "get_edges_by_target", None) is GraphStore.get_edges_by_target
-        and "get_edges_by_target" not in getattr(store, "__dict__", {})
-        and getattr(type(store), "get_nodes_by_file", None) is GraphStore.get_nodes_by_file
-        and "get_nodes_by_file" not in getattr(store, "__dict__", {})
-    ):
-        norm_fp = normalize_file_path(file_path)
-        rows = store._conn.execute(
-            "SELECT file_path FROM edges INDEXED BY idx_edges_target_kind "
-            "WHERE target_qualified IN (?, ?) AND kind = 'IMPORTS_FROM' "
-            "UNION "
-            "SELECT e.file_path FROM nodes n "
-            "JOIN edges e INDEXED BY idx_edges_target_kind "
-            "ON e.target_qualified = n.qualified_name "
-            "WHERE n.file_path = ? "
-            "AND e.kind IN ('CALLS', 'IMPORTS_FROM', 'INHERITS', 'IMPLEMENTS')",
-            (file_path, norm_fp, norm_fp),
-        ).fetchall()
-        sql_dependents = {row[0] for row in rows}
-        sql_dependents.discard(file_path)
-        sql_dependents.discard(norm_fp)
-        return sql_dependents
+    """Find files that directly depend on *file_path* (single hop).
 
-    dependents: set[str] = set()
-    edges = store.get_edges_by_target(file_path)
-    for e in edges:
-        if e.kind == "IMPORTS_FROM":
-            dependents.add(e.file_path)
-
-    nodes = store.get_nodes_by_file(file_path)
-    for node in nodes:
-        for e in store.get_edges_by_target(node.qualified_name):
-            if e.kind in ("CALLS", "IMPORTS_FROM", "INHERITS", "IMPLEMENTS"):
-                dependents.add(e.file_path)
-
-    dependents.discard(file_path)
-    return dependents
-
-
-def _can_batch_store(store: GraphStore, parser: Any) -> bool:
-    """Return True when standard unpatched store/parser can use store_file_batch."""
-    store_cls = type(store)
-    replace_qn = getattr(GraphStore._replace_file_data, "__qualname__", "")
-    return (
-        type(getattr(store, "_conn", None)) is sqlite3.Connection
-        and getattr(store_cls, "store_file_nodes_edges", None)
-        is GraphStore.store_file_nodes_edges
-        and "store_file_nodes_edges" not in getattr(store, "__dict__", {})
-        and getattr(store_cls, "store_file_batch", None) is GraphStore.store_file_batch
-        and "store_file_batch" not in getattr(store, "__dict__", {})
-        and getattr(store_cls, "_replace_file_data", None)
-        is GraphStore._replace_file_data
-        and "_replace_file_data" not in getattr(store, "__dict__", {})
-        and replace_qn == "GraphStore._replace_file_data"
-        and getattr(type(parser).parse_bytes, "__qualname__", "") == "CodeParser.parse_bytes"
-        and "parse_bytes" not in getattr(parser, "__dict__", {})
-    )
+    A file depends on *file_path* when it imports it, or when one of its
+    edges calls, imports, inherits or implements a node defined in it.
+    """
+    return store.get_direct_dependent_files(file_path)
 
 
 # These languages are parsed by bounded fallbacks or config readers, so no
@@ -2085,7 +2031,6 @@ def full_build(
     file_count = len(files)
 
     use_serial = os.environ.get("CRG_SERIAL_PARSE", "") == "1"
-    pending_batch: list[tuple[str, list, list, str]] = []
 
     if use_serial or file_count < 8:
         # Serial fallback (for debugging or tiny repos)
@@ -2120,9 +2065,6 @@ def full_build(
                 total_edges += len(parsed[1])
             if i % 50 == 0 or i == file_count:
                 logger.info("Progress: %d/%d files parsed", i, file_count)
-        if pending_batch:
-            store.store_file_batch(pending_batch)
-            pending_batch.clear()
     else:
         # Parallel parsing — store calls remain serial (SQLite single-writer).
         # Executor kind auto-selected: process for normal CLI/automation;
@@ -2153,9 +2095,6 @@ def full_build(
                 total_edges += len(edges)
                 if i % 200 == 0 or i == file_count:
                     logger.info("Progress: %d/%d files parsed", i, file_count)
-        if pending_batch:
-            store.store_file_batch(pending_batch)
-            pending_batch.clear()
 
     store.set_metadata("last_updated", time.strftime("%Y-%m-%dT%H:%M:%S"))
     store.set_metadata("last_build_type", "full")
@@ -2462,7 +2401,6 @@ def incremental_update(
         store.store_file_nodes_edges(str(repo_root / rel_path), nodes, edges, fhash)
 
     use_serial = os.environ.get("CRG_SERIAL_PARSE", "") == "1"
-    pending_batch: list[tuple[str, list, list, str]] = []
     parsed_files = 0
 
     if use_serial or len(to_parse) < 8:
@@ -2489,9 +2427,6 @@ def incremental_update(
             parsed_files += 1
             total_nodes += len(nodes)
             total_edges += len(edges)
-        if pending_batch:
-            store.store_file_batch(pending_batch)
-            pending_batch.clear()
     else:
         # See full-build comment above for executor kind rationale.
         _prewarm_parser_probes(parser, to_parse)
@@ -2511,9 +2446,6 @@ def incremental_update(
                 parsed_files += 1
                 total_nodes += len(nodes)
                 total_edges += len(edges)
-        if pending_batch:
-            store.store_file_batch(pending_batch)
-            pending_batch.clear()
 
     failed_dependents = dependent_files & {error["file"] for error in errors}
     if failed_dependents != dependents_pending:
