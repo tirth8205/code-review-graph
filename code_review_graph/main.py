@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import anyio.to_thread
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
 from fastmcp.prompts import Message
 
 from . import __version__
@@ -29,8 +30,9 @@ from .constants import MAX_IMPACT_NODES, env_int
 
 # The graph store and incremental module load with the server anyway (the
 # watch thread needs both), so only the tool and prompt modules are deferred.
-from .graph import GraphStore
+from .graph import GraphStore, _sanitize_name
 from .incremental import find_project_root, get_db_path, start_watch_thread
+from .registry import Registry
 
 if TYPE_CHECKING:
     from .tools import (
@@ -129,9 +131,11 @@ def __getattr__(name: str):
 
 logger = logging.getLogger(__name__)
 
-# NOTE: Thread-safe for stdio MCP (single-threaded). If adding HTTP/SSE
-# transport with concurrent requests, replace with contextvars.ContextVar.
+# Set once by ``main()`` before the server starts and only read after that, so
+# concurrent HTTP requests can share them. Nothing per request is kept here.
 _default_repo_root: str | None = None
+#: ``serve --http --multi-repo``: every call must name a registered repo.
+_multi_repo: bool = False
 
 
 def _resolve_repo_root(repo_root: Optional[str]) -> Optional[str]:
@@ -143,11 +147,66 @@ def _resolve_repo_root(repo_root: Optional[str]) -> Optional[str]:
        (captured in ``_default_repo_root``).
     3. None — the underlying impl will fall back to the server's cwd.
 
+    With ``serve --http --multi-repo`` there is no fallback at all: see
+    ``_registered_repo_root``.
+
     All MCP tools that accept ``repo_root`` should use this helper so
     ``serve --repo <X>`` applies consistently, including
     ``get_docs_section_tool``. See: #222.
     """
+    if _multi_repo:
+        return _registered_repo_root(repo_root)
     return repo_root if repo_root else _default_repo_root
+
+
+def _registered_repo_root(repo_root: Optional[str]) -> str:
+    """Return the registered repository a ``--multi-repo`` call names.
+
+    One HTTP server shared by several repositories must never guess which one
+    a call means. Falling back to ``--repo`` or the server's working directory
+    answered a call from a repository the client never named (#607), so a
+    missing, relative or unregistered ``repo_root`` is refused with a message
+    that says what to pass instead.
+
+    The registry is read on every call, so ``register`` and ``unregister``
+    apply without a restart. This check comes on top of
+    ``_validate_repo_root``, which every tool body still runs.
+    """
+    if not repo_root:
+        raise ToolError(
+            "repo_root is required. This server serves several repositories "
+            "(serve --multi-repo), so every call must name one: pass the "
+            "absolute path of a registered repository. list_repos_tool lists them."
+        )
+    candidate = Path(repo_root)
+    if not candidate.is_absolute():
+        raise ToolError(
+            "repo_root must be an absolute path on this server, got: "
+            f"{_sanitize_name(repo_root)}"
+        )
+    try:
+        wanted = candidate.resolve()
+        registered = Registry().list_repos()
+    except (OSError, RuntimeError, ValueError) as exc:  # a NUL byte, a symlink loop
+        raise ToolError(f"repo_root cannot be checked: {exc}") from exc
+
+    wanted_key = os.path.normcase(str(wanted))
+    for entry in registered:
+        path = entry.get("path") if isinstance(entry, dict) else None
+        if not isinstance(path, str) or not path:
+            continue
+        try:
+            known = Path(path).resolve()
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if os.path.normcase(str(known)) == wanted_key:
+            return str(known)
+    raise ToolError(
+        f"repo_root is not a registered repository: {_sanitize_name(str(wanted))}. "
+        "This server only serves registered repositories: run "
+        "`code-review-graph register <path>` to add one, or call list_repos_tool "
+        "to see them."
+    )
 
 
 #: Appended to the message a tool returns when ``CRG_TOOL_TIMEOUT`` cuts it
@@ -305,6 +364,13 @@ SERVER_INSTRUCTIONS = (
     "never spell the name, which text search silently misses.\n"
     "For plain text - string literals, log messages, env var names, comments, config "
     "keys - use Grep; the graph does not index text."
+)
+
+# Added to the instructions under ``serve --http --multi-repo``, so a client
+# learns before its first call that every call must name a repository.
+MULTI_REPO_INSTRUCTIONS = (
+    "\nThis server serves several repositories: pass repo_root, the absolute "
+    "path of a registered repository, on every call. list_repos_tool lists them."
 )
 
 mcp = FastMCP(
@@ -1560,6 +1626,7 @@ def main(
     transport: str = "stdio",
     host: str | None = None,
     port: int | None = None,
+    multi_repo: bool = False,
 ) -> None:
     """Run the MCP server (stdio or HTTP).
 
@@ -1581,19 +1648,51 @@ def main(
         transport: ``"stdio"`` (default) or ``"streamable-http"`` for local HTTP.
         host: Bind address when using HTTP (required for HTTP; set by CLI).
         port: Port when using HTTP (required for HTTP; set by CLI).
+        multi_repo: Serve every registered repository over HTTP. Each call
+            must then name one in ``repo_root``; there is no default (#607).
     """
-    global _default_repo_root
-    root = Path(repo_root) if repo_root else find_project_root()
-    _default_repo_root = str(root)
+    global _default_repo_root, _multi_repo
+    root: Path | None = None
+    if multi_repo:
+        if transport != "streamable-http":
+            raise ValueError("multi_repo needs the HTTP transport (serve --http)")
+        if repo_root:
+            raise ValueError(
+                "multi_repo serves the repositories in the registry and takes no repo_root"
+            )
+        if auto_watch:
+            raise ValueError(
+                "multi_repo cannot auto-watch; the daemon "
+                "(code-review-graph daemon) watches several repositories"
+            )
+        if os.environ.get("CRG_DATA_DIR", "").strip():
+            raise ValueError(
+                "multi_repo cannot be combined with CRG_DATA_DIR, which would put "
+                "every repository's graph in one database; use per-repository "
+                "Registry data_dir entries instead"
+            )
+        _default_repo_root = None
+        if not Registry().list_repos():
+            logger.warning(
+                "No repositories are registered, so every call will be refused "
+                "until one is: code-review-graph register <path>"
+            )
+    else:
+        root = Path(repo_root) if repo_root else find_project_root()
+        _default_repo_root = str(root)
     _apply_tool_filter(tools)
 
     previous_stdio_state = _incremental._MCP_STDIO_ACTIVE
     _incremental._MCP_STDIO_ACTIVE = transport == "stdio"
+    previous_instructions = mcp.instructions
+    _multi_repo = multi_repo
+    if multi_repo:
+        mcp.instructions = SERVER_INSTRUCTIONS + MULTI_REPO_INSTRUCTIONS
     watch_store: GraphStore | None = None
     watch_thread: threading.Thread | None = None
     watch_stop = threading.Event()
     try:
-        if auto_watch:
+        if auto_watch and root is not None:
             from .postprocessing import run_post_processing
 
             watch_store = GraphStore(get_db_path(root))
@@ -1651,6 +1750,8 @@ def main(
                 watch_store.close()
         finally:
             _incremental._MCP_STDIO_ACTIVE = previous_stdio_state
+            _multi_repo = False
+            mcp.instructions = previous_instructions
 
 
 if __name__ == "__main__":

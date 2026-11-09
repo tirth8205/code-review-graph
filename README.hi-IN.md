@@ -414,6 +414,7 @@ code-review-graph daemon status    # Daemon status and repos
 code-review-graph eval             # Run evaluation benchmarks
 code-review-graph serve            # Start the MCP server (stdio)
 code-review-graph serve --http     # MCP over Streamable HTTP on localhost:5555
+code-review-graph serve --http --multi-repo  # One HTTP server for every registered repo
 ```
 
 यह एक चुनी हुई सूची है। `code-review-graph --help` हर कमांड दिखाता है, और [docs/COMMANDS.md](docs/COMMANDS.md) उनके फ़्लैग बताता है।

@@ -416,6 +416,7 @@ code-review-graph daemon status    # Daemon status and repos
 code-review-graph eval             # Run evaluation benchmarks
 code-review-graph serve            # Start the MCP server (stdio)
 code-review-graph serve --http     # MCP over Streamable HTTP on localhost:5555
+code-review-graph serve --http --multi-repo  # One HTTP server for every registered repo
 ```
 
 이것은 일부만 고른 목록입니다. `code-review-graph --help`가 모든 명령을 보여 주고, [docs/COMMANDS.md](docs/COMMANDS.md)가 각 플래그를 설명합니다.

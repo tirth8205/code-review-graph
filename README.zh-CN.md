@@ -413,6 +413,7 @@ code-review-graph daemon status    # Daemon status and repos
 code-review-graph eval             # Run evaluation benchmarks
 code-review-graph serve            # Start the MCP server (stdio)
 code-review-graph serve --http     # MCP over Streamable HTTP on localhost:5555
+code-review-graph serve --http --multi-repo  # One HTTP server for every registered repo
 ```
 
 这是一份精选列表。`code-review-graph --help` 会列出全部命令，[docs/COMMANDS.md](docs/COMMANDS.md) 记录了它们的参数。
