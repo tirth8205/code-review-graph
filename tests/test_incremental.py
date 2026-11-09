@@ -3,6 +3,7 @@
 import hashlib
 import io
 import subprocess
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch  # noqa: F401 – used in tests
 
@@ -1850,12 +1851,11 @@ class TestWatchReconciliation:
             nonlocal callback_count
             callback_count += 1
 
+        stop = threading.Event()
+        stop.set()  # the loop ends at its first tick
         try:
-            with (
-                patch("watchdog.observers.Observer") as observer,
-                patch("time.sleep", side_effect=KeyboardInterrupt),
-            ):
-                watch(tmp_path, store, on_files_updated=on_files_updated)
+            with patch("watchdog.observers.Observer") as observer:
+                watch(tmp_path, store, on_files_updated=on_files_updated, stop_event=stop)
             assert callback_count == 1
             assert store.get_all_files() == []
             observer.return_value.start.assert_called_once()
@@ -1872,10 +1872,11 @@ class TestWatchReconciliation:
         store = GraphStore(tmp_path / "graph.db")
         incremental_update(tmp_path, store, changed_files=["offline.py"])
         deleted.unlink()
+        stop = threading.Event()
+        stop.set()  # if startup ever passes, the loop ends at its first tick
         try:
             with (
                 patch("watchdog.observers.Observer") as observer,
-                patch("time.sleep", side_effect=KeyboardInterrupt),
                 # Patch the entry point post-processing calls, not the
                 # rebuild underneath it: whether a sync rebuilds or applies
                 # a delta depends on how much of the graph moved, and this
@@ -1889,7 +1890,7 @@ class TestWatchReconciliation:
                     match="post-processing reported warnings",
                 ),
             ):
-                watch(tmp_path, store, on_files_updated=run_post_processing)
+                watch(tmp_path, store, on_files_updated=run_post_processing, stop_event=stop)
 
             # The observer starts before startup work (PR #1108), so failing
             # closed means it is stopped and joined before watch() raises.

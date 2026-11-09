@@ -123,22 +123,29 @@ def _live_thread() -> tuple[threading.Thread, threading.Event]:
 
 
 
-def _tick_driver(*actions):
-    """Replacement for ``time.sleep`` that runs one scripted action per tick.
+class _TickDriver:
+    """``stop_event`` for ``watch()`` that runs one scripted action per tick.
 
-    After the script is exhausted the watch loop is stopped with a
+    The loop waits on its stop event once per tick, so each ``wait`` is one
+    tick.  After the script is exhausted the loop is stopped with a
     KeyboardInterrupt, which is how a real ``Ctrl+C`` leaves it.
+
+    Only the watch loop calls this.  Patching ``time.sleep`` instead also
+    caught the sleeps inside ``subprocess.run(timeout=...)``, so on a busy
+    machine a git call could run a tick early or raise the interrupt itself.
     """
-    state = {"tick": 0}
 
-    def _sleep(_seconds):
-        index = state["tick"]
-        state["tick"] += 1
-        if index >= len(actions):
+    def __init__(self, *actions):
+        self._actions = actions
+        self._tick = 0
+
+    def wait(self, _timeout=None):
+        index = self._tick
+        self._tick += 1
+        if index >= len(self._actions):
             raise KeyboardInterrupt
-        actions[index]()
-
-    return _sleep
+        self._actions[index]()
+        return False
 
 
 def _maven_repo(root: Path) -> None:
@@ -945,16 +952,15 @@ class TestObserverLiveness:
 
 
 class TestWatchLoop:
-    def _watch_with(self, tmp_path, store, observer, sleeper, health_interval=0.0, **kwargs):
+    def _watch_with(self, tmp_path, store, observer, ticks, health_interval=0.0, **kwargs):
         with (
             patch("watchdog.observers.Observer", return_value=observer),
-            patch("time.sleep", side_effect=sleeper),
             patch(
                 "code_review_graph.incremental._WATCH_HEALTH_INTERVAL",
                 health_interval,
             ),
         ):
-            watch(tmp_path, store, **kwargs)
+            watch(tmp_path, store, stop_event=ticks, **kwargs)
 
     def test_dead_observer_exits_loudly_instead_of_stalling(self, tmp_path, caplog):
         """The whole point of #811: never keep running with a dead watcher."""
@@ -975,7 +981,7 @@ class TestWatchLoop:
                         tmp_path,
                         store,
                         observer,
-                        _tick_driver(lambda: None, kill_the_reader),
+                        _TickDriver(lambda: None, kill_the_reader),
                     )
         finally:
             store.close()
@@ -1002,7 +1008,7 @@ class TestWatchLoop:
         with GraphStore(tmp_path / "graph.db") as store:
             with pytest.raises(RuntimeError, match="watch observer stopped"):
                 self._watch_with(
-                    tmp_path, store, observer, _tick_driver(die_before_first_tick),
+                    tmp_path, store, observer, _TickDriver(die_before_first_tick),
                 )
 
         health = read_watch_health(tmp_path)
@@ -1044,7 +1050,7 @@ class TestWatchLoop:
                 tmp_path,
                 store,
                 observer,
-                _tick_driver(
+                _TickDriver(
                     lambda: seen.append(read_watch_health(tmp_path) or {}),
                 ),
             )
@@ -1084,7 +1090,7 @@ class TestWatchLoop:
                 tmp_path,
                 store,
                 observer,
-                _tick_driver(deliver_event, capture_health),
+                _TickDriver(deliver_event, capture_health),
                 on_files_updated=lambda _store: callbacks.append(1),
             )
             assert store.get_nodes_by_file(str(source)), "watch never parsed the change"
@@ -1117,7 +1123,7 @@ class TestWatchLoop:
 
         monkeypatch.chdir(tmp_path)
         try:
-            self._watch_with(Path("."), store, FakeObserver(), _tick_driver())
+            self._watch_with(Path("."), store, FakeObserver(), _TickDriver())
             survivors = store.get_all_files()
         finally:
             store.close()
@@ -1369,8 +1375,6 @@ class TestWatchLoop:
         observer = FakeObserver()
         thread, gate = _live_thread()
         reader = GraphStore(tmp_path / "graph.db")
-        # The tick driver replaces time.sleep; keep the real one for polling.
-        real_sleep = time.sleep
 
         def emitter_appears():
             observer.emitters = [FakeEmitter(thread, root=str(source_dir))]
@@ -1391,7 +1395,7 @@ class TestWatchLoop:
                     p.endswith("doomed.py") for p in files
                 ):
                     return
-                real_sleep(0.05)
+                time.sleep(0.05)
 
         try:
             with patch("code_review_graph.incremental._DEBOUNCE_SECONDS", 0.01):
@@ -1399,7 +1403,7 @@ class TestWatchLoop:
                     tmp_path,
                     store,
                     observer,
-                    _tick_driver(emitter_appears, outage, settle),
+                    _TickDriver(emitter_appears, outage, settle),
                 )
             files = reader.get_all_files()
         finally:
@@ -1427,13 +1431,12 @@ class TestWatchLoop:
         try:
             with (
                 patch("watchdog.observers.Observer", return_value=FakeObserver()),
-                patch("time.sleep", side_effect=KeyboardInterrupt),
                 patch(
                     "code_review_graph.incremental.incremental_update",
                     side_effect=record_initial_health,
                 ),
             ):
-                watch(tmp_path, store)
+                watch(tmp_path, store, stop_event=_TickDriver())
         finally:
             store.close()
 
@@ -1457,7 +1460,7 @@ class TestWatchLoop:
             os.kill(os.getpid(), signal.SIGTERM)
 
         try:
-            self._watch_with(tmp_path, store, FakeObserver(), _tick_driver(send_sigterm))
+            self._watch_with(tmp_path, store, FakeObserver(), _TickDriver(send_sigterm))
         finally:
             store.close()
 
