@@ -23,6 +23,7 @@ from collections import deque
 from pathlib import Path, PurePosixPath
 from typing import Any, Optional, Union
 
+from .constants import CLAIMED_ENDPOINT_KEY
 from .flows import _has_framework_decorator, _has_override_decorator, _matches_entry_name
 from .graph import GraphNode, GraphStore, _compatible_edge_languages, _sanitize_name
 from .parser import _STORYBOOK_FILE_RE, CodeParser, normalize_file_path
@@ -2000,11 +2001,13 @@ def find_dead_code(
     importer_files: dict[str, set[str]] = {}
     conn = store._conn
     for row in conn.execute(
-        "SELECT e.kind, e.source_qualified, e.target_qualified, e.file_path, n.language "
+        "SELECT e.kind, e.source_qualified, e.target_qualified, e.file_path, n.language, "
+        f"CASE WHEN instr(e.extra, '\"{CLAIMED_ENDPOINT_KEY}\"') AND json_valid(e.extra) "
+        f"THEN json_extract(e.extra, '$.{CLAIMED_ENDPOINT_KEY}') END "
         "FROM edges e LEFT JOIN nodes n ON n.qualified_name = e.source_qualified "
         "WHERE e.kind IN ('CALLS', 'TESTED_BY', 'IMPORTS_FROM', 'INHERITS', 'REFERENCES')"
     ):
-        edge_kind, source, target, file_path, language = row
+        edge_kind, source, target, file_path, language, claimed = row
         # The class hierarchy and import graph describe the code, not its use,
         # so a story still counts here. Only liveness evidence skips stories.
         if edge_kind == "INHERITS":
@@ -2019,16 +2022,19 @@ def find_dead_code(
             bare_files_by_language.setdefault((edge_kind, target, language), set()).add(file_path)
             bare_files_all.setdefault((edge_kind, target), set()).add(file_path)
         if edge_kind == "CALLS":
-            if "::" in target:
-                suffix_call_files.setdefault(_ascii_fold(target.rsplit("::", 1)[-1]), set()).add(
-                    file_path,
-                )
+            # ``Util.make()`` with ``make`` inherited names no node, so its
+            # target went back to ``make``. It still shows ``Util`` is in use.
+            written_target = claimed if isinstance(claimed, str) else target
+            if "::" in written_target:
+                suffix_call_files.setdefault(
+                    _ascii_fold(written_target.rsplit("::", 1)[-1]), set(),
+                ).add(file_path)
             # Preserve the old substring heuristic: Widget. also matches
             # MyWidget. (conservative for dead-code deletion suggestions).
             # Every dot can terminate a class name, including a dotted Elixir
             # module. Bound suffixes by candidate name length, so long file
             # paths do not create a quadratic set of irrelevant substrings.
-            lowered_target = _ascii_fold(target)
+            lowered_target = _ascii_fold(written_target)
             for end, character in enumerate(lowered_target):
                 if character == ".":
                     member_call_names.update(

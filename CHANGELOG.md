@@ -88,6 +88,36 @@
 
 ### Fixed
 
+- A call the graph could not bind no longer looks like one it did (#984). The
+  parser wrote a file path in front of a name it could not check, so
+  `h.hashCode()` became `One.java::Helper.hashCode` though `Helper` has no such
+  method, `self.shared()` named the subclass when `shared` was inherited, and
+  `Vec::new()` in a Cargo crate became `src/lib.rs::new`. None of these names a
+  node, yet each looked like a real link. Now no edge keeps a qualified name that
+  has no node: it goes back to the plain name, keeps the qualified one in
+  `extra.claimed_endpoint`, and returns to it if that node appears. A guess like
+  this only counts for a method of the class the call named. In Rust, a type from
+  outside the crate stays as written (`Vec::new`), which also lets
+  `WalkBuilder::new` reach the real method; `inner::bar()` on an inline module
+  lands on it; and on macOS and Windows the type `Glob` is no longer read as the
+  file `glob.rs`. On ripgrep, 729 invented call targets and 341 invented test
+  links went to 0, and real call links rose from 4,064 to 4,296 with none lost.
+  spring-petclinic went from 2 to 0 and gin had none; their real links did not
+  change.
+- Every edge claimed confidence 1.0 whatever had happened to it. For `CALLS`,
+  `REFERENCES` and `TESTED_BY`, `confidence_tier` is now `EXTRACTED` (1.0) when
+  the source names a real node, `INFERRED` (0.8, or the resolver's own score) when
+  a resolver chose it, `AMBIGUOUS` (0.4) when several nodes fit, and `UNRESOLVED`
+  (0.2) when none does. On gin, 14,353 of 16,249 such edges had no node and still
+  said 1.0. No schema change: the next build, or an update that changes a file,
+  puts an existing graph right.
+- `callers_of`, `callees_of` and `references_to` say when part of an answer is
+  only name matches, in the existing `confidence` field: "3 of 8 call sites match
+  by name only and may be wrong; resolution='direct' keeps the confirmed ones".
+- `tests_for` no longer counts a test as covering a function because both call
+  the same outside name. `String::new()` in a function and in a test linked the
+  two, and so did the invented targets above: ripgrep's `decompress.rs::add`
+  claimed 10 tests, none of which reaches it, which lowered its risk score.
 - TypeScript and JavaScript imports resolve against `compilerOptions.baseUrl`
   when no `paths` pattern matches them, as `tsc` does. A tsconfig that sets
   `baseUrl` without `paths` resolved no non-relative import at all: on a

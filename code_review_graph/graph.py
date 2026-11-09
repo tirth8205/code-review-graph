@@ -16,7 +16,7 @@ import time
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Optional
 
 import networkx as nx
@@ -25,6 +25,7 @@ from .constants import (
     BFS_ENGINE,
     CALLER_TEST_ROUTE_DEPTH,
     CALLER_TEST_ROUTE_MAX_CALLERS,
+    CLAIMED_ENDPOINT_KEY,
     IMPACT_DEFAULT_EDGE_DIRECTION,
     IMPACT_DEFAULT_EDGE_WEIGHT,
     IMPACT_DEPTH_DECAY,
@@ -376,16 +377,125 @@ def _edge_extra_is_unresolved(extra: Optional[str]) -> bool:
     """True when an edge's ``extra`` marks its endpoint as unresolved.
 
     An edge carrying ``ambiguous_targets`` or ``unresolved_targets`` names a
-    set of candidates rather than one node, so no traversal may treat it as a
-    fact about a specific symbol.
+    set of candidates rather than one node, and one carrying a claimed endpoint
+    was written for a symbol the graph does not have, so no traversal may treat
+    it as a fact about a specific symbol.
     """
     try:
         payload = json.loads(extra or "{}")
     except (TypeError, json.JSONDecodeError):
         return False
     return isinstance(payload, dict) and (
-        "ambiguous_targets" in payload or "unresolved_targets" in payload
+        "ambiguous_targets" in payload
+        or "unresolved_targets" in payload
+        or CLAIMED_ENDPOINT_KEY in payload
     )
+
+
+#: What an edge's ``confidence_tier`` says about how its endpoint was bound, and
+#: the score stored with it. A resolver that knows better records its own score
+#: in ``extra`` (AOP 0.7, Spring events 0.95); these are the defaults.
+TIER_EXTRACTED = "EXTRACTED"  # The source names a symbol, and the node exists.
+TIER_INFERRED = "INFERRED"  # A resolver chose the node from other evidence.
+TIER_AMBIGUOUS = "AMBIGUOUS"  # Several nodes fit and nothing chooses between them.
+TIER_UNRESOLVED = "UNRESOLVED"  # No node: often external, sometimes just unknown.
+_SCORE_EXTRACTED = 1.0
+_SCORE_INFERRED = 0.8
+_SCORE_AMBIGUOUS = 0.4
+_SCORE_UNRESOLVED = 0.2
+
+#: Keys a resolver leaves on an edge it bound. Each means the source did not
+#: name this node outright.
+_RESOLVER_BOUND_KEYS = (
+    "bare_call_target",
+    "bare_tested_by_source",
+    "scoped_resolved",
+    "spring_resolved",
+    "temporal_resolved",
+)
+
+#: The edges whose endpoint is meant to name a node: (kind, column holding that
+#: endpoint, key ``_resolve_bare_endpoints`` manages it through).
+_NODE_ENDPOINTS = (
+    ("CALLS", "target_qualified", "bare_call_target"),
+    ("REFERENCES", "target_qualified", "bare_call_target"),
+    ("TESTED_BY", "source_qualified", "bare_tested_by_source"),
+)
+
+_SYMBOL_SEPARATOR_RE = re.compile(r"::|\.")
+
+
+def _is_path_qualified(name: str) -> bool:
+    """Is *name* ``<absolute file path>::<symbol>``, the form a node's name takes?
+
+    ``Redis::get``, ``crate::a::b`` and ``App\\Mail::send`` also hold ``::``, but
+    they are what the source wrote, and they are what the scoped resolvers read.
+    """
+    head = name.split("::", 1)[0]
+    return PurePosixPath(head).is_absolute() or PureWindowsPath(head).is_absolute()
+
+
+def _plain_symbol_name(qualified: str) -> str:
+    """The last name in a path-qualified symbol: ``a.py::Helper.ping`` -> ``ping``."""
+    _, _, symbol = qualified.partition("::")
+    return _SYMBOL_SEPARATOR_RE.split(symbol)[-1]
+
+
+def _claimed_owner(edge_extra: dict) -> Optional[str]:
+    """The class a settled edge's claimed endpoint put the method on, if any.
+
+    ``a.py::Helper.ping`` gives ``Helper``; ``a.py::ping`` gives None.
+    """
+    claimed = edge_extra.get(CLAIMED_ENDPOINT_KEY)
+    if not isinstance(claimed, str):
+        return None
+    owner, dot, _ = claimed.rsplit("::", 1)[-1].rpartition(".")
+    return owner if dot and owner else None
+
+
+def _last_dotted(name: Optional[str]) -> str:
+    """``Outer.Inner`` -> ``Inner``; None -> ``""``."""
+    return (name or "").rsplit(".", 1)[-1]
+
+
+def _load_edge_extra(extra: Optional[str]) -> dict:
+    """Parse one ``edges.extra`` value, treating anything unusable as empty."""
+    try:
+        payload = json.loads(extra or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _certainty_tier_sql(unbound: str) -> str:
+    """SQL for the tier an edge has earned, given the test that it is unbound."""
+    resolver_bound = " OR ".join(
+        f"extra LIKE '%\"{key}\"%'" for key in _RESOLVER_BOUND_KEYS
+    )
+    return (
+        "CASE "
+        f"WHEN {unbound} AND extra LIKE '%\"ambiguous_targets\"%' "
+        f"THEN '{TIER_AMBIGUOUS}' "
+        f"WHEN {unbound} THEN '{TIER_UNRESOLVED}' "
+        f"WHEN {resolver_bound} THEN '{TIER_INFERRED}' "
+        f"WHEN confidence_tier IN ('{TIER_AMBIGUOUS}', '{TIER_UNRESOLVED}') "
+        f"THEN '{TIER_EXTRACTED}' "
+        "ELSE confidence_tier END"
+    )
+
+
+#: SQL for the score that goes with a tier already stored on the row.
+_CERTAINTY_SCORE_SQL = (
+    "CASE confidence_tier "
+    f"WHEN '{TIER_UNRESOLVED}' THEN {_SCORE_UNRESOLVED} "
+    f"WHEN '{TIER_AMBIGUOUS}' THEN {_SCORE_AMBIGUOUS} "
+    "ELSE COALESCE("
+    "CASE WHEN extra LIKE '%\"confidence\"%' AND json_valid(extra) "
+    "THEN json_extract(extra, '$.confidence') END, "
+    f"CASE confidence_tier WHEN '{TIER_INFERRED}' THEN {_SCORE_INFERRED} "
+    f"ELSE {_SCORE_EXTRACTED} END"
+    ") END"
+)
 
 
 def _parent_dir(path: Optional[str]) -> Optional[str]:
@@ -1550,11 +1660,13 @@ class GraphStore:
                     next_frontier.add(row["target_qualified"])
             if len(next_frontier) > max_frontier:
                 next_frontier = set(list(next_frontier)[:max_frontier])
+            # A callee with no node has no stable identity, be it a bare name
+            # or a scoped one like ``String::new``. Endpoint resolution binds it
+            # when graph evidence exists; otherwise following TESTED_BY here
+            # would attribute every same-named test. One query per hop.
+            bound_callees = self._existing_qualified_names(next_frontier)
             for callee in next_frontier:
-                # A bare callee has no stable identity. Endpoint resolution
-                # qualifies it when graph evidence exists; otherwise following
-                # TESTED_BY here would attribute every same-named test.
-                if "::" not in callee:
+                if callee not in bound_callees:
                     continue
                 for row in conn.execute(
                     "SELECT target_qualified, extra FROM edges "
@@ -1954,7 +2066,13 @@ class GraphStore:
     ) -> bool:
         """Row-level form of :meth:`receiver_evidence_admits`."""
         if "receiver_binding" not in edge_extra:
-            return True
+            owner = _claimed_owner(edge_extra)
+            if owner is None:
+                return True
+            # The call named a class: ``h.hashCode()`` on a ``Helper``, or
+            # ``GlobBuilder::new()``. That class's method is missing, and a
+            # same-named method of another class is no better a match.
+            return _last_dotted(parent_name) == _last_dotted(owner)
         return bool(cls._receiver_backed_candidates(
             [(qualified_name, file_path)],
             edge_extra,
@@ -2001,16 +2119,22 @@ class GraphStore:
     # -- Target-resolution certainty --------------------------------------
 
     def refresh_target_resolution(self) -> int:
-        """Recompute ``edges.target_resolution`` for CALLS/REFERENCES edges.
+        """Settle every edge endpoint, then recompute what each edge claims.
 
         Run after every resolver pass: those passes rewrite bare targets into
         qualified ones, so a classification taken at insert time would be
-        stale for exactly the edges the distinction is about. One set-based
-        UPDATE over the edge table, not a per-row query.
+        stale for exactly the edges the distinction is about. Set-based
+        UPDATEs over the edge table, not a per-row query.
 
         Returns the number of rows classified.
         """
+        self._settle_unbound_endpoints()
         placeholders = ", ".join("?" for _ in TARGET_RESOLUTION_KINDS)
+        call_tier = _certainty_tier_sql(f"target_resolution = '{RESOLUTION_UNRESOLVED}'")
+        tested_by_tier = _certainty_tier_sql(
+            "NOT EXISTS (SELECT 1 FROM nodes crg_cert_n "
+            "WHERE crg_cert_n.qualified_name = edges.source_qualified)"
+        )
         self._begin_immediate()
         try:
             cursor = self._conn.execute(
@@ -2018,11 +2142,129 @@ class GraphStore:
                 f"{TARGET_RESOLUTION_EXPR} WHERE kind IN ({placeholders})",
                 TARGET_RESOLUTION_KINDS,
             )
+            # Only rows that change are written. The stored certainty is read by
+            # nothing on the traversal paths, so this must not cost a rewrite of
+            # the whole table on every incremental update.
+            self._conn.execute(
+                f"UPDATE edges SET confidence_tier = {call_tier} "  # noqa: S608
+                f"WHERE kind IN ({placeholders}) AND confidence_tier IS NOT {call_tier}",
+                TARGET_RESOLUTION_KINDS,
+            )
+            self._conn.execute(
+                f"UPDATE edges SET confidence_tier = {tested_by_tier} "  # noqa: S608
+                f"WHERE kind = 'TESTED_BY' AND confidence_tier IS NOT {tested_by_tier}",
+            )
+            self._conn.execute(
+                f"UPDATE edges SET confidence = {_CERTAINTY_SCORE_SQL} "  # noqa: S608
+                f"WHERE kind IN ({placeholders}, 'TESTED_BY') "
+                f"AND confidence IS NOT {_CERTAINTY_SCORE_SQL}",
+                TARGET_RESOLUTION_KINDS,
+            )
             self._conn.commit()
         except BaseException:
             self._conn.rollback()
             raise
         return cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
+
+    def _settle_unbound_endpoints(self) -> int:
+        """Stop an edge naming a qualified symbol the graph does not have.
+
+        The parser sees one file. It qualifies a call whenever it can tell the
+        file, so ``h.hashCode()`` on a ``Helper`` declared in the same file is
+        written ``One.java::Helper.hashCode`` whether or not ``Helper`` has that
+        method, and ``self.shared()`` names the enclosing class when ``shared``
+        is inherited. A path in front of a name passes every check a real name
+        does, and the bare-name path skips it, so it reads as fact while pointing
+        at nothing. See: #984
+
+        Such an endpoint goes back to the plain name the source wrote. The
+        qualified form stays in ``extra``, because the file that adds the method
+        may be the only one parsed next: the edge returns to it when the node
+        appears, and is written exactly as a fresh parse writes it, so an
+        incremental update and a rebuild agree. A receiver was on the call, so
+        the plain name is not evidence for a same-named symbol nearby, and
+        ``_resolve_bare_endpoints`` leaves these edges alone.
+
+        Returns the number of edges changed.
+        """
+        conn = self._conn
+        changes: dict[str, list[tuple[str, str, int]]] = {}
+        for kind, column, managed_key in _NODE_ENDPOINTS:
+            updates = changes.setdefault(column, [])
+            # Only a fixed column name reaches the SQL text.
+            for row in conn.execute(
+                f"SELECT e.id, e.{column} AS endpoint, e.extra FROM edges e "  # noqa: S608
+                f"WHERE e.kind = ? AND e.{column} LIKE '%::%' AND NOT EXISTS ("
+                f"SELECT 1 FROM nodes n WHERE n.qualified_name = e.{column})",
+                (kind,),
+            ).fetchall():
+                endpoint = row["endpoint"]
+                if not _is_path_qualified(endpoint):
+                    continue
+                extra = _load_edge_extra(row["extra"])
+                managed = extra.get(managed_key)
+                if isinstance(managed, str) and managed:
+                    # The bare resolver owns this edge and will try it again.
+                    updates.append((managed, json.dumps(extra), row["id"]))
+                    continue
+                plain = _plain_symbol_name(endpoint)
+                if not plain:
+                    continue
+                extra[CLAIMED_ENDPOINT_KEY] = endpoint
+                updates.append((plain, json.dumps(extra), row["id"]))
+            for row in conn.execute(
+                f"SELECT e.id, e.{column} AS endpoint, e.extra FROM edges e "  # noqa: S608
+                "WHERE e.kind = ? AND e.extra LIKE ?",
+                (kind, f'%"{CLAIMED_ENDPOINT_KEY}"%'),
+            ).fetchall():
+                extra = _load_edge_extra(row["extra"])
+                claimed = extra.get(CLAIMED_ENDPOINT_KEY)
+                if not isinstance(claimed, str):
+                    continue
+                if self._node_exists(claimed):
+                    bound = claimed
+                elif self._node_exists(row["endpoint"]):
+                    # Something else bound the edge since; the claim is spent.
+                    bound = row["endpoint"]
+                else:
+                    continue
+                del extra[CLAIMED_ENDPOINT_KEY]
+                updates.append((bound, json.dumps(extra), row["id"]))
+
+        changed = sum(len(updates) for updates in changes.values())
+        if not changed:
+            return 0
+        self._begin_immediate()
+        try:
+            for column, updates in changes.items():
+                update_sql = f"UPDATE edges SET {column} = ?, extra = ? WHERE id = ?"  # noqa: S608
+                for start in range(0, len(updates), _UPDATE_BATCH):
+                    conn.executemany(update_sql, updates[start:start + _UPDATE_BATCH])
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        return changed
+
+    def _existing_qualified_names(self, names: Iterable[str]) -> set[str]:
+        """The members of *names* that are a node's qualified name."""
+        wanted = sorted(set(names))
+        found: set[str] = set()
+        for start in range(0, len(wanted), 450):
+            batch = wanted[start:start + 450]
+            placeholders = ",".join("?" for _ in batch)
+            found.update(
+                row[0] for row in self._conn.execute(  # nosec B608
+                    f"SELECT qualified_name FROM nodes WHERE qualified_name IN ({placeholders})",
+                    batch,
+                )
+            )
+        return found
+
+    def _node_exists(self, qualified_name: str) -> bool:
+        return self._conn.execute(
+            "SELECT 1 FROM nodes WHERE qualified_name = ? LIMIT 1", (qualified_name,),
+        ).fetchone() is not None
 
     def count_edges_by_resolution(self, kind: str = "CALLS") -> dict[str, int]:
         """Split one edge kind into certain and guessed target attributions.
@@ -2467,6 +2709,7 @@ class GraphStore:
             if raw_key not in edge_extra and (
                 "ambiguous_targets" in edge_extra
                 or "unresolved_targets" in edge_extra
+                or CLAIMED_ENDPOINT_KEY in edge_extra
             ):
                 continue
 

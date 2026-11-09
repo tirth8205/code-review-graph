@@ -598,7 +598,7 @@ def test_unresolved_external_scoped_call_is_left_untouched(tmp_path: Path) -> No
     )
     external = [c for c in _calls(store) if c["target_qualified"] == "Redis::get"]
     assert len(external) == 1
-    assert external[0]["confidence_tier"] == "EXTRACTED"
+    assert external[0]["confidence_tier"] == "UNRESOLVED"
 
     result = query_graph("callers_of", "get", repo_root=str(tmp_path))
     # No node named ``get`` exists, so there is nothing to (falsely) resolve.

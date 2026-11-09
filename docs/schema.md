@@ -112,6 +112,21 @@ Every edge has `source_qualified`, `target_qualified`, `file_path` (where the re
 was seen), `line`, `extra` (JSON), `confidence`, `confidence_tier` and, for
 `CALLS` and `REFERENCES`, `target_resolution`.
 
+For `CALLS`, `REFERENCES` and `TESTED_BY`, the tier says how the endpoint meant to
+name a node was bound, and is set after every resolver has run:
+
+| Tier | Score | Means |
+|---|---|---|
+| `EXTRACTED` | 1.0 | The source names a symbol and the node exists |
+| `INFERRED` | 0.8, or the resolver's own score | A resolver chose the node from other evidence |
+| `AMBIGUOUS` | 0.4 | Several nodes fit; `extra.ambiguous_targets` lists them |
+| `UNRESOLVED` | 0.2 | No node has this name, so it may be external or simply unknown |
+
+No edge keeps `<path>::<symbol>` when no node has that name. The endpoint goes back to the
+plain name, and `extra.claimed_endpoint` keeps the qualified form, so the edge returns to it
+if that node appears. Until then, a name match on that edge counts only for a method of the
+class the qualified form named.
+
 | Kind | Source -> target | Notes |
 |---|---|---|
 | CALLS | caller -> called function | Target may be a bare name until a resolver qualifies it; `target_resolution` records which |
@@ -186,7 +201,7 @@ CREATE TABLE edges (
     line INTEGER DEFAULT 0,
     extra TEXT DEFAULT '{}',
     confidence REAL DEFAULT 1.0,              -- v9
-    confidence_tier TEXT DEFAULT 'EXTRACTED', -- v9
+    confidence_tier TEXT DEFAULT 'EXTRACTED', -- v9; see "Edge Types"
     target_resolution TEXT,                   -- v11; 'direct' | 'unresolved' | NULL
     updated_at REAL NOT NULL
 );

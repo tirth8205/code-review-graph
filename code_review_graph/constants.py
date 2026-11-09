@@ -327,6 +327,12 @@ def crg_home() -> Path:
 #: the read path expands it; see ``expand_import_scope`` in graph.py.
 IMPORT_SCOPE_KEY = "import_scope"
 
+#: ``edges.extra`` key holding the qualified name an edge endpoint was written
+#: with, once that name turned out to match no node. The endpoint itself goes
+#: back to the plain name the source wrote. See
+#: ``GraphStore._settle_unbound_endpoints``.
+CLAIMED_ENDPOINT_KEY = "claimed_endpoint"
+
 #: The target directory's own files are the imported unit; subdirectories are
 #: separate packages and are NOT members. This is Go's rule.
 IMPORT_SCOPE_PACKAGE = "package"

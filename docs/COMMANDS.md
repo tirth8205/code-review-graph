@@ -98,7 +98,9 @@ resolution: str = "all"          # "all", "direct", or "unresolved"
 one per node. Each row carries `call_site` (`line`, plus `file` only when the
 call is written outside the row's own `file_path`), and rows whose target was
 matched by bare name alone carry `target_resolution: "unresolved"`. The response
-adds `distinct_nodes` and a `resolution_split` of the whole answer. Call sites
+adds `distinct_nodes` and a `resolution_split` of the whole answer. When some of
+the rows are only name matches and `resolution` is `"all"`, a short `confidence`
+sentence says how many. Call sites
 are ordered so every distinct node appears before any node's second call site,
 so truncation never costs a caller.
 
