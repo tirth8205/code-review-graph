@@ -437,19 +437,19 @@ def _legacy_repo_hook_commands(repo_root: Path) -> set[str]:
 
 
 def _legacy_codex_hook_commands() -> set[str]:
-    """Exact user hook commands written before the current stdin guard."""
-    return {
-        (
-            "git rev-parse --git-dir >/dev/null 2>&1"
-            " && code-review-graph update --skip-flows"
-            " || true"
-        ),
-        (
-            "git rev-parse --git-dir >/dev/null 2>&1"
-            " && code-review-graph status"
-            " || echo 'Not a git repo, skipping'"
-        ),
-    }
+    """Exact user hook commands from before the payload-scoped subcommands."""
+    update = (
+        "git rev-parse --git-dir >/dev/null 2>&1"
+        " && code-review-graph update --skip-flows"
+        " || true"
+    )
+    status = (
+        "git rev-parse --git-dir >/dev/null 2>&1"
+        " && code-review-graph status"
+        " || echo 'Not a git repo, skipping'"
+    )
+    stdin_guard = "cat >/dev/null || true; "
+    return {update, status, stdin_guard + update, stdin_guard + status}
 
 
 def _clean_hook_data(
@@ -699,7 +699,7 @@ def _remove_instruction(
         )
 
 
-def _resolve_git_hook(repo_root: Path) -> Path:
+def _resolve_git_hook(repo_root: Path, name: str = "pre-commit") -> Path:
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--git-path", "hooks"],
@@ -713,8 +713,8 @@ def _resolve_git_hook(repo_root: Path) -> Path:
     except (OSError, subprocess.TimeoutExpired):
         result = None
     if result is not None and result.returncode == 0 and result.stdout.strip():
-        return repo_root / result.stdout.strip() / "pre-commit"
-    return repo_root / ".git" / "hooks" / "pre-commit"
+        return repo_root / result.stdout.strip() / name
+    return repo_root / ".git" / "hooks" / name
 
 
 def _strip_git_hook_blocks(raw: str) -> tuple[str, bool]:
@@ -796,6 +796,19 @@ def _remove_git_hook(
             "every known installed block and was kept"
         )
 
+    _rewrite_or_remove_hook(path, new_text, repo_root, report, detail=detail, dry_run=dry_run)
+
+
+def _rewrite_or_remove_hook(
+    path: Path,
+    new_text: str,
+    repo_root: Path,
+    report: UninstallReport,
+    *,
+    detail: str,
+    dry_run: bool,
+) -> None:
+    """Write back what is left of a hook, or delete it when only a shebang remains."""
     meaningful = [
         line
         for line in new_text.splitlines()
@@ -816,6 +829,42 @@ def _remove_git_hook(
             report,
             dry_run=dry_run,
             detail="remove hook containing only code-review-graph",
+        )
+
+
+def _remove_git_sync_hooks(
+    repo_root: Path,
+    report: UninstallReport,
+    *,
+    dry_run: bool,
+) -> None:
+    """Cut the marked sync block out of post-checkout, post-merge and post-rewrite."""
+    begin_marker = skills._GIT_SYNC_HOOK_BEGIN_MARKER
+    end_marker = skills._GIT_SYNC_HOOK_END_MARKER
+    for name in skills._GIT_SYNC_HOOK_NAMES:
+        path = _resolve_git_hook(repo_root, name)
+        if not path.exists() or not _safe_path(path, repo_root, report):
+            continue
+        raw = _read_text(path, report)
+        if raw is None or begin_marker not in raw:
+            continue
+        if not skills._git_hook_markers_balanced(raw, begin_marker, end_marker):
+            report.skipped_paths.append(
+                f"{path} (a code-review-graph begin marker has no matching end marker; "
+                "left unchanged)"
+            )
+            continue
+        text = raw
+        while (span := skills._git_hook_block_span(text, 0, begin_marker, end_marker)):
+            begin, end = span
+            text = text[:begin] + text[end:]
+        _rewrite_or_remove_hook(
+            path,
+            text,
+            repo_root,
+            report,
+            detail="removed code-review-graph hook block",
+            dry_run=dry_run,
         )
 
 
@@ -867,7 +916,12 @@ def _remove_gitignore(
         )
 
 
-def _scope_for_config(path: Path, repo_root: Path, home: Path) -> tuple[str, Path] | None:
+def _scope_for_config(
+    path: Path,
+    repo_root: Path,
+    home: Path,
+    extra_user_boundaries: Sequence[Path] = (),
+) -> tuple[str, Path] | None:
     if _is_lexical_child(path, repo_root):
         return "repo", repo_root
     if _is_lexical_child(path, home):
@@ -879,6 +933,9 @@ def _scope_for_config(path: Path, repo_root: Path, home: Path) -> tuple[str, Pat
     hermes_home = _absolute(skills._hermes_home())
     if _is_lexical_child(path, hermes_home):
         return "user", hermes_home
+    for boundary in extra_user_boundaries:
+        if _is_lexical_child(path, boundary):
+            return "user", boundary
     return None
 
 
@@ -892,6 +949,13 @@ def _process_platform_configs(
     platforms: frozenset[str] | None = None,
 ) -> None:
     seen: set[tuple[Path, str, str]] = set()
+    active_codex_home: Path | None = None
+    if platforms is None or "codex" in platforms:
+        from .codex_skill import codex_home
+
+        active_codex_home = codex_home()
+    else:
+        active_codex_home = None
     for platform_name, spec in skills.PLATFORMS.items():
         if platforms is not None and platform_name not in platforms:
             continue
@@ -904,7 +968,12 @@ def _process_platform_configs(
                 f"{platform_name} config (invalid platform specification: {exc})"
             )
             continue
-        destination = _scope_for_config(path, repo_root, home)
+        destination = _scope_for_config(
+            path,
+            repo_root,
+            home,
+            (active_codex_home,) if platform_name == "codex" and active_codex_home else (),
+        )
         if destination is None:
             if path.exists():
                 report.skipped_paths.append(
@@ -1120,6 +1189,7 @@ def _process_repo(
         )
 
     _remove_git_hook(repo_root, report, dry_run=dry_run)
+    _remove_git_sync_hooks(repo_root, report, dry_run=dry_run)
     _remove_gitignore(repo_root, report, dry_run=dry_run)
 
 
@@ -1153,14 +1223,34 @@ def _process_user(
     else:
         _remove_tree(user_data, home, report, dry_run=dry_run)
 
+    from .codex_skill import codex_home, codex_skill_dir, owned_skill_files
+
+    active_codex_home = codex_home()
+    # ``_process_platform_configs`` already handles the active CODEX_HOME via
+    # the live platform registry. Keep hook/skill cleanup in the same directory
+    # and use that directory itself as the deletion boundary.
     _remove_hooks(
-        home / ".codex" / "hooks.json",
+        active_codex_home / "hooks.json",
         _commands(skills.generate_codex_hooks_config(reference_repo))
         | _legacy_codex_hook_commands(),
-        home,
+        active_codex_home,
         report,
         dry_run=dry_run,
     )
+    skill_dir = codex_skill_dir()
+    for owned_path in owned_skill_files(skill_dir):
+        _remove_skill_file(
+            owned_path,
+            active_codex_home,
+            report,
+            dry_run=dry_run,
+        )
+    if not dry_run:
+        # install creates the skills root, so an empty one is ours to remove.
+        try:
+            skill_dir.parent.rmdir()
+        except OSError:
+            pass
     _remove_hooks(
         home / ".cursor" / "hooks.json",
         _commands(skills.generate_cursor_hooks_config()),

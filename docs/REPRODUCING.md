@@ -355,8 +355,48 @@ This benchmark simulates an agent without the graph:
 
 Output: `evaluate/results/<repo>_agent_baseline_<date>.csv` with a `baseline_to_graph_ratio`
 per question. Rows where either side is zero get `status=no_graph_results` or
-`status=no_baseline_match` and are excluded from `agent_baseline.aggregate()`. No canonical
-capture exists yet; numbers will be added above once measured.
+`status=no_baseline_match` and are excluded from `agent_baseline.aggregate()`.
+
+### Canonical capture, 2026-09-22
+
+18 questions, 3 per repo, from the `agent_questions:` lists. Local `all-MiniLM-L6-v2`
+embeddings, clean clones at the pinned SHAs, every row `status=ok`.
+
+| Repo | Questions | avg grep top-3 tokens | avg graph tokens | median ratio |
+|------|----------:|----------------------:|-----------------:|-------------:|
+| fastapi | 3 | 158,560 | 3,439 | **52.1x** |
+| flask | 3 | 27,611 | 2,432 | **11.5x** |
+| gin | 3 | 25,257 | 3,110 | **6.6x** |
+| httpx | 3 | 26,174 | 4,021 | **6.5x** |
+| code-review-graph | 3 | 26,134 | 3,773 | **6.4x** |
+| express | 3 | 17,086 | 3,726 | **4.5x** |
+
+Across all 18 questions: **median 6.65x, mean 14.81x, range 4.2x to 72.6x**.
+
+Run it with:
+
+```bash
+code-review-graph eval --benchmark agent_baseline --embed
+```
+
+This capture predates test-file ranking in `hybrid_search` and `grep_rank`, so a run today
+gives different numbers until the capture is redone. At the code-review-graph pin the grep
+baseline alone moves from 41,674 / 15,028 / 21,701 tokens to 41,586 / 27,764 / 29,207.
+
+Two things this number is not:
+
+- **It is not the whole-corpus ratio.** The standalone benchmark's ~63x compares a graph
+  query against reading every source file, which no agent does. Against a grep-and-read
+  agent the honest figure is the 6.65x above. Quote whichever you mean, and say which.
+- **It is not an end-to-end agent saving.** Both sides here are measured as *retrieval*
+  cost: the tokens needed to locate the answer. A real coding agent may still open the
+  files the graph named, in which case the graph cost is additive rather than a
+  substitute. `semantic_search_nodes_tool(include_source=True)` exists so the agent can
+  answer from the response instead; measuring that path end-to-end is open work.
+
+The ratio tracks repo size, because the graph answer stays flat (2,432 to 4,021 tokens
+here) while the grep baseline grows with the corpus. On a small repo the graph saves
+little; on fastapi it saves a lot.
 
 ## Incremental fidelity (`code_review_graph/eval/benchmarks/incremental_fidelity.py`)
 
@@ -397,7 +437,9 @@ update against clean rebuild:
 Benchmark wall time 79.1 s (8 clean builds plus 8 incremental updates).
 
 `nodes` and `nodes_fts` match everywhere: node rows and the search index are faithful. Every
-other divergence traces to one of three defects, none of which is fixed here.
+other divergence traces to one of three defects. The table was measured before #673, which
+fixes defects 1 and 2 below (flows and community assignment now follow re-parsed nodes), so
+expect smaller numbers until it is captured again.
 
 **1. `flow_memberships` is orphaned by every re-parse.** `flow_memberships.node_id` is a
 bare integer with no foreign key and no cascade, and `GraphStore._replace_file_data` deletes
@@ -432,8 +474,8 @@ file reorders it. Same set, different order, so the graph is not byte-reproducib
 
 Every edit kind is listed in `incremental_fidelity.KNOWN_FAILURES`, which keeps the run from
 reporting them as unexpected. `tests/test_incremental_fidelity.py` guards against a kind that
-currently passes starting to diverge, and carries two `xfail` tests that document defects 1
-and 2 at the level of the defect.
+currently passes starting to diverge, and carries two `xfail` tests, now passing, that pin
+defects 1 and 2 at the level of the defect.
 
 ## Weekly CI run (report-only)
 
