@@ -1766,7 +1766,8 @@ class TestInstallPlatformConfigs:
         config_path = tmp_path / ".mimocode" / "mimocode.jsonc"
         config_path.parent.mkdir()
         config_path.write_text(
-            '{\n  // keep these MiMo settings\n  "$schema": "https://mimo.xiaomi.com/mimocode/config.json",\n'
+            "{\n  // keep these MiMo settings\n"
+            '  "$schema": "https://mimo.xiaomi.com/mimocode/config.json",\n'
             '  "theme": "dark",\n  "mcp": {\n'
             '    "other": {"type": "local", "command": ["other", "serve"]},\n'
             "  },\n}\n",
@@ -1782,7 +1783,10 @@ class TestInstallPlatformConfigs:
         assert configured == ["MiMo Code"]
         assert config_path.read_bytes() == first_install
         assert json_config.read_text(encoding="utf-8") == '{"theme": "light"}\n'
-        data = json.loads(config_path.read_text(encoding="utf-8"))
+        # The file keeps its comment, so it is read as JSONC (review of #688).
+        text = config_path.read_text(encoding="utf-8")
+        assert "// keep these MiMo settings" in text
+        data = json.loads(_strip_jsonc(text))
         assert data["$schema"] == "https://mimo.xiaomi.com/mimocode/config.json"
         assert data["theme"] == "dark"
         assert data["mcp"]["other"] == {
