@@ -20,7 +20,7 @@ import subprocess
 import sys
 from importlib import resources
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterable, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Sequence
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     # Moved to importlib.resources.abc in 3.11 and removed from importlib.abc
@@ -1641,6 +1641,33 @@ def _codex_hook_command(subcommand: str) -> str:
     )
 
 
+def generate_steering_hooks_config() -> dict[str, Any]:
+    """Generate the opt-in Claude Code hook that runs ``code-review-graph enrich``.
+
+    It adds graph context beside each search and read, which changes what the
+    model sees on every one of them, so ``install`` writes it only when asked.
+    ``|| true`` matters: exit code 2 from a PreToolUse hook stops the tool call,
+    and a failed lookup must never do that. Claude Code is the only client whose
+    hook output ``enrich`` writes.
+    """
+    return {
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "matcher": "Grep|Glob|Bash|Read",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": f"{_codex_hook_command('enrich')} || true",
+                            "timeout": 5,
+                        },
+                    ],
+                },
+            ],
+        }
+    }
+
+
 def generate_codex_hooks_config(repo_root: Path) -> dict[str, Any]:
     """Generate native Codex hooks configuration for the active Codex home."""
     return {
@@ -2147,6 +2174,15 @@ _GENERATED_HOOK_COMMAND_RE = re.compile(
     r")\Z"
 )
 
+# The opt-in steering hook (see generate_steering_hooks_config). It has a
+# pattern of its own so that adding or removing it touches nothing else: the
+# installer's other command shapes, filed under its matcher, are the user's.
+_STEERING_HOOK_COMMAND_RE = re.compile(
+    r"\Acat\s*\|\s*\{\s*if\s+command\s+-v\s+code-review-graph\s*>/dev/null\s+2>&1;\s*"
+    r"then\s+code-review-graph\s+enrich;\s*"
+    r"else\s+cat\s*>/dev/null;\s*fi;\s*\}\s*\|\|\s*true\Z"
+)
+
 # Loose spellings that merely *mention* this project. Used only to tell the
 # user about a hook that was kept because it could not be recognised; never to
 # claim one.
@@ -2159,6 +2195,7 @@ _GENERATED_HOOK_MATCHERS: dict[str, frozenset[str | None]] = {
     "PostToolUse": frozenset({"Edit|Write", "Edit|Write|Bash", "Write|Edit|Bash"}),
     "SessionStart": frozenset({"", None, "startup|resume"}),
     "AfterTool": frozenset({"write_file|replace"}),
+    "PreToolUse": frozenset({"Grep|Glob|Bash|Read"}),
 }
 
 
@@ -2258,6 +2295,13 @@ def _is_generated_hook_command(command: Any) -> bool:
     )
 
 
+def _is_steering_hook_command(command: Any) -> bool:
+    """Return whether ``command`` is the steering hook this project writes."""
+    return isinstance(command, str) and bool(
+        _STEERING_HOOK_COMMAND_RE.match(command.strip())
+    )
+
+
 def _report_kept_hook(command: Any) -> None:
     """Say that a hook mentioning this project was deliberately left alone.
 
@@ -2285,7 +2329,10 @@ def _allowed_hook_matchers(event_name: str, new_entries: Sequence[Any]) -> froze
 
 
 def _merge_hook_entries(
-    existing: Any, new_entries: list[Any], event_name: str = ""
+    existing: Any,
+    new_entries: list[Any],
+    event_name: str = "",
+    owns: Callable[[Any], bool] = _is_generated_hook_command,
 ) -> list[Any]:
     """Return ``existing`` with our own hook groups replaced by ``new_entries``.
 
@@ -2299,7 +2346,7 @@ def _merge_hook_entries(
     to sit under a matcher this project has written for this event. A group
     that also holds a hook someone else wrote keeps that hook, and the
     replacement lands where the old group sat rather than at the end, so a hook
-    that ran first goes on running first.
+    that ran first goes on running first. ``owns`` narrows the commands claimed.
     """
     allowed = _allowed_hook_matchers(event_name, new_entries)
     kept: list[Any] = []
@@ -2319,9 +2366,7 @@ def _merge_hook_entries(
         survivors = [
             hook
             for hook in nested
-            if not (
-                isinstance(hook, dict) and _is_generated_hook_command(hook.get("command"))
-            )
+            if not (isinstance(hook, dict) and owns(hook.get("command")))
         ]
         for hook in survivors:
             if isinstance(hook, dict):
@@ -2499,10 +2544,12 @@ def _merge_hooks_into_settings(
     settings_dir: Path,
     hooks_config: dict[str, Any],
     label: str = "Claude Code",
+    owns: Callable[[Any], bool] = _is_generated_hook_command,
 ) -> Path | None:
     """Merge hook entries into a project settings file without clobbering users.
 
-    Returns the settings path, or None when the file had to be left alone.
+    ``owns`` says which commands are ours to replace. Returns the settings
+    path, or None when the file had to be left alone.
     """
     settings_dir.mkdir(parents=True, exist_ok=True)
     settings_path = settings_dir / "settings.json"
@@ -2517,7 +2564,7 @@ def _merge_hooks_into_settings(
     for hook_name, hook_entries in new_hooks.items():
         if hook_name in merged_hooks:
             merged_hooks[hook_name] = _merge_hook_entries(
-                merged_hooks[hook_name], hook_entries, hook_name
+                merged_hooks[hook_name], hook_entries, hook_name, owns
             )
         else:
             merged_hooks[hook_name] = hook_entries
@@ -2550,6 +2597,18 @@ def install_hooks(repo_root: Path, platform: str = "claude") -> Path | None:
         settings_dir = repo_root / ".claude"
     return _merge_hooks_into_settings(
         settings_dir, generate_hooks_config(repo_root), PLATFORMS[platform]["name"],
+    )
+
+
+def install_steering_hook(repo_root: Path) -> Path | None:
+    """Add the opt-in steering hook to the project's Claude Code settings.
+
+    Returns the settings path, or None when the file had to be left alone.
+    """
+    return _merge_hooks_into_settings(
+        repo_root / ".claude",
+        generate_steering_hooks_config(),
+        owns=_is_steering_hook_command,
     )
 
 
