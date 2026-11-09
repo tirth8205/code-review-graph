@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -664,22 +665,31 @@ class TestGenerateCodexHooksConfig:
                 f"then code-review-graph {subcommand}; else cat >/dev/null; fi; }}"
             )
 
-    def test_windows_commands_drain_stdin_and_exit_successfully(self, tmp_path):
+    def test_windows_commands_forward_the_payload_like_the_posix_form(self, tmp_path):
+        """Codex runs ``commandWindows`` through PowerShell or cmd.exe (#620, #877).
+
+        The script sits inside one pair of double quotes, where an outer
+        PowerShell, cmd.exe or bash expands ``$``, ``%``, backticks and ``!``.
+        One ``$null`` left the inner PowerShell a syntax error, so the script
+        may hold none of them. tests/test_codex_windows_hooks.py runs it on
+        Windows.
+        """
         config = generate_codex_hooks_config(tmp_path)
-        post = config["hooks"]["PostToolUse"][0]["hooks"][0]
-        session = config["hooks"]["SessionStart"][0]["hooks"][0]
-
-        for command in (post["commandWindows"], session["commandWindows"]):
-            assert command.startswith(
-                'powershell.exe -NoProfile -NonInteractive -Command "'
+        prefix = 'powershell.exe -NoProfile -NonInteractive -Command "'
+        for event, subcommand in (
+            ("PostToolUse", "hook-update"),
+            ("SessionStart", "hook-status"),
+        ):
+            command = config["hooks"][event][0]["hooks"][0]["commandWindows"]
+            assert command.startswith(prefix)
+            assert command.endswith('"')
+            script = command[len(prefix) : -1]
+            assert re.fullmatch(r"[A-Za-z0-9 :.(){}\[\]|-]+", script), script
+            assert script == (
+                "if (Get-Command code-review-graph -ErrorAction SilentlyContinue) "
+                f"{{ code-review-graph {subcommand} }} "
+                "else { [Console]::In.ReadToEnd() | Out-Null }"
             )
-            assert "[Console]::In.ReadToEnd() | Out-Null" in command
-            assert "git rev-parse --git-dir" in command
-            assert command.endswith('exit 0"')
-
-        assert "code-review-graph update --skip-flows" in post["commandWindows"]
-        assert "code-review-graph status" in session["commandWindows"]
-        assert "Not a git repo, skipping" in session["commandWindows"]
 
 
 class TestInstallCodexHooks:
@@ -892,6 +902,97 @@ class TestInstallCodexHooks:
         assert json.loads(hooks_path.read_text(encoding="utf-8"))["hooks"] == (
             generate_codex_hooks_config(tmp_path / "repo")["hooks"]
         )
+
+    def test_reinstall_gives_every_older_hook_the_windows_override(
+        self, tmp_path, monkeypatch
+    ):
+        """Reinstalling over hooks with no ``commandWindows`` adds one (#620, #877).
+
+        The released v2.3.9 hooks, the payload-scoped hooks written before
+        ``commandWindows``, and a v2.3.9 hook patched by hand with the
+        workaround posted in #620 all become the current hook, once, and a
+        user's own hook in the same file stays where it was.
+        """
+        monkeypatch.setattr("code_review_graph.skills.Path.home", lambda: tmp_path)
+        repo = tmp_path / "repo"
+        current = generate_codex_hooks_config(repo)["hooks"]
+        v239 = {
+            "PostToolUse": (
+                "cat >/dev/null || true; git rev-parse --git-dir >/dev/null 2>&1"
+                " && code-review-graph update --skip-flows || true"
+            ),
+            "SessionStart": (
+                "cat >/dev/null || true; git rev-parse --git-dir >/dev/null 2>&1"
+                " && code-review-graph status || echo 'Not a git repo, skipping'"
+            ),
+        }
+        workaround = {
+            event: (
+                'powershell.exe -NoProfile -NonInteractive -Command "'
+                f"[Console]::In.ReadToEnd() | Out-Null; code-review-graph {body}; "
+                'exit 0"'
+            )
+            for event, body in (
+                ("PostToolUse", "update --skip-flows"),
+                ("SessionStart", "status"),
+            )
+        }
+        older_hooks = {
+            "v2.3.9": {
+                event: {"type": "command", "command": command}
+                for event, command in v239.items()
+            },
+            "posix only": {
+                event: {
+                    key: value
+                    for key, value in current[event][0]["hooks"][0].items()
+                    if key != "commandWindows"
+                }
+                for event in v239
+            },
+            "patched by hand": {
+                event: {
+                    "type": "command",
+                    "command": command,
+                    "commandWindows": workaround[event],
+                }
+                for event, command in v239.items()
+            },
+        }
+        user_group = {
+            "matcher": "Write",
+            "hooks": [{"type": "command", "command": "./scripts/audit.sh"}],
+        }
+        hooks_path = tmp_path / ".codex" / "hooks.json"
+        hooks_path.parent.mkdir()
+        for label, hooks in older_hooks.items():
+            hooks_path.write_text(
+                json.dumps(
+                    {
+                        "hooks": {
+                            "PostToolUse": [
+                                {"matcher": "Write|Edit|Bash", "hooks": [hooks["PostToolUse"]]},
+                                user_group,
+                            ],
+                            "SessionStart": [
+                                {"matcher": "startup|resume", "hooks": [hooks["SessionStart"]]},
+                            ],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            install_codex_hooks(repo)
+
+            data = json.loads(hooks_path.read_text(encoding="utf-8"))["hooks"]
+            assert data["PostToolUse"] == [*current["PostToolUse"], user_group], label
+            assert data["SessionStart"] == current["SessionStart"], label
+            for event in ("PostToolUse", "SessionStart"):
+                ours = data[event][0]["hooks"]
+                assert len(ours) == 1, label
+                assert ours[0]["commandWindows"].startswith("powershell.exe "), label
+                assert ours[0]["commandWindows"] != workaround[event], label
 
     def test_install_qoder_hooks(self, tmp_path):
         install_hooks(tmp_path, platform="qoder")

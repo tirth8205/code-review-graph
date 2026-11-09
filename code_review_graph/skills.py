@@ -1471,6 +1471,26 @@ def _codex_hook_command(subcommand: str) -> str:
     )
 
 
+def _codex_windows_hook_command(subcommand: str) -> str:
+    """The same hook for Codex on Windows, where ``command`` would meet no ``sh``.
+
+    Codex runs ``commandWindows`` through the user's shell: PowerShell as
+    ``-NoProfile -Command``, or ``cmd.exe /C`` when it has none. Both pass the
+    double-quoted script below to Windows PowerShell unchanged only while it
+    holds no ``$``, ``%``, backtick or double quote, so it uses none. An outer
+    PowerShell would expand ``$null`` inside those quotes and leave the inner
+    one a syntax error. The event JSON still reaches the CLI: a native command
+    that no pipeline feeds inherits PowerShell's stdin. Without the CLI, stdin
+    is drained and the hook succeeds, as ``cat >/dev/null`` does above.
+    """
+    return (
+        'powershell.exe -NoProfile -NonInteractive -Command "'
+        "if (Get-Command code-review-graph -ErrorAction SilentlyContinue) "
+        f"{{ code-review-graph {subcommand} }} "
+        'else { [Console]::In.ReadToEnd() | Out-Null }"'
+    )
+
+
 def generate_codex_hooks_config(repo_root: Path) -> dict[str, Any]:
     """Generate native Codex hooks configuration for the active Codex home."""
     return {
@@ -1482,12 +1502,7 @@ def generate_codex_hooks_config(repo_root: Path) -> dict[str, Any]:
                         {
                             "type": "command",
                             "command": _codex_hook_command("hook-update"),
-                            "commandWindows": (
-                                'powershell.exe -NoProfile -NonInteractive -Command "'
-                                "[Console]::In.ReadToEnd() | Out-Null; "
-                                "if ((git rev-parse --git-dir) -eq $null) { exit 0 }; "
-                                'code-review-graph update --skip-flows; exit 0"'
-                            ),
+                            "commandWindows": _codex_windows_hook_command("hook-update"),
                             "timeout": 30,
                             "statusMessage": "Updating code-review-graph",
                         },
@@ -1501,13 +1516,7 @@ def generate_codex_hooks_config(repo_root: Path) -> dict[str, Any]:
                         {
                             "type": "command",
                             "command": _codex_hook_command("hook-status"),
-                            "commandWindows": (
-                                'powershell.exe -NoProfile -NonInteractive -Command "'
-                                "[Console]::In.ReadToEnd() | Out-Null; "
-                                "if ((git rev-parse --git-dir) -eq $null) { "
-                                "'Not a git repo, skipping'; exit 0 }; "
-                                'code-review-graph status; exit 0"'
-                            ),
+                            "commandWindows": _codex_windows_hook_command("hook-status"),
                             "timeout": 10,
                             "statusMessage": "Checking code-review-graph status",
                         },
