@@ -935,25 +935,10 @@ class GraphStore:
 
     # --- Write operations ---
 
-    def upsert_node(
-        self,
-        node: NodeInfo,
-        file_hash: str = "",
-        qualified_name: str | None = None,
-    ) -> int:
+    def upsert_node(self, node: NodeInfo, file_hash: str = "") -> int:
         """Insert or update a node. Returns the node ID."""
-        node_id, _ = self._upsert_node(node, file_hash, qualified_name)
-        return node_id
-
-    def _upsert_node(
-        self,
-        node: NodeInfo,
-        file_hash: str = "",
-        qualified_name: str | None = None,
-    ) -> tuple[int, str]:
-        """Insert or update a node and return its ID and stored identity."""
         now = time.time()
-        qualified = qualified_name or self._qualified_for_upsert(node)
+        qualified = self._qualified_for_upsert(node)
         extra = json.dumps(node.extra) if node.extra else "{}"
 
         self._conn.execute(
@@ -989,7 +974,7 @@ class GraphStore:
         row = self._conn.execute(
             "SELECT id FROM nodes WHERE qualified_name = ?", (qualified,)
         ).fetchone()
-        return row["id"], qualified
+        return row["id"]
 
     def _qualified_for_upsert(self, node: NodeInfo) -> str:
         """Return a stable identity, suffixing genuine same-file collisions.
