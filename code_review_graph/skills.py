@@ -1760,7 +1760,7 @@ def install_git_hook(repo_root: Path) -> Path | None:
     else:
         install_plan.write_text(hook_path, _GIT_HOOK_SHEBANG + _GIT_HOOK_BLOCK)
 
-    install_plan.chmod(hook_path, 0o755)
+    install_plan.chmod(hook_path, 0o755)  # nosec B103 - a hook must be executable
     logger.info("Wrote git pre-commit hook: %s", hook_path)
     return hook_path
 
@@ -1917,7 +1917,7 @@ def install_git_sync_hooks(repo_root: Path) -> list[Path]:
                 install_plan.write_text(hook_path, existing.rstrip("\n") + "\n" + block)
         else:
             install_plan.write_text(hook_path, _GIT_HOOK_SHEBANG + block)
-        install_plan.chmod(hook_path, 0o755)
+        install_plan.chmod(hook_path, 0o755)  # nosec B103 - a hook must be executable
         logger.info("Wrote git %s hook: %s", name, hook_path)
         written.append(hook_path)
     return written
@@ -2643,11 +2643,11 @@ exit 0
 
     session_start_path = hooks_dir / _GEMINI_CLI_HOOK_FILENAMES[0]
     install_plan.write_text(session_start_path, session_start_script)
-    install_plan.chmod(session_start_path, 0o755)
+    install_plan.chmod(session_start_path, 0o755)  # nosec B103 - a hook must be executable
 
     update_path = hooks_dir / _GEMINI_CLI_HOOK_FILENAMES[1]
     install_plan.write_text(update_path, update_script)
-    install_plan.chmod(update_path, 0o755)
+    install_plan.chmod(update_path, 0o755)  # nosec B103 - a hook must be executable
 
     hooks_obj = existing.get("hooks", {})
     if not isinstance(hooks_obj, dict):
