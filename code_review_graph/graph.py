@@ -992,10 +992,17 @@ class GraphStore:
         return row["id"], qualified
 
     def _qualified_for_upsert(self, node: NodeInfo) -> str:
-        """Return a stable identity, suffixing genuine same-file collisions."""
+        """Return a stable identity, suffixing genuine same-file collisions.
+
+        A row at the same line, or else the semantically identical row nearest
+        to it, is this definition and is updated in place, so a moved line
+        never adds a second row. Only a definition that differs from every
+        stored one sharing its base becomes a suffixed collision.
+        """
         base = self._make_qualified(node)
         rows = self._conn.execute(
-            "SELECT qualified_name, line_start FROM nodes "
+            "SELECT id, qualified_name, line_start, kind, name, parent_name, "
+            "language, params, return_type, modifiers, is_test FROM nodes "
             "WHERE file_path = ? AND name = ? AND parent_name IS ? ORDER BY id",
             (node.file_path, node.name, node.parent_name),
         ).fetchall()
@@ -1008,6 +1015,13 @@ class GraphStore:
         for row in candidates:
             if row["line_start"] == node.line_start:
                 return row["qualified_name"]
+        signature = self._semantic_signature(node)
+        same = [row for row in candidates if self._row_semantic_signature(row) == signature]
+        if same:
+            nearest = min(
+                same, key=lambda row: (abs(row["line_start"] - node.line_start), row["id"]),
+            )
+            return str(nearest["qualified_name"])
 
         if self.get_node(base) is None:
             return base

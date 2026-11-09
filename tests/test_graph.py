@@ -2195,3 +2195,38 @@ class TestQualifiedNameCollisionLifecycle:
         )
 
         assert [self._identity_at(path, 14), self._identity_at(path, 24)] == before
+
+    def test_upsert_of_a_moved_definition_updates_it_in_place(self):
+        """Staging updates a re-upserted definition in place; a moved line must
+        not turn the same definition into a second, suffixed row.
+        """
+        path = "/test/file.py"
+        first_id = self.store.upsert_node(self._render(path, 10, "(a)"))
+        moved_id = self.store.upsert_node(self._render(path, 11, "(a)"))
+
+        [node] = self.store.get_nodes_by_file(path)
+        assert moved_id == first_id
+        assert (node.qualified_name, node.line_start) == (f"{path}::render", 11)
+
+    def test_upsert_of_a_moved_duplicate_updates_its_own_row(self):
+        path = "/test/file.py"
+        self.store.store_file_nodes_edges(
+            path, [self._render(path, 10, "(a)"), self._render(path, 20, "(b)")], [],
+        )
+        second = self._identity_at(path, 20)
+
+        self.store.upsert_node(self._render(path, 25, "(b)"))
+
+        assert sorted(
+            (n.qualified_name, n.line_start) for n in self.store.get_nodes_by_file(path)
+        ) == sorted([(f"{path}::render", 10), (second, 25)])
+
+    def test_upsert_of_a_different_definition_keeps_both(self):
+        """#586's review: direct upserts must not collapse distinct definitions."""
+        path = "/test/file.py"
+        self.store.upsert_node(self._render(path, 10, "(a)"))
+        self.store.upsert_node(self._render(path, 20, "(b)"))
+
+        assert sorted(
+            (n.params, n.line_start) for n in self.store.get_nodes_by_file(path)
+        ) == [("(a)", 10), ("(b)", 20)]
