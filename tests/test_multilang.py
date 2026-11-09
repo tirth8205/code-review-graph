@@ -635,7 +635,7 @@ class TestCSharpParsing:
         inherits = [e for e in self.edges if e.kind == "INHERITS"]
         by_source = {}
         for edge in inherits:
-            by_source.setdefault(edge.source.rsplit("::", 1)[-1], set()).add(
+            by_source.setdefault(edge.source.rsplit("::", 1)[-1].removeprefix("SampleApp."), set()).add(
                 edge.target
             )
 
@@ -1038,18 +1038,18 @@ class TestCSharpReceiverCallResolution:
     ):
         self._build(tmp_path)
         service = str(tmp_path / "Service.cs")
-        targets = self._call_targets_of(tmp_path, "Consumer.Run")
-        assert f"{service}::Service.StaticCall" in targets
-        assert f"{service}::Service.InstanceCall" in targets
-        assert f"{service}::Service.ConditionalCall" in targets
+        targets = self._call_targets_of(tmp_path, "Acme.App.Consumer.Run")
+        assert f"{service}::Acme.Services.Service.StaticCall" in targets
+        assert f"{service}::Acme.Services.Service.InstanceCall" in targets
+        assert f"{service}::Acme.Services.Service.ConditionalCall" in targets
         decoy = str(tmp_path / "Decoy.cs")
         assert not any(t.startswith(f"{decoy}::") for t in targets)
 
     def test_full_build_resolves_same_file_receiver_call(self, tmp_path):
         self._build(tmp_path)
         single = str(tmp_path / "Single.cs")
-        targets = self._call_targets_of(tmp_path, "Runner.Go")
-        assert f"{single}::Widget.Spin" in targets
+        targets = self._call_targets_of(tmp_path, "Acme.Single.Runner.Go")
+        assert f"{single}::Acme.Single.Widget.Spin" in targets
 
     def test_callers_of_returns_resolved_caller_after_full_build(self, tmp_path):
         from code_review_graph.tools.query import query_graph
@@ -1059,7 +1059,7 @@ class TestCSharpReceiverCallResolution:
         for method in ("StaticCall", "InstanceCall", "ConditionalCall"):
             result = query_graph(
                 "callers_of",
-                f"{service}::Service.{method}",
+                f"{service}::Acme.Services.Service.{method}",
                 repo_root=str(tmp_path),
             )
             assert result.get("status") == "ok"
@@ -1113,7 +1113,7 @@ class TestCSharpReceiverCallResolution:
         service = str(tmp_path / "Service.cs")
         result = query_graph(
             "tests_for",
-            f"{service}::Service.StaticCall",
+            f"{service}::Acme.Services.Service.StaticCall",
             repo_root=str(tmp_path),
         )
         assert result.get("status") == "ok"
@@ -1198,7 +1198,10 @@ class TestCSharpNamespaceImpactAndCoverage:
             for e in edges:
                 store.upsert_edge(e)
         store.commit()
-        # Same bare-endpoint resolution the build/postprocess pipeline runs.
+        # Same namespace binding and endpoint resolution as the build pipeline.
+        from code_review_graph.scoped_resolver import resolve_scoped_calls
+
+        resolve_scoped_calls(store, tmp_path)
         store.resolve_bare_call_targets()
         store.resolve_bare_tested_by_sources()
         return store, core, app, tests, unrelated
@@ -1251,8 +1254,8 @@ class TestCSharpNamespaceImpactAndCoverage:
     def test_bare_tested_by_source_resolves_via_namespace_evidence(self, tmp_path):
         store, core, _app, tests, _unrelated = self._build(tmp_path)
         try:
-            method_qn = f"{core}::TaskBoard.CountTasks"
-            test_qn = f"{tests}::TaskBoardTests.CountTasks_ReturnsZero"
+            method_qn = f"{core}::ACME.Core.TaskBoard.CountTasks"
+            test_qn = f"{tests}::ACME.Core.Tests.TaskBoardTests.CountTasks_ReturnsZero"
             tested_by = [
                 e for e in store.get_edges_by_source(method_qn)
                 if e.kind == "TESTED_BY"
@@ -1268,14 +1271,14 @@ class TestCSharpNamespaceImpactAndCoverage:
         store.close()
         result = query_graph(
             "tests_for",
-            f"{core}::TaskBoard.CountTasks",
+            f"{core}::ACME.Core.TaskBoard.CountTasks",
             repo_root=str(tmp_path),
         )
         assert result.get("status") == "ok"
         found = {
             r["qualified_name"]: r for r in result.get("results", [])
         }
-        test_qn = f"{tests}::TaskBoardTests.CountTasks_ReturnsZero"
+        test_qn = f"{tests}::ACME.Core.Tests.TaskBoardTests.CountTasks_ReturnsZero"
         assert test_qn in found
         # Must come from the resolved TESTED_BY edge, not name matching.
         assert found[test_qn].get("inferred_by") != "naming_convention"
@@ -3240,7 +3243,7 @@ class TestElixirParsing:
         functions = [node for node in nodes if node.kind == "Function"]
         assert [node.name for node in functions] == [name]
 
-    def test_multi_clause_functions_keep_distinct_parser_ranges(self, tmp_path):
+    def test_multi_clause_functions_span_every_clause(self, tmp_path):
         path = tmp_path / "clauses.ex"
         source = (
             b"defmodule T do\n"
@@ -3256,7 +3259,7 @@ class TestElixirParsing:
             node for node in nodes
             if node.kind == "Function" and node.name == "multi"
         ]
-        assert [(node.line_start, node.line_end) for node in clauses] == [(4, 4), (5, 5)]
+        assert [(node.line_start, node.line_end) for node in clauses] == [(4, 5)]
 
         for writer_name, writer in (
             ("nodes_edges", lambda store: store.store_file_nodes_edges(path, nodes, edges)),
@@ -3265,9 +3268,17 @@ class TestElixirParsing:
             with GraphStore(tmp_path / f"clauses-{writer_name}.db") as store:
                 writer(store)
                 multi = store.get_node(f"{path.as_posix()}::T.multi")
+                stored = sorted(
+                    (node.line_start, node.line_end)
+                    for node in store.get_nodes_by_file(path.as_posix())
+                    if node.name == "multi"
+                )
 
+            # The clauses are one node (#979), so the same-name collision
+            # #585 guards against never happens here: one row, both lines.
             assert multi is not None
-            assert (multi.line_start, multi.line_end) == (5, 5)
+            assert (multi.line_start, multi.line_end) == (4, 5)
+            assert stored == [(4, 5)]
 
 
 class TestGDScriptParsing:

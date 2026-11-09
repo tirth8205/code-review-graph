@@ -13,7 +13,7 @@ Releases after v2.3.6 are listed in [CHANGELOG.md](../CHANGELOG.md).
 - `docs/FAQ.md`: comparisons with LSP, RAG, grep and agentic search, and when not to use the tool
 - Contribution scaffolding: issue forms, PR template, dependabot config
 - Windows fixes for `daemon status` (#511) and `detect-changes` path mapping (#528)
-- Reliability: embedding provider-name validation, SQLite store-leak fixes in analysis and wiki tools, `fastmcp<4` cap, hooks installed via `git rev-parse --git-path hooks`
+- Reliability: embedding provider-name validation, SQLite store-leak fixes in analysis and wiki tools, `fastmcp<4` cap (now `<5`, #970), hooks installed via `git rev-parse --git-path hooks`
 
 ### v2.3.5
 - Token Savings panel on `detect-changes --brief` and the new `update --brief`, with a per-category breakdown that sums to the graph response size

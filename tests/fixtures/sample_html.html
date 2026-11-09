@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <title>Design brief</title>
+  <script src="./helpers/nav.js"></script>
+  <script src="https://cdn.example.com/lib.js"></script>
+  <script type="application/ld+json">{"@type": "Article"}</script>
+  <style>#cover { color: red; }</style>
+</head>
+<body>
+  <div id="cover">
+    <h1>Project <b>overview</b></h1>
+    <button onclick="openSearch(1)">Search</button>
+  </div>
+  <section id="s1">
+    <h2>Scope of the work</h2>
+    <p>Prose that is not indexed.</p>
+    <div class="note">No id, so not a section.</div>
+    <h2 id="heading-anchor">Heading anchors stay out</h2>
+    <script>
+      function openSearch(tab) {
+        return renderTabs(tab);
+      }
+
+      function renderTabs(tab) {
+        return tab;
+      }
+    </script>
+  </section>
+  <article id="appendix">
+    <h2>Appendix</h2>
+    <script>
+      class Tracker {
+        update() {
+          return renderTabs(2);
+        }
+      }
+    </script>
+    <script></script>
+  </article>
+</body>
+</html>

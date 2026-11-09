@@ -77,6 +77,8 @@ code-review-graph install --platform codebuddy
 
 Config file locations are listed in [docs/USAGE.md](docs/USAGE.md#supported-platforms). Requires Python 3.10+.
 
+The files `install` writes, such as `.claude/` and `.mcp.json`, stay visible to git in case your team commits them. `install --gitignore` adds the ones that run created to a marked block in `.gitignore`; `uninstall` removes the block.
+
 For Codex, the installer also places a global `code-review-graph` Skill under
 `$CODEX_HOME/skills/code-review-graph/` (default:
 `~/.codex/skills/code-review-graph/`). It prefers CRG MCP tools and falls back
@@ -104,6 +106,55 @@ Build the code review graph for this project
 
 Build time scales with repository size; a cold build of a ~3,000-file repository took about 40 seconds ([measured](docs/REPRODUCING.md#incremental-update-latency)). After that, hooks and watch mode keep the graph updated. If some files fail to parse, the result has status `partial` and names them in its summary; the CLI also prints a `Warning:` line on stderr, and those files keep their previous graph rows.
 
+
+### Run with Docker or Podman
+
+Build the image from the repository root:
+
+```bash
+docker build -t code-review-graph:local .
+```
+
+From the repository you want to analyze, run:
+
+```bash
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --env HOME=/tmp \
+  --volume "$PWD:/workspace" \
+  code-review-graph:local build
+```
+
+The mounted repository must be writable. The command above uses your
+user and group IDs so the generated `.code-review-graph/` directory
+remains owned by your user. Run these commands as a non-root host user.
+
+For Podman, build the same Dockerfile and preserve your user mapping:
+
+```bash
+podman build -t code-review-graph:local .
+podman run --rm \
+  --userns=keep-id \
+  --env HOME=/tmp \
+  --volume "$PWD:/workspace" \
+  code-review-graph:local build
+```
+
+The graph persists in `.code-review-graph/` in the mounted repository and stores
+absolute container paths such as `/workspace/app.py`. Run `update` and
+`detect-changes` through Docker or Podman with the same `/workspace` mount.
+A host `update` on this graph can fail with "built with a different repository
+root". To switch to host commands, run `code-review-graph build` on the host
+to rebuild the graph with host paths.
+
+Replace `build` with `status` to inspect the saved graph.
+The image includes Git and defaults to a non-root user.
+No graph is generated during image construction.
+
+These examples use macOS/Linux shell syntax. On macOS, start your
+Docker-compatible engine or Podman machine before running them. On a host with
+SELinux on, such as Fedora, add `:z` to the mount (`"$PWD:/workspace:z"`), or
+the container is refused access to the repository.
 
 ## How It Works
 
@@ -147,7 +198,7 @@ Instead of feeding a whole corpus to the model, the graph returns a slice shaped
   <img src="diagrams/diagram9_language_coverage.png" alt="Language coverage by category: Web, Backend, Systems, Mobile, Scripting, Shells, Domain, and Other, plus Jupyter and Databricks notebooks" width="90%" />
 </p>
 
-The parser extracts functions, classes, imports, call sites, inheritance and tests, using Tree-sitter where a grammar exists and targeted fallbacks elsewhere. Supported: Python, JavaScript/TypeScript/TSX, Go, Rust, Java, C/C++, C#, VB.NET, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL/PL/SQL (Oracle), Terraform/OpenTofu (`.tf`; other `.hcl` files become file nodes only), Ansible YAML (playbooks, roles, tasks), Spring Boot application config (`application.properties`, `application.yml`, `application.yaml` and their `application-<profile>` variants; key names and value types only, never values), value-free generic YAML structure, Vue/Svelte SFCs, Astro files (parsed with the TypeScript grammar), Jupyter and Databricks notebooks (`.ipynb`), Perl XS files (`.xs`), and Robot Framework files (`.robot`, `.resource`). Other `.properties` files are not treated as source code.
+The parser extracts functions, classes, imports, call sites, inheritance and tests, using Tree-sitter where a grammar exists and targeted fallbacks elsewhere. Supported: Python, JavaScript/TypeScript/TSX, Go, Rust, Java, C/C++, C#, VB.NET, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL/PL/SQL (Oracle), Terraform/OpenTofu (`.tf`; other `.hcl` files become file nodes only), Ansible YAML (playbooks, roles, tasks), Spring Boot application config (`application.properties`, `application.yml`, `application.yaml` and their `application-<profile>` variants; key names and value types only, never values), value-free generic YAML structure (translation files in folders such as `locales/` become file nodes only), XSLT stylesheets (`.xsl`, `.xslt`), value-free JSON structure (`.json`; translation, test, docs, example and data files keep only a file node, and lock files are skipped), Vue/Svelte SFCs, HTML pages (`.html`, `.htm`; inline scripts, plus `div`, `section` and `article` blocks with an id as `DocSection` nodes), Astro files (parsed with the TypeScript grammar), Jupyter and Databricks notebooks (`.ipynb`), Perl XS files (`.xs`), Robot Framework files (`.robot`, `.resource`), and Liquid templates (`.liquid`). Other `.properties` files are not treated as source code.
 
 PHP projects also get repository-bounded Composer PSR-4 resolution, Blade template references,
 and Laravel Route and Eloquent edges when the source shows explicit framework imports, model
@@ -174,7 +225,7 @@ The generic tree-sitter walker does the extraction. Built-in languages cannot be
 
 ### Risk-scored PR reviews in CI (GitHub Action)
 
-The same analysis runs as a composite GitHub Action. The graph is built and queried on your CI runner; no source code is sent to an external service. On each pull request the action posts one sticky comment with risk-scored functions, affected execution flows and test gaps, updated in place on every push. The optional `fail-on-risk` input turns it into a merge gate.
+The same analysis runs as a composite GitHub Action. The graph is built and queried on your CI runner; no source code is sent to an external service. On each pull request the action posts one sticky comment with risk-scored functions, affected execution flows and test gaps, updated in place on every push. The optional `fail-on-risk` input turns it into a merge gate. The optional `details` input adds more graph context, folded away and capped in size: why each top symbol scored what it did, the communities, hubs and cross-boundary links the change touches, its impact radius, its untested hotspots, and where the graph came from.
 
 ```yaml
 # .github/workflows/code-review-graph.yml
@@ -256,7 +307,9 @@ Blast-radius analysis recovers every file in the ground truth on all 13 evaluati
 | gin | 3 | 0.609 | 0.439 | 1.0 |
 | **Average** | **13** | **0.693** | **0.546** | **1.000** |
 
-The benchmark also runs a **co-change mode**: the predictor is seeded with one changed file and graded against the other files the author touched in the same commit, which is evidence from git history rather than from the graph. Both modes appear in the result CSVs (`ground_truth_mode` column). In the 2026-08-02 capture co-change mode returned `predicted_files = 0` on every graded commit, so it is not yet a usable measurement and no co-change number is quoted.
+This table is from the 2026-08-02 capture, taken before the path fix described below. That bug also kept real neighbour files out of the graph-derived ground truth, so these numbers will change when the benchmark is re-run.
+
+The benchmark also runs a **co-change mode**: the predictor is seeded with one changed file and graded against the other files the author touched in the same commit, which is evidence from git history rather than from the graph. Both modes appear in the result CSVs (`ground_truth_mode` column). In the 2026-08-02 capture co-change mode returned `predicted_files = 0` on every graded commit, code seeds included (for example `code_review_graph/cli.py` and gin's `context.go`). The cause was a path bug in the benchmark: `git diff` gives repo-relative paths, the graph stores absolute ones, so the seed never matched a node. That bug is now fixed, but the benchmark has not been re-run yet, so no co-change number is quoted.
 
 </details>
 
@@ -279,7 +332,7 @@ From the same 2026-08-02 clean-room build at the pinned SHAs above. Embedding co
 
 ### Limitations
 
-- **Impact "recall 1.0" is circular.** The historical ground truth comes from the same graph edges the predictor walks, so it is an upper bound by construction. The co-change mode is not yet a usable measurement.
+- **Impact "recall 1.0" is circular.** The historical ground truth comes from the same graph edges the predictor walks, so it is an upper bound by construction. Co-change numbers are not quoted until the benchmark is re-run with the path fix.
 - **Small single-file changes.** Graph context can exceed a plain file read for trivial edits. The overhead is the structural metadata that makes multi-file analysis possible.
 - **Search ranking.** Keyword search usually finds the right result near the top, but ranking needs work. Express queries can return no hits because of module-pattern naming.
 - **Flow detection.** Entry-point detection is strongest for Python and PHP/Laravel. JavaScript and Go flow detection needs work.
@@ -301,9 +354,9 @@ From the same 2026-08-02 clean-room build at the pinned SHAs above. Embedding co
 | **Interactive visualisation** | D3.js force-directed graph with search, community legend toggles and degree-scaled nodes |
 | **Hub and bridge detection** | Most-connected nodes and chokepoints (betweenness centrality) |
 | **Surprise scoring** | Unexpected coupling: cross-community, cross-language, peripheral-to-hub edges |
-| **Knowledge gap analysis** | Isolated nodes, untested hotspots, thin communities |
+| **Knowledge gap analysis** | Isolated nodes, untested hotspots, thin communities, import cycles |
 | **Suggested questions** | Review questions generated from bridges, hubs and surprises |
-| **Edge confidence** | Two-tier confidence (EXTRACTED/INFERRED) with float scores on edges |
+| **Edge confidence** | Four tiers (EXTRACTED, INFERRED, AMBIGUOUS, UNRESOLVED) with float scores on edges, so a call the graph could not bind says so |
 | **Graph traversal** | BFS/DFS from any node with configurable depth and token budget |
 | **Export formats** | GraphML (Gephi/yEd), Neo4j Cypher, Obsidian vault, JSON, and SVG (SVG needs matplotlib from the `eval` extra) |
 | **Token benchmarking** | `code_review_graph/token_benchmark.py` measures whole-corpus tokens against graph query tokens per question |
@@ -312,7 +365,7 @@ From the same 2026-08-02 clean-room build at the pinned SHAs above. Embedding co
 | **Execution flows** | Call chains from entry points, sorted by weighted criticality |
 | **Community detection** | Leiden clustering with resolution scaled to graph size |
 | **Architecture overview** | Community-based architecture map with coupling warnings |
-| **Risk-scored reviews** | `detect_changes` maps diffs to affected functions, YAML paths, flows and test gaps |
+| **Risk-scored reviews** | `detect_changes` maps diffs to affected functions, YAML and JSON paths, flows and test gaps |
 | **Custom languages** | New languages via `.code-review-graph/languages.toml`, no fork needed |
 | **GitHub Action** | Sticky risk-scored PR review comments in CI, with an optional `fail-on-risk` merge gate |
 | **Refactoring tools** | Rename preview, framework-aware dead code detection, community-driven suggestions |
@@ -369,6 +422,7 @@ code-review-graph detect-changes --brief         # Risk panel + token savings (r
 code-review-graph detect-changes --brief --base main  # Against the merge base of main and HEAD
 code-review-graph update --brief                 # Refresh graph + same panel
 code-review-graph detect-changes --brief --verify  # Cross-check against tiktoken
+code-review-graph context-history  # Trend of the opt-in savings log (CRG_CONTEXT_HISTORY=1)
 code-review-graph register <path>  # Register repo in the multi-repo registry
 code-review-graph unregister <path|alias>  # Remove repo from the registry
 code-review-graph repos            # List registered repositories
@@ -378,6 +432,7 @@ code-review-graph daemon status    # Daemon status and repos
 code-review-graph eval             # Run evaluation benchmarks
 code-review-graph serve            # Start the MCP server (stdio)
 code-review-graph serve --http     # MCP over Streamable HTTP on localhost:5555
+code-review-graph serve --http --multi-repo  # One HTTP server for every registered repo
 ```
 
 This is a selection. `code-review-graph --help` lists every command, and [docs/COMMANDS.md](docs/COMMANDS.md) documents their flags.
@@ -413,6 +468,8 @@ Both commands print the same panel showing how many tokens the graph saved compa
 Add `--verify` to either command to compare the figures with OpenAI's `cl100k_base` tokenizer (needs `pip install tiktoken`). The estimate is within about 1% of real tokens in aggregate; see [`docs/REPRODUCING.md`](docs/REPRODUCING.md#calibration-table).
 
 The same `context_savings` metadata is attached to the JSON responses of the `get_impact_radius`, `get_review_context`, `detect_changes` and `get_architecture_overview` MCP tools.
+
+To see these estimates over time, set `CRG_CONTEXT_HISTORY=1` (off by default). Each estimate then adds one line to a local log next to `graph.db`, holding token counts and tool names only, and `code-review-graph context-history` prints it per day or per tool. See [docs/USAGE.md](docs/USAGE.md#context-history).
 
 </details>
 
@@ -521,7 +578,7 @@ Optional dependency groups:
 pip install "code-review-graph[embeddings]"          # Local vector embeddings (sentence-transformers)
 pip install "code-review-graph[google-embeddings]"   # Google Gemini embeddings
 pip install "code-review-graph[communities]"         # Community detection (igraph)
-pip install "code-review-graph[enrichment]"          # Python call-resolution enrichment (Jedi)
+pip install "code-review-graph[enrichment]"          # Python call resolution with Jedi (then build --enrich)
 pip install "code-review-graph[eval]"                # Evaluation benchmarks and SVG export (matplotlib)
 pip install "code-review-graph[wiki]"                # ollama client (not used by the current wiki generator)
 pip install "code-review-graph[all]"                 # All optional dependencies
@@ -543,13 +600,17 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_MAX_IMPACT_DEPTH` | Search depth for blast-radius analysis | `2` |
 | `CRG_MAX_BFS_DEPTH` | Maximum depth for graph traversal | `15` |
 | `CRG_MAX_CHANGED_FUNCS` | Maximum changed functions analysed in one change report | `500` |
-| `CRG_MAX_TRANSITIVE_FRONTIER` | Maximum frontier size for transitive caller/callee expansion | `50` |
+| `CRG_MAX_DELETION_FILES` | Maximum files whose old version is read in one change report, to name the functions and classes a diff deleted | `100` |
+| `CRG_MAX_TRANSITIVE_FRONTIER` | Maximum callees followed per hop when `tests_for` and `detect-changes` look for tests. The first by name are kept, so one graph always gives one answer | `50` |
 | `CRG_CALLER_TEST_ROUTE_DEPTH` | Hops to walk up incoming `CALLS` when looking for a tested caller of an untested changed symbol. Reported as a note, never as coverage | `2` |
 | `CRG_CALLER_TEST_ROUTE_MAX_CALLERS` | Maximum callers examined while looking for that tested caller | `500` |
 | `CRG_TOOL_TIMEOUT` | Timeout in seconds for read-only MCP tools (`0` disables). Does not bound the tools that write: build, postprocess, embed, wiki and apply-refactor | `0` |
 | `CRG_CHURN_WINDOW_DAYS` | Window for `detect-changes --churn` commit counts | `90` |
+| `CRG_CONTEXT_HISTORY` | Set to `1` to keep a local log of each `context_savings` estimate in `.code-review-graph/context-history.jsonl`; read it with `code-review-graph context-history`. Token counts and tool names only, never sent anywhere | - |
 | `CRG_LEIDEN_SEED` | Seed for Leiden community detection | `42` |
 | `CRG_RECURSE_SUBMODULES` | Include git submodules when set to `1`, `true` or `yes` | - |
+| `CRG_FOLLOW_SYMLINKS` | Follow symlinked folders, inside or outside the repository, when set to `1`, `true`, `yes` or `on`; same as `--follow-symlinks`. See [Symlinked folders](docs/USAGE.md#symlinked-folders) | - |
+| `CRG_MAX_FOLLOWED_FILES` | Most files taken through followed symlinked folders | `10000` |
 | `CRG_TOOLS` | Comma-separated allowlist of MCP tools to expose when serving | - |
 | `GOOGLE_API_KEY` | API key for Google Gemini embeddings | - |
 | `MINIMAX_API_KEY` | API key for MiniMax embeddings | - |
@@ -567,6 +628,8 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_OPENAI_BATCH_SIZE` | Batch size for OpenAI-compatible requests | `100` |
 | `NO_COLOR` | Disable ANSI colours in the terminal | - |
 | `CRG_SERIAL_PARSE` | Set to `1` to disable parallel parsing (for debugging) | - |
+| `CRG_ENABLE_ENRICHMENT` | Set to `1` to resolve Python method calls with Jedi on every build and update (needs the `enrichment` extra; about a second more per Python file). Same as `build --enrich` | off |
+| `CRG_DISABLE_ENRICHMENT` | Set to `1` to never run Jedi, even when asked for | - |
 
 OpenAI-compatible embeddings (OpenAI, Azure, or a self-hosted gateway such as new-api, LiteLLM, vLLM, LocalAI, or Ollama in OpenAI mode) need no extra install. Set the variables and pass `provider="openai"` to `embed_graph`:
 

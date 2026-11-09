@@ -52,7 +52,8 @@ class _Trace:
 class InstrumentedStore:
     """Stands in for main()'s GraphStore: counts users, records closes, closes nothing."""
 
-    def __init__(self, trace: _Trace, watcher_threads) -> None:
+    def __init__(self, trace: _Trace, watcher_threads, db_path) -> None:
+        self.db_path = db_path  # the write lock sits beside it
         self._trace = trace
         self._watcher_threads = watcher_threads
         self._lock = threading.Lock()
@@ -169,8 +170,8 @@ class Harness:
                       if t not in self.threads_before and t is not self.main_thread
                       and t.is_alive())
 
-    def _new_store(self, *_args, **_kwargs) -> InstrumentedStore:
-        store = InstrumentedStore(self.trace, self.watcher_threads)
+    def _new_store(self, db_path, *_args, **_kwargs) -> InstrumentedStore:
+        store = InstrumentedStore(self.trace, self.watcher_threads, db_path)
         self.stores.append(store)
         return store
 

@@ -20,7 +20,7 @@ import subprocess
 import sys
 from importlib import resources
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Sequence
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     # Moved to importlib.resources.abc in 3.11 and removed from importlib.abc
@@ -1015,6 +1015,23 @@ def _splice_commented_config(
         return None
 
 
+def platforms_for_target(repo_root: Path, target: str) -> dict[str, dict[str, Any]]:
+    """Return the platforms whose MCP config ``install`` writes for ``target``.
+
+    ``"all"`` means every detected platform, plus Kiro when the repository has
+    a ``.kiro`` folder. An unknown name gives an empty mapping.
+    """
+    if target == "all":
+        selected = {k: v for k, v in PLATFORMS.items() if v["detect"]()}
+        # Workspace-level Kiro detection
+        if "kiro" not in selected and (repo_root / ".kiro").is_dir():
+            selected["kiro"] = PLATFORMS["kiro"]
+        return selected
+    if target in PLATFORMS:
+        return {target: PLATFORMS[target]}
+    return {}
+
+
 def install_platform_configs(
     repo_root: Path,
     target: str = "all",
@@ -1032,10 +1049,7 @@ def install_platform_configs(
     """
     shared_aliases: dict[str, tuple[str, ...]] = {}
     if target == "all":
-        platforms_to_install = {k: v for k, v in PLATFORMS.items() if v["detect"]()}
-        # Workspace-level Kiro detection
-        if "kiro" not in platforms_to_install and (repo_root / ".kiro").is_dir():
-            platforms_to_install["kiro"] = PLATFORMS["kiro"]
+        platforms_to_install = platforms_for_target(repo_root, target)
 
         # Claude Code and CodeBuddy intentionally share the official project
         # .mcp.json/mcpServers contract. Process that exact pair once, but do
@@ -1405,6 +1419,186 @@ def generate_skills(repo_root: Path, skills_dir: Path | None = None) -> Path:
     return skills_dir
 
 
+# --- Documentation-driven skills ---
+
+DOCUMENTARY_SKILLS: dict[str, dict[str, str]] = {
+    "build-graph": {
+        "description": (
+            "Build or update the code review knowledge graph. Run this first to initialize, or let "
+            "hooks keep it updated automatically."
+        ),
+        "argument_hint": "[full]",
+        "title": "Build Graph",
+        "body": (
+            "Build or incrementally update the knowledge graph for this repository.\n\n"
+            "## Steps\n\n"
+            "1. Call `list_graph_stats_tool`. If `last_updated` is null, the graph has never been "
+            "built.\n"
+            "2. For a first build, or when the argument is `full`, call "
+            "`build_or_update_graph_tool(full_rebuild=True)`. Otherwise call "
+            "`build_or_update_graph_tool()` for an incremental update.\n"
+            "3. Report the response: `status` (`ok`, `partial` or `error`) and `summary`.\n\n"
+            "## When to Use\n\n"
+            "- First set-up of a repository, or after a branch switch or large refactor.\n"
+            "- When the graph looks stale. Hooks installed by `code-review-graph install` run an "
+            "update after each edit and before each commit, so manual builds are rarely needed.\n\n"
+            "## Notes\n\n"
+            "- The database is `.code-review-graph/graph.db` in the repository root.\n"
+            "- Binary files, dependency and build directories, and patterns in "
+            "`.code-review-graphignore` are skipped.\n"
+            "- For the list of supported languages call "
+            "`get_docs_section_tool(section_name=\"languages\")`."
+        ),
+    },
+    "review-delta": {
+        "description": (
+            "Review only changes since last commit using impact analysis. Token-efficient delta "
+            "review with automatic blast-radius detection."
+        ),
+        "argument_hint": "[file or function name]",
+        "title": "Review Delta",
+        "body": (
+            "Review only the changed code and its blast radius.\n\n"
+            "## Steps\n\n"
+            "1. Call `get_minimal_context_tool(task=\"review changes\")`. If it returns `status: "
+            "not_ready`, call `build_or_update_graph_tool()` and continue.\n"
+            "2. Call `detect_changes_tool(detail_level=\"minimal\")` for risk-scored changed "
+            "functions, test gaps and affected flows. Changes come from `git diff` against "
+            "`HEAD~1`; if the argument names a file, pass it in `changed_files`.\n"
+            "3. Call `get_review_context_tool(detail_level=\"minimal\")` when you need source "
+            "snippets for the changed areas and `review_guidance` (untested functions, wide blast "
+            "radius, inheritance changes).\n"
+            "4. For each untested high-risk function, confirm with "
+            "`query_graph_tool(pattern=\"tests_for\", target=\"<function>\")`.\n"
+            "5. Use `detail_level=\"standard\"` only for a high-risk item the minimal output "
+            "leaves unclear. Do not load whole files unless a snippet is not enough.\n\n"
+            "## Report\n\n"
+            "- Summary: one line\n"
+            "- Risk: low, medium or high, from the blast radius\n"
+            "- Issues: bugs, missing tests, style\n"
+            "- Blast radius: impacted files and functions\n"
+            "- Recommendations"
+        ),
+    },
+    "review-pr": {
+        "description": (
+            "Review a PR or branch diff using the knowledge graph for full structural context. "
+            "Outputs a structured review with blast-radius analysis."
+        ),
+        "argument_hint": "[PR number or branch name]",
+        "title": "Review PR",
+        "body": (
+            "Review all commits of a pull request or branch against its base branch.\n\n"
+            "## Steps\n\n"
+            "1. Identify the changes. With a branch name run `git diff --name-only "
+            "main...<branch>`; otherwise diff the current branch against `main` (or `master`). Use "
+            "that ref as `base` below.\n"
+            "2. Call `get_minimal_context_tool(task=\"review PR\", base=\"main\")`. If it returns "
+            "`status: not_ready`, call `build_or_update_graph_tool()` and continue.\n"
+            "3. Call `detect_changes_tool(base=\"main\", detail_level=\"minimal\")` for "
+            "risk-scored changed functions, test gaps and affected flows across the whole branch.\n"
+            "4. For high-risk functions call `query_graph_tool(pattern=\"callers_of\", "
+            "target=\"<function>\")` and `query_graph_tool(pattern=\"tests_for\", "
+            "target=\"<function>\")`. Flag public API changes whose callers were not updated.\n"
+            "5. Call `get_review_context_tool(base=\"main\")` for source snippets, or "
+            "`get_impact_radius_tool(base=\"main\")` for the full dependent list, only when step 3 "
+            "leaves a high-risk item unclear.\n"
+            "6. Read the changed source of the highest-impact files first. Do not load whole files "
+            "unless the change needs it.\n\n"
+            "## Output\n\n"
+            "```\n"
+            "## PR Review: <title>\n\n"
+            "### Summary\n"
+            "<1-3 sentences>\n\n"
+            "### Risk\n"
+            "- Overall: Low / Medium / High\n"
+            "- Blast radius: <n> files, <m> functions\n"
+            "- Test coverage: <covered> of <changed> changed functions\n\n"
+            "### Files\n"
+            "#### <path>\n"
+            "- Changes: <what>\n"
+            "- Impact: <who depends on it>\n"
+            "- Issues: <bugs, style, concerns>\n\n"
+            "### Missing Tests\n"
+            "- <function> in <file>\n\n"
+            "### Recommendations\n"
+            "1. <action>\n"
+            "```\n\n"
+            "## Tips\n\n"
+            "- Use `semantic_search_nodes_tool` to find related code the PR may have missed."
+        ),
+    },
+}
+
+
+def render_documentary_skill_markdown(slug: str) -> str:
+    """Render the checked-in markdown for a documentation-driven skill.
+
+    Raises:
+        KeyError: *slug* is not one of ``DOCUMENTARY_SKILLS``.
+    """
+    try:
+        spec = DOCUMENTARY_SKILLS[slug]
+    except KeyError:
+        known = ", ".join(sorted(DOCUMENTARY_SKILLS))
+        raise KeyError(f"unknown documentary skill {slug!r} (known: {known})") from None
+    frontmatter = [
+        "---",
+        f"name: {slug}",
+        f"description: {spec['description']}",
+    ]
+    argument_hint = spec.get("argument_hint")
+    if argument_hint:
+        frontmatter.append(f'argument-hint: "{argument_hint}"')
+    frontmatter.append("---")
+    frontmatter.append("")
+    frontmatter.append(f"# {spec['title']}")
+    frontmatter.append("")
+    frontmatter.append(spec["body"])
+    frontmatter.append("")
+    return "\n".join(frontmatter)
+
+
+def generate_documentary_skills(repo_root: Path, skills_dir: Path | None = None) -> Path:
+    """Generate the documentation-driven skills under ``skills/``.
+
+    ``DOCUMENTARY_SKILLS`` is the source of these files: edit the text there,
+    then run ``scripts/generate_documentary_skills.py``.
+
+    Args:
+        repo_root: Repository root directory.
+        skills_dir: Custom skills directory. Defaults to repo_root/skills.
+
+    Returns:
+        Path to the skills directory.
+    """
+    if skills_dir is None:
+        skills_dir = repo_root / "skills"
+    skills_dir.mkdir(parents=True, exist_ok=True)
+
+    for slug in DOCUMENTARY_SKILLS:
+        skill_subdir = skills_dir / slug
+        skill_subdir.mkdir(parents=True, exist_ok=True)
+        skill_path = skill_subdir / "SKILL.md"
+        # LF on every platform: these files are checked in, and Windows
+        # newline translation would rewrite all three as a diff.
+        skill_path.write_text(
+            render_documentary_skill_markdown(slug), encoding="utf-8", newline="\n",
+        )
+
+    return skills_dir
+
+
+# The edit hook hands the event JSON to ``hook-update``, then drains whatever
+# was left unread, so a large payload never meets a closed pipe (#493). It never
+# fails the edit: not when the CLI is missing, not when an older CLI has no
+# ``hook-update``, not when the update itself fails.
+_CLAUDE_UPDATE_HOOK_COMMAND = (
+    "command -v code-review-graph >/dev/null 2>&1"
+    " && code-review-graph hook-update; cat >/dev/null || true"
+)
+
+
 def generate_hooks_config(repo_root: Path) -> dict[str, Any]:
     """Generate Claude Code hooks configuration.
 
@@ -1413,9 +1607,11 @@ def generate_hooks_config(repo_root: Path) -> dict[str, Any]:
     Claude Code event — pre-commit checks are handled by ``install_git_hook``.
 
     The ``repo_root`` parameter is retained for backward compatibility but is
-    not embedded in hook commands. Instead, the repo root is resolved at
-    runtime via ``git rev-parse --show-toplevel`` so that ``settings.json``
-    is shareable across collaborators with different checkout paths.
+    not embedded in hook commands, so ``settings.json`` is shareable across
+    collaborators with different checkout paths. The edit hook passes the
+    event JSON to ``hook-update``, which updates the repository that holds
+    the edited file rather than the one the session started in (#311). The
+    session hook resolves its repository with ``git rev-parse --show-toplevel``.
     A PATH guard ensures the hook exits silently when the binary is not on
     ``$PATH`` (e.g. installed in a project venv).
     """
@@ -1427,14 +1623,7 @@ def generate_hooks_config(repo_root: Path) -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": (
-                                "cat >/dev/null || true; "
-                                "command -v code-review-graph >/dev/null 2>&1 || exit 0; "
-                                "git rev-parse --git-dir >/dev/null 2>&1"
-                                " && code-review-graph update --skip-flows"
-                                " --repo \"$(git rev-parse --show-toplevel 2>/dev/null)\""
-                                " || true"
-                            ),
+                            "command": _CLAUDE_UPDATE_HOOK_COMMAND,
                             "timeout": 30,
                         },
                     ],
@@ -1469,6 +1658,33 @@ def _codex_hook_command(subcommand: str) -> str:
         "cat | { if command -v code-review-graph >/dev/null 2>&1; "
         f"then code-review-graph {subcommand}; else cat >/dev/null; fi; }}"
     )
+
+
+def generate_steering_hooks_config() -> dict[str, Any]:
+    """Generate the opt-in Claude Code hook that runs ``code-review-graph enrich``.
+
+    It adds graph context beside each search and read, which changes what the
+    model sees on every one of them, so ``install`` writes it only when asked.
+    ``|| true`` matters: exit code 2 from a PreToolUse hook stops the tool call,
+    and a failed lookup must never do that. Claude Code is the only client whose
+    hook output ``enrich`` writes.
+    """
+    return {
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "matcher": "Grep|Glob|Bash|Read",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": f"{_codex_hook_command('enrich')} || true",
+                            "timeout": 5,
+                        },
+                    ],
+                },
+            ],
+        }
+    }
 
 
 def generate_codex_hooks_config(repo_root: Path) -> dict[str, Any]:
@@ -1974,7 +2190,19 @@ _GENERATED_HOOK_COMMAND_RE = re.compile(
     r"|cat\s*\|\s*\{\s*if\s+command\s+-v\s+code-review-graph\s*>/dev/null\s+2>&1;\s*"
     r"then\s+code-review-graph\s+hook-(?:update|status);\s*"
     r"else\s+cat\s*>/dev/null;\s*fi;\s*\}"
+    # The project edit hook that forwards the event JSON to ``hook-update``.
+    r"|command\s+-v\s+code-review-graph\s*>/dev/null\s+2>&1\s*&&\s*"
+    r"code-review-graph\s+hook-update;\s*cat\s*>/dev/null(?:\s*\|\|\s*true)?"
     r")\Z"
+)
+
+# The opt-in steering hook (see generate_steering_hooks_config). It has a
+# pattern of its own so that adding or removing it touches nothing else: the
+# installer's other command shapes, filed under its matcher, are the user's.
+_STEERING_HOOK_COMMAND_RE = re.compile(
+    r"\Acat\s*\|\s*\{\s*if\s+command\s+-v\s+code-review-graph\s*>/dev/null\s+2>&1;\s*"
+    r"then\s+code-review-graph\s+enrich;\s*"
+    r"else\s+cat\s*>/dev/null;\s*fi;\s*\}\s*\|\|\s*true\Z"
 )
 
 # Loose spellings that merely *mention* this project. Used only to tell the
@@ -1989,6 +2217,7 @@ _GENERATED_HOOK_MATCHERS: dict[str, frozenset[str | None]] = {
     "PostToolUse": frozenset({"Edit|Write", "Edit|Write|Bash", "Write|Edit|Bash"}),
     "SessionStart": frozenset({"", None, "startup|resume"}),
     "AfterTool": frozenset({"write_file|replace"}),
+    "PreToolUse": frozenset({"Grep|Glob|Bash|Read"}),
 }
 
 
@@ -2088,6 +2317,13 @@ def _is_generated_hook_command(command: Any) -> bool:
     )
 
 
+def _is_steering_hook_command(command: Any) -> bool:
+    """Return whether ``command`` is the steering hook this project writes."""
+    return isinstance(command, str) and bool(
+        _STEERING_HOOK_COMMAND_RE.match(command.strip())
+    )
+
+
 def _report_kept_hook(command: Any) -> None:
     """Say that a hook mentioning this project was deliberately left alone.
 
@@ -2115,7 +2351,10 @@ def _allowed_hook_matchers(event_name: str, new_entries: Sequence[Any]) -> froze
 
 
 def _merge_hook_entries(
-    existing: Any, new_entries: list[Any], event_name: str = ""
+    existing: Any,
+    new_entries: list[Any],
+    event_name: str = "",
+    owns: Callable[[Any], bool] = _is_generated_hook_command,
 ) -> list[Any]:
     """Return ``existing`` with our own hook groups replaced by ``new_entries``.
 
@@ -2129,7 +2368,7 @@ def _merge_hook_entries(
     to sit under a matcher this project has written for this event. A group
     that also holds a hook someone else wrote keeps that hook, and the
     replacement lands where the old group sat rather than at the end, so a hook
-    that ran first goes on running first.
+    that ran first goes on running first. ``owns`` narrows the commands claimed.
     """
     allowed = _allowed_hook_matchers(event_name, new_entries)
     kept: list[Any] = []
@@ -2149,9 +2388,7 @@ def _merge_hook_entries(
         survivors = [
             hook
             for hook in nested
-            if not (
-                isinstance(hook, dict) and _is_generated_hook_command(hook.get("command"))
-            )
+            if not (isinstance(hook, dict) and owns(hook.get("command")))
         ]
         for hook in survivors:
             if isinstance(hook, dict):
@@ -2188,48 +2425,181 @@ def _merge_flat_hook_entries(existing: Any, new_entries: list[Any]) -> list[Any]
     return kept[:insert_at] + list(new_entries) + kept[insert_at:]
 
 
+def _report_settings_left_alone(label: str, path: Path, problem: str) -> None:
+    print(
+        f"  {label}: {path} {problem} — left unchanged to avoid data loss. "
+        f"Please add the hooks manually."
+    )
+
+
+def _read_settings_for_merge(
+    path: Path, label: str, events: Iterable[str],
+) -> tuple[str, dict[str, Any]] | None:
+    """Return a hook settings file's text and parsed object, or None to leave it.
+
+    Merging onto an empty dict whenever a file fails strict JSON replaces all of
+    it with our hooks, so one comment or trailing comma used to cost the user
+    every setting they had, with no backup. JSONC is read as JSONC, and a file
+    that cannot be merged is named and left alone, as
+    :func:`install_platform_configs` does for MCP entries.
+    """
+    if not path.exists():
+        return "", {}
+    try:
+        # Bytes, because text mode would rewrite CRLF line endings on the way
+        # through, and strict UTF-8, because replacing a bad byte and writing the
+        # file back would corrupt it.
+        raw = path.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        _report_settings_left_alone(label, path, f"could not be read ({exc})")
+        return None
+    if jsonc.has_unclosed_comment(raw):
+        # Our hooks would land inside the comment: written, reported, never run.
+        _report_settings_left_alone(label, path, "has a /* comment that is never closed")
+        return None
+    stripped = _strip_jsonc(raw)
+    if not stripped.strip():
+        return raw, {}
+    try:
+        parsed = json.loads(stripped)
+    except (json.JSONDecodeError, RecursionError):
+        _report_settings_left_alone(label, path, "contains unparseable JSON")
+        return None
+    if not isinstance(parsed, dict):
+        _report_settings_left_alone(label, path, "is valid JSON but not a top-level object")
+        return None
+    hooks = parsed.get("hooks", {})
+    if not isinstance(hooks, dict):
+        _report_settings_left_alone(label, path, "has a 'hooks' setting that is not an object")
+        return None
+    wrong_shape = sorted(
+        event for event in events if event in hooks and not isinstance(hooks[event], list)
+    )
+    if wrong_shape:
+        _report_settings_left_alone(
+            label, path, f"has hook settings that are not lists ({', '.join(wrong_shape)})",
+        )
+        return None
+    return raw, parsed
+
+
+def _splice_merged_settings(
+    raw: str, before: dict[str, Any], merged: dict[str, Any],
+) -> str | None:
+    """Apply only what changed to a commented settings file, or return None.
+
+    Replacing a value deletes any comment inside it, so a change that would do
+    that is refused rather than made.
+    """
+    try:
+        if not jsonc.tokenize(raw):
+            # Comments but no JSON document yet: keep them above what we write.
+            body = json.dumps(merged, indent=2, ensure_ascii=False)
+            return raw.rstrip("\n") + "\n" + body + "\n"
+        text = raw
+        changes: list[tuple[tuple[str, ...], Any]] = []
+        for key, value in merged.items():
+            if key == "hooks" and "hooks" in before:
+                changes.extend(
+                    (("hooks", event), entries)
+                    for event, entries in value.items()
+                    if event not in before["hooks"] or before["hooks"][event] != entries
+                )
+            elif key not in before or before[key] != value:
+                changes.append(((key,), value))
+        for member_path, value in changes:
+            exists = (
+                member_path[-1] in before["hooks"]
+                if len(member_path) == 2
+                else member_path[0] in before
+            )
+            if exists and jsonc.value_has_comments(text, member_path):
+                return None
+            text = jsonc.set_member(text, member_path, value)
+        # A duplicate key, for one, can make the edit land on the wrong member.
+        if json.loads(_strip_jsonc(text)) != merged:
+            return None
+    except (ValueError, KeyError, IndexError, RecursionError):
+        return None
+    return text
+
+
+def _write_merged_settings(
+    path: Path, raw: str, merged: dict[str, Any], label: str,
+) -> bool:
+    """Write merged hook settings, keeping a backup and every comment.
+
+    Returns False when the file was left alone instead. A commented file that
+    already holds these hooks is not touched, so reinstalling neither rewrites it
+    nor replaces the backup of what the user wrote with our own earlier edit.
+    """
+    spliced: str | None = None
+    if jsonc.has_comments(raw):
+        stripped = _strip_jsonc(raw)
+        before = json.loads(stripped) if stripped.strip() else {}
+        if merged == before:
+            return True
+        spliced = _splice_merged_settings(raw, before, merged)
+        if spliced is None:
+            _report_settings_left_alone(
+                label, path, "has comments this installer cannot keep through the edit",
+            )
+            return False
+    if raw.strip():
+        backup_path = path.with_name(f"{path.name}.bak")
+        try:
+            shutil.copy2(path, backup_path)
+        except OSError as exc:
+            _report_settings_left_alone(label, path, f"could not be backed up ({exc})")
+            return False
+        logger.info("Backed up existing settings to %s", backup_path)
+    if spliced is not None:
+        path.write_bytes(spliced.encode("utf-8"))
+    else:
+        path.write_text(
+            json.dumps(merged, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+    return True
+
+
 def _merge_hooks_into_settings(
     settings_dir: Path,
     hooks_config: dict[str, Any],
-) -> Path:
-    """Merge hook entries into a project settings file without clobbering users."""
+    label: str = "Claude Code",
+    owns: Callable[[Any], bool] = _is_generated_hook_command,
+) -> Path | None:
+    """Merge hook entries into a project settings file without clobbering users.
+
+    ``owns`` says which commands are ours to replace. Returns the settings
+    path, or None when the file had to be left alone.
+    """
     settings_dir.mkdir(parents=True, exist_ok=True)
     settings_path = settings_dir / "settings.json"
 
-    existing: dict[str, Any] = {}
-    if settings_path.exists():
-        try:
-            existing = json.loads(settings_path.read_text(encoding="utf-8", errors="replace"))
-            backup_path = settings_dir / "settings.json.bak"
-            shutil.copy2(settings_path, backup_path)
-            logger.info("Backed up existing settings to %s", backup_path)
-        except (json.JSONDecodeError, OSError) as exc:
-            logger.warning("Could not read existing %s: %s", settings_path, exc)
+    new_hooks = hooks_config.get("hooks", {})
+    loaded = _read_settings_for_merge(settings_path, label, new_hooks)
+    if loaded is None:
+        return None
+    raw, existing = loaded
 
-    existing_hooks = existing.get("hooks", {})
-    if not isinstance(existing_hooks, dict):
-        logger.warning("Existing hooks config is not a dict; replacing with defaults")
-        existing_hooks = {}
-
-    merged_hooks = dict(existing_hooks)
-    for hook_name, hook_entries in hooks_config.get("hooks", {}).items():
-        if isinstance(merged_hooks.get(hook_name), list):
+    merged_hooks = dict(existing.get("hooks", {}))
+    for hook_name, hook_entries in new_hooks.items():
+        if hook_name in merged_hooks:
             merged_hooks[hook_name] = _merge_hook_entries(
-                merged_hooks[hook_name], hook_entries, hook_name
+                merged_hooks[hook_name], hook_entries, hook_name, owns
             )
         else:
             merged_hooks[hook_name] = hook_entries
 
     existing["hooks"] = merged_hooks
 
-    settings_path.write_text(
-        json.dumps(existing, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
+    if not _write_merged_settings(settings_path, raw, existing, label):
+        return None
     logger.info("Wrote hooks config: %s", settings_path)
     return settings_path
 
 
-def install_hooks(repo_root: Path, platform: str = "claude") -> None:
+def install_hooks(repo_root: Path, platform: str = "claude") -> Path | None:
     """Write hooks config to platform-specific settings.json.
 
     Merges new hook entries into existing settings, preserving both
@@ -2239,15 +2609,32 @@ def install_hooks(repo_root: Path, platform: str = "claude") -> None:
     Args:
         repo_root: Repository root directory.
         platform: Target platform ("claude" or "qoder").
+
+    Returns:
+        The settings path, or None when the file had to be left alone.
     """
     if platform == "qoder":
         settings_dir = repo_root / ".qoder"
     else:
         settings_dir = repo_root / ".claude"
-    _merge_hooks_into_settings(settings_dir, generate_hooks_config(repo_root))
+    return _merge_hooks_into_settings(
+        settings_dir, generate_hooks_config(repo_root), PLATFORMS[platform]["name"],
+    )
 
 
-def install_codebuddy_hooks(repo_root: Path) -> Path:
+def install_steering_hook(repo_root: Path) -> Path | None:
+    """Add the opt-in steering hook to the project's Claude Code settings.
+
+    Returns the settings path, or None when the file had to be left alone.
+    """
+    return _merge_hooks_into_settings(
+        repo_root / ".claude",
+        generate_steering_hooks_config(),
+        owns=_is_steering_hook_command,
+    )
+
+
+def install_codebuddy_hooks(repo_root: Path) -> Path | None:
     """Install runtime-resolved POSIX hooks in .codebuddy/settings.json.
 
     CodeBuddy uses the same nested hook schema and POSIX-shell execution
@@ -2263,39 +2650,33 @@ def install_codebuddy_hooks(repo_root: Path) -> Path:
     return _merge_hooks_into_settings(
         repo_root / ".codebuddy",
         hooks_config,
+        PLATFORMS["codebuddy"]["name"],
     )
 
 
-def install_codex_hooks(repo_root: Path) -> Path:
+def install_codex_hooks(repo_root: Path) -> Path | None:
     """Write native Codex hooks config to the active Codex home.
 
     Merges code-review-graph hook entries into any existing hooks.json,
     preserving user-defined hook entries and other top-level settings.
     A backup of the original file is created before modifications.
+
+    Returns the hooks path, or None when the file had to be left alone.
     """
     codex_dir = _codex_home()
     codex_dir.mkdir(parents=True, exist_ok=True)
     hooks_path = codex_dir / "hooks.json"
 
-    existing: dict[str, Any] = {}
-    if hooks_path.exists():
-        try:
-            existing = json.loads(hooks_path.read_text(encoding="utf-8", errors="replace"))
-            backup_path = codex_dir / "hooks.json.bak"
-            shutil.copy2(hooks_path, backup_path)
-            logger.info("Backed up existing Codex hooks to %s", backup_path)
-        except (json.JSONDecodeError, OSError) as exc:
-            logger.warning("Could not read existing %s: %s", hooks_path, exc)
-
     hooks_config = generate_codex_hooks_config(repo_root)
-    existing_hooks = existing.get("hooks", {})
-    if not isinstance(existing_hooks, dict):
-        logger.warning("Existing Codex hooks config is not a dict; replacing with defaults")
-        existing_hooks = {}
+    new_hooks = hooks_config.get("hooks", {})
+    loaded = _read_settings_for_merge(hooks_path, PLATFORMS["codex"]["name"], new_hooks)
+    if loaded is None:
+        return None
+    raw, existing = loaded
 
-    merged_hooks = dict(existing_hooks)
-    for hook_name, hook_entries in hooks_config.get("hooks", {}).items():
-        if isinstance(merged_hooks.get(hook_name), list):
+    merged_hooks = dict(existing.get("hooks", {}))
+    for hook_name, hook_entries in new_hooks.items():
+        if hook_name in merged_hooks:
             merged_hooks[hook_name] = _merge_hook_entries(
                 merged_hooks[hook_name], hook_entries, hook_name
             )
@@ -2303,9 +2684,8 @@ def install_codex_hooks(repo_root: Path) -> Path:
             merged_hooks[hook_name] = hook_entries
 
     existing["hooks"] = merged_hooks
-    hooks_path.write_text(
-        json.dumps(existing, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
+    if not _write_merged_settings(hooks_path, raw, existing, PLATFORMS["codex"]["name"]):
+        return None
     logger.info("Wrote Codex hooks config: %s", hooks_path)
     return hooks_path
 
@@ -2578,30 +2958,25 @@ def _remove_legacy_instruction_file(path: Path) -> None:
 _GEMINI_CLI_HOOK_FILENAMES = ("crg-session-start.sh", "crg-update.sh")
 
 
-def install_gemini_cli_hooks(repo_root: Path) -> Path:
+def install_gemini_cli_hooks(repo_root: Path) -> Path | None:
     """Install Gemini CLI hooks in .gemini/settings.json and write hook scripts.
 
     Hooks schema reference:
     - https://geminicli.com/docs/hooks/reference/
 
     This is workspace-scoped (project) configuration: .gemini/settings.json
+
+    Returns the settings path, or None when the file had to be left alone.
     """
     settings_dir = repo_root / ".gemini"
     settings_dir.mkdir(parents=True, exist_ok=True)
     settings_path = settings_dir / "settings.json"
 
-    existing: dict[str, Any] = {}
-    if settings_path.exists():
-        try:
-            existing = json.loads(settings_path.read_text(encoding="utf-8", errors="replace"))
-            backup_path = settings_dir / "settings.json.bak"
-            shutil.copy2(settings_path, backup_path)
-            logger.info("Backed up existing Gemini CLI settings to %s", backup_path)
-        except (json.JSONDecodeError, OSError) as exc:
-            logger.warning("Could not read existing %s: %s", settings_path, exc)
-
-    hooks_dir = settings_dir / "hooks"
-    hooks_dir.mkdir(parents=True, exist_ok=True)
+    label = PLATFORMS["gemini-cli"]["name"]
+    loaded = _read_settings_for_merge(settings_path, label, ("SessionStart", "AfterTool"))
+    if loaded is None:
+        return None
+    raw, existing = loaded
 
     repo_arg = repo_root.resolve().as_posix()
     session_start_script = """\
@@ -2637,17 +3012,7 @@ exit 0
 """
     update_script = update_script.replace("__CRG_REPO__", repo_arg)
 
-    session_start_path = hooks_dir / _GEMINI_CLI_HOOK_FILENAMES[0]
-    session_start_path.write_text(session_start_script, encoding="utf-8")
-    session_start_path.chmod(0o755)
-
-    update_path = hooks_dir / _GEMINI_CLI_HOOK_FILENAMES[1]
-    update_path.write_text(update_script, encoding="utf-8")
-    update_path.chmod(0o755)
-
     hooks_obj = existing.get("hooks", {})
-    if not isinstance(hooks_obj, dict):
-        hooks_obj = {}
 
     def _ensure_group(
         event_name: str, matcher: str, hook_command: str, name: str, timeout: int,
@@ -2689,10 +3054,19 @@ exit 0
     )
 
     existing["hooks"] = hooks_obj
-    settings_path.write_text(
-        json.dumps(existing, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
+    if not _write_merged_settings(settings_path, raw, existing, label):
+        # The unchanged settings may still run the scripts already there.
+        return None
     logger.info("Wrote Gemini CLI hooks config: %s", settings_path)
+
+    hooks_dir = settings_dir / "hooks"
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    for filename, content in zip(
+        _GEMINI_CLI_HOOK_FILENAMES, (session_start_script, update_script)
+    ):
+        script_path = hooks_dir / filename
+        script_path.write_text(content, encoding="utf-8")
+        script_path.chmod(0o755)
     return settings_path
 
 
@@ -2919,7 +3293,7 @@ exit 0
     }
 
 
-def install_cursor_hooks() -> Path:
+def install_cursor_hooks() -> Path | None:
     """Install Cursor hooks configuration and scripts at user level.
 
     Writes ``~/.cursor/hooks.json`` (merging code-review-graph hooks
@@ -2927,29 +3301,26 @@ def install_cursor_hooks() -> Path:
     in ``~/.cursor/hooks/``.
 
     Returns:
-        Path to the hooks.json file that was written.
+        Path to the hooks.json file that was written, or None when the file
+        had to be left alone, in which case no scripts are written either.
     """
     cursor_dir = Path.home() / ".cursor"
     hooks_json_path = cursor_dir / "hooks.json"
     hooks_script_dir = cursor_dir / "hooks"
 
     # --- Merge hooks.json ---
-    existing: dict[str, Any] = {}
-    if hooks_json_path.exists():
-        try:
-            existing = json.loads(hooks_json_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError) as exc:
-            logger.warning("Could not read existing %s: %s", hooks_json_path, exc)
-
     new_config = generate_cursor_hooks_config()
+    label = PLATFORMS["cursor"]["name"]
+    loaded = _read_settings_for_merge(hooks_json_path, label, new_config["hooks"])
+    if loaded is None:
+        return None
+    raw, existing = loaded
 
     # Preserve version (use ours if absent)
     existing.setdefault("version", new_config["version"])
 
     # Merge hook arrays per event type
     existing_hooks = existing.get("hooks", {})
-    if not isinstance(existing_hooks, dict):
-        existing_hooks = {}
 
     for event, entries in new_config["hooks"].items():
         # Cursor's schema is one flat list per event. Replace our own hooks
@@ -2961,10 +3332,8 @@ def install_cursor_hooks() -> Path:
     existing["hooks"] = existing_hooks
 
     cursor_dir.mkdir(parents=True, exist_ok=True)
-    hooks_json_path.write_text(
-        json.dumps(existing, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
+    if not _write_merged_settings(hooks_json_path, raw, existing, label):
+        return None
     logger.info("Wrote Cursor hooks config: %s", hooks_json_path)
 
     # --- Write hook scripts ---

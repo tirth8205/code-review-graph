@@ -286,7 +286,7 @@ class TestHybridSearch:
             "SELECT id FROM nodes WHERE name = 'authenticate'"
         ).fetchone()[0]
 
-        def fake_emb(store, query, limit=50, model=None, provider=None):
+        def fake_emb(store, query, limit=50, model=None, provider=None, kind=None):
             return [(node_id, 0.9)]
 
         monkeypatch.setattr(search_mod, "_embedding_search", fake_emb)
@@ -304,7 +304,7 @@ class TestHybridSearch:
             "SELECT id FROM nodes WHERE name = 'authenticate'"
         ).fetchone()[0]
 
-        def fake_emb(store, query, limit=50, model=None, provider=None):
+        def fake_emb(store, query, limit=50, model=None, provider=None, kind=None):
             return [(node_id, 0.9)]
 
         monkeypatch.setattr(search_mod, "_embedding_search", fake_emb)

@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
 
-from . import jsonc, skills
+from . import install_gitignore, jsonc, skills
 
 _tomllib: Any = importlib.import_module(
     "tomllib" if sys.version_info >= (3, 11) else "tomli"
@@ -419,9 +419,9 @@ def _commands(value: Any) -> set[str]:
 
 
 def _legacy_repo_hook_commands(repo_root: Path) -> set[str]:
-    """Exact project hook commands written by the source #491-era installer."""
+    """Exact project hook commands earlier releases wrote and install no longer does."""
     repo_arg = json.dumps(repo_root.resolve().as_posix())
-    return {
+    pinned = {
         (
             "git rev-parse --git-dir >/dev/null 2>&1"
             " && code-review-graph update --skip-flows"
@@ -434,6 +434,19 @@ def _legacy_repo_hook_commands(repo_root: Path) -> set[str]:
             " || echo 'Not a git repo, skipping'"
         ),
     }
+    # v2.3.4 - v2.3.6 drained stdin in front of the pinned commands.
+    drained = {"cat >/dev/null || true; " + command for command in pinned}
+    # v2.3.7 - v2.3.9 resolved the repository from the session's directory,
+    # which #311 replaced with the edited file's repository.
+    from_cwd = (
+        "cat >/dev/null || true; "
+        "command -v code-review-graph >/dev/null 2>&1 || exit 0; "
+        "git rev-parse --git-dir >/dev/null 2>&1"
+        " && code-review-graph update --skip-flows"
+        ' --repo "$(git rev-parse --show-toplevel 2>/dev/null)"'
+        " || true"
+    )
+    return pinned | drained | {from_cwd}
 
 
 def _legacy_codex_hook_commands() -> set[str]:
@@ -452,10 +465,33 @@ def _legacy_codex_hook_commands() -> set[str]:
     return {update, status, stdin_guard + update, stdin_guard + status}
 
 
+def _steering_hook_scopes() -> dict[str, tuple[str, Any]]:
+    """Map the steering hook's command to the one event and matcher it is written under.
+
+    Install writes it there and only there, so a copy anywhere else is the user's.
+    """
+    scopes: dict[str, tuple[str, Any]] = {}
+    for event, groups in skills.generate_steering_hooks_config()["hooks"].items():
+        for group in groups:
+            for hook in group["hooks"]:
+                scopes[hook["command"]] = (event, group.get("matcher"))
+    return scopes
+
+
 def _clean_hook_data(
     data: dict[str, Any],
     owned_commands: set[str],
+    scoped_commands: dict[str, tuple[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], list[tuple[str | int, ...]]]:
+    """Drop owned hooks: ``owned_commands`` anywhere, ``scoped_commands`` only
+    under their own ``(event, matcher)``."""
+    scoped = scoped_commands or {}
+
+    def owned(command: Any, event: str, matcher: Any) -> bool:
+        if not isinstance(command, str):
+            return False
+        return command in owned_commands or scoped.get(command) == (event, matcher)
+
     expected = copy.deepcopy(data)
     hooks_obj = data.get("hooks")
     if not isinstance(hooks_obj, dict):
@@ -472,8 +508,7 @@ def _clean_hook_data(
             if not isinstance(entry, dict):
                 new_entries.append(copy.deepcopy(entry))
                 continue
-            direct_command = entry.get("command")
-            if isinstance(direct_command, str) and direct_command in owned_commands:
+            if owned(entry.get("command"), event, entry.get("matcher")):
                 entry_paths.append(("hooks", event, entry_index))
                 continue
 
@@ -485,7 +520,7 @@ def _clean_hook_data(
             nested_paths: list[tuple[str | int, ...]] = []
             for nested_index, hook in enumerate(nested):
                 command = hook.get("command") if isinstance(hook, dict) else None
-                if isinstance(command, str) and command in owned_commands:
+                if owned(command, event, entry.get("matcher")):
                     nested_paths.append(("hooks", event, entry_index, "hooks", nested_index))
                 else:
                     kept_nested.append(copy.deepcopy(hook))
@@ -511,6 +546,20 @@ def _clean_hook_data(
     return expected, paths
 
 
+def remove_steering_hook(repo_root: Path, *, dry_run: bool = False) -> UninstallReport:
+    """Remove only the opt-in steering hook from the project's Claude Code settings."""
+    report = UninstallReport()
+    _remove_hooks(
+        repo_root / ".claude" / "settings.json",
+        set(),
+        repo_root,
+        report,
+        dry_run=dry_run,
+        scoped_commands=_steering_hook_scopes(),
+    )
+    return report
+
+
 def _remove_hooks(
     path: Path,
     owned_commands: set[str],
@@ -518,6 +567,7 @@ def _remove_hooks(
     report: UninstallReport,
     *,
     dry_run: bool,
+    scoped_commands: dict[str, tuple[str, Any]] | None = None,
 ) -> None:
     if not path.exists() or not _safe_path(path, boundary, report):
         return
@@ -527,7 +577,7 @@ def _remove_hooks(
     data = _parse_jsonc(path, raw, report)
     if data is None:
         return
-    expected, paths = _clean_hook_data(data, owned_commands)
+    expected, paths = _clean_hook_data(data, owned_commands, scoped_commands)
     if not paths:
         return
     try:
@@ -877,12 +927,22 @@ def _remove_gitignore(
     path = repo_root / ".gitignore"
     if not path.exists() or not _safe_path(path, repo_root, report):
         return
-    raw = _read_text(path, report)
-    if raw is None:
+    try:
+        # Bytes, not text mode, so CRLF line endings come back unchanged.
+        raw = path.read_bytes().decode("utf-8")
+    except (OSError, UnicodeError) as exc:
+        report.errors.append(f"{path}: read failed ({exc})")
         return
-    lines = raw.splitlines(keepends=True)
+    # The block ``install --gitignore`` writes (#471). Only its own lines go.
+    without_block, block_state = install_gitignore.remove_block(raw)
+    if block_state == "edited":
+        report.skipped_paths.append(
+            f"{path} (code-review-graph install files block was edited by hand; "
+            "left unchanged)"
+        )
+    lines = without_block.splitlines(keepends=True)
     rewritten: list[str] = []
-    changed = False
+    changed = block_state == "removed"
     index = 0
     while index < len(lines):
         if (
@@ -1122,6 +1182,7 @@ def _process_repo(
         repo_root,
         report,
         dry_run=dry_run,
+        scoped_commands=_steering_hook_scopes(),
     )
     _remove_hooks(
         repo_root / ".qoder" / "settings.json",

@@ -31,6 +31,15 @@ inputs:
     description: "Python version used to run code-review-graph."
     required: false
     default: "3.12"
+  details:
+    description: >-
+      Extra graph context to add to the comment, as a comma-separated list:
+      risk, communities, hubs, coupling, impact, gaps, graph, or all.
+      Empty (the default) leaves the comment and the run exactly as they
+      are. The extra sections are folded away under one heading and capped
+      at 12,000 bytes in total; a note says what was cut.
+    required: false
+    default: ""
 
 outputs:
   comment-file:
@@ -51,16 +60,16 @@ runs:
       shell: bash
       run: python -m pip install --quiet code-review-graph
 
-    # Cache the SQLite knowledge graph between runs. The "schema14" segment
+    # Cache the SQLite knowledge graph between runs. The "schema15" segment
     # tracks LATEST_VERSION in code_review_graph/migrations.py — bump it when
     # the database schema changes so stale caches are not restored.
     - name: Cache knowledge graph
       uses: actions/cache@v6
       with:
         path: .code-review-graph
-        key: code-review-graph-schema14-${{ runner.os }}-${{ hashFiles('**/uv.lock', '**/poetry.lock', '**/requirements*.txt', '**/Pipfile.lock', '**/package-lock.json', '**/pnpm-lock.yaml', '**/yarn.lock', '**/go.sum', '**/Cargo.lock', '**/Gemfile.lock', '**/composer.lock') }}
+        key: code-review-graph-schema15-${{ runner.os }}-${{ hashFiles('**/uv.lock', '**/poetry.lock', '**/requirements*.txt', '**/Pipfile.lock', '**/package-lock.json', '**/pnpm-lock.yaml', '**/yarn.lock', '**/go.sum', '**/Cargo.lock', '**/Gemfile.lock', '**/composer.lock') }}
         restore-keys: |
-          code-review-graph-schema14-${{ runner.os }}-
+          code-review-graph-schema15-${{ runner.os }}-
 
     - name: Resolve diff base
       shell: bash
@@ -94,11 +103,21 @@ runs:
     # cannot determine the changes (no git, a git that timed out, an
     # unreadable graph). Swallowing that would post a reassuring comment
     # about a pull request nobody analyzed.
+    #
+    # With the `details` input empty, `details` stays an empty array and
+    # expands to no words at all, so this step and the render step run
+    # exactly the commands they ran before the input existed.
     - name: Run risk-scored change analysis
       shell: bash
+      env:
+        REPORT_DETAILS: ${{ inputs.details }}
       run: |
+        details=()
+        if [ -n "${REPORT_DETAILS}" ]; then
+          details=(--details "${REPORT_DETAILS}")
+        fi
         code-review-graph detect-changes --base "${CRG_BASE}" \
-          > "${RUNNER_TEMP}/crg-report.json"
+          ${details[@]+"${details[@]}"} > "${RUNNER_TEMP}/crg-report.json"
 
     # Renders on exit 0 (an analysis, or a genuinely unchanged tree) and on
     # exit 4 (output that is neither): the exit-4 comment says the analysis
@@ -107,11 +126,18 @@ runs:
     - name: Render markdown report
       id: render
       shell: bash
+      env:
+        REPORT_DETAILS: ${{ inputs.details }}
       run: |
+        details=()
+        if [ -n "${REPORT_DETAILS}" ]; then
+          details=(--details "${REPORT_DETAILS}")
+        fi
         set +e
         python "${GITHUB_ACTION_PATH}/scripts/render_pr_comment.py" \
           --input "${RUNNER_TEMP}/crg-report.json" \
-          --output "${RUNNER_TEMP}/crg-comment.md"
+          --output "${RUNNER_TEMP}/crg-comment.md" \
+          ${details[@]+"${details[@]}"}
         status=$?
         set -e
         if [ "${status}" -ne 0 ] && [ "${status}" -ne 4 ]; then

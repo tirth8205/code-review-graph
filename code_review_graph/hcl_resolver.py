@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from .constants import CLAIMED_ENDPOINT_KEY
 
 if TYPE_CHECKING:
     from .graph import GraphStore
@@ -48,7 +51,7 @@ def resolve_hcl_module_references(store: GraphStore) -> dict[str, int]:
 
     reference_updates: list[tuple[str, int]] = []
     for row in conn.execute(
-        "SELECT id, target_qualified, file_path FROM edges "
+        "SELECT id, target_qualified, file_path, extra FROM edges "
         "WHERE kind = 'REFERENCES'"
     ).fetchall():
         if row["file_path"] not in hcl_files:
@@ -56,6 +59,15 @@ def resolve_hcl_module_references(store: GraphStore) -> dict[str, int]:
         target = row["target_qualified"]
         if target in known_qns:
             continue
+        # A placeholder no node matched was settled to its last name (``region``
+        # for ``var.region``); the name Terraform uses is kept in the claim.
+        try:
+            extra = json.loads(row["extra"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            extra = {}
+        claimed = extra.get(CLAIMED_ENDPOINT_KEY) if isinstance(extra, dict) else None
+        if isinstance(claimed, str):
+            target = claimed
         name = target.split("::", 1)[-1]
         key = (str(Path(row["file_path"]).parent), name)
         candidates = nodes_by_module_name.get(key, [])
@@ -97,7 +109,7 @@ def resolve_hcl_module_references(store: GraphStore) -> dict[str, int]:
         "UPDATE edges SET target_qualified = ? WHERE id = ?",
         reference_updates + import_updates,
     )
-    conn.commit()
+    store.commit()
     if reference_updates or import_updates:
         store._invalidate_cache()
 

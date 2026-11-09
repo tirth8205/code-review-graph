@@ -171,6 +171,23 @@ class WorkspaceResolver:
             self._result_cache[key] = result
         return self._result_cache[key]
 
+    def resolve_in_package(
+        self, directory: Path, manifest: dict[str, Any], subpath: str,
+    ) -> Optional[str]:
+        """Resolve an ``exports`` subpath key (``"."``, ``"./x"``) inside one package.
+
+        For a package found some other way than workspace membership, such
+        as the target of an npm alias (see ``npm_alias_resolver``).
+        """
+        try:
+            return self._resolve_in_package(_Package(directory, manifest), subpath)
+        except _LOOKUP_ERRORS:
+            logger.warning(
+                "WorkspaceResolver: cannot resolve %s in %s",
+                subpath, directory, exc_info=True,
+            )
+            return None
+
     # ------------------------------------------------------------------
     # Workspace discovery
     # ------------------------------------------------------------------

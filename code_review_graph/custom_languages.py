@@ -32,8 +32,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-import tree_sitter_language_pack as tslp
-
 if sys.version_info >= (3, 11):
     import tomllib
 else:
@@ -331,7 +329,9 @@ def _validate_entry(
     # Probe the grammar last (it is the expensive check).  Parser objects
     # themselves are created lazily by CodeParser._get_parser.
     try:
-        tslp.get_language(grammar)  # type: ignore[arg-type]
+        import tree_sitter_language_pack as _tslp
+
+        globals().setdefault("tslp", _tslp).get_language(grammar)  # type: ignore[arg-type]
     except (LookupError, ValueError, ImportError, OSError) as exc:
         logger.warning(
             "%s: custom language %r: grammar %r is not available in "
@@ -351,3 +351,12 @@ def _validate_entry(
         comment=comment,
         name_field=name_field,
     )
+
+
+def __getattr__(name: str):
+    if name == "tslp":
+        import tree_sitter_language_pack as _tslp
+
+        globals()["tslp"] = _tslp
+        return _tslp
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

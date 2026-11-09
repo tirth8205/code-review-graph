@@ -11,9 +11,9 @@ What this module does
 It builds one corpus repeatedly, each build in its own subprocess writing its
 own database, and compares the *contents* of every table each build produced:
 ``nodes``, ``edges``, ``metadata``, ``flows``, ``flow_memberships``,
-``communities``, the per-node community assignment, ``community_summaries``,
-``flow_snapshots``, ``risk_index``, the FTS5 search index (both what it
-answers and what it is on disk), and the embedding pipeline. Sorted contents,
+``communities``, the per-node community assignment, the FTS5 search index
+(both what it answers and what it is on disk), and the embedding pipeline.
+Sorted contents,
 never counts. ``tests/determinism_dump.py`` holds the dump and diff, including
 the enumerated list of columns that are allowed to differ and why
 (``determinism_dump.IGNORED`` -- timestamps and autoincrement surrogate keys,
@@ -108,11 +108,8 @@ MIN_ROWS: dict[str, int] = {
     "metadata": 5,
     "flows": 20,
     "flow_memberships": 500,
-    "flow_snapshots": 20,
     "communities": 5,
     "node_communities": 500,
-    "community_summaries": 5,
-    "risk_index": 500,
     "fts_query_results": 60,
     "fts_index_bytes": 1,
     # One row per indexed node, so it tracks the nodes floor rather than a
@@ -133,9 +130,6 @@ PATH_SECTIONS_HANDLED_SEPARATELY = {
     ),
     "fts_query_results": (
         "owned by test_path_independence_of_search_ranking"
-    ),
-    "community_summaries": (
-        "owned by test_community_summary_purpose_does_not_embed_the_checkout_dir"
     ),
 }
 
@@ -476,7 +470,7 @@ def test_python_hash_seed_does_not_change_the_graph(
 # -- File inventory order ---------------------------------------------------
 
 # Everything the build stores about the code itself survives a reordering of
-# the inventory; the id numbering and the summaries do not. The split below is
+# the inventory; the id numbering and the communities do not. The split below is
 # deliberate -- collapsing it into one test would hide the half that passes.
 
 ORDER_CONTENT_SECTIONS = (
@@ -485,8 +479,6 @@ ORDER_CONTENT_SECTIONS = (
     "metadata",
     "flows",
     "flow_memberships",
-    "flow_snapshots",
-    "risk_index",
     "embedding_texts",
     "embeddings",
     "fts_query_results",
@@ -534,23 +526,20 @@ def test_file_order_does_not_change_node_id_assignment(
 
 
 @pytest.mark.xfail(
+    IGRAPH_AVAILABLE,
     strict=True,
     reason=(
-        "KNOWN BUG, not fixed here: community_summaries.key_symbols is built "
-        "from a stable sort on edge count alone, so ties are broken by node "
-        "insertion order and the list changes when the file inventory is "
-        "reordered. It also selects bare node names, so one name can appear "
-        "twice. With igraph installed the Leiden partition itself is "
-        "order-sensitive as well. Reported, not repaired, in this pull request."
+        "KNOWN BUG, not fixed here: with igraph installed the Leiden partition "
+        "is order-sensitive. Reported, not repaired, in this pull request."
     ),
 )
-def test_file_order_does_not_change_community_summaries(
+def test_file_order_does_not_change_communities(
     farm: BuildFarm,
     corpus: Path,
     baseline: BuiltGraph,
 ) -> None:
     reordered = farm.build("reversed-order", corpus, order="reversed")
-    sections = {"community_summaries", "communities", "node_communities"}
+    sections = {"communities", "node_communities"}
     _assert_same(
         farm,
         baseline,
@@ -616,7 +605,7 @@ def test_leiden_seed_is_what_makes_community_detection_reproducible(
     about it.
     """
     other_seed = farm.build("leiden-seed-99", corpus, env={"CRG_LEIDEN_SEED": "99"})
-    sections = ("communities", "node_communities", "community_summaries")
+    sections = ("communities", "node_communities")
     diffs = dd.compare(
         farm.dump(baseline),
         farm.dump(other_seed),
@@ -704,42 +693,3 @@ def test_path_independence_of_search_ranking(
             s for s in farm.dump(baseline) if s != "fts_query_results"
         ),
     )
-
-
-@pytest.mark.xfail(
-    IGRAPH_AVAILABLE,
-    strict=True,
-    reason=(
-        "KNOWN BUG, not fixed here: community_summaries.purpose is the last "
-        "component of os.path.commonprefix over the members' absolute file "
-        "paths. A community spanning several top-level directories therefore "
-        "stores the checkout directory's own name -- local filesystem naming "
-        "in a field the MCP tools hand back. It only surfaces when Leiden "
-        "produces such a community, which needs igraph. Reported, not "
-        "repaired, in this pull request."
-    ),
-)
-def test_community_summary_purpose_does_not_embed_the_checkout_dir(
-    farm: BuildFarm,
-    corpus: Path,
-    corpus_at_another_path: Path,
-    baseline: BuiltGraph,
-) -> None:
-    elsewhere = farm.build("other-path", corpus_at_another_path)
-    _assert_same(
-        farm,
-        baseline,
-        elsewhere,
-        skip=tuple(
-            s for s in farm.dump(baseline) if s != "community_summaries"
-        ),
-    )
-    for label, root in ((baseline.label, corpus), ("other-path", corpus_at_another_path)):
-        purposes = {
-            row.split("\x1f")[2]
-            for row in farm.dumps[label]["community_summaries"]
-        }
-        assert root.name not in purposes, (
-            f"{label}: a community summary's purpose is the checkout directory "
-            f"name {root.name!r}"
-        )

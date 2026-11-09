@@ -18,6 +18,7 @@ from ..build_state import (
     graph_contents_are_complete,
     read_build_state,
 )
+from ..constants import normalize_file_path
 from ..incremental import (
     VERIFIED_FILE_COUNT_KEY,
     _prepare_db_path,
@@ -30,7 +31,6 @@ from ..incremental import (
     resolve_incremental_base,
 )
 from ..locking import WriteLock, write_lock_path
-from ..parser import normalize_file_path
 from ._common import _get_store, _resolve_root
 
 logger = logging.getLogger(__name__)
@@ -251,7 +251,7 @@ def _run_postprocess(
 
     Records structured stage durations in ``build_result["postprocess_timing"]``.
     Minimal processing reports ``signatures_s`` and ``fts_s``; full processing
-    additionally reports ``flows_s``, ``communities_s``, and ``summaries_s``.
+    additionally reports ``flows_s`` and ``communities_s``.
     Each duration is a nonnegative float measured in seconds.
 
     Returns a list of warning strings (empty on success).
@@ -279,18 +279,32 @@ def _run_postprocess(
             )
         return warnings
 
+    noop_incremental = (
+        not full_rebuild
+        and changed_files is not None
+        and build_result.get("files_updated") == 0
+        and not build_result.get("stale_files_removed")
+        # A C# rebind with no source change still owes the flows a rebuild.
+        and store.get_metadata("csharp_flows_dirty") != "1"
+    )
+
     # Resolve bare and C++ scoped call targets before derived graph steps.
     if not skip_resolvers:
         try:
-            resolved = store.resolve_bare_call_targets()
-            resolved += store.resolve_bare_tested_by_sources()
-            build_result["bare_edges_resolved"] = resolved
-            build_result["cpp_scoped_edges_resolved"] = (
-                store.resolve_cpp_scoped_call_targets()
-            )
-            # Resolvers rewrite bare targets into qualified ones, so the stored
-            # certainty column is only correct once they have all run.
-            store.refresh_target_resolution()
+            if noop_incremental and not store.get_nodes_without_signature():
+                build_result["bare_edges_resolved"] = 0
+                build_result["cpp_scoped_edges_resolved"] = 0
+            else:
+                noop_incremental = False
+                resolved = store.resolve_bare_call_targets()
+                resolved += store.resolve_bare_tested_by_sources()
+                build_result["bare_edges_resolved"] = resolved
+                build_result["cpp_scoped_edges_resolved"] = (
+                    store.resolve_cpp_scoped_call_targets()
+                )
+                # Resolvers rewrite bare targets into qualified ones, so the stored
+                # certainty column is only correct once they have all run.
+                store.refresh_target_resolution()
         except sqlite3.OperationalError as e:
             logger.warning("Call-target resolution failed: %s", e)
             _note_contention(build_result, e)
@@ -375,13 +389,21 @@ def _run_postprocess(
     # Incremental mode also triggers when pre-replacement capture preserved
     # entry-point QNs even if the relative changed_files list alone would
     # miss absolute graph paths (#569).
-    use_incremental = not full_rebuild and (
-        bool(changed_files) or bool(entry_point_qns) or communities_were_affected
+    use_incremental = (
+        not full_rebuild
+        and not build_result.get("identity_rebuild")
+        and (
+            bool(changed_files)
+            or bool(entry_point_qns)
+            or communities_were_affected
+        )
     )
 
     stage_started = time.perf_counter()
     try:
-        if use_incremental:
+        if noop_incremental:
+            count = 0
+        elif use_incremental:
             from code_review_graph.flows import incremental_trace_flows
 
             count = incremental_trace_flows(
@@ -408,7 +430,9 @@ def _run_postprocess(
 
     stage_started = time.perf_counter()
     try:
-        if use_incremental:
+        if noop_incremental:
+            count = store._conn.execute("SELECT COUNT(*) FROM communities").fetchone()[0]
+        elif use_incremental:
             from code_review_graph.communities import (
                 incremental_detect_communities,
             )
@@ -439,19 +463,6 @@ def _run_postprocess(
         round(time.perf_counter() - stage_started, 6),
     )
 
-    # -- Compute pre-computed summary tables --
-    stage_started = time.perf_counter()
-    try:
-        _compute_summaries(store)
-        build_result["summaries_computed"] = True
-    except (sqlite3.OperationalError, Exception) as e:
-        logger.warning("Summary computation failed: %s", e)
-        _note_contention(build_result, e)
-        warnings.append(f"Summary computation failed: {type(e).__name__}: {e}")
-    timing["summaries_s"] = max(
-        0.0,
-        round(time.perf_counter() - stage_started, 6),
-    )
     _run_embedding_refresh(
         store,
         build_result,
@@ -466,236 +477,10 @@ def _run_postprocess(
         time.strftime("%Y-%m-%dT%H:%M:%S"),
     )
     store.set_metadata("postprocess_level", postprocess)
+    if hasattr(store, "shrink_memory"):
+        store.shrink_memory()
 
     return warnings
-
-
-def _compute_summaries(store: Any) -> None:
-    """Populate community_summaries, flow_snapshots, and risk_index tables.
-
-    Uses batched aggregate queries and in-memory grouping instead of
-    per-community/per-node loops. On graphs with ~100k edges this
-    reduces the work from ``O(nodes + communities)`` SQLite round trips
-    each doing their own B-tree scan to a handful of ``GROUP BY``
-    queries, turning what used to be an effective hang into a few
-    seconds.
-
-    Each summary block (community_summaries, flow_snapshots, risk_index)
-    is wrapped in an explicit transaction so the DELETE + INSERT sequence
-    is atomic.  If a table doesn't exist yet the block is silently skipped.
-    """
-    import json as _json
-    from collections import defaultdict
-    from os.path import commonprefix
-
-    conn = store._conn
-
-    # -- community_summaries --
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        conn.execute("DELETE FROM community_summaries")
-
-        # Pre-compute per-qualified_name edge counts once. Previously
-        # this section ran a per-community triple-JOIN aggregate query
-        # (nodes LEFT JOIN edges LEFT JOIN edges), which on graphs with
-        # thousands of communities was the second-biggest hang.
-        edge_counts: dict[str, int] = defaultdict(int)
-        for row in conn.execute(
-            "SELECT source_qualified, COUNT(*) FROM edges GROUP BY source_qualified"
-        ):
-            edge_counts[row[0]] += row[1]
-        for row in conn.execute(
-            "SELECT target_qualified, COUNT(*) FROM edges GROUP BY target_qualified"
-        ):
-            edge_counts[row[0]] += row[1]
-
-        # Group non-File nodes per community for top-symbol selection.
-        nodes_by_comm: dict[int, list[tuple[str, int]]] = defaultdict(list)
-        for row in conn.execute(
-            "SELECT community_id, name, qualified_name FROM nodes "
-            "WHERE community_id IS NOT NULL AND kind != 'File'"
-        ):
-            cid, name, qn = row[0], row[1], row[2]
-            nodes_by_comm[cid].append((name, edge_counts.get(qn, 0)))
-
-        # Group distinct file paths per community (preserving first-seen
-        # order for stable output, same as DISTINCT in the old query).
-        files_by_comm: dict[int, list[str]] = defaultdict(list)
-        seen_files: dict[int, set[str]] = defaultdict(set)
-        for row in conn.execute(
-            "SELECT community_id, file_path FROM nodes WHERE community_id IS NOT NULL"
-        ):
-            cid, fp = row[0], row[1]
-            if fp not in seen_files[cid]:
-                seen_files[cid].add(fp)
-                files_by_comm[cid].append(fp)
-
-        community_rows = conn.execute(
-            "SELECT id, name, size, dominant_language FROM communities"
-        ).fetchall()
-        for r in community_rows:
-            cid, cname, csize, clang = r[0], r[1], r[2], r[3]
-
-            # Top 5 symbols by total edge count (in + out). Python's
-            # sorted() is stable so ties break by original row order.
-            members = sorted(
-                nodes_by_comm.get(cid, []),
-                key=lambda nc: nc[1],
-                reverse=True,
-            )
-            key_syms = _json.dumps([m[0] for m in members[:5]])
-
-            # Auto-generate purpose from common file path prefix.
-            paths = files_by_comm.get(cid, [])[:20]
-            purpose = ""
-            if paths:
-                prefix = commonprefix(paths)
-                if "/" in prefix:
-                    purpose = prefix.rsplit("/", 1)[0].split("/")[-1] if "/" in prefix else ""
-
-            conn.execute(
-                "INSERT OR REPLACE INTO community_summaries "
-                "(community_id, name, purpose, key_symbols, size, dominant_language) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (cid, cname, purpose, key_syms, csize, clang or ""),
-            )
-        conn.commit()
-    except sqlite3.OperationalError:
-        conn.rollback()  # Table may not exist yet
-
-    # -- flow_snapshots --
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        conn.execute("DELETE FROM flow_snapshots")
-        flow_rows = conn.execute(
-            "SELECT id, name, entry_point_id, criticality, node_count, "
-            "file_count, path_json FROM flows"
-        ).fetchall()
-
-        # Collect every node id referenced by any flow, then fetch
-        # their qualified_names in one batched query instead of per-flow
-        # per-node lookups.
-        needed_ids: set[int] = set()
-        parsed_paths: list[list[int]] = []
-        for r in flow_rows:
-            needed_ids.add(r[2])  # entry_point_id
-            path_ids = _json.loads(r[6]) if r[6] else []
-            parsed_paths.append(path_ids)
-            # Match the old semantics: entry + up to 3 intermediates + last
-            for nid in path_ids[1:4]:
-                needed_ids.add(nid)
-            if path_ids:
-                needed_ids.add(path_ids[-1])
-
-        id_to_name: dict[int, str] = {}
-        if needed_ids:
-            # Batch the IN clause in chunks of 450 to stay under SQLite's
-            # default SQLITE_MAX_VARIABLE_NUMBER (999), same strategy as
-            # GraphStore.get_edges_among.
-            id_list = list(needed_ids)
-            for i in range(0, len(id_list), 450):
-                batch = id_list[i : i + 450]
-                placeholders = ",".join("?" for _ in batch)
-                node_rows = conn.execute(
-                    f"SELECT id, qualified_name FROM nodes WHERE id IN ({placeholders})",  # nosec B608
-                    batch,
-                ).fetchall()
-                for nr in node_rows:
-                    id_to_name[nr[0]] = nr[1]
-
-        for r, path_ids in zip(flow_rows, parsed_paths):
-            fid, fname, ep_id = r[0], r[1], r[2]
-            crit, ncount, fcount = r[3], r[4], r[5]
-            ep_name = id_to_name.get(ep_id, str(ep_id))
-            critical_path: list[str] = []
-            if path_ids:
-                critical_path.append(ep_name)
-                if len(path_ids) > 2:
-                    for nid in path_ids[1:4]:
-                        nm = id_to_name.get(nid)
-                        if nm:
-                            critical_path.append(nm)
-                if len(path_ids) > 1:
-                    last = id_to_name.get(path_ids[-1])
-                    if last and last not in critical_path:
-                        critical_path.append(last)
-            conn.execute(
-                "INSERT OR REPLACE INTO flow_snapshots "
-                "(flow_id, name, entry_point, critical_path, criticality, "
-                "node_count, file_count) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (fid, fname, ep_name, _json.dumps(critical_path), crit, ncount, fcount),
-            )
-        conn.commit()
-    except sqlite3.OperationalError:
-        conn.rollback()
-
-    # -- risk_index --
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        conn.execute("DELETE FROM risk_index")
-
-        # Pre-compute caller and test-coverage counts in two aggregate
-        # queries. Previously this section ran two COUNT(*) queries per
-        # candidate node; on a ~100k-edge graph with tens of thousands
-        # of Function/Class/Test nodes that was the primary hang
-        # observed during Godot builds.
-        caller_counts: dict[str, int] = {}
-        for row in conn.execute(
-            "SELECT target_qualified, COUNT(*) FROM edges "
-            "WHERE kind = 'CALLS' GROUP BY target_qualified"
-        ):
-            caller_counts[row[0]] = row[1]
-
-        tested_counts: dict[str, int] = {}
-        for row in conn.execute(
-            "SELECT source_qualified, COUNT(*) FROM edges "
-            "WHERE kind = 'TESTED_BY' GROUP BY source_qualified"
-        ):
-            tested_counts[row[0]] = row[1]
-
-        risk_nodes = conn.execute(
-            "SELECT id, qualified_name, name FROM nodes WHERE kind IN ('Function', 'Class', 'Test')"
-        ).fetchall()
-        security_kw = {
-            "auth",
-            "login",
-            "password",
-            "token",
-            "session",
-            "crypt",
-            "secret",
-            "credential",
-            "permission",
-            "sql",
-            "execute",
-        }
-        for n in risk_nodes:
-            nid, qn, name = n[0], n[1], n[2]
-            caller_count = caller_counts.get(qn, 0)
-            tested = tested_counts.get(qn, 0)
-            coverage = "tested" if tested > 0 else "untested"
-            name_lower = name.lower()
-            sec_relevant = 1 if any(kw in name_lower for kw in security_kw) else 0
-            risk = 0.0
-            if caller_count > 10:
-                risk += 0.3
-            elif caller_count > 3:
-                risk += 0.15
-            if coverage == "untested":
-                risk += 0.3
-            if sec_relevant:
-                risk += 0.4
-            risk = min(risk, 1.0)
-            conn.execute(
-                "INSERT OR REPLACE INTO risk_index "
-                "(node_id, qualified_name, risk_score, caller_count, "
-                "test_coverage, security_relevant, last_computed) "
-                "VALUES (?, ?, ?, ?, ?, ?, datetime('now'))",
-                (nid, qn, risk, caller_count, coverage, sec_relevant),
-            )
-        conn.commit()
-    except sqlite3.OperationalError:
-        conn.rollback()
 
 
 def build_or_update_graph(
@@ -708,6 +493,8 @@ def build_or_update_graph(
     embedding_model: str | None = None,
     wait_for_lock: bool = False,
     recover_corrupt: bool = False,
+    enrich: bool | None = None,
+    follow_symlinks: bool | None = None,
 ) -> dict[str, Any]:
     """Build or incrementally update the code knowledge graph.
 
@@ -750,6 +537,14 @@ def build_or_update_graph(
 
         recover_corrupt: Discard an unusable graph before an explicit full rebuild.
             Used by the CLI build command; ignored for incremental updates.
+        enrich: Also resolve Python method calls with Jedi (the
+            ``enrichment`` extra; CLI: ``--enrich``). When None (default),
+            falls back to ``CRG_ENABLE_ENRICHMENT``. Off by default because
+            it costs about a second per Python file.
+        follow_symlinks: If True, also index files in symlinked folders that
+            point inside the repository (never outside it). When None
+            (default), falls back to the CRG_FOLLOW_SYMLINKS environment
+            variable. Default: disabled.
 
     Returns:
         Summary with files_parsed/updated, node/edge counts, and errors. A run
@@ -802,7 +597,10 @@ def build_or_update_graph(
         store.set_metadata(BUILD_STATE_KEY, BUILD_IN_PROGRESS)
 
         if full_rebuild:
-            result = full_build(root, store, recurse_submodules)
+            result = full_build(
+                root, store, recurse_submodules, enrich=enrich,
+                follow_symlinks=follow_symlinks,
+            )
             failed = [str(item.get("file", "?")) for item in result["errors"]]
             summary = (
                 f"Full build complete: parsed {result['files_parsed']} files, "
@@ -822,7 +620,10 @@ def build_or_update_graph(
                 build_result["recovery_reason"] = recovery_reason
         else:
             try:
-                result = incremental_update(root, store, base=base_resolved)
+                result = incremental_update(
+                    root, store, base=base_resolved, enrich=enrich,
+                    follow_symlinks=follow_symlinks,
+                )
             except RuntimeError as exc:
                 # Change discovery or root validation failed before anything was
                 # stored; report it the way every other failure is reported.
@@ -841,7 +642,9 @@ def build_or_update_graph(
                     "postprocess_level": postprocess,
                 }
             failed = [str(item.get("file", "?")) for item in result["errors"]]
-            if result["files_updated"] == 0 and not failed:
+            if result["files_updated"] == 0 and not failed and not (
+                postprocess == "full" and store.get_metadata("csharp_flows_dirty") == "1"
+            ):
                 summary = (
                     "No changes detected. Graph is up to date."
                     if result.get("freshness_advanced")
@@ -1007,27 +810,37 @@ def build_or_update_graph(
 
 
 def _lock_or_skip(
-    db_path: Path, wait_for_lock: bool
+    db_path: Path,
+    wait_for_lock: bool,
+    outcome: str = "skipped instead of repeating the work",
 ) -> tuple[WriteLock | None, dict[str, Any] | None]:
     """Take the graph's write lock, or build the response for standing down.
 
     Returns the held lock and ``None``, or ``None`` and the response to return.
-    Both graph-writing entry points (``build_or_update_graph`` and
-    ``run_postprocess``) share this so neither can drift from the other.
+    Every graph-writing entry point shares this so none can drift from the
+    others. *outcome* says what standing down means for the caller.
     """
     lock = WriteLock(db_path)
     if lock.acquire(blocking=wait_for_lock):
         return lock, None
-    return None, _write_skipped_response(db_path, lock.holder_pid())
+    return None, _write_skipped_response(db_path, lock.holder_pid(), outcome)
 
 
-def _write_skipped_response(db_path: Path, holder_pid: int | None) -> dict[str, Any]:
+def _write_skipped_response(
+    db_path: Path,
+    holder_pid: int | None,
+    outcome: str = "skipped instead of repeating the work",
+) -> dict[str, Any]:
     """Describe a run that stood down because another writer owns the graph.
 
     ``contended`` rather than ``error``: nothing failed, and a caller switching
     on the existing statuses would otherwise have no way to tell a lost race
     from a broken database. The counts are present and zero so callers that
     unpack them keep working.
+
+    A second build really does repeat the first, but ``forget`` and ``embed``
+    are not covered by whatever else is running, so they pass their own
+    *outcome* rather than tell the reader the work is in hand.
     """
     holder = f"PID {holder_pid}" if holder_pid is not None else "another process"
     return {
@@ -1042,10 +855,9 @@ def _write_skipped_response(db_path: Path, holder_pid: int | None) -> dict[str, 
         "total_edges": 0,
         "errors": [],
         "summary": (
-            f"Another code-review-graph build, update or postprocess is "
-            f"already running for this repository ({holder}); skipped instead "
-            f"of repeating the work. Pass wait_for_lock=True (CLI: --wait) to "
-            f"block until it finishes."
+            f"Another code-review-graph write is already running for this "
+            f"repository ({holder}); {outcome}. Pass wait_for_lock=True "
+            f"(CLI: --wait) to block until it finishes."
         ),
     }
 

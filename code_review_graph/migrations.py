@@ -99,7 +99,7 @@ def _set_schema_version(conn: sqlite3.Connection, version: int) -> None:
 
 _KNOWN_TABLES = frozenset({
     "nodes", "edges", "metadata", "communities", "flows", "flow_memberships", "nodes_fts",
-    "community_summaries", "flow_snapshots", "risk_index", "nodes_fts_state",
+    "nodes_fts_state",
 })
 
 
@@ -618,6 +618,34 @@ def _migrate_v14(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_v15(conn: sqlite3.Connection) -> None:
+    """v15: drop three tables nothing reads and three indexes others cover.
+
+    ``community_summaries``, ``flow_snapshots`` and ``risk_index`` were rewritten
+    on every full postprocess and read by nothing, and their rows kept pointing
+    at deleted nodes.
+
+    ``idx_nodes_qualified`` repeats the UNIQUE index on ``nodes.qualified_name``.
+    ``idx_edges_source`` and ``idx_edges_target`` are the leading columns of
+    ``idx_edges_source_kind`` and ``idx_edges_target_kind``, which serve the same
+    lookups.
+
+    Dropping puts the pages on the free list, where later writes reuse them. The
+    file itself only shrinks on VACUUM, left out on purpose: it rewrites the whole
+    database while the opener waits and needs twice the disk space. ``IF EXISTS``
+    lets a migration cut off half way finish on the next open.
+    """
+    for statement in (
+        "DROP TABLE IF EXISTS community_summaries",
+        "DROP TABLE IF EXISTS flow_snapshots",
+        "DROP TABLE IF EXISTS risk_index",
+        "DROP INDEX IF EXISTS idx_nodes_qualified",
+        "DROP INDEX IF EXISTS idx_edges_source",
+        "DROP INDEX IF EXISTS idx_edges_target",
+    ):
+        conn.execute(statement)
+    logger.info("Migration v15: dropped unread tables and covered indexes")
+
 
 # ---------------------------------------------------------------------------
 # Migration registry
@@ -637,6 +665,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     12: _migrate_v12,
     13: _migrate_v13,
     14: _migrate_v14,
+    15: _migrate_v15,
 }
 
 LATEST_VERSION = max(MIGRATIONS.keys())

@@ -1087,12 +1087,18 @@ def test_a_graph_written_before_wrapped_components_gains_them(tmp_path, monkeypa
             )
             full_build(repo, store)
         assert store.get_node(button) is None
-        assert button in _dangling_calls(store)
+        # No qualified name without a node: the edge keeps it aside (#984).
+        assert _dangling_calls(store) == set()
+        assert button in {
+            edge.extra.get("claimed_endpoint") for edge in store.get_all_edges()
+        }
 
         (repo / "src" / "Button.tsx").write_text(edited, encoding="utf-8")
         incremental_update(repo, store, changed_files=["src/Button.tsx"])
         assert store.get_node(button) is not None
         assert _dangling_calls(store) == set()
+        # The file holding the call was not parsed again, and the edge still lands.
+        assert button in {edge.target_qualified for edge in store.get_all_edges()}
 
         full_build(repo, store)
         rebuilt = graph(store, repo)
