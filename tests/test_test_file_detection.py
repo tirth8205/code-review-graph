@@ -470,7 +470,7 @@ def test_review_guidance_ignores_test_file_helpers():
     guidance = _generate_review_guidance(impact, ["tests/test_upgrade_path.py"])
     assert "_check" not in guidance
     assert "analyze_changes" in guidance
-    assert "1 changed function(s) lack test coverage" in guidance
+    assert "1 changed function(s) have no direct test" in guidance
 
 
 def test_review_guidance_under_a_test_named_checkout_still_warns():
@@ -495,7 +495,7 @@ def test_review_guidance_under_a_test_named_checkout_still_warns():
         impact, [f"{root}/code_review_graph/changes.py"], root,
     )
     assert "_check" not in guidance
-    assert "1 changed function(s) lack test coverage: analyze_changes" in guidance
+    assert "1 changed function(s) have no direct test: analyze_changes" in guidance
 
 
 # ---------------------------------------------------------------------------

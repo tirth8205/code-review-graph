@@ -13,19 +13,96 @@ from ..build_state import (
     BUILD_IN_PROGRESS,
     BUILD_STATE_KEY,
     INCOMPLETE_BUILD_STATES,
+    POSTPROCESS_PENDING,
     advance_to_postprocess_pending,
     graph_contents_are_complete,
     read_build_state,
 )
 from ..incremental import (
+    VERIFIED_FILE_COUNT_KEY,
+    _prepare_db_path,
+    collect_all_files,
+    detect_vcs,
     full_build,
+    get_all_tracked_files,
+    get_db_path,
     incremental_update,
     resolve_incremental_base,
 )
+from ..locking import WriteLock, write_lock_path
 from ..parser import normalize_file_path
-from ._common import _get_store
+from ._common import _get_store, _resolve_root
 
 logger = logging.getLogger(__name__)
+
+_PARTIAL_GRAPH_MIN_FILES = 8
+_PARTIAL_GRAPH_MAX_COVERAGE = 0.25
+_PARTIAL_GRAPH_SUSPECT_TRACKED_COVERAGE = 0.50
+
+
+def _should_rebuild_partial_graph(
+    repo_root: Path,
+    store: Any,
+    recurse_submodules: bool | None = None,
+) -> bool:
+    """Detect a non-empty graph that represents only a small slice of a repo."""
+    if store.get_metadata("intentionally_incomplete") == "1":
+        return False
+
+    represented_paths = {
+        normalize_file_path(path) for path in store.get_all_files()
+    }
+    # A graph that still holds what a complete graph held is not partial, even
+    # if most parseable files yield no rows. This needs no inventory at all.
+    try:
+        verified = int(store.get_metadata(VERIFIED_FILE_COUNT_KEY) or 0)
+    except ValueError:
+        verified = 0
+    if verified and len(represented_paths) > verified * _PARTIAL_GRAPH_MAX_COVERAGE:
+        return False
+    # Listing an SVN working copy asks the server, which no update should wait
+    # for. The poisoned graphs this recovers came from Git diffs.
+    if detect_vcs(repo_root) == "svn":
+        return False
+
+    tracked_files = get_all_tracked_files(repo_root, recurse_submodules)
+    tracked_paths: set[str] = set()
+    if tracked_files:
+        # Keep the common path cheap: a graph already representing at least
+        # half of all tracked files cannot be severely partial. Below that,
+        # documentation- or asset-heavy repositories still need the precise
+        # parseable inventory below before forcing an expensive rebuild.
+        # Untracked files are indexed too, but say nothing about tracked ones.
+        tracked_paths = {
+            normalize_file_path(repo_root / relative) for relative in tracked_files
+        }
+        if (
+            len(represented_paths & tracked_paths) >= len(tracked_files)
+            * _PARTIAL_GRAPH_SUSPECT_TRACKED_COVERAGE
+        ):
+            return False
+        if len(tracked_files) < _PARTIAL_GRAPH_MIN_FILES:
+            return False
+
+    expected_files = collect_all_files(repo_root, recurse_submodules)
+    if len(expected_files) < _PARTIAL_GRAPH_MIN_FILES:
+        return False
+
+    expected_paths = {
+        normalize_file_path(repo_root / relative)
+        for relative in expected_files
+    }
+    # collect_all_files also lists untracked files, which say nothing about
+    # whether the tracked ones made it into the graph.
+    if tracked_paths:
+        expected_paths &= tracked_paths
+    represented_count = len(expected_paths & represented_paths)
+    if represented_count <= len(expected_paths) * _PARTIAL_GRAPH_MAX_COVERAGE:
+        return True
+    # Checked and fine: later updates need not repeat the inventory.
+    store.set_metadata(VERIFIED_FILE_COUNT_KEY, str(len(represented_paths)))
+    return False
+
 
 # The build-state vocabulary is imported above rather than defined here:
 # ``full_build`` has to advance it as soon as the last file is stored, and it
@@ -34,13 +111,7 @@ logger = logging.getLogger(__name__)
 
 
 def build_was_interrupted(store: Any) -> bool:
-    """True when the previous build died before it finished post-processing.
-
-    Both incomplete states answer yes: a build that never stored every file
-    and a build that stored them all but left the derived data unbuilt are
-    each a graph whose freshness metadata overstates it.  What separates them
-    is which repair works, which is :func:`graph_contents_are_complete`.
-    """
+    """True when the last build left source or derived data incomplete."""
     return read_build_state(store) in INCOMPLETE_BUILD_STATES
 
 
@@ -64,7 +135,9 @@ def _run_embedding_refresh(
         from code_review_graph.embeddings import refresh_embeddings
 
         refreshed = refresh_embeddings(store, provider=provider, model=model)
-        if refreshed is not None:
+        if refreshed is None:
+            _report_refresh_skipped(result, warnings)
+        else:
             result["embeddings_refreshed"] = refreshed["embedded"]
             result["embeddings_purged"] = refreshed["purged"]
     except Exception as exc:
@@ -72,6 +145,15 @@ def _run_embedding_refresh(
         warnings.append(
             f"Embedding refresh failed: {type(exc).__name__}: {exc}",
         )
+
+
+def _report_refresh_skipped(result: dict[str, Any], warnings: list[str]) -> None:
+    """Tell a caller who asked for a refresh that the graph has no index to refresh."""
+    from code_review_graph.embeddings import REFRESH_SKIPPED_WARNING
+
+    logger.warning(REFRESH_SKIPPED_WARNING)
+    warnings.append(REFRESH_SKIPPED_WARNING)
+    result["embeddings_refresh_skipped"] = True
 
 
 # SQLITE_BUSY and SQLITE_LOCKED are the only two primary result codes that
@@ -155,11 +237,17 @@ def _run_postprocess(
     repo_root: str | None = None,
     embedding_provider: str | None = None,
     embedding_model: str | None = None,
+    entry_point_qns: list[str] | None = None,
+    communities_were_affected: bool = False,
+    skip_resolvers: bool = False,
 ) -> list[str]:
     """Run post-build steps based on *postprocess* level.
 
     When *full_rebuild* is False and *changed_files* are available,
     uses incremental flow/community detection for faster updates.
+
+    *skip_resolvers* leaves call-target resolution out, for a no-op update on a
+    graph whose edges are already resolved.
 
     Records structured stage durations in ``build_result["postprocess_timing"]``.
     Minimal processing reports ``signatures_s`` and ``fts_s``; full processing
@@ -192,22 +280,23 @@ def _run_postprocess(
         return warnings
 
     # Resolve bare and C++ scoped call targets before derived graph steps.
-    try:
-        resolved = store.resolve_bare_call_targets()
-        resolved += store.resolve_bare_tested_by_sources()
-        build_result["bare_edges_resolved"] = resolved
-        build_result["cpp_scoped_edges_resolved"] = (
-            store.resolve_cpp_scoped_call_targets()
-        )
-        # Resolvers rewrite bare targets into qualified ones, so the stored
-        # certainty column is only correct once they have all run.
-        store.refresh_target_resolution()
-    except sqlite3.OperationalError as e:
-        logger.warning("Call-target resolution failed: %s", e)
-        _note_contention(build_result, e)
-        warnings.append(
-            f"Call-target resolution failed: {type(e).__name__}: {e}"
-        )
+    if not skip_resolvers:
+        try:
+            resolved = store.resolve_bare_call_targets()
+            resolved += store.resolve_bare_tested_by_sources()
+            build_result["bare_edges_resolved"] = resolved
+            build_result["cpp_scoped_edges_resolved"] = (
+                store.resolve_cpp_scoped_call_targets()
+            )
+            # Resolvers rewrite bare targets into qualified ones, so the stored
+            # certainty column is only correct once they have all run.
+            store.refresh_target_resolution()
+        except sqlite3.OperationalError as e:
+            logger.warning("Call-target resolution failed: %s", e)
+            _note_contention(build_result, e)
+            warnings.append(
+                f"Call-target resolution failed: {type(e).__name__}: {e}"
+            )
 
     # -- Signatures + FTS (fast, always run unless "none") --
     timing: dict[str, float] = {}
@@ -283,14 +372,24 @@ def _run_postprocess(
         return warnings
 
     # -- Expensive: flows + communities (only for "full") --
-    use_incremental = not full_rebuild and bool(changed_files)
+    # Incremental mode also triggers when pre-replacement capture preserved
+    # entry-point QNs even if the relative changed_files list alone would
+    # miss absolute graph paths (#569).
+    use_incremental = not full_rebuild and (
+        bool(changed_files) or bool(entry_point_qns) or communities_were_affected
+    )
 
     stage_started = time.perf_counter()
     try:
         if use_incremental:
             from code_review_graph.flows import incremental_trace_flows
 
-            count = incremental_trace_flows(store, changed_files)
+            count = incremental_trace_flows(
+                store,
+                changed_files or [],
+                repo_root=repo_root,
+                entry_point_qns=entry_point_qns,
+            )
         else:
             from code_review_graph.flows import store_flows as _store_flows
             from code_review_graph.flows import trace_flows as _trace_flows
@@ -314,7 +413,12 @@ def _run_postprocess(
                 incremental_detect_communities,
             )
 
-            count = incremental_detect_communities(store, changed_files)
+            count = incremental_detect_communities(
+                store,
+                changed_files or [],
+                repo_root=repo_root,
+                force=communities_were_affected,
+            )
         else:
             from code_review_graph.communities import (
                 detect_communities as _detect_communities,
@@ -602,8 +706,18 @@ def build_or_update_graph(
     recurse_submodules: bool | None = None,
     embedding_provider: str | None = None,
     embedding_model: str | None = None,
+    wait_for_lock: bool = False,
+    recover_corrupt: bool = False,
 ) -> dict[str, Any]:
     """Build or incrementally update the code knowledge graph.
+
+    Only one build runs per repository at a time. A second call that arrives
+    while the first is still parsing reports ``status: contended`` and returns
+    without touching the graph rather than repeating the same work: ``build``
+    and ``update`` are fired from commit hooks, save hooks and the watcher,
+    which can overlap by seconds, and each duplicate used to pay for a full
+    parse plus its own process pool before failing on the SQLite write lock.
+    Pass ``wait_for_lock=True`` (CLI: ``--wait``) to block instead of skipping.
 
     Args:
         full_rebuild: If True, re-parse every file. If False (default),
@@ -628,23 +742,42 @@ def build_or_update_graph(
             source-derived text or load an embedding model unexpectedly.
         embedding_model: Exact model for an explicitly requested post-build
             embedding refresh. Must be supplied with ``embedding_provider``.
+        wait_for_lock: Block until an in-flight build for this repository
+            finishes, instead of skipping. Default: False, because the
+            skipping caller is usually a hook whose work the in-flight build
+            already covers; a human running ``build``/``update`` by hand
+            usually wants the wait.
+
+        recover_corrupt: Discard an unusable graph before an explicit full rebuild.
+            Used by the CLI build command; ignored for incremental updates.
 
     Returns:
-        Summary with files_parsed/updated, node/edge counts, and errors.
+        Summary with files_parsed/updated, node/edge counts, and errors. A run
+        that stood down because another build held the lock returns
+        ``status: contended``, ``skipped: True`` and ``holder_pid``.
     """
-    store, root = _get_store(repo_root)
+    root = _resolve_root(repo_root)
+    db_path = get_db_path(root, read_only=True)
+    lock, contended = _lock_or_skip(db_path, wait_for_lock)
+    if contended is not None:
+        return contended
+    store = None
     try:
+        recovery_reason: str | None = None
+        _prepare_db_path(root, db_path)
+        store, root = _get_store(
+            str(root), db_path=db_path, recover_corrupt=full_rebuild and recover_corrupt
+        )
         if not full_rebuild and not store.has_nodes():
             full_rebuild = True
 
-        # A previous run that died between storing the last file and finishing
-        # post-processing left a current anchor over a half-derived graph.
-        # Trusting the anchor there is exactly what made that damage permanent,
-        # so repair it with a full rebuild instead of believing it.
+        # A previous run that died before post-processing left a current anchor
+        # over a half-derived graph. Preserve the visible incomplete marker,
+        # but only rebuild source files when storage itself was interrupted.
         interrupted = build_was_interrupted(store)
-        if interrupted and not full_rebuild:
+        if not graph_contents_are_complete(read_build_state(store)) and not full_rebuild:
             logger.warning(
-                "Previous build did not finish post-processing; rebuilding to repair it"
+                "Previous build stopped before all source files were stored; rebuilding"
             )
             full_rebuild = True
 
@@ -657,6 +790,13 @@ def build_or_update_graph(
             base_resolved = resolve_incremental_base(root, store)
             if base_resolved is None:
                 full_rebuild = True
+
+        if (
+            not full_rebuild
+            and _should_rebuild_partial_graph(root, store, recurse_submodules)
+        ):
+            full_rebuild = True
+            recovery_reason = "partial_graph"
 
         previous_state = store.get_metadata(BUILD_STATE_KEY)
         store.set_metadata(BUILD_STATE_KEY, BUILD_IN_PROGRESS)
@@ -678,6 +818,8 @@ def build_or_update_graph(
                 "base_resolved": None,
                 "summary": summary,
             }
+            if recovery_reason is not None:
+                build_result["recovery_reason"] = recovery_reason
         else:
             try:
                 result = incremental_update(root, store, base=base_resolved)
@@ -705,18 +847,77 @@ def build_or_update_graph(
                     if result.get("freshness_advanced")
                     else "No graph changes detected. Freshness metadata was not advanced."
                 )
-                # Nothing changed, so there is nothing half built to repair;
-                # leaving the marker set would make every later update a full
-                # rebuild.
-                store.set_metadata(BUILD_STATE_KEY, BUILD_COMPLETE)
-                return {
+                if postprocess == "none":
+                    # An explicit skip should not turn an existing state into
+                    # a claim that derived data was checked. No source rows
+                    # changed, so restore the state that was present before
+                    # this no-op update began.
+                    store.set_metadata(BUILD_STATE_KEY, previous_state or "")
+                    noop_result = {
+                        **result,
+                        "status": "ok",
+                        "build_type": "incremental",
+                        "base_resolved": base_resolved,
+                        "summary": summary,
+                        "postprocess_level": postprocess,
+                    }
+                    # Match the other no-op levels: an explicit request should
+                    # report that there is no embedding index to refresh.
+                    if embedding_provider and embedding_model:
+                        from code_review_graph.embeddings import has_embeddings
+
+                        if not has_embeddings(store):
+                            noop_warnings: list[str] = []
+                            _report_refresh_skipped(noop_result, noop_warnings)
+                            noop_result["warnings"] = noop_warnings
+                    return noop_result
+
+                # Older builds could leave FTS drift behind a complete marker.
+                # Reconcile it even when Git has no source changes, while
+                # keeping the no-op path away from the expensive flow and
+                # community passes. A pending marker may also mean flows or
+                # communities were interrupted; honor the requested level in
+                # that case so a default update can finish the full repair.
+                pending = previous_state == POSTPROCESS_PENDING
+                postprocess_level = postprocess if pending else "minimal"
+                build_result = {
                     **result,
                     "status": "ok",
                     "build_type": "incremental",
                     "base_resolved": base_resolved,
                     "summary": summary,
-                    "postprocess_level": postprocess,
                 }
+                advance_to_postprocess_pending(store)
+                warnings = _run_postprocess(
+                    store,
+                    build_result,
+                    postprocess_level,
+                    full_rebuild=False,
+                    changed_files=None,
+                    repo_root=str(root),
+                    # The run that left the marker may have changed nodes. A
+                    # complete graph has no resolver or embedding work to do,
+                    # and hooks run this path after every edit.
+                    embedding_provider=embedding_provider if pending else None,
+                    embedding_model=embedding_model if pending else None,
+                    skip_resolvers=not pending,
+                )
+                if warnings:
+                    build_result["warnings"] = warnings
+                if build_result.get("postprocess_failed"):
+                    build_result["status"] = "partial"
+                if not build_result.get("postprocess_contended"):
+                    store.set_metadata(BUILD_STATE_KEY, BUILD_COMPLETE)
+                build_result["repaired_interrupted_build"] = interrupted
+                if not pending and embedding_provider and embedding_model:
+                    from code_review_graph.embeddings import has_embeddings
+
+                    if not has_embeddings(store):
+                        embedding_warnings: list[str] = []
+                        _report_refresh_skipped(build_result, embedding_warnings)
+                        build_result.setdefault("warnings", []).extend(embedding_warnings)
+                build_result["postprocess_level"] = postprocess_level
+                return build_result
             summary = (
                 f"Incremental update: {result['files_updated']} files re-parsed, "
                 f"{result['total_nodes']} nodes and "
@@ -746,8 +947,22 @@ def build_or_update_graph(
         # incremental path and is a no-op when the state is already advanced.
         advance_to_postprocess_pending(store)
 
-        # Pass changed_files for incremental flow/community detection
-        changed = result.get("changed_files") if not full_rebuild else None
+        # Pass changed_files + pre-replacement flow/community capture for
+        # incremental postprocess (#569). A pending marker means derived tables
+        # may be missing across the whole graph, so that case recomputes them
+        # from all stored rows, while source parsing stays incremental.
+        changed = None
+        entry_qns = None
+        communities_affected = False
+        # Internal, and can run to thousands of names: not for the response.
+        flow_entry_qns = build_result.pop("flow_entry_point_qns", None)
+        if not full_rebuild and previous_state != POSTPROCESS_PENDING:
+            changed = list(result.get("changed_files") or [])
+            changed.extend(result.get("dependent_files") or [])
+            entry_qns = list(flow_entry_qns or [])
+            communities_affected = bool(
+                result.get("communities_were_affected")
+            )
         warnings = _run_postprocess(
             store,
             build_result,
@@ -757,6 +972,8 @@ def build_or_update_graph(
             repo_root=str(root),
             embedding_provider=embedding_provider,
             embedding_model=embedding_model,
+            entry_point_qns=entry_qns,
+            communities_were_affected=communities_affected,
         )
         if warnings:
             build_result["warnings"] = warnings
@@ -768,12 +985,69 @@ def build_or_update_graph(
         # genuinely what its freshness metadata claims.  A stage that lost the
         # write lock keeps the marker set so the next run redoes it, rather
         # than leaving an empty FTS index behind a "complete" verdict.
-        if not build_result.get("postprocess_contended"):
+        if not build_result.get("postprocess_contended") and postprocess != "none":
             store.set_metadata(BUILD_STATE_KEY, BUILD_COMPLETE)
+        elif postprocess == "none" and failed:
+            # A partial update can store some changed rows while another file
+            # fails. Keep derived data visibly pending so a later update can
+            # repair FTS/flows/communities for the rows that were stored.
+            rows_changed = result.get("files_updated", 0) or result.get("files_parsed", 0)
+            store.set_metadata(
+                BUILD_STATE_KEY,
+                POSTPROCESS_PENDING if rows_changed else (previous_state or ""),
+            )
         build_result["repaired_interrupted_build"] = interrupted
         return build_result
     finally:
-        store.close()
+        try:
+            if store is not None:
+                store.close()
+        finally:
+            lock.release()
+
+
+def _lock_or_skip(
+    db_path: Path, wait_for_lock: bool
+) -> tuple[WriteLock | None, dict[str, Any] | None]:
+    """Take the graph's write lock, or build the response for standing down.
+
+    Returns the held lock and ``None``, or ``None`` and the response to return.
+    Both graph-writing entry points (``build_or_update_graph`` and
+    ``run_postprocess``) share this so neither can drift from the other.
+    """
+    lock = WriteLock(db_path)
+    if lock.acquire(blocking=wait_for_lock):
+        return lock, None
+    return None, _write_skipped_response(db_path, lock.holder_pid())
+
+
+def _write_skipped_response(db_path: Path, holder_pid: int | None) -> dict[str, Any]:
+    """Describe a run that stood down because another writer owns the graph.
+
+    ``contended`` rather than ``error``: nothing failed, and a caller switching
+    on the existing statuses would otherwise have no way to tell a lost race
+    from a broken database. The counts are present and zero so callers that
+    unpack them keep working.
+    """
+    holder = f"PID {holder_pid}" if holder_pid is not None else "another process"
+    return {
+        "status": "contended",
+        "skipped": True,
+        "build_type": "none",
+        "holder_pid": holder_pid,
+        "lock_path": str(write_lock_path(db_path)),
+        "files_parsed": 0,
+        "files_updated": 0,
+        "total_nodes": 0,
+        "total_edges": 0,
+        "errors": [],
+        "summary": (
+            f"Another code-review-graph build, update or postprocess is "
+            f"already running for this repository ({holder}); skipped instead "
+            f"of repeating the work. Pass wait_for_lock=True (CLI: --wait) to "
+            f"block until it finishes."
+        ),
+    }
 
 
 def run_postprocess(
@@ -783,12 +1057,17 @@ def run_postprocess(
     repo_root: str | None = None,
     embedding_provider: str | None = None,
     embedding_model: str | None = None,
+    wait_for_lock: bool = False,
 ) -> dict[str, Any]:
     """Run post-processing steps on an existing graph.
 
     Useful for running expensive steps (flows, communities) separately
     from the build, or for re-running after the graph has been updated
     with ``postprocess="none"``.
+
+    Takes the same per-repository write lock as ``build`` and ``update``: this
+    rewrites derived data (flows, communities, FTS) for a graph another process
+    may be half way through writing, which is the failure #1073 reports.
 
     Args:
         flows: Run flow detection. Default: True.
@@ -799,15 +1078,25 @@ def run_postprocess(
             supplied with ``embedding_model``. Default: disabled.
         embedding_model: Exact model for an explicit refresh. Must be supplied
             with ``embedding_provider``. Default: disabled.
+        wait_for_lock: Block until an in-flight write for this repository
+            finishes, instead of skipping. Default: False.
 
     Returns:
-        Summary of what was computed.
+        Summary of what was computed, or ``status: contended`` when another
+        writer held the lock.
     """
-    store, _root = _get_store(repo_root)
+    root = _resolve_root(repo_root)
+    db_path = get_db_path(root, read_only=True)
+    lock, contended = _lock_or_skip(db_path, wait_for_lock)
+    if contended is not None:
+        return contended
+    store = None
     result: dict[str, Any] = {"status": "ok"}
     warnings: list[str] = []
 
     try:
+        _prepare_db_path(root, db_path)
+        store, _root = _get_store(str(root), db_path=db_path)
         # Read before anything runs: the stages below rebuild derived data
         # from whatever nodes are stored, and none of them can put back a file
         # the interrupted build never parsed.
@@ -953,4 +1242,8 @@ def run_postprocess(
             result["warnings"] = warnings
         return result
     finally:
-        store.close()
+        try:
+            if store is not None:
+                store.close()
+        finally:
+            lock.release()

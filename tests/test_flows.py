@@ -13,7 +13,7 @@ from code_review_graph.flows import (
     trace_flows,
 )
 from code_review_graph.graph import GraphStore
-from code_review_graph.parser import EdgeInfo, NodeInfo
+from code_review_graph.parser import CodeParser, EdgeInfo, NodeInfo
 
 
 class TestFlows:
@@ -171,6 +171,89 @@ class TestFlows:
         eps = detect_entry_points(self.store)
         ep_names = {ep.name for ep in eps}
         assert "query_health" in ep_names
+
+    def test_called_override_is_not_a_flow_root(self):
+        """``@Override`` stops a method reading as dead, not as mid-flow.
+
+        Only dead-code needs it. As a flow root, every called override would add
+        a sub-path of a flow that already exists and push real roots out of the list.
+        """
+        self._add_func("entry_func")
+        self._add_func(
+            "hashCode",
+            parent="Widget",
+            language="java",
+            extra={"decorators": ["Override"]},
+        )
+        self._add_call("app.py::entry_func", "app.py::Widget.hashCode")
+
+        eps = detect_entry_points(self.store)
+        assert "hashCode" not in {ep.name for ep in eps}
+
+    def test_detect_entry_points_junit_lifecycle(self):
+        """JUnit lifecycle methods are invoked by the runner, never explicitly.
+
+        Each one is given a caller, for the same reason as above.
+        """
+        self._add_func("entry_func")
+        for name, annotation in (
+            ("setUp", "BeforeEach"),
+            ("tearDown", "AfterEach"),
+            ("initAll", "BeforeAll"),
+            ("cleanAll", "AfterAll"),
+        ):
+            self._add_func(
+                name,
+                parent="Harness",
+                language="java",
+                extra={"decorators": [annotation]},
+            )
+            self._add_call("app.py::entry_func", f"app.py::Harness.{name}")
+
+        eps = {ep.name for ep in detect_entry_points(self.store)}
+        assert {"setUp", "tearDown", "initAll", "cleanAll"} <= eps
+
+    def test_detect_entry_points_parsed_junit_annotations(self):
+        """Forms read from real Java, which keep their package and arguments."""
+        source = (
+            b"package demo;\n"
+            b"class Cases {\n"
+            b"  @Test void plain() {}\n"
+            b"  @Test(expected = IllegalStateException.class) void withArgs() {}\n"
+            b"  @org.junit.jupiter.api.BeforeEach void qualified() {}\n"
+            b"  @BeforeMethod void testNg() {}\n"
+            b'  @DataProvider(name = "rows") Object[][] rows() { return null; }\n'
+            b"  @TestHelper void lookalike() {}\n"
+            b"  void caller() {\n"
+            b"    plain(); withArgs(); qualified(); testNg(); rows(); lookalike();\n"
+            b"  }\n"
+            b"}\n"
+        )
+        nodes, edges = CodeParser().parse_bytes(Path("Cases.java"), source)
+        for node in nodes:
+            self.store.upsert_node(node)
+        for edge in edges:
+            self.store.upsert_edge(edge)
+        self.store.commit()
+
+        kinds = {n.name: n.kind for n in nodes}
+        # The parser takes a bare @Test for a test, so it never reaches the pattern.
+        assert kinds["plain"] == "Test"
+        assert kinds["withArgs"] == "Function"
+
+        eps = {ep.name for ep in detect_entry_points(self.store)}
+        assert {"withArgs", "qualified", "testNg", "rows"} <= eps
+        assert "plain" not in eps
+        assert "lookalike" not in eps
+
+    def test_override_pattern_is_anchored(self):
+        """``^Override$`` must not match a decorator that merely contains it."""
+        self._add_func("entry_func")
+        self._add_func("helper", extra={"decorators": ["Overridable"]})
+        self._add_call("app.py::entry_func", "app.py::helper")
+
+        eps = detect_entry_points(self.store)
+        assert "helper" not in {ep.name for ep in eps}
 
     def test_detect_entry_points_alembic(self):
         """upgrade/downgrade functions are entry points."""
@@ -634,3 +717,222 @@ class TestFlows:
             "WHERE f.id IS NULL"
         ).fetchall()
         assert len(orphans) == 0, f"found {len(orphans)} orphaned memberships"
+
+    def test_incremental_trace_flows_relative_vs_absolute_new_entry(self, tmp_path):
+        """Relative git paths must match absolute graph file_path values (#569)."""
+        abs_a = (tmp_path / "a.py").resolve().as_posix()
+        abs_b = (tmp_path / "b.py").resolve().as_posix()
+
+        self._add_func("old_entry", path=abs_a)
+        self._add_func("old_callee", path=abs_a)
+        self._add_call(f"{abs_a}::old_entry", f"{abs_a}::old_callee", abs_a)
+
+        flows = trace_flows(self.store)
+        store_flows(self.store, flows)
+
+        self._add_func("new_entry", path=abs_b)
+        self._add_func("new_callee", path=abs_b)
+        self._add_call(f"{abs_b}::new_entry", f"{abs_b}::new_callee", abs_b)
+
+        # git-style relative input — must still discover the new entry point.
+        count = incremental_trace_flows(
+            self.store, ["b.py"], repo_root=tmp_path,
+        )
+        assert count >= 1
+        after = get_flows(self.store)
+        assert any(f["name"] == "new_entry" for f in after)
+
+    def test_incremental_flow_lifecycle_after_node_replacement(self, tmp_path):
+        """Capture/clear before replace, then rematch via entry-point QNs (#569)."""
+        from code_review_graph.flows import (
+            clear_flows_for_files,
+            expand_changed_file_paths,
+            purge_orphan_flow_data,
+        )
+        from code_review_graph.parser import EdgeInfo, NodeInfo
+
+        abs_routes = (tmp_path / "routes.py").resolve().as_posix()
+        abs_services = (tmp_path / "services.py").resolve().as_posix()
+
+        handler_id = self._add_func("handler", path=abs_routes)
+        service_id = self._add_func("service", path=abs_services)
+        self._add_call(
+            f"{abs_routes}::handler",
+            f"{abs_services}::service",
+            abs_routes,
+        )
+
+        flows = trace_flows(self.store)
+        store_flows(self.store, flows)
+        before = get_flows(self.store)
+        assert any(f["name"] == "handler" for f in before)
+        old_flow = next(f for f in before if f["name"] == "handler")
+        old_ep_id = old_flow["entry_point_id"]
+        assert old_ep_id == handler_id
+
+        # Pre-replacement capture (as incremental_update does).
+        expanded = expand_changed_file_paths(
+            self.store, ["routes.py", abs_routes], repo_root=tmp_path,
+        )
+        entry_qns = clear_flows_for_files(self.store, expanded)
+        assert f"{abs_routes}::handler" in entry_qns
+        assert get_flows(self.store) == []
+
+        # Simulate store_file_nodes_edges: delete + reinsert with new IDs.
+        self.store.remove_file_data(abs_routes)
+        self.store.commit()
+        new_handler = NodeInfo(
+            kind="Function",
+            name="handler",
+            file_path=abs_routes,
+            line_start=1,
+            line_end=12,
+            language="python",
+        )
+        new_handler_id = self.store.upsert_node(new_handler, file_hash="new")
+        self.store.upsert_edge(
+            EdgeInfo(
+                kind="CALLS",
+                source=f"{abs_routes}::handler",
+                target=f"{abs_services}::service",
+                file_path=abs_routes,
+                line=5,
+            )
+        )
+        self.store.commit()
+        assert new_handler_id != handler_id
+        # Unchanged callee keeps its ID.
+        assert self.store.get_node(f"{abs_services}::service").id == service_id
+
+        purge_orphan_flow_data(self.store)
+
+        count = incremental_trace_flows(
+            self.store,
+            ["routes.py"],
+            repo_root=tmp_path,
+            entry_point_qns=entry_qns,
+        )
+        assert count >= 1
+
+        after = get_flows(self.store)
+        handler_flows = [f for f in after if f["name"] == "handler"]
+        assert len(handler_flows) == 1
+        assert handler_flows[0]["entry_point_id"] == new_handler_id
+
+        conn = self.store._conn
+        dead_eps = conn.execute(
+            "SELECT id FROM flows WHERE entry_point_id NOT IN (SELECT id FROM nodes)"
+        ).fetchall()
+        assert dead_eps == []
+        orphan_members = conn.execute(
+            "SELECT fm.node_id FROM flow_memberships fm "
+            "LEFT JOIN nodes n ON n.id = fm.node_id WHERE n.id IS NULL"
+        ).fetchall()
+        assert orphan_members == []
+        # Exactly one handler flow — no duplicate stale+new pair.
+        assert len(handler_flows) == 1
+
+    def test_incremental_trace_flows_relative_without_repo_root(self, tmp_path):
+        """Relative changed_files must match absolute paths without repo_root (#569)."""
+        abs_b = (tmp_path / "b.py").resolve().as_posix()
+        self._add_func("new_entry", path=abs_b)
+        self._add_func("new_callee", path=abs_b)
+        self._add_call(f"{abs_b}::new_entry", f"{abs_b}::new_callee", abs_b)
+
+        # Maintainer reproduction: relative only, no repo_root.
+        count = incremental_trace_flows(self.store, ["b.py"])
+        assert count >= 1
+        assert any(f["name"] == "new_entry" for f in get_flows(self.store))
+
+    def test_expand_changed_paths_literal_like_wildcards(self, tmp_path):
+        """Filenames containing _ or % must not fuzzy-match siblings (#569)."""
+        from code_review_graph.flows import expand_changed_file_paths
+
+        abs_literal = (tmp_path / "a_b.py").resolve().as_posix()
+        abs_other = (tmp_path / "acb.py").resolve().as_posix()
+        abs_pct = (tmp_path / "a%z.py").resolve().as_posix()
+        abs_pct_other = (tmp_path / "axz.py").resolve().as_posix()
+        self._add_func("literal", path=abs_literal)
+        self._add_func("other", path=abs_other)
+        self._add_func("pct", path=abs_pct)
+        self._add_func("pct_other", path=abs_pct_other)
+
+        matched_us = expand_changed_file_paths(self.store, ["a_b.py"])
+        assert abs_literal in matched_us
+        assert abs_other not in matched_us
+
+        matched_pct = expand_changed_file_paths(self.store, ["a%z.py"])
+        assert abs_pct in matched_pct
+        assert abs_pct_other not in matched_pct
+
+        assert abs_other not in self.store.get_files_matching("a_b.py")
+        assert abs_literal in self.store.get_files_matching("a_b.py")
+        assert abs_pct_other not in self.store.get_files_matching("a%z.py")
+        assert abs_pct in self.store.get_files_matching("a%z.py")
+
+    def test_expand_rejects_basename_suffix_collision(self, tmp_path):
+        """b.py must not match ab.py / data_utils.py-style suffix collisions."""
+        from code_review_graph.flows import expand_changed_file_paths
+
+        abs_b = (tmp_path / "b.py").resolve().as_posix()
+        abs_ab = (tmp_path / "ab.py").resolve().as_posix()
+        abs_utils = (tmp_path / "utils.py").resolve().as_posix()
+        abs_data_utils = (tmp_path / "data_utils.py").resolve().as_posix()
+        self._add_func("b_fn", path=abs_b)
+        self._add_func("ab_fn", path=abs_ab)
+        self._add_func("utils_fn", path=abs_utils)
+        self._add_func("data_utils_fn", path=abs_data_utils)
+
+        for repo_root in (None, tmp_path):
+            matched_b = expand_changed_file_paths(
+                self.store, ["b.py"], repo_root=repo_root,
+            )
+            assert abs_b in matched_b
+            assert abs_ab not in matched_b
+
+            matched_utils = expand_changed_file_paths(
+                self.store, ["utils.py"], repo_root=repo_root,
+            )
+            assert abs_utils in matched_utils
+            assert abs_data_utils not in matched_utils
+
+    def test_expand_ignores_suffix_collision_across_directories(self, tmp_path):
+        """Shared basenames in different dirs must not cross-wire flows."""
+        from code_review_graph.flows import expand_changed_file_paths
+
+        left = tmp_path / "left"
+        right = tmp_path / "right"
+        left.mkdir()
+        right.mkdir()
+        abs_left = (left / "util.py").resolve().as_posix()
+        abs_right = (right / "util.py").resolve().as_posix()
+        self._add_func("left_fn", path=abs_left)
+        self._add_func("right_fn", path=abs_right)
+
+        # With repo_root + relative path, only the intended file expands.
+        matched = expand_changed_file_paths(
+            self.store, ["left/util.py"], repo_root=tmp_path,
+        )
+        assert abs_left in matched
+        assert abs_right not in matched
+
+    def test_expand_with_repo_root_skips_nested_same_basename(self, tmp_path):
+        """Root-level util.py must not LIKE-match left/util.py when repo_root is set."""
+        from code_review_graph.flows import expand_changed_file_paths
+
+        left = tmp_path / "left"
+        left.mkdir()
+        abs_root = (tmp_path / "util.py").resolve().as_posix()
+        abs_nested = (left / "util.py").resolve().as_posix()
+        self._add_func("root_util", path=abs_root)
+        self._add_func("nested_util", path=abs_nested)
+
+        matched = expand_changed_file_paths(
+            self.store, ["util.py"], repo_root=tmp_path,
+        )
+        assert abs_root in matched
+        assert abs_nested not in matched
+
+        # Without repo_root, LIKE fallback may still resolve absolute forms.
+        matched_any = expand_changed_file_paths(self.store, ["util.py"])
+        assert abs_root in matched_any or abs_nested in matched_any

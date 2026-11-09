@@ -53,6 +53,7 @@ from typing import Iterable, TypedDict
 from .errors import CodeReviewGraphError, is_lock_error
 from .neighbourhood import DEFAULT_DEPTH as NB_DEFAULT_DEPTH
 from .neighbourhood import DEFAULT_MAX_NODES as NB_DEFAULT_MAX_NODES
+from .stdio import configure_utf8_stdio as _configure_utf8_stdio
 
 logger = logging.getLogger(__name__)
 
@@ -101,21 +102,6 @@ def _supports_color() -> bool:
     if not hasattr(sys.stdout, "isatty"):
         return False
     return sys.stdout.isatty()
-
-
-def _configure_utf8_stdio() -> None:
-    """Allow Unicode CLI decoration on streams using a legacy encoding."""
-    for stream in (sys.stdout, sys.stderr):
-        encoding = getattr(stream, "encoding", None)
-        if not encoding or encoding.lower().replace("-", "") == "utf8":
-            continue
-        reconfigure = getattr(stream, "reconfigure", None)
-        if reconfigure is None:
-            continue
-        try:
-            reconfigure(encoding="utf-8")
-        except (OSError, ValueError):
-            pass
 
 
 def _print_banner() -> None:
@@ -334,6 +320,7 @@ def _handle_init(args: argparse.Namespace) -> None:
     # --no-instructions to opt out.
     skip_skills = getattr(args, "no_skills", False)
     skip_hooks = getattr(args, "no_hooks", False)
+    codex_skill_error: str | None = None
     # Legacy: --skills/--hooks/--all still accepted (no-op, everything is default)
 
     from .skills import (
@@ -343,17 +330,36 @@ def _handle_init(args: argparse.Namespace) -> None:
         install_codebuddy_hooks,
         install_codebuddy_skills,
         install_codex_hooks,
+        install_codex_skill,
         install_cursor_hooks,
         install_gemini_cli_hooks,
         install_gemini_cli_skills,
         install_git_hook,
+        install_git_sync_hooks,
         install_hermes_skills,
         install_hooks,
         install_opencode_plugin,
         install_qoder_skills,
     )
-
     if not skip_skills:
+        codex_detected = target == "codex" or (
+            target == "all" and PLATFORMS["codex"]["detect"]()
+        )
+        if codex_detected:
+            try:
+                codex_skill_dir = install_codex_skill()
+            except OSError as exc:
+                codex_skill_dir = None
+                codex_skill_error = f"Could not install Codex skill: {exc}"
+            if codex_skill_dir is None:
+                codex_skill_error = codex_skill_error or (
+                    "Codex skill installation refused existing files; check the warning above"
+                )
+                if target == "all":
+                    print(codex_skill_error, file=sys.stderr)
+            else:
+                print(f"Installed Codex skill in {codex_skill_dir}")
+
         # Claude Code skills are only relevant for Claude (or full install).
         if target in ("claude", "all"):
             skills_dir = generate_skills(repo_root)
@@ -422,6 +428,8 @@ def _handle_init(args: argparse.Namespace) -> None:
         git_hook = install_git_hook(repo_root)
         if git_hook:
             print(f"Installed git pre-commit hook in {git_hook}")
+        for sync_hook in install_git_sync_hooks(repo_root):
+            print(f"Installed git {sync_hook.name} hook in {sync_hook}")
     if not skip_hooks and target in ("claude", "qoder", "all"):
         platforms_to_install = [target] if target != "all" else ["claude", "qoder"]
         for plat in platforms_to_install:
@@ -430,6 +438,8 @@ def _handle_init(args: argparse.Namespace) -> None:
         git_hook = install_git_hook(repo_root)
         if git_hook:
             print(f"Installed git pre-commit hook in {git_hook}")
+        for sync_hook in install_git_sync_hooks(repo_root):
+            print(f"Installed git {sync_hook.name} hook in {sync_hook}")
 
     # Cursor hooks (user-level, only if ~/.cursor exists — matching MCP detect)
     if not skip_hooks and target in ("all", "cursor") and PLATFORMS["cursor"]["detect"]():
@@ -454,6 +464,8 @@ def _handle_init(args: argparse.Namespace) -> None:
         except Exception as exc:
             logger.warning("Could not install OpenCode plugin: %s", exc)
 
+    if codex_skill_error and target == "codex":
+        raise CodeReviewGraphError(codex_skill_error)
     print()
     print("Next steps:")
     print("  1. code-review-graph build    # build the knowledge graph")
@@ -682,6 +694,29 @@ def _run_graph_tool_command(args, repo_root: Path) -> None:
     print(json.dumps(result, indent=2, default=str))
 
 
+#: Exit code for "another writer holds the lock; nothing was done".
+#:
+#: ``EX_TEMPFAIL`` from sysexits.h rather than 1: the condition is temporary
+#: and expected, so a hook or script can tell it apart from a real failure
+#: (bad config, corrupt database) without parsing the message, while still
+#: seeing a non-zero status the way the SQLite busy timeout used to report it.
+EXIT_TEMPFAIL = getattr(os, "EX_TEMPFAIL", 75)
+
+
+def _exit_if_contended(result: dict) -> None:
+    """Stop when another writer already owns this repository's graph.
+
+    The process holding the lock is writing the same graph, so this invocation
+    has nothing left to do. ``EXIT_TEMPFAIL`` says so precisely: non-zero, so a
+    caller cannot mistake a skip for success, but distinct from the exit code
+    of an actual failure.
+    """
+    if result.get("status") != "contended":
+        return
+    print(f"Skipped: {result.get('summary', 'another write is running')}", file=sys.stderr)
+    sys.exit(EXIT_TEMPFAIL)
+
+
 def _warn_failed_files(result: dict) -> None:
     """Report files that failed to parse; their previous graph rows are kept."""
     failed = result.get("errors") or []
@@ -697,42 +732,186 @@ def _warn_failed_files(result: dict) -> None:
 
 
 def _open_graph_store(db_path: Path, command: str):
-    """Open the graph store, recovering from an unusable database file.
+    """Open a store; CLI builds request recovery inside their write lock."""
+    from .tools._common import _open_graph_store as open_store
 
-    A restored CI cache can hold a truncated or half-written ``graph.db``,
-    and it can just as easily hold a valid SQLite file whose tables are the
-    wrong shape. SQLite refuses either one and the command used to die with a
-    traceback, which is why ``action.yml``'s ``update || build`` fallback
-    could not recover: the full build failed for exactly the same reason.
-    ``build`` rewrites the graph from scratch, so there the bad file is
-    discarded and the build proceeds.
+    return open_store(db_path, command)
 
-    Every other command re-raises, and ``main`` prints the one actionable
-    line the error already carries. That is the whole difference between the
-    two paths, and it is worth stating why the reporting is not duplicated
-    here: a second message would compete with the first, and one of them
-    would drift.
 
-    ``build`` discards only what ``CorruptGraphDatabaseError`` names, and
-    that class is deliberately narrow. A contended database, a read-only
-    checkout, a foreign SQLite file and a graph from a newer release all
-    reach ``main`` as themselves, because deleting any of those would destroy
-    a graph, or data, that is not broken.
+def _ensure_project_marker(repo_root: Path) -> None:
+    """Let a plain directory pass tool validation, without opening graph.db.
+
+    ``build``, ``update`` and ``postprocess`` all accept one, and each now
+    reaches the tools before anything has created the data directory.
     """
-    from .graph import CorruptGraphDatabaseError, GraphStore, discard_corrupt_database
+    if repo_root.is_dir() and not any(
+        (repo_root / marker).exists() for marker in (".git", ".svn", ".code-review-graph")
+    ):
+        from .incremental import _create_data_dir
+        _create_data_dir(repo_root / ".code-review-graph")
 
-    try:
-        return GraphStore(db_path)
-    except CorruptGraphDatabaseError as exc:
-        if command != "build":
-            raise
-        logger.warning(
-            "Graph database at %s is unusable (%s); discarding it and "
-            "building from scratch.",
-            db_path, exc.reason,
+
+def _handle_build_update(args, repo_root: Path, embedding_refresh_kwargs) -> None:
+    """Run writers before the generic CLI store initialization."""
+    from .incremental import assert_graph_serves_root, get_db_path
+
+    _ensure_project_marker(repo_root)
+    if args.command == "build":
+        pp = (
+            "none"
+            if getattr(args, "skip_postprocess", False)
+            else ("minimal" if getattr(args, "skip_flows", False) else "full")
         )
-        discard_corrupt_database(db_path)
-        return GraphStore(db_path)
+        from .tools.build import build_or_update_graph
+
+        previous_disable = logging.root.manager.disable
+        if args.quiet:
+            logging.disable(logging.INFO)
+        try:
+            result = build_or_update_graph(
+                full_rebuild=True,
+                recover_corrupt=True,
+                repo_root=str(repo_root),
+                postprocess=pp,
+                wait_for_lock=getattr(args, "wait", False),
+                **embedding_refresh_kwargs,
+            )
+        finally:
+            logging.disable(previous_disable)
+        _exit_if_contended(result)
+        parsed = result.get("files_parsed", 0)
+        nodes = result.get("total_nodes", 0)
+        edges = result.get("total_edges", 0)
+        if not args.quiet:
+            print(
+                f"Full build: {parsed} files, {nodes} nodes, {edges} edges "
+                f"(postprocess={pp})"
+            )
+            if result.get("errors"):
+                print(f"Errors: {len(result['errors'])}")
+
+    elif args.command == "update":
+        pp = (
+            "none"
+            if getattr(args, "skip_postprocess", False)
+            else ("minimal" if getattr(args, "skip_flows", False) else "full")
+        )
+        from .tools.build import build_or_update_graph
+
+        previous_disable = logging.root.manager.disable
+        if args.quiet:
+            logging.disable(logging.INFO)
+        try:
+            result = build_or_update_graph(
+                full_rebuild=False,
+                repo_root=str(repo_root),
+                base=args.base,
+                postprocess=pp,
+                wait_for_lock=getattr(args, "wait", False),
+                **embedding_refresh_kwargs,
+            )
+        except RuntimeError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+        finally:
+            logging.disable(previous_disable)
+        _exit_if_contended(result)
+        if result.get("status") == "error":
+            print(f"Error: {result.get('summary', 'update failed')}", file=sys.stderr)
+            sys.exit(1)
+        nodes = result.get("total_nodes", 0)
+        edges = result.get("total_edges", 0)
+        if not args.quiet:
+            if result.get("build_type") == "full":
+                # No usable incremental base (fresh/legacy graph, or the
+                # last-synced commit was lost to a rewrite/shallow clone),
+                # so the update fell back to a full rebuild.
+                parsed = result.get("files_parsed", 0)
+                print(
+                    f"Full rebuild (no usable incremental base): "
+                    f"{parsed} files, {nodes} nodes, {edges} edges"
+                    f" (postprocess={pp})"
+                )
+            else:
+                updated = result.get("files_updated", 0)
+                print(
+                    f"Incremental: {updated} files updated, "
+                    f"{nodes} nodes, {edges} edges"
+                    f" (postprocess={pp})"
+                )
+        _warn_failed_files(result)
+
+        # --brief: append a one-line change-impact summary with the same
+        # estimated context-savings approximation that detect-changes uses.
+        # Same baseline (changed files vs analysis response), so the two
+        # commands are directly comparable.
+        if getattr(args, "brief", False) and not args.quiet:
+            from .changes import analyze_changes
+            from .context_savings import (
+                attach_context_savings,
+                estimate_file_tokens,
+                format_context_savings_panel,
+            )
+            from .incremental import discover_review_changes
+
+            # Reuse the base the update actually resolved to (args.base is
+            # None by default now, which get_changed_files cannot accept),
+            # then apply the same merge-base rule as detect-changes so a
+            # branch ref scopes the summary to this branch's own commits.
+            changed, brief_base = discover_review_changes(
+                repo_root, result.get("base_resolved") or "HEAD~1"
+            )
+            if changed:
+                from .locking import WriteLock
+
+                db_path = get_db_path(repo_root, read_only=True)
+                brief_lock = WriteLock(db_path)
+                if not brief_lock.acquire(blocking=True):
+                    from .tools.build import _write_skipped_response
+                    _exit_if_contended(_write_skipped_response(db_path, brief_lock.holder_pid()))
+                store = None
+                try:
+                    store = _open_graph_store(db_path, "update")
+                    assert_graph_serves_root(repo_root, store)
+                    impact = analyze_changes(
+                        store,
+                        changed,
+                        repo_root=str(repo_root),
+                        base=brief_base,
+                    )
+                    original_tokens = estimate_file_tokens(repo_root, changed)
+                    attach_context_savings(
+                        impact,
+                        original_tokens=original_tokens,
+                    )
+                    summary = impact.get("summary", "")
+                    if summary:
+                        print(summary)
+                    verified = None
+                    if getattr(args, "verify", False):
+                        from .context_savings import verify_with_tiktoken
+                        verified = verify_with_tiktoken(
+                            repo_root, changed, impact,
+                        )
+                        if verified is None:
+                            print(
+                                "Note: --verify requires tiktoken. "
+                                "Install with `pip install tiktoken`.",
+                            )
+                    panel = format_context_savings_panel(
+                        impact.get("context_savings"),
+                        original_tokens=original_tokens,
+                        response=impact,
+                        verified=verified,
+                    )
+                    if panel:
+                        print(panel)
+                finally:
+                    try:
+                        if store is not None:
+                            store.close()
+                    finally:
+                        brief_lock.release()
 
 
 def main() -> None:
@@ -1042,6 +1221,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="External directory to store graph database (useful for network shares)"
     )
     _add_embedding_refresh_args(build_cmd)
+    build_cmd.add_argument(
+        "--wait",
+        action="store_true",
+        help="If a build for this repository is already running, wait for it "
+             "to finish instead of skipping. Default: report the overlap and "
+             "exit without re-parsing the same files.",
+    )
 
     # update
     update_cmd = sub.add_parser("update", help="Incremental update (only changed files)")
@@ -1086,6 +1272,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="External directory to store graph database (useful for network shares)"
     )
     _add_embedding_refresh_args(update_cmd)
+    update_cmd.add_argument(
+        "--wait",
+        action="store_true",
+        help="If a build for this repository is already running, wait for it "
+             "to finish instead of skipping. Default: report the overlap and "
+             "exit without re-parsing the same files.",
+    )
 
     # postprocess
     pp_cmd = sub.add_parser(
@@ -1102,6 +1295,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="External directory to store graph database (useful for network shares)"
     )
     _add_embedding_refresh_args(pp_cmd)
+    pp_cmd.add_argument(
+        "--wait",
+        action="store_true",
+        help="If a build, update or postprocess is already running for this "
+             "repository, wait for it to finish instead of skipping.",
+    )
 
     # embed
     embed_cmd = sub.add_parser(
@@ -1389,6 +1588,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     # enrich (Claude Code PreToolUse hook; reads one JSON object from stdin)
     sub.add_parser("enrich", help="Enrich hook input with graph context")
+    sub.add_parser("hook-update", help="Update the graph for the hook payload cwd")
+    sub.add_parser("hook-status", help="Show graph status for the hook payload cwd")
 
     # dead-code
     dead_cmd = sub.add_parser(
@@ -1459,7 +1660,7 @@ def build_parser() -> argparse.ArgumentParser:
     search_cmd.add_argument("query", help="Search string")
     search_cmd.add_argument(
         "--kind",
-        choices=["File", "Class", "Function", "Type", "Test"],
+        choices=["File", "Class", "Function", "Type", "Test", "YamlPath"],
         default=None,
     )
     search_cmd.add_argument("--limit", type=_positive_int, default=20)
@@ -1541,6 +1742,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Start filesystem watch in a daemon thread while MCP server runs",
     )
     serve_cmd.add_argument(
+        "--multi-worktree",
+        action="store_true",
+        help=(
+            "Use one stdio MCP session with one child server per linked Git "
+            "worktree; requires explicit repo_root for non-primary worktrees"
+        ),
+    )
+    serve_cmd.add_argument(
         "--tools", default=None,
         help=(
             "Comma-separated list of tool names to expose "
@@ -1574,6 +1783,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--auto-watch",
         action="store_true",
         help="Start filesystem watch in a daemon thread while MCP server runs",
+    )
+    mcp_cmd.add_argument(
+        "--multi-worktree",
+        action="store_true",
+        help="Use one stdio MCP session with one child server per linked Git worktree",
     )
 
     # daemon
@@ -1694,6 +1908,12 @@ def _dispatch() -> None:
         run_hook()
         return
 
+    if args.command in {"hook-update", "hook-status"}:
+        from .hook_update import run_status_hook, run_update_hook
+
+        (run_update_hook if args.command == "hook-update" else run_status_hook)()
+        return
+
     if args.command in _GRAPH_TOOL_COMMANDS:
         from .incremental import find_project_root, get_db_path
 
@@ -1713,7 +1933,15 @@ def _dispatch() -> None:
                 raise SystemExit(1)
         else:
             repo_root = find_project_root()
-        db_path = get_db_path(repo_root)
+        db_path = get_db_path(repo_root, read_only=True)
+        if (
+            not db_path.exists()
+            and db_path.resolve() == (repo_root / ".code-review-graph" / "graph.db").resolve()
+            and (repo_root / ".code-review-graph.db").exists()
+        ):
+            # Preserve legacy migration without creating graph state for a
+            # repository that has never been indexed or an external data dir.
+            db_path = get_db_path(repo_root)
         if not db_path.exists():
             print(
                 f"No graph found at {db_path}. Run `code-review-graph build` first.",
@@ -1726,14 +1954,38 @@ def _dispatch() -> None:
     embedding_refresh_kwargs = _embedding_refresh_kwargs(args, ap)
 
     if args.command in ("serve", "mcp"):
-        from .main import main as serve_main
-
         auto_watch = getattr(args, "auto_watch", False)
+        multi_worktree = getattr(args, "multi_worktree", False)
         if args.command == "serve":
             if args.port is not None and not args.http:
                 _SUBCOMMANDS["serve"].error("--port requires --http")
             if args.host is not None and not args.http:
                 _SUBCOMMANDS["serve"].error("--host requires --http")
+        if multi_worktree:
+            if args.command == "serve" and args.http:
+                _SUBCOMMANDS["serve"].error(
+                    "--multi-worktree is only supported for stdio"
+                )
+            if os.environ.get("CRG_DATA_DIR", "").strip():
+                _SUBCOMMANDS[args.command].error(
+                    "--multi-worktree cannot be combined with CRG_DATA_DIR; "
+                    "use per-repository Registry data_dir entries instead"
+                )
+            from .multi_worktree import MultiWorktreeError, run_multi_worktree_server
+
+            try:
+                run_multi_worktree_server(
+                    repo_root=args.repo,
+                    auto_watch=auto_watch,
+                    tools=getattr(args, "tools", None),
+                )
+            except MultiWorktreeError as exc:
+                _SUBCOMMANDS[args.command].error(str(exc))
+            return
+
+        from .main import main as serve_main
+
+        if args.command == "serve":
             if args.http:
                 host = args.host if args.host is not None else "127.0.0.1"
                 port = args.port if args.port is not None else 5555
@@ -1918,6 +2170,13 @@ def _dispatch() -> None:
                     alias = entry.get("alias", "")
                     alias_str = f"  ({alias})" if alias else ""
                     print(f"  {entry['path']}{alias_str}")
+                    if registered_data_dir := entry.get("data_dir"):
+                        try:
+                            accessible = Path(registered_data_dir).is_dir()
+                        except OSError:
+                            accessible = False
+                        missing = " [MISSING]" if not accessible else ""
+                        print(f"    data_dir: {registered_data_dir}{missing}")
         return
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -1933,38 +2192,36 @@ def _dispatch() -> None:
     if args.command == "postprocess":
         repo_root = Path(args.repo) if args.repo else find_project_root()
         _handle_data_dir_option(args, repo_root)
-        db_path = get_db_path(repo_root)
-        store = _open_graph_store(db_path, args.command)
-        try:
-            from .tools.build import run_postprocess
+        _ensure_project_marker(repo_root)
+        from .tools.build import run_postprocess
 
-            result = run_postprocess(
-                flows=not getattr(args, "no_flows", False),
-                communities=not getattr(args, "no_communities", False),
-                fts=not getattr(args, "no_fts", False),
-                repo_root=str(repo_root),
-                **embedding_refresh_kwargs,
+        result = run_postprocess(
+            flows=not getattr(args, "no_flows", False),
+            communities=not getattr(args, "no_communities", False),
+            fts=not getattr(args, "no_fts", False),
+            repo_root=str(repo_root),
+            wait_for_lock=getattr(args, "wait", False),
+            **embedding_refresh_kwargs,
+        )
+        _exit_if_contended(result)
+        parts = []
+        if result.get("flows_detected"):
+            parts.append(f"{result['flows_detected']} flows")
+        if result.get("communities_detected"):
+            parts.append(f"{result['communities_detected']} communities")
+        if result.get("fts_indexed"):
+            parts.append(f"{result['fts_indexed']} FTS entries")
+        print(f"Post-processing: {', '.join(parts) or 'done'}")
+        if result.get("build_incomplete"):
+            # Post-processing rebuilt derived data for the nodes that are
+            # stored, which is not the same as a repaired graph: the build
+            # that stored them never finished, so files are still missing.
+            print(
+                "Build state: INCOMPLETE - the last build stopped before "
+                "every file was stored, so files are still missing from "
+                "the graph. Post-processing cannot add them. Run "
+                "'code-review-graph build' to rebuild."
             )
-            parts = []
-            if result.get("flows_detected"):
-                parts.append(f"{result['flows_detected']} flows")
-            if result.get("communities_detected"):
-                parts.append(f"{result['communities_detected']} communities")
-            if result.get("fts_indexed"):
-                parts.append(f"{result['fts_indexed']} FTS entries")
-            print(f"Post-processing: {', '.join(parts) or 'done'}")
-            if result.get("build_incomplete"):
-                # Post-processing rebuilt derived data for the nodes that are
-                # stored, which is not the same as a repaired graph: the build
-                # that stored them never finished, so files are still missing.
-                print(
-                    "Build state: INCOMPLETE - the last build stopped before "
-                    "every file was stored, so files are still missing from "
-                    "the graph. Post-processing cannot add them. Run "
-                    "'code-review-graph build' to rebuild."
-                )
-        finally:
-            store.close()
         return
 
     if args.command == "embed":
@@ -2027,6 +2284,10 @@ def _dispatch() -> None:
     if args.command in _data_dir_cmds and not read_only_explicit_data_dir:
         _handle_data_dir_option(args, repo_root)
 
+    if args.command in ("build", "update"):
+        _handle_build_update(args, repo_root, embedding_refresh_kwargs)
+        return
+
     if args.command in (*_read_only_db_cmds, "dead-code", "forget"):
         if read_only_explicit_data_dir:
             db_path = Path(args.data_dir).expanduser().resolve() / "graph.db"
@@ -2088,141 +2349,6 @@ def _dispatch() -> None:
                     file_path = item.get("relative_path") or item.get("file", "?")
                     line = item.get("line", "?")
                     print(f"  [{kind}] {name}  ({file_path}:{line})")
-
-        elif args.command == "build":
-            pp = (
-                "none"
-                if getattr(args, "skip_postprocess", False)
-                else ("minimal" if getattr(args, "skip_flows", False) else "full")
-            )
-            from .tools.build import build_or_update_graph
-
-            previous_disable = logging.root.manager.disable
-            if args.quiet:
-                logging.disable(logging.INFO)
-            try:
-                result = build_or_update_graph(
-                    full_rebuild=True,
-                    repo_root=str(repo_root),
-                    postprocess=pp,
-                    **embedding_refresh_kwargs,
-                )
-            finally:
-                logging.disable(previous_disable)
-            parsed = result.get("files_parsed", 0)
-            nodes = result.get("total_nodes", 0)
-            edges = result.get("total_edges", 0)
-            if not args.quiet:
-                print(
-                    f"Full build: {parsed} files, {nodes} nodes, {edges} edges "
-                    f"(postprocess={pp})"
-                )
-                if result.get("errors"):
-                    print(f"Errors: {len(result['errors'])}")
-
-        elif args.command == "update":
-            pp = (
-                "none"
-                if getattr(args, "skip_postprocess", False)
-                else ("minimal" if getattr(args, "skip_flows", False) else "full")
-            )
-            from .tools.build import build_or_update_graph
-
-            previous_disable = logging.root.manager.disable
-            if args.quiet:
-                logging.disable(logging.INFO)
-            try:
-                result = build_or_update_graph(
-                    full_rebuild=False,
-                    repo_root=str(repo_root),
-                    base=args.base,
-                    postprocess=pp,
-                    **embedding_refresh_kwargs,
-                )
-            except RuntimeError as exc:
-                print(f"Error: {exc}", file=sys.stderr)
-                sys.exit(1)
-            finally:
-                logging.disable(previous_disable)
-            if result.get("status") == "error":
-                print(f"Error: {result.get('summary', 'update failed')}", file=sys.stderr)
-                sys.exit(1)
-            nodes = result.get("total_nodes", 0)
-            edges = result.get("total_edges", 0)
-            if not args.quiet:
-                if result.get("build_type") == "full":
-                    # No usable incremental base (fresh/legacy graph, or the
-                    # last-synced commit was lost to a rewrite/shallow clone),
-                    # so the update fell back to a full rebuild.
-                    parsed = result.get("files_parsed", 0)
-                    print(
-                        f"Full rebuild (no usable incremental base): "
-                        f"{parsed} files, {nodes} nodes, {edges} edges"
-                        f" (postprocess={pp})"
-                    )
-                else:
-                    updated = result.get("files_updated", 0)
-                    print(
-                        f"Incremental: {updated} files updated, "
-                        f"{nodes} nodes, {edges} edges"
-                        f" (postprocess={pp})"
-                    )
-            _warn_failed_files(result)
-
-            # --brief: append a one-line change-impact summary with the same
-            # estimated context-savings approximation that detect-changes uses.
-            # Same baseline (changed files vs analysis response), so the two
-            # commands are directly comparable.
-            if getattr(args, "brief", False) and not args.quiet:
-                from .changes import analyze_changes
-                from .context_savings import (
-                    attach_context_savings,
-                    estimate_file_tokens,
-                    format_context_savings_panel,
-                )
-                from .incremental import discover_review_changes
-
-                # Reuse the base the update actually resolved to (args.base is
-                # None by default now, which get_changed_files cannot accept),
-                # then apply the same merge-base rule as detect-changes so a
-                # branch ref scopes the summary to this branch's own commits.
-                changed, brief_base = discover_review_changes(
-                    repo_root, result.get("base_resolved") or "HEAD~1"
-                )
-                if changed:
-                    impact = analyze_changes(
-                        store,
-                        changed,
-                        repo_root=str(repo_root),
-                        base=brief_base,
-                    )
-                    original_tokens = estimate_file_tokens(repo_root, changed)
-                    attach_context_savings(
-                        impact,
-                        original_tokens=original_tokens,
-                    )
-                    summary = impact.get("summary", "")
-                    if summary:
-                        print(summary)
-                    verified = None
-                    if getattr(args, "verify", False):
-                        from .context_savings import verify_with_tiktoken
-                        verified = verify_with_tiktoken(
-                            repo_root, changed, impact,
-                        )
-                        if verified is None:
-                            print(
-                                "Note: --verify requires tiktoken. "
-                                "Install with `pip install tiktoken`.",
-                            )
-                    panel = format_context_savings_panel(
-                        impact.get("context_savings"),
-                        original_tokens=original_tokens,
-                        response=impact,
-                        verified=verified,
-                    )
-                    if panel:
-                        print(panel)
 
         elif args.command == "status":
             from .build_state import BUILD_IN_PROGRESS, read_build_state
