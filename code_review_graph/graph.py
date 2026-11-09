@@ -2183,8 +2183,14 @@ class GraphStore:
         separate query per file. Order matters for ambiguous export targets.
         """
         rows = self._conn.execute(
-            f"SELECT * FROM nodes WHERE file_path IN ({_FILE_PATHS_QUERY}) "
-            "ORDER BY file_path, id"
+            "WITH file_paths AS (" + _FILE_PATHS_QUERY + ") "
+            "SELECT nodes.* FROM nodes JOIN ("
+            "SELECT REPLACE(file_path, ?, '/') AS normalized_path, "
+            "MIN(file_path) AS inventory_path FROM file_paths "
+            "GROUP BY normalized_path) AS inventory "
+            "ON nodes.file_path = inventory.normalized_path "
+            "ORDER BY inventory.inventory_path, nodes.id",
+            ("\\",),
         )
         for row in rows:
             yield self._row_to_node(row)

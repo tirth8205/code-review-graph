@@ -38,7 +38,11 @@ def test_full_export_batches_node_reads(tmp_path, unrelated_files, view):
             }
         )
         assert {node["qualified_name"] for node in data["nodes"]} == expected
-        node_reads = [sql for sql in statements if sql.startswith("SELECT * FROM nodes")]
+        node_reads = [
+            sql
+            for sql in statements
+            if "SELECT * FROM nodes" in sql or "SELECT nodes.* FROM nodes" in sql
+        ]
         assert len(node_reads) == 1, node_reads
 
 
@@ -76,4 +80,28 @@ def test_export_preserves_file_scope_and_ambiguous_target_order(tmp_path):
         ]
         assert [(edge["source"], edge["target"]) for edge in data["edges"]] == [
             ("caller.py::call", "a/target.py::run")
+        ]
+
+
+def test_legacy_path_inventory_preserves_ambiguous_target_order(tmp_path):
+    with GraphStore(tmp_path / "graph.db") as store:
+        store.upsert_node(NodeInfo("Function", "run", "a/z.py", 1, 2, "python"))
+        store.upsert_node(
+            NodeInfo("Function", "run", "a/a.py", 1, 2, "python", extra={"virtual": True})
+        )
+        store.upsert_node(NodeInfo("Function", "call", "caller.py", 1, 2, "python"))
+        store.upsert_edge(EdgeInfo("CALLS", "a/a.py::run", "missing", "a/a.py"))
+        store._conn.execute("UPDATE edges SET file_path = ?", ("a\\a.py",))
+        store.upsert_edge(EdgeInfo("CALLS", "caller.py::call", "run", "caller.py"))
+        store.commit()
+
+        data = export_graph_data(store)
+
+        assert [node["qualified_name"] for node in data["nodes"]] == [
+            "a/z.py::run",
+            "a/a.py::run",
+            "caller.py::call",
+        ]
+        assert [(edge["source"], edge["target"]) for edge in data["edges"]] == [
+            ("caller.py::call", "a/z.py::run")
         ]
