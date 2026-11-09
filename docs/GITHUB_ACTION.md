@@ -43,7 +43,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: tirth8205/code-review-graph@v2.3.8
+      - uses: tirth8205/code-review-graph@v2.3.9
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 ```
@@ -57,7 +57,7 @@ which run on Node 24. Self-hosted runners must be version `2.327.1` or newer.
 To turn the review into a merge gate:
 
 ```yaml
-      - uses: tirth8205/code-review-graph@v2.3.8
+      - uses: tirth8205/code-review-graph@v2.3.9
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           fail-on-risk: high
@@ -130,11 +130,11 @@ someone else's.
 The action caches the `.code-review-graph/` directory (the SQLite graph
 database) with `actions/cache`:
 
-- **Key**: `code-review-graph-schema13-<runner.os>-<hashFiles(lockfiles)>`.
+- **Key**: `code-review-graph-schema14-<runner.os>-<hashFiles(lockfiles)>`.
   The lockfile hash covers `uv.lock`, `poetry.lock`, `requirements*.txt`,
   `Pipfile.lock`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`,
   `go.sum`, `Cargo.lock`, `Gemfile.lock` and `composer.lock`.
-- **Schema segment**: `schema13` tracks the database schema version
+- **Schema segment**: `schema14` tracks the database schema version
   (`LATEST_VERSION` in `code_review_graph/migrations.py`). It is bumped when
   the schema changes so a stale cache is not restored across incompatible
   versions.

@@ -6,6 +6,7 @@ never be reachable from this suite.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
@@ -372,6 +373,34 @@ def test_source_pr_legacy_hook_commands_are_removed_exactly(
     assert _read_jsonc(fake_home / ".codex" / "hooks.json") == {}
 
 
+def test_removes_codex_hooks_every_release_wrote(fake_home: Path, fake_repo: Path):
+    """The v2.3.9 commands are no longer what the installer generates."""
+    released = {
+        "PostToolUse": (
+            "cat >/dev/null || true; git rev-parse --git-dir >/dev/null 2>&1"
+            " && code-review-graph update --skip-flows || true"
+        ),
+        "SessionStart": (
+            "cat >/dev/null || true; git rev-parse --git-dir >/dev/null 2>&1"
+            " && code-review-graph status || echo 'Not a git repo, skipping'"
+        ),
+    }
+    path = fake_home / ".codex" / "hooks.json"
+    _write_json(
+        path,
+        {
+            "hooks": {
+                event: [{"hooks": [{"type": "command", "command": command}]}]
+                for event, command in released.items()
+            }
+        },
+    )
+
+    uninstall.run(repo=fake_repo, keep_data=True)
+
+    assert _read_jsonc(path) == {}
+
+
 def test_shared_skill_directories_keep_user_files_and_unrelated_skills(
     fake_repo: Path,
     fake_home: Path,
@@ -387,6 +416,16 @@ def test_shared_skill_directories_keep_user_files_and_unrelated_skills(
         _write(root / generated_slug / "notes.txt", "keep\n")
         _write(root / "user-skill" / "SKILL.md", "keep\n")
 
+    # What install actually writes since #909: the workflows bundled in the
+    # distribution, in a repository that has no top-level skills/ of its own.
+    bundled = skills.bundled_skill_names()
+    assert bundled, "no bundled skills found to exercise the Qoder path"
+    for name in bundled:
+        _write(fake_repo / ".qoder" / "skills" / name / "SKILL.md", "bundled\n")
+    _write(fake_repo / ".qoder" / "skills" / bundled[0] / "notes.txt", "keep\n")
+
+    # What releases before #909 wrote: a copy of the target project's own
+    # top-level skills/ directory. Those copies must still be removable.
     _write(fake_repo / "skills" / "project-skill" / "SKILL.md", "source\n")
     _write(fake_repo / ".qoder" / "skills" / "project-skill" / "SKILL.md", "copy\n")
     _write(fake_repo / ".qoder" / "skills" / "project-skill" / "notes.txt", "keep\n")
@@ -398,9 +437,33 @@ def test_shared_skill_directories_keep_user_files_and_unrelated_skills(
         assert not (root / generated_slug / "SKILL.md").exists()
         assert (root / generated_slug / "notes.txt").exists()
         assert (root / "user-skill" / "SKILL.md").exists()
+    for name in bundled:
+        assert not (fake_repo / ".qoder" / "skills" / name / "SKILL.md").exists()
+    assert (fake_repo / ".qoder" / "skills" / bundled[0] / "notes.txt").exists()
     assert not (fake_repo / ".qoder" / "skills" / "project-skill" / "SKILL.md").exists()
     assert (fake_repo / ".qoder" / "skills" / "project-skill" / "notes.txt").exists()
     assert (fake_repo / ".qoder" / "skills" / "user-skill" / "SKILL.md").exists()
+
+
+def test_qoder_skills_are_removed_without_a_repository_skills_directory(
+    fake_repo: Path,
+    fake_home: Path,
+) -> None:
+    """The shape a real user repository has: install's own bundled workflows.
+
+    Deriving the list from ``<repo>/skills`` removed none of them, because a
+    normal project has no such directory (#909).
+    """
+    assert not (fake_repo / "skills").exists()
+    bundled = skills.bundled_skill_names()
+    assert bundled, "no bundled skills found to exercise the Qoder path"
+    for name in bundled:
+        _write(fake_repo / ".qoder" / "skills" / name / "SKILL.md", "bundled\n")
+
+    uninstall.run(repo=fake_repo, keep_data=True)
+
+    for name in bundled:
+        assert not (fake_repo / ".qoder" / "skills" / name / "SKILL.md").exists()
 
 
 def test_instruction_inventory_and_git_hook_are_surgical(
@@ -1005,6 +1068,86 @@ def test_platform_scoped_unbind_targets_user_scope_toml(
     assert "code-review-graph" in claude_config.read_text(encoding="utf-8")
 
 
+def test_uninstall_uses_custom_codex_home_and_preserves_user_skill(
+    fake_repo: Path,
+    fake_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codex_home = fake_home / "wsl-codex"
+    skill_dir = codex_home / "skills" / "code-review-graph"
+    skill_dir.mkdir(parents=True)
+    skill_file = skill_dir / "SKILL.md"
+    skill_file.write_text("generated\n", encoding="utf-8")
+    notes = skill_dir / "notes.txt"
+    notes.write_text("user\n", encoding="utf-8")
+    (skill_dir / ".code-review-graph-managed.json").write_text(
+        json.dumps({"version": 1, "files": {"SKILL.md": "not-the-file-hash"}}),
+        encoding="utf-8",
+    )
+    config = codex_home / "config.toml"
+    _write_codex_config(config)
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    report = uninstall.run(repo=fake_repo, keep_data=True)
+
+    assert report.errors == []
+    config_text = config.read_text(encoding="utf-8")
+    assert "[mcp_servers.code-review-graph]" not in config_text
+    assert "[mcp_servers.other]" in config_text
+    assert skill_file.exists()
+    assert notes.exists()
+
+
+def test_uninstall_removes_only_managed_codex_skill_files(
+    fake_repo: Path,
+    fake_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from code_review_graph.codex_skill import install_codex_skill
+
+    codex_home = fake_home / "wsl-codex"
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    skill_dir = install_codex_skill()
+    notes = skill_dir / "notes.txt"
+    notes.write_text("user\n", encoding="utf-8")
+
+    report = uninstall.run(repo=fake_repo, keep_data=True)
+
+    assert report.errors == []
+    assert notes.read_text(encoding="utf-8") == "user\n"
+    assert not (skill_dir / "SKILL.md").exists()
+    assert not (skill_dir / "agents" / "openai.yaml").exists()
+    assert not (skill_dir / "scripts" / "crg_readonly.py").exists()
+    assert not (skill_dir / ".code-review-graph-managed.json").exists()
+
+
+def test_uninstall_ignores_symlinked_codex_manifest(
+    fake_repo: Path,
+    fake_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codex_home = fake_home / "codex"
+    skill_dir = codex_home / "skills" / "code-review-graph"
+    skill_dir.mkdir(parents=True)
+    skill = skill_dir / "SKILL.md"
+    skill.write_text("user-owned\n", encoding="utf-8")
+    outside = fake_home / "outside.json"
+    outside.write_text(
+        json.dumps({"version": 1, "files": {
+            "SKILL.md": hashlib.sha256(skill.read_bytes()).hexdigest()
+        }}),
+        encoding="utf-8",
+    )
+    (skill_dir / ".code-review-graph-managed.json").symlink_to(outside)
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    report = uninstall.run(repo=fake_repo, keep_data=True)
+
+    assert report.errors == []
+    assert skill.read_text(encoding="utf-8") == "user-owned\n"
+    assert outside.is_file()
+
+
 def test_cli_uninstall_platform_scopes_to_one_binding(
     fake_repo: Path,
     fake_home: Path,
@@ -1031,3 +1174,19 @@ def test_cli_uninstall_platform_scopes_to_one_binding(
     assert "unbind" in out
     assert _read_jsonc(claude_config) == {"mcpServers": {"other": {}}}
     assert "[mcp_servers.code-review-graph]" in codex_config.read_text(encoding="utf-8")
+
+
+def test_uninstall_removes_the_empty_codex_skills_folder(
+    fake_home: Path, fake_repo: Path, monkeypatch,
+):
+    from code_review_graph import codex_skill
+
+    home = fake_home / ".codex"
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    assert codex_skill.install_codex_skill() is not None
+    skills_root = home / "skills"
+    assert skills_root.is_dir()
+
+    uninstall.run(repo=fake_repo, keep_data=True)
+
+    assert not skills_root.exists()

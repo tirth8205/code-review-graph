@@ -10,13 +10,14 @@ from typing import Any
 from ..changes import (  # noqa: F401
     analyze_changes,
     compute_risk_score,
+    is_test_gap_exempt,
     parse_diff_ranges,
     parse_git_diff_ranges,
 )
 from ..context_savings import attach_context_savings, estimate_file_tokens
 from ..errors import ChangeDiscoveryError
 from ..flows import get_affected_flows as _get_affected_flows
-from ..graph import GraphNode, edge_to_dict, node_to_dict
+from ..graph import GraphNode, GraphStore, edge_to_dict, node_to_dict
 from ..hints import generate_hints, get_session
 from ..incremental import (
     discover_review_changes,
@@ -27,8 +28,9 @@ from ._common import (
     _bounded,
     _error_response,
     _get_store,
-    _resolve_graph_file_paths,
+    _resolve_graph_file_paths_with_unmatched,
     _shown_of,
+    _unmatched_file_warning,
     _validate_positive_int,
 )
 
@@ -490,18 +492,22 @@ def get_review_context(
                 "context": {},
             }
 
-        graph_files = _resolve_graph_file_paths(store, root, changed_files)
+        graph_files, unmatched_files = _resolve_graph_file_paths_with_unmatched(
+            store, root, changed_files,
+        )
+        shown_unmatched, unmatched_total, unmatched_cut = _bounded(
+            unmatched_files, 5 if detail_level == "minimal" else max_files, _MAX_REVIEW_FILES,
+        )
         original_tokens = estimate_file_tokens(root, changed_files)
         impact = store.get_impact_radius(graph_files, max_depth=max_depth)
+        impacted_count = impact.get("total_impacted", len(impact["impacted_nodes"]))
+        risk = (
+            "unknown" if not graph_files else
+            "high" if impacted_count > 20 else
+            "medium" if impacted_count > 5 else "low"
+        )
 
         if detail_level == "minimal":
-            impacted_count = len(impact["impacted_nodes"])
-            if impacted_count > 20:
-                risk = "high"
-            elif impacted_count > 5:
-                risk = "medium"
-            else:
-                risk = "low"
 
             key_entities = [
                 n.name for n in impact["changed_nodes"][:5]
@@ -526,7 +532,10 @@ def get_review_context(
             tested_qualified = {e.source_qualified for e in test_edges}
             test_gap_count = sum(
                 1 for f in changed_funcs
-                if f.qualified_name not in tested_qualified
+                if (
+                    f.qualified_name not in tested_qualified
+                    and not is_test_gap_exempt(f)
+                )
             )
 
             summary_parts = [
@@ -535,11 +544,16 @@ def get_review_context(
                 f"  - {len(impact['impacted_nodes'])} impacted nodes"
                 f" in {len(impact['impacted_files'])} files",
             ]
+            if unmatched_files:
+                summary_parts.append(_unmatched_file_warning(unmatched_files))
 
             result = {
                 "status": "ok",
                 "summary": "\n".join(summary_parts),
                 "risk": risk,
+                "unmatched_files": shown_unmatched,
+                "unmatched_files_total": unmatched_total,
+                "unmatched_files_truncated": unmatched_cut,
                 "changed_file_count": len(changed_files),
                 "impacted_file_count": len(impact["impacted_files"]),
                 "key_entities": key_entities,
@@ -584,7 +598,7 @@ def get_review_context(
             impact["edges"], max_results, _MAX_REVIEW_EDGES,
         )
         truncated = (
-            files_cut or impacted_cut or cn_cut or in_cut or edges_cut
+            files_cut or impacted_cut or cn_cut or in_cut or edges_cut or unmatched_cut
         )
 
         context: dict[str, Any] = {
@@ -691,7 +705,13 @@ def get_review_context(
                 context["truncated"] = True
 
         # Generate review guidance
-        guidance = _generate_review_guidance(impact, changed_files, root)
+        # With nothing matched the graph knows nothing about this change, so
+        # the "well-contained" default would contradict risk="unknown".
+        guidance = (
+            _generate_review_guidance(impact, changed_files, root, store)
+            if graph_files
+            else "- None of these files are in the graph, so the blast radius is unknown."
+        )
         context["review_guidance"] = guidance
 
         summary_parts = [
@@ -706,9 +726,15 @@ def get_review_context(
             "Review guidance:",
             guidance,
         ]
+        if unmatched_files:
+            summary_parts.append(_unmatched_file_warning(unmatched_files))
 
         result = {
             "status": "ok",
+            "risk": risk,
+            "unmatched_files": shown_unmatched,
+            "unmatched_files_total": unmatched_total,
+            "unmatched_files_truncated": unmatched_cut,
             "summary": "\n".join(summary_parts),
             "context": context,
         }
@@ -725,7 +751,10 @@ def get_review_context(
 
 
 def _generate_review_guidance(
-    impact: dict, changed_files: list[str], repo_root: "str | Path | None" = None,
+    impact: dict,
+    changed_files: list[str],
+    repo_root: "str | Path | None" = None,
+    store: "GraphStore | None" = None,
 ) -> str:
     """Generate review guidance based on the impact analysis.
 
@@ -733,6 +762,12 @@ def _generate_review_guidance(
     than an absolute one. Without it, directory conventions are skipped for
     absolute paths, which can leave a test helper in the untested list but
     never hides a production gap. See #1023.
+
+    *store* lets this split the untested list the same way ``detect_changes``
+    does. CLAUDE.md sends reviewers through both tools in one session, so when
+    one says a symbol "lacks test coverage" and the other says a tested caller
+    reaches it, the reviewer gets two answers and no way to pick. Without a
+    store the wording still stays inside what an edge check can support.
     """
     guidance_parts = []
 
@@ -748,12 +783,37 @@ def _generate_review_guidance(
         if f.qualified_name not in tested_funcs
         and not f.is_test
         and not is_test_file(f.file_path, repo_root)
+        and not is_test_gap_exempt(f)
     ]
     if untested:
+        routes: dict = {}
+        if store is not None:
+            try:
+                routes = store.get_caller_test_routes(
+                    (f.qualified_name for f in untested),
+                    repo_root=str(repo_root) if repo_root else None,
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("caller-route lookup failed: %s", exc)
+                routes = {}
+        unreached = [f for f in untested if f.qualified_name not in routes]
+        indirect = [f for f in untested if f.qualified_name in routes]
+        # "no direct test", never "untested": a test reaching this code through
+        # importlib, a fixture or a subprocess leaves no edge behind.
         guidance_parts.append(
-            f"- {len(untested)} changed function(s) lack test coverage: "
+            f"- {len(untested)} changed function(s) have no direct test: "
             + ", ".join(n.name for n in untested[:5])
         )
+        if indirect:
+            guidance_parts.append(
+                f"  - of those, {len(indirect)} are reached only through a "
+                "caller (a call path, not a record of execution): "
+                + ", ".join(n.name for n in indirect[:5])
+            )
+            guidance_parts.append(
+                f"  - {len(unreached)} have no tested caller found: "
+                + ", ".join(n.name for n in unreached[:5])
+            )
 
     # Check for wide blast radius
     if len(impact["impacted_nodes"]) > 20:
@@ -909,8 +969,8 @@ def detect_changes_func(
     """Detect changes and produce risk-scored review guidance.
 
     [REVIEW] Primary tool for code review.  Maps git diffs to affected
-    functions, flows, communities, and test coverage gaps.  Returns
-    priority-ordered review guidance with risk scores.
+    functions, YAML paths, flows, communities, and test coverage gaps.
+    Returns priority-ordered review guidance with risk scores.
 
     Args:
         base: Git ref to diff against (default: HEAD~1).
@@ -922,9 +982,10 @@ def detect_changes_func(
         repo_root: Repository root path.  Auto-detected if omitted.
         detail_level: Output detail level.  "standard" returns full analysis;
             "minimal" returns only summary, risk_score, changed_file_count,
-            test_gap_count, and top 3 review priorities (text only).
+            changed_yaml_path_count, test_gap_count, and the top three code
+            review priorities (text only).
             Default: "standard".
-        max_results: Maximum changed functions and test gaps to return
+        max_results: Maximum changed functions, YAML paths and test gaps to return
             (default 25, capped at 200). ``changed_functions_total`` and
             ``test_gaps_total`` report the untruncated counts.
         max_flows: Maximum affected flows to embed (default 20, capped at
@@ -932,8 +993,8 @@ def detect_changes_func(
             get_affected_flows_tool for step detail. See #849.
 
     Returns:
-        Risk-scored analysis with changed functions, affected flows,
-        test gaps, and review priorities, plus ``truncated``.
+        Risk-scored analysis with changed functions, YAML paths, affected
+        flows, test gaps, and review priorities, plus ``truncated``.
     """
     _validate_positive_int(max_results, "max_results")
     _validate_positive_int(max_flows, "max_flows")
@@ -958,6 +1019,7 @@ def detect_changes_func(
                 "summary": "No changed files detected.",
                 "risk_score": 0.0,
                 "changed_functions": [],
+                "changed_yaml_paths": [],
                 "affected_flows": [],
                 "test_gaps": [],
                 "review_priorities": [],
@@ -1032,6 +1094,7 @@ def detect_changes_func(
                 "summary": analysis.get("summary", ""),
                 "risk_score": analysis.get("risk_score", 0.0),
                 "changed_file_count": len(changed_files),
+                "changed_yaml_path_count": len(analysis.get("changed_yaml_paths", [])),
                 "test_gap_count": len(analysis.get("test_gaps", [])),
                 "review_priorities": top_priorities,
                 # Minimal mode still has to say when the score it reports is
@@ -1054,12 +1117,20 @@ def detect_changes_func(
             files, files_total, files_cut = _bounded(
                 changed_files, max_results, _MAX_REVIEW_FILES,
             )
-            any_cut = funcs_cut or gaps_cut or flows_cut or files_cut
+            yaml_paths, yaml_paths_total, yaml_paths_cut = _bounded(
+                analysis.get("changed_yaml_paths", []),
+                max_results, _MAX_CHANGED_FUNCTIONS,
+            )
+            any_cut = (
+                funcs_cut or gaps_cut or flows_cut or files_cut or yaml_paths_cut
+                or bool(analysis.get("yaml_paths_truncated"))
+            )
             summary = analysis.get("summary", "")
             if any_cut:
                 summary += (
                     "\n  - Response bounded: "
                     f"{len(funcs)} of {funcs_total} changed function(s), "
+                    f"{len(yaml_paths)} of {yaml_paths_total} changed YAML path(s), "
                     f"{len(gaps)} of {gaps_total} test gap(s), "
                     f"{len(flows)} of {flows_total} flow(s) shown"
                 )
@@ -1071,6 +1142,8 @@ def detect_changes_func(
                 "changed_file_count": files_total,
                 "changed_functions": funcs,
                 "changed_functions_total": funcs_total,
+                "changed_yaml_paths": yaml_paths,
+                "changed_yaml_paths_total": yaml_paths_total,
                 "test_gaps": gaps,
                 "test_gaps_total": gaps_total,
                 "affected_flows": _project(flows, _DETECT_FLOW_FIELDS),

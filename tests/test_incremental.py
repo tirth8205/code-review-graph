@@ -11,6 +11,7 @@ import pytest
 import code_review_graph.constants as constants_module
 import code_review_graph.incremental as incremental_module
 from code_review_graph.constants import discovery_timeout
+from code_review_graph.errors import ChangeDiscoveryError
 from code_review_graph.graph import GraphStore
 from code_review_graph.incremental import (
     _create_watch_handler,
@@ -34,7 +35,6 @@ from code_review_graph.incremental import (
     start_watch_thread,
     watch,
 )
-from code_review_graph.errors import ChangeDiscoveryError
 
 
 class TestParseExecutorSelection:
@@ -252,6 +252,7 @@ class TestIgnorePatterns:
         assert "**/.git/**" in patterns
         assert "**/__pycache__/**" in patterns
         assert "/build/**" in patterns
+        assert "pnpm-lock.yaml" in patterns
 
     def test_custom_ignore_file(self, tmp_path):
         ignore = tmp_path / ".code-review-graphignore"
@@ -551,33 +552,95 @@ class TestIsBinary:
         assert _is_binary(f)
 
 
+def test_collect_all_files_skips_undecodable_git_paths(tmp_path, monkeypatch):
+    monkeypatch.setattr(incremental_module, "detect_vcs", lambda _root: "git")
+    monkeypatch.setattr(
+        incremental_module, "get_all_tracked_files", lambda *_args: [],
+    )
+    monkeypatch.setattr(
+        incremental_module,
+        "_get_untracked_files",
+        lambda *_args, **_kwargs: ["notes-\udcff.txt"],
+    )
+
+    assert incremental_module.collect_all_files(tmp_path) == []
+
+
+def test_collect_all_files_skips_undecodable_filesystem_fallback_paths(
+    tmp_path,
+    monkeypatch,
+):
+    invalid_path = tmp_path / "notes-\udcff.txt"
+    original_rglob = Path.rglob
+    original_is_file = Path.is_file
+
+    def fake_rglob(path, pattern):
+        if path == tmp_path:
+            return iter([invalid_path])
+        return original_rglob(path, pattern)
+
+    def fake_is_file(path):
+        if path == invalid_path:
+            return True
+        return original_is_file(path)
+
+    monkeypatch.setattr(incremental_module, "detect_vcs", lambda _root: "none")
+    monkeypatch.setattr(
+        incremental_module, "get_all_tracked_files", lambda *_args: [],
+    )
+    monkeypatch.setattr(Path, "rglob", fake_rglob)
+    monkeypatch.setattr(Path, "is_file", fake_is_file)
+
+    assert incremental_module.collect_all_files(tmp_path) == []
+
+
 class TestGitOperations:
     @patch("code_review_graph.incremental.subprocess.run")
     def test_get_changed_files(self, mock_run, tmp_path):
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout=b"M\0src/a.py\0A\0src/b.py\0",
-        )
+        mock_run.side_effect = [
+            MagicMock(
+                returncode=0,
+                stdout=b"M\0src/a.py\0A\0src/b.py\0",
+            ),
+            MagicMock(returncode=0, stdout=b""),
+        ]
         result = get_changed_files(tmp_path)
         assert result == ["src/a.py", "src/b.py"]
-        mock_run.assert_called_once()
-        call_args = mock_run.call_args
-        assert "git" in call_args[0][0]
-        assert "-z" in call_args[0][0]
-        assert call_args[1].get("timeout") == 30
-        assert "text" not in call_args[1]
+        assert mock_run.call_count == 2
+        diff_call = mock_run.call_args_list[0]
+        assert "git" in diff_call.args[0]
+        assert "-z" in diff_call.args[0]
+        assert diff_call.kwargs.get("timeout") == 30
+        assert "text" not in diff_call.kwargs
+        untracked_call = mock_run.call_args_list[1]
+        assert untracked_call.args[0] == [
+            "git", "ls-files", "--others", "--exclude-standard", "-z",
+        ]
 
     @patch("code_review_graph.incremental.subprocess.run")
     def test_get_changed_files_fallback(self, mock_run, tmp_path):
-        # First call fails, second succeeds
+        # A failed base diff falls back to the complete working-tree status.
         mock_run.side_effect = [
             MagicMock(returncode=1, stdout=b""),
-            MagicMock(returncode=0, stdout=b"A\0staged.py\0"),
+            MagicMock(returncode=0, stdout=b" M staged.py\0"),
         ]
         result = get_changed_files(tmp_path)
         assert result == ["staged.py"]
         assert mock_run.call_count == 2
-        assert "-z" in mock_run.call_args_list[1].args[0]
+        fallback_call = mock_run.call_args_list[1].args[0]
+        assert fallback_call[:2] == ["git", "status"]
+        assert "--untracked-files=all" in fallback_call
+
+    @patch("code_review_graph.incremental.subprocess.run")
+    def test_get_changed_files_includes_untracked_paths(self, mock_run, tmp_path):
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout=b"M\0tracked.py\0"),
+            MagicMock(returncode=0, stdout=b"new.py\0nested/new.py\0"),
+        ]
+
+        assert get_changed_files(tmp_path) == [
+            "tracked.py", "new.py", "nested/new.py",
+        ]
 
     @patch("code_review_graph.incremental.subprocess.run")
     def test_get_changed_files_strict_failure_does_not_fallback(self, mock_run, tmp_path):
@@ -925,6 +988,386 @@ class TestIncrementalUpdate:
             # File should have been removed from graph
             nodes = store.get_nodes_by_file(str(tmp_path / "old.py"))
             assert len(nodes) == 0
+        finally:
+            store.close()
+
+    def test_incremental_update_flow_lifecycle_preserves_live_memberships(
+        self, tmp_path,
+    ):
+        """#569: node replacement must not leave stale flows/dead entry points."""
+        from code_review_graph.flows import (
+            get_flows,
+            incremental_trace_flows,
+            store_flows,
+            trace_flows,
+        )
+        from code_review_graph.tools.build import _run_postprocess
+
+        routes = tmp_path / "routes.py"
+        services = tmp_path / "services.py"
+        routes.write_text(
+            "def handler():\n    return service()\n\ndef service():\n    return 1\n"
+        )
+        services.write_text("def helper():\n    return 2\n")
+
+        db_path = tmp_path / "test.db"
+        store = GraphStore(db_path)
+        try:
+            first = incremental_update(
+                tmp_path, store, changed_files=["routes.py", "services.py"],
+            )
+            assert first["files_updated"] >= 1
+
+            flows = trace_flows(store)
+            store_flows(store, flows)
+            before = get_flows(store)
+            assert before, "expected at least one flow after full trace"
+            old_ids = {
+                n.id
+                for n in store.get_nodes_by_file(str(routes.resolve()))
+                if n.kind == "Function"
+            }
+
+            # Mutate the entry-point file so hash changes and nodes are replaced.
+            routes.write_text(
+                "def handler():\n"
+                "    return service()\n"
+                "\n"
+                "def service():\n"
+                "    return 1\n"
+                "\n"
+                "def extra():\n"
+                "    return helper()\n"
+            )
+
+            result = incremental_update(
+                tmp_path, store, changed_files=["routes.py"],
+            )
+            assert "flow_entry_point_qns" in result
+
+            build_result: dict = {}
+            _run_postprocess(
+                store,
+                build_result,
+                "full",
+                full_rebuild=False,
+                changed_files=result["changed_files"],
+                repo_root=str(tmp_path),
+                entry_point_qns=result.get("flow_entry_point_qns"),
+                communities_were_affected=bool(
+                    result.get("communities_were_affected")
+                ),
+            )
+            assert build_result.get("flows_detected", 0) >= 1
+
+            after = get_flows(store)
+            assert after
+            handler_flows = [f for f in after if f["name"] == "handler"]
+            assert len(handler_flows) == 1
+
+            new_ids = {
+                n.id
+                for n in store.get_nodes_by_file(str(routes.resolve()))
+                if n.kind == "Function"
+            }
+            assert old_ids.isdisjoint(new_ids), "routes.py nodes should be new IDs"
+
+            conn = store._conn
+            assert conn.execute(
+                "SELECT COUNT(*) FROM flows "
+                "WHERE entry_point_id NOT IN (SELECT id FROM nodes)"
+            ).fetchone()[0] == 0
+            assert conn.execute(
+                "SELECT COUNT(*) FROM flow_memberships fm "
+                "LEFT JOIN nodes n ON n.id = fm.node_id WHERE n.id IS NULL"
+            ).fetchone()[0] == 0
+
+            # Relative changed_files alone also finds the new entry point.
+            count = incremental_trace_flows(
+                store, ["routes.py"], repo_root=tmp_path,
+            )
+            assert count >= 0
+        finally:
+            store.close()
+
+    def test_incremental_root_basename_does_not_clear_nested_flows(self, tmp_path):
+        """With repo_root, changing util.py must not delete left/util.py flows."""
+        from code_review_graph.flows import get_flows, store_flows, trace_flows
+
+        left = tmp_path / "left"
+        left.mkdir()
+        root_util = tmp_path / "util.py"
+        nested_util = left / "util.py"
+        root_util.write_text(
+            "def root_entry():\n    return root_helper()\n\n"
+            "def root_helper():\n    return 1\n"
+        )
+        nested_util.write_text(
+            "def nested_entry():\n    return nested_helper()\n\n"
+            "def nested_helper():\n    return 2\n"
+        )
+
+        db_path = tmp_path / "test.db"
+        store = GraphStore(db_path)
+        try:
+            incremental_update(
+                tmp_path,
+                store,
+                changed_files=["util.py", "left/util.py"],
+            )
+            store_flows(store, trace_flows(store))
+            before_names = {f["name"] for f in get_flows(store)}
+            assert "root_entry" in before_names
+            assert "nested_entry" in before_names
+
+            root_util.write_text(
+                "def root_entry():\n    return root_helper()\n\n"
+                "def root_helper():\n    return 1\n\n"
+                "def root_extra():\n    return 3\n"
+            )
+            # postprocess none: wrongly expanded nested paths would lose flows forever
+            incremental_update(
+                tmp_path, store, changed_files=["util.py"],
+            )
+            after_names = {f["name"] for f in get_flows(store)}
+            assert "nested_entry" in after_names
+        finally:
+            store.close()
+
+    def test_failed_replacement_parse_preserves_existing_flows(
+        self, tmp_path, monkeypatch,
+    ):
+        """A failed replacement parse must keep prior flows and nodes."""
+        from code_review_graph.flows import get_flows, store_flows, trace_flows
+        from code_review_graph.parser import CodeParser
+
+        routes = tmp_path / "routes.py"
+        routes.write_text(
+            "def handler():\n    return helper()\n\n"
+            "def helper():\n    return 1\n"
+        )
+
+        db_path = tmp_path / "test.db"
+        store = GraphStore(db_path)
+        try:
+            monkeypatch.setenv("CRG_SERIAL_PARSE", "1")
+            full_build(tmp_path, store)
+            store_flows(store, trace_flows(store))
+            before = get_flows(store)
+            assert len(before) >= 1
+            before_names = {f["name"] for f in before}
+            assert "handler" in before_names
+            before_nodes = store.get_nodes_by_file(str(routes.resolve()))
+            assert before_nodes
+
+            routes.write_text(
+                "def handler():\n    return helper()\n\n"
+                "def helper():\n    return 1\n\n"
+                "def extra():\n    return 2\n"
+            )
+
+            real_parse_bytes = CodeParser.parse_bytes
+
+            def boom(self, path, source):  # noqa: ANN001
+                raise RuntimeError("simulated replacement parse failure")
+
+            monkeypatch.setattr(CodeParser, "parse_bytes", boom)
+            result = incremental_update(
+                tmp_path, store, changed_files=["routes.py"],
+            )
+            assert result.get("errors")
+            after = get_flows(store)
+            assert {f["name"] for f in after} == before_names
+            after_nodes = store.get_nodes_by_file(str(routes.resolve()))
+            assert {n.qualified_name for n in after_nodes} == {
+                n.qualified_name for n in before_nodes
+            }
+
+            # Recovery: a later successful parse must still be able to replace.
+            monkeypatch.setattr(CodeParser, "parse_bytes", real_parse_bytes)
+            recovered = incremental_update(
+                tmp_path, store, changed_files=["routes.py"],
+            )
+            assert recovered["files_updated"] >= 1
+            assert not recovered.get("errors")
+        finally:
+            store.close()
+
+    @staticmethod
+    def _community_assignment_signature(store) -> list[tuple[tuple[str, str], ...]]:
+        """Stable community membership fingerprint (name, kind), ID-independent."""
+        from collections import defaultdict
+
+        groups: dict[int, list[tuple[str, str]]] = defaultdict(list)
+        for cid, name, kind in store._conn.execute(
+            "SELECT community_id, name, kind FROM nodes "
+            "WHERE community_id IS NOT NULL AND kind != 'File'"
+        ):
+            groups[int(cid)].append((name, kind))
+        return sorted(tuple(sorted(members)) for members in groups.values())
+
+    def test_incremental_delete_clears_orphan_community_rows(self, tmp_path):
+        """Deleting an isolated community file must match a clean rebuild."""
+        from code_review_graph.communities import (
+            detect_communities,
+            get_communities,
+            store_communities,
+        )
+        from code_review_graph.incremental import full_build
+        from code_review_graph.tools.build import _run_postprocess
+
+        isolated = tmp_path / "isolated.py"
+        isolated.write_text(
+            "def alpha():\n    return beta()\n\ndef beta():\n    return 1\n"
+        )
+        other = tmp_path / "other.py"
+        other.write_text("def keep():\n    return 2\n")
+
+        db_path = tmp_path / "test.db"
+        store = GraphStore(db_path)
+        try:
+            incremental_update(
+                tmp_path,
+                store,
+                changed_files=["isolated.py", "other.py"],
+                reconcile_stale=False,
+            )
+            communities = detect_communities(store, min_size=2)
+            store_communities(store, communities)
+            before = get_communities(store, min_size=0)
+            assert any(c["size"] >= 2 for c in before)
+
+            isolated.unlink()
+            result = incremental_update(
+                tmp_path,
+                store,
+                changed_files=["isolated.py"],
+                reconcile_stale=False,
+            )
+            assert result.get("communities_were_affected") is True
+
+            build_result: dict = {}
+            _run_postprocess(
+                store,
+                build_result,
+                "full",
+                full_rebuild=False,
+                changed_files=result["changed_files"],
+                repo_root=str(tmp_path),
+                entry_point_qns=result.get("flow_entry_point_qns"),
+                communities_were_affected=True,
+            )
+
+            after = get_communities(store, min_size=0)
+            for comm in after:
+                members = store._conn.execute(
+                    "SELECT COUNT(*) FROM nodes WHERE community_id = ?",
+                    (comm["id"],),
+                ).fetchone()[0]
+                assert members == comm["size"]
+                assert members > 0
+
+            clean = GraphStore(tmp_path / "clean.db")
+            try:
+                full_build(tmp_path, clean)
+                store_communities(clean, detect_communities(clean, min_size=2))
+                assert self._community_assignment_signature(store) == (
+                    self._community_assignment_signature(clean)
+                )
+                assert len(get_communities(store, min_size=0)) == len(
+                    get_communities(clean, min_size=0)
+                )
+            finally:
+                clean.close()
+        finally:
+            store.close()
+
+    def test_incremental_rename_parity_with_full_rebuild(self, tmp_path):
+        """Renamed sources: incremental flow/community state matches full rebuild."""
+        from code_review_graph.communities import (
+            detect_communities,
+            get_communities,
+            store_communities,
+        )
+        from code_review_graph.flows import get_flows, store_flows, trace_flows
+        from code_review_graph.incremental import full_build
+        from code_review_graph.tools.build import _run_postprocess
+
+        src = tmp_path / "old_name.py"
+        src.write_text(
+            "def entry():\n    return helper()\n\ndef helper():\n    return 1\n"
+        )
+        db_path = tmp_path / "inc.db"
+        store = GraphStore(db_path)
+        try:
+            incremental_update(
+                tmp_path, store, changed_files=["old_name.py"], reconcile_stale=False,
+            )
+            store_flows(store, trace_flows(store))
+            store_communities(store, detect_communities(store, min_size=1))
+
+            new = tmp_path / "new_name.py"
+            src.rename(new)
+            result = incremental_update(
+                tmp_path,
+                store,
+                changed_files=["old_name.py", "new_name.py"],
+                reconcile_stale=False,
+            )
+            _run_postprocess(
+                store,
+                {},
+                "full",
+                full_rebuild=False,
+                changed_files=result["changed_files"],
+                repo_root=str(tmp_path),
+                entry_point_qns=result.get("flow_entry_point_qns"),
+                communities_were_affected=bool(
+                    result.get("communities_were_affected")
+                ),
+            )
+
+            assert store.get_nodes_by_file(str(src)) == []
+            assert store.get_nodes_by_file(str(tmp_path / "old_name.py")) == []
+            assert len(store.get_nodes_by_file(str(new))) > 0
+
+            clean = GraphStore(tmp_path / "clean.db")
+            try:
+                full_build(tmp_path, clean)
+                store_flows(clean, trace_flows(clean))
+                store_communities(clean, detect_communities(clean, min_size=1))
+
+                inc_flow_names = sorted(f["name"] for f in get_flows(store))
+                clean_flow_names = sorted(f["name"] for f in get_flows(clean))
+                assert inc_flow_names == clean_flow_names
+
+                def _live_memberships(s):
+                    return s._conn.execute(
+                        "SELECT COUNT(*) FROM flow_memberships fm "
+                        "JOIN nodes n ON n.id = fm.node_id"
+                    ).fetchone()[0]
+
+                assert _live_memberships(store) == _live_memberships(clean)
+                assert store._conn.execute(
+                    "SELECT COUNT(*) FROM flow_memberships fm "
+                    "LEFT JOIN nodes n ON n.id = fm.node_id WHERE n.id IS NULL"
+                ).fetchone()[0] == 0
+
+                assert self._community_assignment_signature(store) == (
+                    self._community_assignment_signature(clean)
+                )
+                assert len(get_communities(store, min_size=0)) == len(
+                    get_communities(clean, min_size=0)
+                )
+                assigned_inc = store._conn.execute(
+                    "SELECT COUNT(*) FROM nodes WHERE community_id IS NOT NULL"
+                ).fetchone()[0]
+                assigned_clean = clean._conn.execute(
+                    "SELECT COUNT(*) FROM nodes WHERE community_id IS NOT NULL"
+                ).fetchone()[0]
+                assert assigned_inc == assigned_clean
+            finally:
+                clean.close()
         finally:
             store.close()
 
@@ -1364,7 +1807,7 @@ class TestWatchReconciliation:
         store = GraphStore(tmp_path / "graph.db")
         debouncer = MagicMock()
         with patch(
-            "watchdog.utils.event_debouncer.EventDebouncer",
+            "code_review_graph.incremental._WatchDebouncer",
             return_value=debouncer,
         ):
             handler = _create_watch_handler(tmp_path, store, None)
@@ -1419,7 +1862,7 @@ class TestWatchReconciliation:
         finally:
             store.close()
 
-    def test_watch_startup_postprocess_warning_prevents_observer_start(self, tmp_path):
+    def test_watch_startup_postprocess_warning_stops_observer(self, tmp_path):
         import sqlite3
 
         from code_review_graph.postprocessing import run_post_processing
@@ -1448,7 +1891,11 @@ class TestWatchReconciliation:
             ):
                 watch(tmp_path, store, on_files_updated=run_post_processing)
 
-            observer.assert_not_called()
+            # The observer starts before startup work (PR #1108), so failing
+            # closed means it is stopped and joined before watch() raises.
+            observer.return_value.start.assert_called_once_with()
+            observer.return_value.stop.assert_called()
+            observer.return_value.join.assert_called()
         finally:
             store.close()
 
@@ -1821,14 +2268,15 @@ class TestRenamePurgeParity:
 
     @patch("code_review_graph.incremental.subprocess.run")
     def test_get_changed_files_reports_both_sides_of_rename(self, mock_run, tmp_path):
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout=b"R100\0old.py\0new.py\0",
-        )
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout=b"R100\0old.py\0new.py\0"),
+            MagicMock(returncode=0, stdout=b""),
+        ]
         assert get_changed_files(tmp_path) == ["old.py", "new.py"]
 
     def test_rename_purges_old_path_end_to_end(self, tmp_path):
         self._git(tmp_path, "init", "-q")
+        (tmp_path / ".gitignore").write_text("g.db*\n")
         (tmp_path / "a.py").write_text("def foo():\n    return 1\n")
         self._git(tmp_path, "add", ".")
         self._git(tmp_path, "commit", "-qm", "init")

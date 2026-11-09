@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from code_review_graph.graph import GraphStore
 from code_review_graph.parser import CodeParser
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -892,10 +893,7 @@ class TestCSharpNamespaceResolution:
             "}\n",
         )
 
-        try:
-            nodes, _ = CodeParser().parse_file(source_file)
-        except RecursionError:
-            pytest.fail("C# namespace discovery overflowed on a deep expression AST")
+        nodes, _ = CodeParser().parse_file(source_file)
 
         file_node = next(node for node in nodes if node.kind == "File")
         assert file_node.extra.get("csharp_namespaces") == [
@@ -1337,7 +1335,9 @@ class TestRubyParsing:
 
         # A same-class call resolves to the defining method node, not a bare
         # name, so callers_of/callees_of work within a file.
-        assert any(t.endswith("sample.rb::UserRepository.save") for t in targets)
+        assert any(
+            t.endswith("sample.rb::Auth.UserRepository.save") for t in targets
+        )
 
         # Calls are attributed to their enclosing method.
         create_user_targets = {
@@ -1346,6 +1346,426 @@ class TestRubyParsing:
         }
         assert any(t.endswith("UserRepository.save") for t in create_user_targets)
         assert any(t.endswith("new") for t in create_user_targets)
+
+    def test_compact_namespace_class_is_indexed(self, tmp_path):
+        """``class Foo::Bar`` must emit a Class node, like ``module Foo`` + ``class Bar``.
+
+        tree-sitter-ruby types the ``name`` field of a compact declaration as
+        ``scope_resolution`` rather than ``constant``. Without explicit
+        handling ``_get_name`` returns None, ``_extract_classes`` bails, and
+        the class vanishes while its methods are left orphaned. This is the
+        dominant declaration style in Rails codebases.
+        """
+        compact = tmp_path / "compact.rb"
+        compact.write_text(
+            "class Widgets::CompactStyle\n"
+            "  def render\n"
+            "    :ok\n"
+            "  end\n"
+            "end\n"
+        )
+        nodes, _ = self.parser.parse_file(compact)
+
+        classes = {n.name: n for n in nodes if n.kind == "Class"}
+        # Named after the rightmost constant, matching the nested form.
+        assert "CompactStyle" in classes
+
+        render = next(
+            n for n in nodes if n.kind == "Function" and n.name == "render"
+        )
+        assert render.parent_name == "Widgets.CompactStyle"
+
+    def test_compact_namespace_module_is_indexed(self, tmp_path):
+        """``module Foo::Bar`` goes through the same scope_resolution path."""
+        compact = tmp_path / "compact_module.rb"
+        compact.write_text(
+            "module Widgets::Helpers\n"
+            "  def self.render\n"
+            "    :ok\n"
+            "  end\n"
+            "end\n"
+        )
+        nodes, _ = self.parser.parse_file(compact)
+
+        names = {n.name for n in nodes if n.kind == "Class"}
+        assert "Helpers" in names
+
+
+    def test_compact_namespace_three_segments(self, tmp_path):
+        """``class A::B::C`` names the class after the rightmost constant.
+
+        The loop walks ``scope_resolution.children`` in reverse, so nesting
+        depth must not change the result: the emitted Class is ``C``, and its
+        methods hang off ``C`` rather than off an intermediate segment.
+        """
+        deep = tmp_path / "deep.rb"
+        deep.write_text(
+            "class Alpha::Beta::Gamma\n"
+            "  def ping\n"
+            "    :ok\n"
+            "  end\n"
+            "end\n"
+        )
+        nodes, _ = self.parser.parse_file(deep)
+
+        names = {n.name for n in nodes if n.kind == "Class"}
+        assert "Gamma" in names
+        # Intermediate segments are scope, not classes of their own.
+        assert "Alpha" not in names
+        assert "Beta" not in names
+
+        ping = next(
+            n for n in nodes if n.kind == "Function" and n.name == "ping"
+        )
+        assert ping.parent_name == "Alpha.Beta.Gamma"
+
+    def test_compact_namespace_same_leaf_keeps_distinct_identities(
+        self, tmp_path,
+    ):
+        """Two compact classes sharing a leaf must not merge into one node.
+
+        The leaf alone is not an identity: ``class Alpha::Same`` and
+        ``class Beta::Same`` in one file both qualified to ``file.rb::Same``
+        before the scope segment fed ``parent_name``, merging the two classes
+        and attaching both methods to the survivor.
+        """
+        twins = tmp_path / "twins.rb"
+        twins.write_text(
+            "class Alpha::Same\n"
+            "  def a\n"
+            "  end\n"
+            "end\n"
+            "\n"
+            "class Beta::Same\n"
+            "  def b\n"
+            "  end\n"
+            "end\n"
+        )
+        nodes, _ = self.parser.parse_file(twins)
+
+        same = [n for n in nodes if n.kind == "Class" and n.name == "Same"]
+        assert len(same) == 2
+        assert {n.parent_name for n in same} == {"Alpha", "Beta"}
+
+        identities = {self.parser._node_qualified(n) for n in same}
+        assert len(identities) == 2
+
+    def test_compact_namespace_with_superclass(self, tmp_path):
+        """``class Foo::Bar < Base`` still emits Class ``Bar``.
+
+        A superclass adds a further child to the ``class`` node. The name is
+        read from the ``name`` field rather than from child order, so the
+        extra child must not displace it. This is the dominant form in Rails
+        (``class Admin::UsersController < ApplicationController``).
+        """
+        inherited = tmp_path / "inherited.rb"
+        inherited.write_text(
+            "class Base\n"
+            "end\n"
+            "\n"
+            "class Widgets::Themed < Base\n"
+            "  def render\n"
+            "    :ok\n"
+            "  end\n"
+            "end\n"
+        )
+        nodes, _ = self.parser.parse_file(inherited)
+
+        names = {n.name for n in nodes if n.kind == "Class"}
+        assert "Themed" in names
+
+        render = next(
+            n for n in nodes if n.kind == "Function" and n.name == "render"
+        )
+        assert render.parent_name == "Widgets.Themed"
+
+    def test_top_level_scope_class(self, tmp_path):
+        """``class ::Foo`` has a ``scope_resolution`` name with no scope child.
+
+        Only the leading ``::`` and the constant are present, so the reverse
+        walk has to reach the sole ``constant`` instead of relying on a
+        preceding scope node.
+        """
+        rooted = tmp_path / "rooted.rb"
+        rooted.write_text(
+            "class ::Standalone\n"
+            "  def ping\n"
+            "    :ok\n"
+            "  end\n"
+            "end\n"
+        )
+        nodes, _ = self.parser.parse_file(rooted)
+
+        names = {n.name for n in nodes if n.kind == "Class"}
+        assert "Standalone" in names
+
+    def test_compact_namespace_inside_module_accumulates_scope(
+        self, tmp_path,
+    ):
+        """A compact class nested in a module stacks both scopes.
+
+        ``module Alpha; class Beta::Gamma`` reports ``Alpha.Beta``, the same
+        identity as the nested spelling ``module Alpha; module Beta; class
+        Gamma``. Ruby resolves the ``Beta`` in a compact name by lexical
+        lookup, and the enclosing module is the first place it looks, so
+        stacking is both the likelier reading and the one that makes the two
+        spellings agree.
+        """
+        nested = tmp_path / "nested.rb"
+        nested.write_text(
+            "module Alpha\n"
+            "  class Beta::Gamma\n"
+            "    def ping\n"
+            "      :ok\n"
+            "    end\n"
+            "  end\n"
+            "end\n"
+        )
+        nodes, _ = self.parser.parse_file(nested)
+
+        gamma = next(
+            n for n in nodes if n.kind == "Class" and n.name == "Gamma"
+        )
+        # Both scopes stack, matching the nested equivalent
+        # ``module Alpha; module Beta; class Gamma``, which also reports
+        # ``Alpha.Beta``.
+        assert gamma.parent_name == "Alpha.Beta"
+
+    def test_compact_namespaces_inside_one_module_stay_distinct(self, tmp_path):
+        """Same leaf, different compact scope, one enclosing module.
+
+        Taking the enclosing module as ``parent_name`` would qualify both to
+        ``file.rb::Alpha.Same``. The compact scope segment, stacked on the
+        enclosing module, is what keeps them apart.
+        """
+        shared = tmp_path / "shared.rb"
+        shared.write_text(
+            "module Alpha\n"
+            "  class Beta::Same\n"
+            "    def b\n"
+            "    end\n"
+            "  end\n"
+            "\n"
+            "  class Gamma::Same\n"
+            "    def c\n"
+            "    end\n"
+            "  end\n"
+            "end\n"
+        )
+        nodes, _ = self.parser.parse_file(shared)
+
+        same = [n for n in nodes if n.kind == "Class" and n.name == "Same"]
+        assert len(same) == 2
+        assert {n.parent_name for n in same} == {"Alpha.Beta", "Alpha.Gamma"}
+
+        identities = {self.parser._node_qualified(n) for n in same}
+        assert len(identities) == 2
+
+    def test_root_anchored_compact_name_drops_enclosing_scope(self, tmp_path):
+        """A leading ``::`` anchors the name at the top level.
+
+        ``class ::Root`` inside ``module Outer`` defines ``::Root``, not
+        ``Outer::Root``, so the enclosing scope must be dropped, and the
+        leading ``::`` must not leave an empty segment behind (``Outer..A``,
+        ``.X``).
+        """
+        anchored = tmp_path / "anchored.rb"
+        anchored.write_text(
+            "module Outer\n"
+            "  class ::Root\n"
+            "    def r\n"
+            "    end\n"
+            "  end\n"
+            "\n"
+            "  class ::A::B\n"
+            "    def ab\n"
+            "    end\n"
+            "  end\n"
+            "end\n"
+            "\n"
+            "class ::X::Y\n"
+            "  def xy\n"
+            "  end\n"
+            "end\n"
+        )
+        nodes, _ = self.parser.parse_file(anchored)
+
+        classes = {n.name: n for n in nodes if n.kind == "Class"}
+        assert classes["Root"].parent_name is None
+        assert classes["B"].parent_name == "A"
+        assert classes["Y"].parent_name == "X"
+
+        methods = {n.name: n for n in nodes if n.kind == "Function"}
+        assert methods["r"].parent_name == "Root"
+        assert methods["ab"].parent_name == "A.B"
+        assert methods["xy"].parent_name == "X.Y"
+
+        # Same identity as the unanchored spelling at the top level.
+        assert self.parser._node_qualified(classes["B"]).endswith("anchored.rb::A.B")
+
+    @pytest.mark.parametrize(
+        "declaration",
+        [
+            "class klass::Inner",
+            "class self::Foo",
+            "class klass::Outer::Inner",
+            "class self::Outer::Inner",
+            "class make()::Outer::Inner",
+            "module klass::Outer::Inner",
+        ],
+    )
+    def test_runtime_scope_chain_emits_no_class(self, tmp_path, declaration):
+        """A chain rooted at a runtime value records no static namespace."""
+        path = tmp_path / "runtime_scope.rb"
+        path.write_text(f"{declaration}\n  def run; end\nend\n")
+
+        nodes, _ = self.parser.parse_file(path)
+
+        assert [n for n in nodes if n.kind == "Class"] == []
+        assert [n.parent_name for n in nodes if n.kind == "Function"] == [None]
+
+    @pytest.mark.parametrize(
+        "declaration, name, parent",
+        [
+            ("class A::B::C", "C", "A.B"),
+            ("class ::A::B", "B", "A"),
+            ("class ::A", "A", None),
+        ],
+    )
+    def test_constant_rooted_scope_chain_still_emits_class(
+        self, tmp_path, declaration, name, parent,
+    ):
+        path = tmp_path / "constant_scope.rb"
+        path.write_text(f"{declaration}\nend\n")
+
+        nodes, _ = self.parser.parse_file(path)
+
+        classes = [n for n in nodes if n.kind == "Class"]
+        assert [(n.name, n.parent_name) for n in classes] == [(name, parent)]
+
+    def test_scope_resolution_without_constant_is_not_fatal(self):
+        """The fallthrough branch: no ``constant`` child, no crash.
+
+        The reverse walk can complete without a match only on a malformed or
+        error-recovered tree. It must fall through to the generic lookup and
+        return None (no Class node) instead of raising.
+        """
+
+        class _StubNode:
+            def __init__(self, type_, children=(), name_child=None):
+                self.type = type_
+                self.children = list(children)
+                self._name_child = name_child
+
+            def child_by_field_name(self, field):
+                return self._name_child if field == "name" else None
+
+        scope = _StubNode("scope_resolution", children=[_StubNode("::")])
+        class_node = _StubNode("class", children=[scope], name_child=scope)
+
+        assert self.parser._get_name(class_node, "ruby", "class") is None
+
+    def test_malformed_compact_namespace_does_not_crash(self, tmp_path):
+        """An unterminated compact name parses to an error tree, not a crash."""
+        broken = tmp_path / "broken.rb"
+        broken.write_text("class Widgets::\nend\n")
+
+        nodes, _ = self.parser.parse_file(broken)
+
+        # A File node is always emitted; the point is that parsing returns.
+        assert any(n.kind == "File" for n in nodes)
+
+
+    def test_compact_module_class_contains_edge_resolves(self, tmp_path):
+        """An ordinary class inside a compact module keeps a live CONTAINS source.
+
+        The class node is keyed by its qualified identity, so its methods have
+        to descend with that same scope. Descending with the bare leaf pointed
+        the CONTAINS edge at a ``adapters.rb::Stripe`` container that was never
+        emitted: both nodes stayed indexed, the edge dangled, and ``charge``
+        became unreachable from the class that defines it.
+        """
+        adapters = tmp_path / "adapters.rb"
+        adapters.write_text(
+            "module Billing::Adapters\n"
+            "  class Stripe\n"
+            "    def charge(amount)\n"
+            "      amount * 100\n"
+            "    end\n"
+            "  end\n"
+            "end\n"
+        )
+        nodes, edges = self.parser.parse_file(adapters)
+
+        stripe = next(
+            n for n in nodes if n.kind == "Class" and n.name == "Stripe"
+        )
+        charge = next(
+            n for n in nodes if n.kind == "Function" and n.name == "charge"
+        )
+        stripe_id = self.parser._node_qualified(stripe)
+        charge_id = self.parser._node_qualified(charge)
+
+        # The method hangs off the class identity, not off a bare leaf.
+        assert charge_id == f"{stripe_id}.charge"
+
+        owning = [
+            e for e in edges if e.kind == "CONTAINS" and e.target == charge_id
+        ]
+        assert len(owning) == 1
+        assert owning[0].source == stripe_id
+
+    def test_compact_namespace_contains_edges_have_no_dangling_source(
+        self, tmp_path,
+    ):
+        """Every CONTAINS source must name a node the same parse emitted.
+
+        A sweep rather than a single case: the identity and the edge are built
+        in two different places, so any compact shape that feeds one but not
+        the other leaves an edge pointing at nothing. Nothing in the suite
+        caught that before, because the tests only ever looked at nodes.
+        """
+        mixed = tmp_path / "mixed.rb"
+        mixed.write_text(
+            "module Billing::Adapters\n"
+            "  class Stripe\n"
+            "    def charge; end\n"
+            "  end\n"
+            "end\n"
+            "\n"
+            "class Admin::User\n"
+            "  def display_name; end\n"
+            "end\n"
+            "\n"
+            "class User\n"
+            "  def display_name; end\n"
+            "end\n"
+            "\n"
+            "module Alpha\n"
+            "  class Beta::Gamma\n"
+            "    def ping; end\n"
+            "  end\n"
+            "end\n"
+        )
+        nodes, edges = self.parser.parse_file(mixed)
+
+        identities = {self.parser._node_qualified(n) for n in nodes}
+        file_id = str(mixed)
+
+        dangling = [
+            e.source for e in edges
+            if e.kind == "CONTAINS"
+            and e.source != file_id
+            and e.source not in identities
+        ]
+        assert dangling == []
+
+        # Same leaf under different scopes stays two distinct rows; the
+        # qualified_name column is UNIQUE, so a collision drops one outright.
+        qualified = [
+            self.parser._node_qualified(n) for n in nodes if n.kind == "Function"
+        ]
+        assert len(qualified) == len(set(qualified))
 
 
 class TestPHPParsing:
@@ -2629,9 +3049,11 @@ class TestBashParsing:
 
     def test_functions_have_no_parent(self):
         """Bash has no classes so every function should be top-level."""
-        for n in self.nodes:
-            if n.kind == "Function":
-                assert n.parent_name is None
+
+        functions = [node for node in self.nodes if node.kind == "Function"]
+
+        assert functions
+        assert all(node.parent_name is None for node in functions)
 
     def test_source_creates_import_edge(self):
         """`source ./lib.sh` / `. ./config.sh` should produce IMPORTS_FROM
@@ -2729,6 +3151,123 @@ class TestElixirParsing:
         }
         assert any(t.endswith("::Calculator.add") for t in function_targets)
         assert any(t.endswith("::Calculator.compute") for t in function_targets)
+
+    def test_guarded_functions_are_parsed_and_called(self, tmp_path):
+        path = tmp_path / "guarded.ex"
+        source = (
+            b"defmodule T do\n"
+            b"  def plain(x), do: x\n"
+            b"  def guarded(x) when is_binary(x), do: x\n"
+            b"  def caller(x) do\n"
+            b"    guarded(x)\n"
+            b"  end\n"
+            b"  def zero, do: :zero\n"
+            b"end\n"
+        )
+
+        nodes, edges = self.parser.parse_bytes(path, source)
+
+        function_names = {node.name for node in nodes if node.kind == "Function"}
+        assert {"plain", "guarded", "caller", "zero"} <= function_names
+        assert any(
+            edge.kind == "CALLS"
+            and edge.source.endswith("::T.caller")
+            and edge.target.endswith("::T.guarded")
+            for edge in edges
+        )
+
+    def test_guarded_short_form_function_calls_are_extracted(self, tmp_path):
+        path = tmp_path / "guarded_short_form.ex"
+        source = (
+            b"defmodule Example do\n"
+            b"  def guarded(x) when is_binary(x), do: helper(x)\n"
+            b"  def helper(x), do: x\n"
+            b"end\n"
+        )
+
+        nodes, edges = self.parser.parse_bytes(path, source)
+
+        guarded = [
+            node for node in nodes
+            if node.kind == "Function" and node.name == "guarded"
+        ]
+        assert len(guarded) == 1
+        guarded_calls = [
+            edge for edge in edges
+            if edge.kind == "CALLS" and edge.source.endswith("::Example.guarded")
+        ]
+        assert any(node.kind == "Function" and node.name == "helper" for node in nodes)
+        assert [edge.target.rsplit("::", 1)[-1] for edge in guarded_calls] == ["Example.helper"]
+
+    def test_short_form_walks_every_keyword_clause_and_dynamic_callee(self, tmp_path):
+        path = tmp_path / "short_form_clauses.ex"
+        source = (
+            b"defmodule Example do\n"
+            b"  def clauses(x), do: helper(x), rescue: (e -> other(e))\n"
+            b"  def dynamic(x), do: unquote(f)(helper(x))\n"
+            b"  def helper(x), do: x\n"
+            b"  def other(x), do: x\n"
+            b"end\n"
+        )
+
+        _, edges = self.parser.parse_bytes(path, source)
+
+        calls = {
+            (edge.source.rsplit("::", 1)[-1], edge.target.rsplit("::", 1)[-1])
+            for edge in edges
+            if edge.kind == "CALLS"
+        }
+        assert ("Example.clauses", "Example.helper") in calls
+        assert ("Example.clauses", "Example.other") in calls
+        assert ("Example.dynamic", "Example.helper") in calls
+
+    @pytest.mark.parametrize(
+        "name, declaration",
+        [
+            ("compound", b"  def compound(a, b) when a and b, do: a\n"),
+            ("stacked", b"  def stacked(x) when g1 when g2, do: x\n"),
+            ("private_guarded", b"  defp private_guarded(x) when is_integer(x), do: x\n"),
+            ("macro_guarded", b"  defmacro macro_guarded(x) when is_atom(x), do: x\n"),
+            ("zero_guarded", b"  def zero_guarded when is_boolean(true), do: :zero\n"),
+        ],
+    )
+    def test_guarded_function_forms_are_parsed(self, tmp_path, name, declaration):
+        path = tmp_path / f"{name}.ex"
+        source = b"defmodule T do\n" + declaration + b"end\n"
+
+        nodes, _ = self.parser.parse_bytes(path, source)
+
+        functions = [node for node in nodes if node.kind == "Function"]
+        assert [node.name for node in functions] == [name]
+
+    def test_multi_clause_functions_keep_distinct_parser_ranges(self, tmp_path):
+        path = tmp_path / "clauses.ex"
+        source = (
+            b"defmodule T do\n"
+            b"\n"
+            b"\n"
+            b"  def multi(0), do: :zero\n"
+            b"  def multi(n), do: n\n"
+            b"end\n"
+        )
+
+        nodes, edges = self.parser.parse_bytes(path, source)
+        clauses = [
+            node for node in nodes
+            if node.kind == "Function" and node.name == "multi"
+        ]
+        assert [(node.line_start, node.line_end) for node in clauses] == [(4, 4), (5, 5)]
+
+        for writer_name, writer in (
+            ("nodes_edges", lambda store: store.store_file_nodes_edges(path, nodes, edges)),
+            ("batch", lambda store: store.store_file_batch([(str(path), nodes, edges, "")])),
+        ):
+            with GraphStore(tmp_path / f"clauses-{writer_name}.db") as store:
+                writer(store)
+                multi = store.get_node(f"{path.as_posix()}::T.multi")
+
+            assert multi is not None
+            assert (multi.line_start, multi.line_end) == (5, 5)
 
 
 class TestGDScriptParsing:
@@ -3887,6 +4426,1053 @@ class TestSQLParsing:
         assert targets == ["customers", "invoices"]
 
 
+class TestPLSQLParsing:
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.fixture = FIXTURES / "sample_plsql.sql"
+        self.nodes, self.edges = self.parser.parse_file(self.fixture)
+
+    def test_detects_language(self):
+        assert self.parser.detect_language(Path("package.pkb")) == "sql"
+        assert self.parser.detect_language(Path("trigger.trg")) == "sql"
+        assert self.parser.detect_language(Path("proc.prc")) == "sql"
+
+    def test_finds_table(self):
+        tables = [n for n in self.nodes if n.kind == "Class" and n.extra.get("sql_kind") == "table"]
+        assert "employees" in {t.name for t in tables}
+
+    def test_finds_procedure(self):
+        procs = [
+            n for n in self.nodes
+            if n.kind == "Function" and n.extra.get("sql_kind") == "procedure"
+            and n.parent_name is None
+        ]
+        assert "give_raise" in {p.name for p in procs}
+
+    def test_finds_oracle_style_function(self):
+        # CREATE FUNCTION ... RETURN ... IS ... BEGIN ... END — no RETURNS/
+        # LANGUAGE clause, so the ANSI tree-sitter grammar can't parse this
+        # and it must come from the regex fallback.
+        funcs = [
+            n for n in self.nodes
+            if n.kind == "Function" and n.extra.get("sql_kind") == "function"
+            and n.parent_name is None
+        ]
+        assert "get_salary" in {f.name for f in funcs}
+
+    def test_finds_trigger(self):
+        triggers = [n for n in self.nodes if n.extra.get("sql_kind") == "trigger"]
+        assert "trg_employees_audit" in {t.name for t in triggers}
+
+    def test_finds_package_spec_and_body(self):
+        packages = [n for n in self.nodes if n.extra.get("sql_kind") == "package"]
+        bodies = [n for n in self.nodes if n.extra.get("sql_kind") == "package_body"]
+        assert "payroll_pkg" in {p.name for p in packages}
+        assert "payroll_pkg" in {b.name for b in bodies}
+
+    def test_finds_nested_package_members(self):
+        members = [n for n in self.nodes if n.parent_name == "payroll_pkg$body"]
+        names = {m.name for m in members}
+        assert "calculate_bonus" in names
+        assert "process_payroll" in names
+        kinds = {m.extra.get("sql_kind") for m in members}
+        assert kinds == {"function", "procedure"}
+
+    def test_package_spec_and_body_have_distinct_qualified_names(self):
+        # Spec and body are separate Oracle objects; sharing one qualified
+        # name collided on the graph store's UNIQUE(qualified_name), so the
+        # body gets a `$body` suffix.
+        contains = [e for e in self.edges if e.kind == "CONTAINS"]
+        targets = {e.target for e in contains if e.source == str(self.fixture)}
+        assert f"{self.fixture}::payroll_pkg" in targets
+        assert f"{self.fixture}::payroll_pkg$body" in targets
+
+    def test_package_body_contains_members(self):
+        # Members are qualified with their parameter signature (always-on,
+        # mirroring _cpp_function_identity), since Oracle allows overloaded
+        # PROCEDURE/FUNCTION members within a package and two overloads
+        # sharing a bare name would collide on the graph store's
+        # UNIQUE(qualified_name).
+        contains = [e for e in self.edges if e.kind == "CONTAINS"]
+        body_qualified = f"{self.fixture}::payroll_pkg$body"
+        member_sources = {e.target.split("::")[-1] for e in contains if e.source == body_qualified}
+        assert "payroll_pkg$body.calculate_bonus(p_emp_id IN NUMBER)" in member_sources
+        assert "payroll_pkg$body.process_payroll(p_emp_id IN NUMBER)" in member_sources
+
+    def test_procedure_call_edge(self):
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        targets = {e.target for e in calls}
+        assert "log_salary_change" in targets
+
+    def test_trigger_call_edge(self):
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        assert ("log_change", {"receiver": "audit_pkg"}) in [(e.target, e.extra) for e in calls]
+
+    def test_package_member_call_edges(self):
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        by_source = {}
+        for e in calls:
+            by_source.setdefault(e.source.split("::")[-1], set()).add(e.target)
+        assert "get_salary" in by_source.get(
+            "payroll_pkg$body.calculate_bonus(p_emp_id IN NUMBER)", set(),
+        )
+        assert {"calculate_bonus", "give_raise"} <= by_source.get(
+            "payroll_pkg$body.process_payroll(p_emp_id IN NUMBER)", set(),
+        )
+
+    def test_variable_declarations_are_not_calls(self):
+        # `v_bonus NUMBER(10, 2);` must not produce a CALLS edge to NUMBER.
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        targets = {e.target.upper() for e in calls}
+        assert "NUMBER" not in targets
+        assert "VARCHAR2" not in targets
+
+    def test_bare_end_member(self):
+        # A package-body member closed by a bare `END;` (no repeated name)
+        # must still get the correct span, not swallow the next member.
+        src = """
+CREATE OR REPLACE PACKAGE BODY util_pkg IS
+    PROCEDURE do_first IS
+    BEGIN
+        NULL;
+    END;
+
+    PROCEDURE do_second IS
+    BEGIN
+        first_helper();
+    END do_second;
+END util_pkg;
+/
+"""
+        fixture = FIXTURES / "sample_plsql_bare_end.sql"
+        fixture.write_text(src)
+        try:
+            nodes, edges = self.parser.parse_file(fixture)
+        finally:
+            fixture.unlink()
+        members = [n for n in nodes if n.parent_name == "util_pkg$body"]
+        names = {m.name for m in members}
+        assert names == {"do_first", "do_second"}
+        do_second = next(m for m in members if m.name == "do_second")
+        assert do_second.line_start < do_second.line_end < 12
+        calls = [e for e in edges if e.kind == "CALLS"]
+        targets = {e.target for e in calls}
+        assert "first_helper" in targets
+        assert "do_second" not in targets
+
+    def test_forward_declaration_no_phantom(self):
+        src = """
+CREATE OR REPLACE PACKAGE BODY log_pkg IS
+    PROCEDURE log_event(p_msg VARCHAR2);
+
+    FUNCTION total_orders RETURN NUMBER IS
+    BEGIN
+        RETURN 42;
+    END total_orders;
+
+    PROCEDURE log_event(p_msg VARCHAR2) IS
+    BEGIN
+        NULL;
+    END log_event;
+END log_pkg;
+/
+"""
+        fixture = FIXTURES / "sample_plsql_forward_decl.sql"
+        fixture.write_text(src)
+        try:
+            nodes, edges = self.parser.parse_file(fixture)
+        finally:
+            fixture.unlink()
+        members = [n for n in nodes if n.parent_name == "log_pkg$body" and n.name == "log_event"]
+        assert len(members) == 1
+        calls = [e for e in edges if e.kind == "CALLS"]
+        assert not any(e.target == "log_event" for e in calls)
+
+    def test_forward_declaration_with_as_is_mid_word_return_type(self):
+        # A forward declaration whose RETURN type contains "as"/"is" as a
+        # substring (e.g. t_alias) must still be recognized as a forward
+        # declaration, not misread as a real definition via a false
+        # mid-word "AS" match.
+        src = """
+CREATE OR REPLACE PACKAGE BODY alias_pkg IS
+    FUNCTION get_alias(p_id NUMBER) RETURN t_alias;
+
+    FUNCTION get_alias(p_id NUMBER) RETURN t_alias IS
+        v_result t_alias;
+    BEGIN
+        RETURN v_result;
+    END get_alias;
+END alias_pkg;
+/
+"""
+        fixture = FIXTURES / "sample_plsql_alias_forward_decl.sql"
+        fixture.write_text(src)
+        try:
+            nodes, edges = self.parser.parse_file(fixture)
+        finally:
+            fixture.unlink()
+        members = [n for n in nodes if n.parent_name == "alias_pkg$body" and n.name == "get_alias"]
+        assert len(members) == 1
+        assert members[0].line_start == 5
+
+    def test_tsql_procedure_without_end_is_not_treated_as_plsql(self):
+        # No Oracle signal anywhere: two back-to-back T-SQL procedures with
+        # no BEGIN/END must not have their spans computed at all, let alone
+        # bleed into each other.
+        src = """
+CREATE PROCEDURE dbo.GetTotal
+AS
+SELECT SUM(total) FROM orders;
+GO
+
+CREATE PROCEDURE dbo.GetCount
+AS
+SELECT COUNT(*) FROM customers;
+GO
+"""
+        fixture = FIXTURES / "sample_tsql.sql"
+        fixture.write_text(src)
+        try:
+            nodes, edges = self.parser.parse_file(fixture)
+        finally:
+            fixture.unlink()
+        procs = {n.name: n for n in nodes if n.kind == "Function"}
+        assert set(procs) == {"GetTotal", "GetCount"}
+        # Single-line span (pre-PL/SQL-support behavior) — no body computed.
+        assert procs["GetTotal"].line_start == procs["GetTotal"].line_end
+        assert not [e for e in edges if e.kind == "CALLS"]
+
+    def test_package_spec_and_body_survive_graph_store(self, tmp_path):
+        # GraphStore.upsert_node computes each node's real qualified_name
+        # from identity_name/parent_name — it does not read the local
+        # `body_qualified`/`member_qualified` strings this parser builds
+        # for edge targets. A node whose real qualified_name doesn't match
+        # what the CONTAINS/CALLS edges point at is a silent bug the
+        # parser-only tests above can't catch (regression: spec and body
+        # collided on nodes.qualified_name UNIQUE and one was dropped).
+        from code_review_graph.graph import GraphStore
+
+        graph_dir = tmp_path / ".code-review-graph"
+        graph_dir.mkdir()
+        store = GraphStore(graph_dir / "graph.db")
+        try:
+            store.store_file_nodes_edges(str(self.fixture), self.nodes, self.edges)
+            stored = store.get_nodes_by_file(str(self.fixture))
+            spec = next(n for n in stored if n.extra.get("sql_kind") == "package")
+            body = next(n for n in stored if n.extra.get("sql_kind") == "package_body")
+            assert spec.qualified_name != body.qualified_name
+
+            stored_qualified = {n.qualified_name for n in stored}
+            contains_targets = {
+                e.target for e in self.edges if e.kind == "CONTAINS"
+            }
+            missing = contains_targets - stored_qualified
+            assert not missing, f"CONTAINS edges point at nodes that don't exist: {missing}"
+        finally:
+            store.close()
+
+    def test_overloaded_package_members_survive_graph_store(self, tmp_path):
+        # Oracle allows PROCEDURE/FUNCTION overloading within a package
+        # (never for standalone subprograms) — two members sharing a name
+        # is normal, not a duplicate. Without a signature-qualified identity
+        # both would collide on nodes.qualified_name UNIQUE, same root
+        # cause as the spec/body collision above, and one overload would
+        # silently vanish from the graph.
+        from code_review_graph.graph import GraphStore
+
+        src = """
+CREATE OR REPLACE PACKAGE BODY math_pkg IS
+    FUNCTION add_val(p_x NUMBER, p_y NUMBER) RETURN NUMBER IS
+    BEGIN
+        RETURN p_x + p_y;
+    END add_val;
+
+    FUNCTION add_val(p_x VARCHAR2, p_y VARCHAR2) RETURN VARCHAR2 IS
+    BEGIN
+        RETURN p_x || p_y;
+    END add_val;
+END math_pkg;
+/
+"""
+        fixture = FIXTURES / "sample_plsql_overload.sql"
+        fixture.write_text(src)
+        graph_dir = tmp_path / ".code-review-graph"
+        graph_dir.mkdir()
+        store = GraphStore(graph_dir / "graph.db")
+        try:
+            nodes, edges = self.parser.parse_file(fixture)
+            store.store_file_nodes_edges(str(fixture), nodes, edges)
+            stored = store.get_nodes_by_file(str(fixture))
+            overloads = [n for n in stored if n.name == "add_val"]
+            assert len(overloads) == 2
+            assert len({n.qualified_name for n in overloads}) == 2
+
+            stored_qualified = {n.qualified_name for n in stored}
+            contains_targets = {e.target for e in edges if e.kind == "CONTAINS"}
+            missing = contains_targets - stored_qualified
+            assert not missing, f"CONTAINS edges point at nodes that don't exist: {missing}"
+        finally:
+            store.close()
+            fixture.unlink()
+
+    def test_comment_semicolon_before_is_does_not_hide_member(self):
+        # A trailing line comment containing a `;` between the parameter
+        # list and `IS` must not be mistaken for the forward-declaration
+        # terminator — the member must still be extracted.
+        src = """
+CREATE OR REPLACE PACKAGE BODY note_pkg IS
+    PROCEDURE add_note(p_text VARCHAR2) -- see ticket #123; needs review
+    IS
+    BEGIN
+        NULL;
+    END add_note;
+END note_pkg;
+/
+"""
+        fixture = FIXTURES / "sample_plsql_comment_semicolon.sql"
+        fixture.write_text(src)
+        try:
+            nodes, edges = self.parser.parse_file(fixture)
+        finally:
+            fixture.unlink()
+        members = [n for n in nodes if n.parent_name == "note_pkg$body"]
+        assert {m.name for m in members} == {"add_note"}
+
+    def test_comment_end_marker_does_not_truncate_span(self):
+        # A comment mentioning `END name;` inside the body must not be
+        # mistaken for the real terminator — the span (and any calls after
+        # the comment) must extend to the actual END.
+        src = """
+CREATE OR REPLACE PROCEDURE do_thing IS
+BEGIN
+    -- TODO: END do_thing; should call cleanup() here eventually
+    real_work();
+END do_thing;
+/
+"""
+        fixture = FIXTURES / "sample_plsql_comment_end.prc"
+        fixture.write_text(src)
+        try:
+            nodes, edges = self.parser.parse_file(fixture)
+        finally:
+            fixture.unlink()
+        proc = next(n for n in nodes if n.name == "do_thing")
+        assert proc.line_end == 6
+        calls = [e for e in edges if e.kind == "CALLS"]
+        assert any(e.target == "real_work" for e in calls)
+
+    def test_dollar_and_hash_in_identifiers(self):
+        # Oracle identifiers may contain `$`/`#` (e.g. version-suffixed or
+        # internal-convention names). `\w+` alone truncates at the `$`/`#`,
+        # which cascades into the block-end search looking for the wrong
+        # (truncated) terminator name.
+        src = """
+CREATE OR REPLACE PROCEDURE log_event$v2 (p_msg VARCHAR2) IS
+BEGIN
+    NULL;
+END log_event$v2;
+/
+
+CREATE OR REPLACE FUNCTION calc#total (p_x NUMBER) RETURN NUMBER IS
+BEGIN
+    RETURN p_x;
+END calc#total;
+/
+"""
+        fixture = FIXTURES / "sample_plsql_dollar_hash.sql"
+        fixture.write_text(src)
+        try:
+            nodes, edges = self.parser.parse_file(fixture)
+        finally:
+            fixture.unlink()
+        by_name = {n.name: n for n in nodes if n.kind == "Function"}
+        assert set(by_name) == {"log_event$v2", "calc#total"}
+        assert by_name["log_event$v2"].line_start < by_name["log_event$v2"].line_end
+        assert by_name["log_event$v2"].line_end < by_name["calc#total"].line_start
+
+    def test_oracle_word_in_comment_does_not_trip_dialect_detection(self):
+        # A T-SQL file with no Oracle syntax anywhere except inside a
+        # comment must not be treated as PL/SQL — dialect detection has to
+        # run against comment-stripped text, or this reintroduces the
+        # original EOF-swallowing regression via a different path.
+        src = """
+-- Migrated from Oracle: the old column type was VARCHAR2, now VARCHAR.
+CREATE PROCEDURE dbo.GetTotal
+AS
+SELECT SUM(total) FROM orders;
+GO
+
+CREATE PROCEDURE dbo.GetCount
+AS
+SELECT COUNT(*) FROM customers;
+GO
+"""
+        fixture = FIXTURES / "sample_tsql_oracle_word_in_comment.sql"
+        fixture.write_text(src)
+        try:
+            nodes, edges = self.parser.parse_file(fixture)
+        finally:
+            fixture.unlink()
+        procs = {n.name: n for n in nodes if n.kind == "Function"}
+        assert set(procs) == {"GetTotal", "GetCount"}
+        assert procs["GetTotal"].line_start == procs["GetTotal"].line_end
+        assert procs["GetCount"].line_start == procs["GetCount"].line_end
+        assert not [e for e in edges if e.kind == "CALLS"]
+class TestPLSQLHelpers:
+    """Direct unit coverage for the private PL/SQL scanning helpers.
+
+    TestPLSQLParsing above only exercises these through the public
+    parse_file() entry point, which is how the bugs fixed in PR #785 were
+    found — but it means static/call-graph tooling sees no direct
+    test -> helper edge for these symbols. These tests call them directly.
+    """
+
+    def test_is_plsql_dialect_true_for_oracle_extensions_regardless_of_content(self):
+        for ext in (".pls", ".plb", ".pks", ".pkb", ".pck", ".prc", ".fnc", ".trg"):
+            assert CodeParser._is_plsql_dialect(Path(f"x{ext}"), "SELECT 1;")
+
+    def test_is_plsql_dialect_true_for_content_signals(self):
+        signals = [
+            "v_x employees.id%TYPE;",
+            "v_x employees%ROWTYPE;",
+            "v_x VARCHAR2(10);",
+            "v_x PLS_INTEGER;",
+            "v_x BINARY_INTEGER;",
+            "v_x SYS_REFCURSOR;",
+            "DBMS_OUTPUT.PUT_LINE('x');",
+            ":NEW.id",
+            ":OLD.id",
+            "CREATE OR REPLACE PACKAGE pkg IS END pkg;",
+        ]
+        for text in signals:
+            assert CodeParser._is_plsql_dialect(Path("x.sql"), text), text
+
+    def test_is_plsql_dialect_false_for_plain_sql(self):
+        plain = "CREATE TABLE t (id INT); SELECT * FROM t WHERE id = 1;"
+        assert not CodeParser._is_plsql_dialect(Path("x.sql"), plain)
+
+    def test_is_plsql_dialect_false_for_tsql_style_procedure(self):
+        tsql = "CREATE PROCEDURE dbo.GetTotal AS SELECT SUM(total) FROM orders;"
+        assert not CodeParser._is_plsql_dialect(Path("x.sql"), tsql)
+
+    def test_forward_decl_true_for_signature_only(self):
+        text = "PROCEDURE log_event(p_msg VARCHAR2);"
+        start = text.index("(")
+        assert CodeParser._plsql_is_forward_decl(text, start)
+
+    def test_forward_decl_true_for_no_arg_signature(self):
+        text = "PROCEDURE do_first;"
+        start = text.index(";")
+        assert CodeParser._plsql_is_forward_decl(text, start)
+
+    def test_forward_decl_false_for_real_definition_is(self):
+        text = "PROCEDURE log_event(p_msg VARCHAR2) IS BEGIN NULL; END log_event;"
+        start = text.index("(")
+        assert not CodeParser._plsql_is_forward_decl(text, start)
+
+    def test_forward_decl_false_for_real_definition_as(self):
+        text = "PROCEDURE log_event AS BEGIN NULL; END log_event;"
+        start = text.index(" AS")
+        assert not CodeParser._plsql_is_forward_decl(text, start)
+
+    def test_forward_decl_false_for_function_return_is(self):
+        text = "FUNCTION calc(p_x NUMBER) RETURN NUMBER IS BEGIN RETURN p_x; END calc;"
+        start = text.index("(")
+        assert not CodeParser._plsql_is_forward_decl(text, start)
+
+    def test_forward_decl_ignores_semicolon_inside_nested_parens(self):
+        # A default-value string containing `;` inside the parameter list's
+        # parens must not be mistaken for the top-level terminator.
+        text = "PROCEDURE log_msg(p_msg VARCHAR2 := 'a;b') IS BEGIN NULL; END log_msg;"
+        start = text.index("(")
+        assert not CodeParser._plsql_is_forward_decl(text, start)
+
+    def test_forward_decl_ignores_as_is_mid_identifier(self):
+        # `re.match` alone only anchors the *end* of "AS"/"IS" with `\b` —
+        # without a word boundary check on the start too, a return type
+        # like `t_alias` matches "AS" mid-word ("t_ali|AS") and a genuine
+        # forward declaration gets misread as a real definition.
+        text = "FUNCTION get_alias(p) RETURN t_alias;"
+        start = text.index("(")
+        assert CodeParser._plsql_is_forward_decl(text, start)
+
+    def test_forward_decl_skips_comment_before_is(self):
+        # A `;` inside a trailing comment on the declaration line must not
+        # be mistaken for the forward-decl terminator, even when this
+        # function is called directly on uncleaned text.
+        text = (
+            "PROCEDURE setup(p IN NUMBER) -- initializes state; call once\n"
+            "IS BEGIN NULL; END setup;"
+        )
+        start = text.index("(")
+        assert not CodeParser._plsql_is_forward_decl(text, start)
+
+    def test_block_end_prefers_named_terminator(self):
+        text = "BEGIN NULL; END; END foo;"
+        end = CodeParser._plsql_block_end(text, 0, "foo")
+        assert text[:end] == "BEGIN NULL; END; END foo;"
+
+    def test_block_end_falls_back_to_bare_terminator(self):
+        text = "BEGIN NULL; END;"
+        end = CodeParser._plsql_block_end(text, 0, "foo")
+        assert text[:end] == "BEGIN NULL; END;"
+
+    def test_block_end_bounded_by_next_create_when_no_end_found(self):
+        # T-SQL-style body with no BEGIN/END at all — must bound at the next
+        # top-level CREATE statement, not swallow it too.
+        text = "AS\nSELECT SUM(total) FROM orders\nCREATE PROCEDURE next_one AS SELECT 1"
+        end = CodeParser._plsql_block_end(text, 0, "foo")
+        assert end == text.index("CREATE PROCEDURE next_one")
+
+    def test_block_end_falls_back_to_eof_when_nothing_found(self):
+        text = "BEGIN more_code_with_no_terminator_at_all"
+        end = CodeParser._plsql_block_end(text, 0, "foo")
+        assert end == len(text)
+
+    def test_block_end_requires_boundary_after_end(self):
+        # "ENDfoo;" must not be read as "END foo;" — END has to be its own
+        # token, not a prefix glued to the name with no separator.
+        text = "BEGIN NULL; ENDfoo;"
+        end = CodeParser._plsql_block_end(text, 0, "foo")
+        assert end == len(text)
+
+    def test_create_regex_requires_leading_boundary(self):
+        # "RECREATE PROCEDURE" must not match as "CREATE PROCEDURE" — the
+        # word has to actually start with CREATE, not just contain it.
+        text = "RECREATE PROCEDURE ghost_proc IS BEGIN NULL; END;"
+        assert CodeParser._SQL_PROC_RE.search(text) is None
+        real = "CREATE PROCEDURE real_proc IS BEGIN NULL; END;"
+        m = CodeParser._SQL_PROC_RE.search(real)
+        assert m is not None and m.group(1) == "real_proc"
+
+    def test_member_signature_skips_unbalanced_paren_in_string(self):
+        # A default-value string literal containing "(" must not throw off
+        # the paren-depth count when called directly on raw text.
+        text = "PROCEDURE weird(p_x VARCHAR2 := '(' ) IS BEGIN NULL; END weird;"
+        start = text.index("(")
+        sig = CodeParser._plsql_member_signature(text, start)
+        assert sig == "p_x VARCHAR2 := '('"
+
+    def test_identifier_preserves_non_ascii_letters(self):
+        # _PLSQL_IDENT used to be [A-Za-z_][A-Za-z0-9_$#]*, which silently
+        # truncated identifiers at the first non-ASCII letter (e.g. "café"
+        # became "caf"), unlike the \w-based regexes used for non-Oracle
+        # SQL elsewhere in this file, which are Unicode-aware by default.
+        text = "CREATE PROCEDURE café AS SELECT 1;"
+        m = CodeParser._SQL_PROC_RE.search(text)
+        assert m is not None and m.group(1) == "café"
+
+    def test_identifier_still_stops_before_dollar_and_hash_start(self):
+        # $/# are valid mid-identifier but not as the very first character,
+        # matching Oracle's own identifier rules.
+        import re
+
+        assert re.match(CodeParser._PLSQL_IDENT, "$bad") is None
+        assert re.match(CodeParser._PLSQL_IDENT, "#bad") is None
+
+    def test_call_extraction_is_not_quadratic_on_many_calls(self):
+        # _extract_plsql_calls used body_text[:m.start()] (re-slicing and
+        # re-scanning the whole preceding text) for the INSERT INTO check
+        # on every match, making this O(n^2) — ~25s on large real files per
+        # review. A bounded lookback window keeps it roughly linear.
+        import time
+
+        parser = CodeParser()
+        lines = ["CREATE OR REPLACE PROCEDURE big_proc IS", "BEGIN"]
+        n = 4000
+        for i in range(n):
+            lines.append(f"    call_target_{i}(v_x, v_y);")
+        lines.append("END big_proc;")
+        lines.append("/")
+        fixture = FIXTURES / "sample_plsql_many_calls.prc"
+        fixture.write_text("\n".join(lines))
+        try:
+            start = time.perf_counter()
+            nodes, edges = parser.parse_file(fixture)
+            elapsed = time.perf_counter() - start
+        finally:
+            fixture.unlink()
+        calls = [e for e in edges if e.kind == "CALLS"]
+        assert len(calls) == n
+        # Generous ceiling: linear behavior finishes in well under a second
+        # for this size; quadratic behavior would take many seconds.
+        assert elapsed < 5, f"call extraction took {elapsed:.2f}s for {n} calls — looks quadratic"
+
+    def test_into_lookback_still_filters_insert_into_target(self):
+        # The bounded lookback must still catch INSERT INTO immediately
+        # before the match, including across a couple of formatting lines.
+        import re
+
+        text = "INSERT\n  INTO\n  audit_log (msg) VALUES ('x');"
+        m = CodeParser._PLSQL_CALL_RE.search(text, text.index("audit_log"))
+        assert m is not None
+        lookback_start = max(0, m.start() - CodeParser._INTO_LOOKBACK)
+        assert re.search(r"\bINTO\s*$", text[lookback_start:m.start()], re.IGNORECASE)
+
+    def test_strip_noise_tracks_string_state_across_lines(self):
+        # _strip_plsql_noise used to reset its in-string flag at the start
+        # of every line, so a string literal spanning multiple lines let a
+        # "END name;"-shaped substring inside it terminate the block early
+        # (PR #785 review).
+        parser = CodeParser()
+        fixture = FIXTURES / "sample_plsql_multiline_string.sql"
+        fixture.write_text(
+            "CREATE PROCEDURE multi_line_proc AS\n"
+            "  v_msg VARCHAR2(200) := 'line one\n"
+            "END multi_line_proc;\n"
+            "line two';\n"
+            "BEGIN\n"
+            "  NULL;\n"
+            "END multi_line_proc;\n",
+        )
+        try:
+            nodes, _ = parser.parse_file(fixture)
+        finally:
+            fixture.unlink()
+        procs = [n for n in nodes if n.name == "multi_line_proc"]
+        assert len(procs) == 1
+        assert procs[0].line_end == 7
+
+    def test_strip_noise_handles_q_quoted_strings(self):
+        # Oracle's q'[...]'/Q'<...>' quote operator allows unescaped `'`
+        # inside the string, which the plain '...' state machine does not
+        # know about, so it closed the string early on the embedded `'`
+        # and then misread the rest of the q-string as real code.
+        parser = CodeParser()
+        fixture = FIXTURES / "sample_plsql_qstring.sql"
+        fixture.write_text(
+            "CREATE PROCEDURE q_proc AS\n"
+            "  v_msg VARCHAR2(200) := q'[it's a test; END q_proc;]';\n"
+            "BEGIN\n"
+            "  NULL;\n"
+            "END q_proc;\n",
+        )
+        try:
+            nodes, _ = parser.parse_file(fixture)
+        finally:
+            fixture.unlink()
+        procs = [n for n in nodes if n.name == "q_proc"]
+        assert len(procs) == 1
+        assert procs[0].line_end == 5
+
+    def test_strip_noise_comment_cannot_start_inside_string(self):
+        # The old implementation blanked /\*.*?\*/ over the raw text before
+        # any string tracking existed, so an unterminated "/*" inside one
+        # string literal could pair up with an unrelated "*/" inside a
+        # later string, blanking everything between them — including a
+        # whole CREATE PROCEDURE statement that happened to fall in that
+        # span (PR #785 review: "staging finds both procedures and tables
+        # but this branch finds only one procedure").
+        parser = CodeParser()
+        fixture = FIXTURES / "sample_plsql_comment_in_string.sql"
+        fixture.write_text(
+            "CREATE PROCEDURE get_widget AS\n"
+            "BEGIN\n"
+            "  v_note VARCHAR2(100) := 'a /* b';\n"
+            "END;\n"
+            "\n"
+            "CREATE PROCEDURE should_not_be_dropped AS\n"
+            "BEGIN\n"
+            "  NULL;\n"
+            "END;\n"
+            "\n"
+            "CREATE TABLE widgets (id INT, tag VARCHAR2(20) DEFAULT 'c */ d');\n",
+        )
+        try:
+            nodes, _ = parser.parse_file(fixture)
+        finally:
+            fixture.unlink()
+        names = {n.name for n in nodes}
+        assert "get_widget" in names
+        assert "should_not_be_dropped" in names
+        assert "widgets" in names
+
+    def test_block_end_bounded_to_enclosing_package_body(self):
+        # _plsql_block_end's named-END search ran unbounded to end-of-file,
+        # so a member using a bare "END;" could have its search skip past
+        # its own package body entirely and land on an unrelated, later
+        # package body's same-named member's "END <name>;" (PR #785
+        # review). Passing the enclosing body's own end as `limit` keeps
+        # the search inside that body.
+        parser = CodeParser()
+        fixture = FIXTURES / "sample_plsql_bleed.pkb"
+        fixture.write_text(
+            "CREATE OR REPLACE PACKAGE BODY pkg_a IS\n"
+            "  PROCEDURE foo IS\n"
+            "  BEGIN\n"
+            "    NULL;\n"
+            "  END;\n"
+            "END pkg_a;\n"
+            "/\n"
+            "\n"
+            "CREATE OR REPLACE PACKAGE BODY pkg_b IS\n"
+            "  PROCEDURE foo IS\n"
+            "  BEGIN\n"
+            "    NULL;\n"
+            "  END foo;\n"
+            "END pkg_b;\n"
+            "/\n",
+        )
+        try:
+            nodes, _ = parser.parse_file(fixture)
+        finally:
+            fixture.unlink()
+        foos = [n for n in nodes if n.name == "foo"]
+        assert len(foos) == 2
+        by_line = sorted(foos, key=lambda n: n.line_start)
+        assert by_line[0].line_end == 5  # pkg_a.foo's own bare END, not pkg_b's
+        assert by_line[1].line_end == 13
+
+    @pytest.mark.parametrize(
+        "lead",
+        [
+            b"INSERT INTO t VALUES ('it\\'s');\n",  # MySQL backslash escape
+            b"# it's a MySQL comment\n",
+            b'SELECT "it\'s" FROM a;\n',
+            b"COPY people (id, name) FROM stdin;\n1\tO'Brien\n\\.\n",  # pg_dump row
+            b"DO $x$ don't $x$;\n",  # Postgres dollar quoting
+        ],
+    )
+    def test_plain_sql_apostrophe_does_not_hide_later_statements(self, lead):
+        # Oracle's quoting rules do not hold in other dialects, so the blanking
+        # must not run on them: one stray apostrophe would flip its string state.
+        source = lead + (
+            b"CREATE PROCEDURE later() BEGIN SELECT * FROM orders; END;\n"
+            b"SELECT 1 FROM users;\n"
+        )
+
+        nodes, edges = CodeParser().parse_bytes(Path("dump.sql"), source)
+
+        assert "later" in {n.name for n in nodes if n.kind == "Function"}
+        tables = {e.target for e in edges if e.kind == "IMPORTS_FROM"}
+        assert {"orders", "users"} <= tables
+
+    def test_plain_sql_procedure_name_may_start_with_a_digit(self):
+        source = b"CREATE PROCEDURE 2fa_check() BEGIN SELECT 1; END;\n"
+
+        nodes, _ = CodeParser().parse_bytes(Path("mysql.sql"), source)
+
+        assert [n.name for n in nodes if n.kind == "Function"] == ["2fa_check"]
+
+    def test_overload_with_bare_end_stops_before_the_next_overload(self):
+        source = (
+            b"CREATE OR REPLACE PACKAGE BODY a IS\n"
+            b"  PROCEDURE run(x NUMBER) IS\n"
+            b"  BEGIN\n"
+            b"    one();\n"
+            b"  END;\n"
+            b"  PROCEDURE run(y DATE) IS\n"
+            b"  BEGIN\n"
+            b"    two();\n"
+            b"  END run;\n"
+            b"END a;\n"
+        )
+
+        nodes, edges = CodeParser().parse_bytes(Path("o.pkb"), source)
+
+        spans = {n.identity_name: (n.line_start, n.line_end) for n in nodes if n.name == "run"}
+        assert spans == {"run(x NUMBER)": (2, 5), "run(y DATE)": (6, 9)}
+        calls = {
+            (e.source.rsplit(".", 1)[-1], e.target) for e in edges if e.kind == "CALLS"
+        }
+        assert calls == {("run(x NUMBER)", "one"), ("run(y DATE)", "two")}
+
+    def test_package_qualified_call_reaches_the_member(self, tmp_path):
+        from code_review_graph.graph import GraphStore
+        from code_review_graph.incremental import full_build
+        from code_review_graph.refactor import find_dead_code
+        from code_review_graph.tools.query import query_graph
+
+        (tmp_path / ".git").mkdir()
+        (tmp_path / "billing.pkb").write_text(
+            "CREATE OR REPLACE PACKAGE BODY billing AS\n"
+            "  PROCEDURE charge(p_id NUMBER) IS\n"
+            "  BEGIN\n"
+            "    NULL;\n"
+            "  END charge;\n"
+            "END billing;\n/\n",
+        )
+        (tmp_path / "notify.prc").write_text(
+            "CREATE OR REPLACE PROCEDURE notify_user(p_id NUMBER) IS\n"
+            "BEGIN\n"
+            "  app.billing.charge(p_id);\n"
+            "END notify_user;\n/\n",
+        )
+        with GraphStore(tmp_path / ".code-review-graph" / "graph.db") as store:
+            full_build(tmp_path, store)
+            dead = find_dead_code(store)
+
+        result = query_graph("callers_of", "charge", str(tmp_path))
+
+        assert [row["name"] for row in result["results"]] == ["notify_user"]
+        assert "charge" not in {item["name"] for item in dead}
+
+    def test_analytic_over_clause_is_not_a_call(self):
+        source = (
+            b"CREATE OR REPLACE PROCEDURE p IS\n"
+            b"BEGIN\n"
+            b"  SELECT SUM(a) OVER (ORDER BY b) INTO v FROM t;\n"
+            b"END p;\n"
+        )
+
+        _, edges = CodeParser().parse_bytes(Path("p.prc"), source)
+
+        assert [e.target for e in edges if e.kind == "CALLS"] == []
+
+    def test_block_end_uses_the_named_end_index(self):
+        text = "BEGIN a; END; BEGIN b; END foo; END bar;"
+        named_ends = {"foo": [text.index(" END bar")], "bar": [len(text)]}
+
+        # A later `END foo;` wins over the nearer bare `END;`.
+        assert CodeParser._plsql_block_end(text, 0, "foo", named_ends=named_ends) == (
+            text.index(" END bar")
+        )
+        # A name with no entry falls back to the first bare `END;`.
+        assert CodeParser._plsql_block_end(text, 0, "baz", named_ends=named_ends) == (
+            text.index(" BEGIN b")
+        )
+        # An entry past the limit is out of reach, so the bare `END;` wins.
+        assert CodeParser._plsql_block_end(
+            text, 0, "bar", limit=text.index(" BEGIN b"), named_ends=named_ends,
+        ) == text.index(" BEGIN b")
+
+    def test_block_end_search_is_not_quadratic_on_many_members(self):
+        # Each member's unbounded search used to cost O(remaining file
+        # size); bounding it to the enclosing package body's own end keeps
+        # per-member cost proportional to that body instead of the file.
+        import time
+
+        parser = CodeParser()
+        lines = ["CREATE OR REPLACE PACKAGE BODY big_pkg IS"]
+        n = 2000
+        for i in range(n):
+            lines.append(f"  PROCEDURE member_{i} IS")
+            lines.append("  BEGIN")
+            lines.append("    NULL;")
+            lines.append("  END;")
+        lines.append("END big_pkg;")
+        lines.append("/")
+        fixture = FIXTURES / "sample_plsql_many_members.pkb"
+        fixture.write_text("\n".join(lines))
+        try:
+            start = time.perf_counter()
+            nodes, _ = parser.parse_file(fixture)
+            elapsed = time.perf_counter() - start
+        finally:
+            fixture.unlink()
+        members = [n for n in nodes if n.name.startswith("member_")]
+        assert len(members) == n
+        assert elapsed < 5, f"block-end search took {elapsed:.2f}s for {n} members — looks quadratic"
+
+    @staticmethod
+    def _parse_plsql(source: str, name: str = "x.sql"):
+        return CodeParser().parse_bytes(Path(name), source.encode())
+
+    @staticmethod
+    def _call_targets(edges) -> set[str]:
+        return {e.target for e in edges if e.kind == "CALLS"}
+
+    def test_call_names_keep_unicode_letters(self):
+        _, edges = self._parse_plsql(
+            "CREATE PROCEDURE p IS v VARCHAR2(1);\n"
+            "BEGIN\n  café_proc(1);\n  café(2);\nEND p;\n"
+        )
+
+        assert self._call_targets(edges) == {"café_proc", "café"}
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "CREATE FUNCTION f RETURN NUMBER IS BEGIN RETURN g(1); END f;\n",
+            "CREATE OR REPLACE FUNCTION s.f(p NUMBER(10, 2)) RETURN NUMBER AS\n"
+            "BEGIN RETURN g(p); END;\n",
+            "CREATE PROCEDURE f IS BEGIN g(1); END f;\n",
+            "CREATE PROCEDURE f\n  (a NUMBER)\nIS\nBEGIN g(a); END;\n",
+            "CREATE OR REPLACE PROCEDURE f(a NUMBER)  AS\n  n NUMBER;\nBEGIN g(a); END;\n",
+        ],
+    )
+    def test_oracle_subprogram_syntax_is_a_dialect_signal(self, source):
+        # None of these holds a VARCHAR2 or a %TYPE: the routine's own shape has
+        # to be enough, or a plain Oracle function has no node at all.
+        nodes, edges = self._parse_plsql(source)
+
+        assert [n.name for n in nodes if n.kind == "Function"] == ["f"]
+        assert self._call_targets(edges) == {"g"}
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "CREATE PROCEDURE p AS BEGIN SELECT 1 END\n",  # T-SQL
+            "CREATE PROCEDURE analysis @x INT AS SELECT 1\n",  # name ends in IS
+            "CREATE PROCEDURE thesis (@x INT) AS SELECT 1\n",
+            "CREATE FUNCTION f(@x INT) RETURNS INT AS BEGIN RETURN @x END\n",
+            "CREATE FUNCTION f(@x INT) RETURNS @t TABLE (a INT) AS\n"
+            "BEGIN INSERT @t VALUES (1) RETURN END\n",
+            "CREATE FUNCTION f(x INT) RETURNS INT DETERMINISTIC BEGIN RETURN x; END\n",  # MySQL
+            "CREATE FUNCTION myreturn (x INT) RETURNS INT BEGIN RETURN x; END\n",
+            "CREATE OR REPLACE PROCEDURE p() AS $$ BEGIN g(1); END; $$ LANGUAGE plpgsql;\n",
+            "CREATE OR REPLACE PROCEDURE p()  AS\n  $body$ BEGIN g(1); END; $body$\n"
+            "LANGUAGE plpgsql;\n",
+            "CREATE OR REPLACE PROCEDURE p() AS 'g(1)' LANGUAGE sql;\n",
+            "CREATE OR REPLACE PROCEDURE p() LANGUAGE plpgsql AS $$ BEGIN g(1); END; $$;\n",
+        ],
+    )
+    def test_other_dialects_are_not_read_as_oracle_subprograms(self, source):
+        assert not CodeParser._is_plsql_dialect(Path("x.sql"), source)
+
+    def test_q_string_default_does_not_run_the_member_signature_on(self):
+        nodes, edges = self._parse_plsql(
+            "CREATE PACKAGE BODY k AS\n"
+            "  PROCEDURE m(x VARCHAR2 DEFAULT q'[text]') IS BEGIN g(1); END m;\n"
+            "  PROCEDURE n(y NUMBER) IS BEGIN h(1); END n;\n"
+            "END k;\n"
+        )
+
+        identities = {n.name: n.identity_name for n in nodes if n.kind == "Function"}
+        assert identities["n"] == "n(y NUMBER)"
+        assert identities["m"].startswith("m(x VARCHAR2 DEFAULT q'")
+        assert identities["m"].endswith("')")
+        assert "BEGIN" not in identities["m"]
+        assert self._call_targets(edges) == {"g", "h"}
+
+    @pytest.mark.parametrize("name", ["run$", "calc#", "run$v2"])
+    def test_named_end_after_an_identifier_ending_in_dollar_or_hash(self, name):
+        _, edges = self._parse_plsql(
+            f"CREATE PROCEDURE {name} IS v VARCHAR2(1);\n"
+            "BEGIN\n"
+            "  BEGIN\n    a(1);\n  END;\n"
+            "  b(2);\n"
+            f"END {name};\n"
+        )
+
+        assert self._call_targets(edges) == {"a", "b"}
+
+    def test_bare_outer_end_keeps_every_package_member(self):
+        nodes, edges = self._parse_plsql(
+            "CREATE PACKAGE BODY k AS\n"
+            "  PROCEDURE a IS\n"
+            "    v VARCHAR2(1) := CASE WHEN 1 = 1 THEN 'x' END;\n"
+            "  BEGIN\n"
+            "    IF v IS NULL THEN x(1); END IF;\n"
+            "    FOR i IN 1 .. 2 LOOP x2(i); END LOOP;\n"
+            "    CASE v WHEN 'x' THEN x3(1); END CASE;\n"
+            "    $IF 1 = 1 $THEN x4(1); $END\n"
+            "  END;\n"
+            "  PROCEDURE b IS BEGIN y(1); END;\n"
+            "  FUNCTION c RETURN NUMBER IS BEGIN RETURN z(1); END c;\n"
+            "END;\n"
+            "/\n"
+            "CREATE TABLE t (id NUMBER);\n"
+        )
+
+        body = next(n for n in nodes if n.extra.get("sql_kind") == "package_body")
+        assert (body.line_start, body.line_end) == (1, 12)
+        assert {n.name for n in nodes if n.kind == "Function"} == {"a", "b", "c"}
+        assert {"x", "x2", "x3", "x4", "y", "z"} == self._call_targets(edges)
+
+    def test_package_initialisation_section_with_bare_end(self):
+        nodes, edges = self._parse_plsql(
+            "CREATE PACKAGE BODY k AS\n"
+            "  PROCEDURE a IS BEGIN x(1); END;\n"
+            "BEGIN\n"
+            "  setup(1);\n"
+            "END;\n"
+            "/\n"
+            "CREATE TABLE t (id NUMBER);\n"
+        )
+
+        body = next(n for n in nodes if n.extra.get("sql_kind") == "package_body")
+        assert (body.line_start, body.line_end) == (1, 5)
+        assert {n.name for n in nodes if n.kind == "Function"} == {"a"}
+
+    def test_bare_end_counts_nested_blocks_and_case_expressions(self):
+        _, edges = self._parse_plsql(
+            "CREATE PROCEDURE p IS v VARCHAR2(1);\n"
+            "BEGIN\n"
+            "  BEGIN\n    a(1);\n  END;\n"
+            "  v := CASE WHEN 1 = 1 THEN 'x' END;\n"
+            "  b(2);\n"
+            "END;\n"
+            "CREATE PROCEDURE q IS BEGIN c(3); END;\n"
+        )
+
+        sources = {
+            e.target: e.source.rsplit("::", 1)[-1] for e in edges if e.kind == "CALLS"
+        }
+        assert sources == {"a": "p", "b": "p", "c": "q"}
+
+    def test_named_local_procedure_does_not_end_a_bare_ended_parent(self):
+        nodes, edges = self._parse_plsql(
+            "CREATE PROCEDURE p IS\n"
+            "  v VARCHAR2(1);\n"
+            "  PROCEDURE inner_step IS BEGIN a(1); END inner_step;\n"
+            "BEGIN\n"
+            "  b(2);\n"
+            "END;\n"
+        )
+
+        assert self._call_targets(edges) == {"a", "b"}
+        parent = next(n for n in nodes if n.name == "p")
+        assert parent.line_end == 6
+
+    def test_qualified_call_named_like_a_builtin_is_kept(self):
+        _, edges = self._parse_plsql(
+            "CREATE PROCEDURE p IS v VARCHAR2(1); n NUMBER;\n"
+            "BEGIN\n"
+            "  text_utils.replace(v);\n"
+            "  math_pkg.round(n);\n"
+            "  v := replace(v, 'a', 'b');\n"
+            "  n := round(n);\n"
+            "  n := sys.nvl(n, 0);\n"
+            "  n := standard.round(n);\n"
+            "  n := l_tab.count();\n"
+            "  l_tab.trim(1);\n"
+            "  dbms_output.put_line(v);\n"
+            "END p;\n"
+        )
+
+        calls = {
+            (e.extra.get("receiver"), e.target) for e in edges if e.kind == "CALLS"
+        }
+        assert calls == {("text_utils", "replace"), ("math_pkg", "round")}
+
+    def test_call_lines_follow_the_source(self):
+        _, edges = self._parse_plsql(
+            "-- a comment\n"
+            "CREATE PROCEDURE p IS v VARCHAR2(1);\n"
+            "BEGIN\n"
+            "  a(1);\n"
+            "  a(2);\n"
+            "\n"
+            "  b(\n"
+            "    c(3)\n"
+            "  );\n"
+            "END p;\n"
+            "CREATE PROCEDURE q IS BEGIN\n"
+            "  d(1);\n"
+            "END q;\n"
+        )
+
+        lines = {e.target: e.line for e in edges if e.kind == "CALLS"}
+        assert lines == {"a": 4, "b": 7, "c": 8, "d": 12}
+
+    def test_many_distinct_calls_do_not_recount_the_file(self):
+        # Timed on the call pass alone: tree-sitter's error recovery on PL/SQL is
+        # slower still at this size, on any branch.
+        import time
+
+        calls = "".join(f"  call_{i}(1);\n" for i in range(64000))
+        source = f"CREATE PROCEDURE big IS v VARCHAR2(1);\nBEGIN\n{calls}END big;\n"
+        edges = []
+
+        started = time.perf_counter()
+        CodeParser()._extract_plsql_calls(source, 0, len(source), "x::big", "x", edges)
+
+        assert time.perf_counter() - started < 5
+        assert len(edges) == 64000
+        assert edges[-1].line == 64002
+
+
 class TestZigParsing:
     def setup_method(self):
         self.parser = CodeParser()
@@ -4077,10 +5663,12 @@ class TestHCLParsing:
         contains = [e for e in self.edges if e.kind == "CONTAINS"]
         targets = {e.target for e in contains}
         # All non-File nodes should be contained by the file
-        for n in self.nodes:
-            if n.kind != "File":
-                qn = f"{n.file_path}::{n.name}"
-                assert qn in targets, f"missing CONTAINS for {n.name}"
+        expected_targets = {
+            f"{node.file_path}::{node.name}" for node in self.nodes if node.kind != "File"
+        }
+
+        assert expected_targets
+        assert expected_targets <= targets
 
     def test_resource_references_variable(self):
         """resource.aws_instance.web references var.instance_type."""
@@ -4563,9 +6151,10 @@ class TestAnsibleTasksParsing:
         assert file_path_str in sources
 
     def test_tasks_have_no_parent_play(self):
-        for n in self.nodes:
-            if n.kind == "Function":
-                assert n.parent_name is None, f"{n.name} should have no parent_play"
+        tasks = [node for node in self.nodes if node.kind == "Function"]
+
+        assert tasks
+        assert all(task.parent_name is None for task in tasks)
 
 
 @_ANSIBLE_SKIP

@@ -71,7 +71,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # discovered so the corpus is reproducible; ``test_release_list_tracks_the_
 # newest_tag`` fails if a newer release is tagged and this list is not updated,
 # which is the only way this check can quietly go stale.
-RELEASES = ("2.3.8", "2.3.7", "2.3.6")
+RELEASES = ("2.3.9", "2.3.8", "2.3.7")
 
 OPT_IN_ENV = "CRG_UPGRADE_TEST"
 
@@ -84,12 +84,21 @@ REVERSE_FUNCTION_NAME = "crg_downgrade_path_probe"
 # A symbol that exists in graph.py in every covered tag. The dotted spelling
 # resolves through the ``nodes.symbol`` column that migration v10 introduces,
 # so it is the query most likely to break on an upgraded database.
-KNOWN_SYMBOL = "upsert_node"
-KNOWN_DOTTED_SYMBOL = "GraphStore.upsert_node"
+#
+# Nothing else in any covered tag may mention the bare name. A bare target is a
+# full-text search over names and docstrings, and more than one match answers
+# ``ambiguous``. ``upsert_node`` stopped qualifying at 2.3.9, whose tests name it.
+KNOWN_SYMBOL = "get_all_edges"
+KNOWN_DOTTED_SYMBOL = "GraphStore.get_all_edges"
 KNOWN_FILE = "code_review_graph/graph.py"
 
+# The first release that refuses a database written by a newer one. Earlier
+# releases open it in silence and cannot be changed now, so the reverse
+# direction holds the two groups to different promises.
+FIRST_RELEASE_THAT_REFUSES = "2.3.9"
+
 # Floors for the canary that the old release really parsed a real repository.
-# The smallest covered tag produced 3282 nodes / 23793 edges / 179 files; these
+# The smallest covered tag produced 4418 nodes / 34123 edges / 218 files; these
 # sit far enough below that to tolerate parser drift but well above the "the
 # build silently did nothing" range.
 MIN_BASELINE_NODES = 1000
@@ -714,7 +723,7 @@ def test_the_old_release_built_a_real_graph(upgrade_run: UpgradeRun) -> None:
 def test_the_old_database_was_behind_the_current_schema(
     upgrade_run: UpgradeRun,
 ) -> None:
-    """Nothing is being tested if the released version already wrote v10.
+    """Nothing is being tested if the released version already wrote this schema.
 
     This is the assertion that keeps the module honest as the schema moves: the
     day a release ships with ``LATEST_VERSION`` equal to the current one, this
@@ -907,7 +916,11 @@ def test_mcp_tools_return_sane_results(upgrade_run: UpgradeRun) -> None:
     )
 
     callers = tools["query_graph.callers_of"]["payload"]
-    assert callers.get("status") == "ok"
+    assert callers.get("status") == "ok", (
+        f"callers_of({KNOWN_SYMBOL!r}) did not resolve to one node: "
+        f"{str(callers.get('summary'))[:200]}; if the {upgrade_run.tag} corpus "
+        "now mentions it elsewhere, pick a symbol nothing else mentions"
+    )
     assert callers.get("result_count", 0) >= 1, (
         f"callers_of({KNOWN_SYMBOL!r}) found nothing on a graph of "
         f"{upgrade_run.after_update['nodes']} nodes"
@@ -939,33 +952,68 @@ def test_mcp_tools_return_sane_results(upgrade_run: UpgradeRun) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_the_reverse_experiment_actually_ran(upgrade_run: UpgradeRun) -> None:
-    """Canary for the two expectations below, which are currently xfail.
+def _refuses_newer_databases(version: str) -> bool:
+    """Whether the release *version* refuses a database newer than itself."""
 
-    Without this, a reverse half that crashed during setup would leave the
-    xfails passing as xfail and report nothing.
+    def parts(text: str) -> tuple[int, ...]:
+        return tuple(int(part) for part in text.split("."))
+
+    return parts(version) >= parts(FIRST_RELEASE_THAT_REFUSES)
+
+
+def _expect_shipped_defect(
+    request: pytest.FixtureRequest, version: str, reason: str,
+) -> None:
+    """Expect *reason* to fail, but only for a release that shipped the defect.
+
+    A decorator would cover every release in ``RELEASES``. Added here the mark
+    stays strict for the releases it names, and a release that refuses is held
+    to the plain assertions.
+    """
+    if not _refuses_newer_databases(version):
+        request.node.add_marker(pytest.mark.xfail(strict=True, reason=reason))
+
+
+def test_the_reverse_experiment_actually_ran(upgrade_run: UpgradeRun) -> None:
+    """Canary for the two expectations below.
+
+    Without this, a reverse half that crashed during setup would leave their
+    xfails passing as xfail and report nothing. A release that refuses parses
+    nothing, so it has to show it met the current schema and said so.
     """
     reverse = upgrade_run.reverse
     assert reverse["schema_version_after_old_write"] == LATEST_VERSION, (
         "the reverse experiment did not run against a current-schema database"
     )
     assert reverse["update_returncode"] is not None
+    if _refuses_newer_databases(upgrade_run.version):
+        assert reverse["update_returncode"] != 0, (
+            f"{upgrade_run.tag} should refuse a newer database but its update "
+            f"exited 0\n{reverse['update_output'][-2000:]}"
+        )
+        assert f"schema v{LATEST_VERSION}" in reverse["update_output"], (
+            f"{upgrade_run.tag}'s update failed without naming the schema it "
+            f"met; the reverse experiment measured nothing\n"
+            f"{reverse['update_output'][-2000:]}"
+        )
+        return
     assert reverse["new_node_qualified_name"] is not None, (
         f"the old release's update never parsed the new function; the reverse "
         f"experiment measured nothing\n{reverse['update_output'][-2000:]}"
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "known defect: run_migrations returns early when the stored schema "
-        "version is ahead of LATEST_VERSION, and nothing else compares the "
-        "two, so an older release opens a newer database silently"
-    ),
-)
-def test_an_old_release_refuses_a_newer_database(upgrade_run: UpgradeRun) -> None:
+def test_an_old_release_refuses_a_newer_database(
+    upgrade_run: UpgradeRun, request: pytest.FixtureRequest,
+) -> None:
     """Opening a database from the future should fail loudly, not proceed."""
+    _expect_shipped_defect(
+        request,
+        upgrade_run.version,
+        "known defect, fixed in 2.3.9: run_migrations returns early when the "
+        "stored schema version is ahead of LATEST_VERSION, and nothing else in "
+        "this release compares the two, so it opens a newer database silently",
+    )
     reverse = upgrade_run.reverse
     assert reverse["status_returncode"] != 0, (
         "the old release read a newer database and exited 0"
@@ -975,20 +1023,37 @@ def test_an_old_release_refuses_a_newer_database(upgrade_run: UpgradeRun) -> Non
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "known defect: an older release writes rows without nodes.symbol into "
-        "a v10 database and leaves schema_version at 10, so the backfill never "
-        "runs again and dotted-tail queries answer not_found for nodes that "
-        "are present"
-    ),
-)
 def test_an_old_release_write_leaves_the_graph_queryable(
-    upgrade_run: UpgradeRun,
+    upgrade_run: UpgradeRun, request: pytest.FixtureRequest,
 ) -> None:
-    """If the old release does write, it must not silently break lookups."""
+    """If the old release does write, it must not silently break lookups.
+
+    A release that refuses must not write at all, so the graph has to be as the
+    current code left it.
+    """
     reverse = upgrade_run.reverse
+    if _refuses_newer_databases(upgrade_run.version):
+        assert reverse["new_node_qualified_name"] is None, (
+            f"{upgrade_run.tag} refused the database but still wrote "
+            f"{reverse['new_node_qualified_name']}"
+        )
+        after_update = upgrade_run.after_update
+        assert reverse["snapshot"]["qualified_names"] == after_update["qualified_names"], (
+            f"{upgrade_run.tag} refused the database but its nodes changed"
+        )
+        assert reverse["snapshot"]["edges"] == after_update["edges"], (
+            f"{upgrade_run.tag} refused the database but its edges changed"
+        )
+        assert reverse["snapshot"]["null_symbols"] == 0
+        return
+    _expect_shipped_defect(
+        request,
+        upgrade_run.version,
+        "known defect, fixed in 2.3.9 by refusing: this release writes rows "
+        "without nodes.symbol into a newer database and leaves schema_version "
+        "alone, so the backfill never runs again and dotted-tail queries answer "
+        "not_found for nodes that are present",
+    )
     assert reverse["snapshot"]["null_symbols"] == 0, (
         f"{reverse['snapshot']['null_symbols']} row(s) lost their symbol when "
         "the old release re-parsed a file"
