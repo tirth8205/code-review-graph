@@ -163,7 +163,7 @@ def test_stored_node_keeps_the_span_and_a_change_in_any_clause_finds_it(tmp_path
     path, nodes, edges = _parse(tmp_path)
     with GraphStore(tmp_path / "graph.db") as store:
         store.store_file_nodes_edges(str(path), nodes, edges)
-        qualified = f"{path}::T.multi"
+        qualified = f"{path.as_posix()}::T.multi"
 
         node = store.get_node(qualified)
         assert (node.line_start, node.line_end) == (8, 13)
