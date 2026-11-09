@@ -145,7 +145,9 @@
   beside its `command`, so Codex on Windows runs a PowerShell form instead of
   the `sh` one, which failed every time with `hook exited with code 1`. It
   passes the event JSON to `hook-update` or `hook-status` in the same way, and
-  does nothing but succeed when `code-review-graph` is not on `PATH`. Run
+  when `code-review-graph` is not on `PATH` it does nothing and still succeeds.
+  Those commands now read the event and git's answer as UTF-8, so a repository
+  under a folder such as `C:\Users\José` is updated too. Run
   `install --platform codex` again to add it to existing hooks; Codex on
   Windows then asks you once to review the two changed hooks (#620, #877).
 - `**/vendor/**` applies only when a root manifest shows `vendor/` holds
