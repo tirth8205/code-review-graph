@@ -70,6 +70,10 @@ class _EmbeddingRefreshKwargs(TypedDict, total=False):
     embedding_model: str
 
 
+class _FollowSymlinksKwargs(TypedDict, total=False):
+    follow_symlinks: bool
+
+
 def _get_version() -> str:
     """Get the installed package version.
 
@@ -569,6 +573,29 @@ def _add_embedding_refresh_args(command) -> None:
     )
 
 
+def _add_follow_symlinks_arg(command) -> None:
+    """Add the opt-in for following symlinked folders inside the repo (#269)."""
+    command.add_argument(
+        "--follow-symlinks",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Also index files in symlinked folders, inside or outside the "
+            "repository, stored under their path inside it. Links that loop "
+            "are skipped, and at most CRG_MAX_FOLLOWED_FILES files are taken. "
+            "Default: off, or CRG_FOLLOW_SYMLINKS"
+        ),
+    )
+
+
+def _follow_symlinks_kwargs(args) -> _FollowSymlinksKwargs:
+    """Pass the flag on only when it was given; otherwise the env var decides."""
+    value = getattr(args, "follow_symlinks", None)
+    if value is None:
+        return {}
+    return {"follow_symlinks": bool(value)}
+
+
 def _embedding_refresh_kwargs(args, parser) -> _EmbeddingRefreshKwargs:
     """Validate the all-or-nothing provider/model opt-in."""
     provider = getattr(args, "embedding_provider", None)
@@ -930,6 +957,7 @@ def _handle_build_update(args, repo_root: Path, embedding_refresh_kwargs) -> Non
                 wait_for_lock=getattr(args, "wait", False),
                 **_enrich_kwargs(args),
                 **embedding_refresh_kwargs,
+                **_follow_symlinks_kwargs(args),
             )
         finally:
             logging.disable(previous_disable)
@@ -965,6 +993,7 @@ def _handle_build_update(args, repo_root: Path, embedding_refresh_kwargs) -> Non
                 wait_for_lock=getattr(args, "wait", False),
                 **_enrich_kwargs(args),
                 **embedding_refresh_kwargs,
+                **_follow_symlinks_kwargs(args),
             )
         except RuntimeError as exc:
             print(f"Error: {exc}", file=sys.stderr)
@@ -1476,6 +1505,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="External directory to store graph database (useful for network shares)"
     )
     _add_embedding_refresh_args(build_cmd)
+    _add_follow_symlinks_arg(build_cmd)
     build_cmd.add_argument(
         "--enrich",
         action="store_true",
@@ -1534,6 +1564,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="External directory to store graph database (useful for network shares)"
     )
     _add_embedding_refresh_args(update_cmd)
+    _add_follow_symlinks_arg(update_cmd)
     update_cmd.add_argument(
         "--enrich",
         action="store_true",
@@ -1610,6 +1641,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="External directory to store graph database (useful for network shares)"
     )
     _add_embedding_refresh_args(watch_cmd)
+    _add_follow_symlinks_arg(watch_cmd)
 
     # status
     status_cmd = sub.add_parser("status", help="Show graph statistics")
@@ -2835,7 +2867,10 @@ def _dispatch() -> None:
                     if embedding_refresh_kwargs
                     else run_post_processing
                 )
-                watch(repo_root, store, on_files_updated=callback)
+                watch(
+                    repo_root, store, on_files_updated=callback,
+                    **_follow_symlinks_kwargs(args),
+                )
             except RuntimeError as exc:
                 print(f"Error: {exc}", file=sys.stderr)
                 sys.exit(1)

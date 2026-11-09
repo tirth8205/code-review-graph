@@ -494,6 +494,7 @@ def build_or_update_graph(
     wait_for_lock: bool = False,
     recover_corrupt: bool = False,
     enrich: bool | None = None,
+    follow_symlinks: bool | None = None,
 ) -> dict[str, Any]:
     """Build or incrementally update the code knowledge graph.
 
@@ -540,6 +541,10 @@ def build_or_update_graph(
             ``enrichment`` extra; CLI: ``--enrich``). When None (default),
             falls back to ``CRG_ENABLE_ENRICHMENT``. Off by default because
             it costs about a second per Python file.
+        follow_symlinks: If True, also index files in symlinked folders that
+            point inside the repository (never outside it). When None
+            (default), falls back to the CRG_FOLLOW_SYMLINKS environment
+            variable. Default: disabled.
 
     Returns:
         Summary with files_parsed/updated, node/edge counts, and errors. A run
@@ -592,7 +597,10 @@ def build_or_update_graph(
         store.set_metadata(BUILD_STATE_KEY, BUILD_IN_PROGRESS)
 
         if full_rebuild:
-            result = full_build(root, store, recurse_submodules, enrich=enrich)
+            result = full_build(
+                root, store, recurse_submodules, enrich=enrich,
+                follow_symlinks=follow_symlinks,
+            )
             failed = [str(item.get("file", "?")) for item in result["errors"]]
             summary = (
                 f"Full build complete: parsed {result['files_parsed']} files, "
@@ -612,7 +620,10 @@ def build_or_update_graph(
                 build_result["recovery_reason"] = recovery_reason
         else:
             try:
-                result = incremental_update(root, store, base=base_resolved, enrich=enrich)
+                result = incremental_update(
+                    root, store, base=base_resolved, enrich=enrich,
+                    follow_symlinks=follow_symlinks,
+                )
             except RuntimeError as exc:
                 # Change discovery or root validation failed before anything was
                 # stored; report it the way every other failure is reported.

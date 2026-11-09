@@ -591,6 +591,8 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_CONTEXT_HISTORY` | `1` करने पर हर `context_savings` अनुमान `.code-review-graph/context-history.jsonl` नाम के स्थानीय लॉग में लिखा जाता है; इसे `code-review-graph context-history` से पढ़ें। इसमें केवल टोकन संख्या और टूल के नाम होते हैं, यह कहीं भेजा नहीं जाता | - |
 | `CRG_LEIDEN_SEED` | Leiden कम्युनिटी पहचान का सीड | `42` |
 | `CRG_RECURSE_SUBMODULES` | `1`, `true` या `yes` होने पर git सबमॉड्यूल शामिल करें | - |
+| `CRG_FOLLOW_SYMLINKS` | `1`, `true`, `yes` या `on` होने पर symlink फ़ोल्डरों में जाएँ, रिपॉज़िटरी के अंदर या बाहर; `--follow-symlinks` जैसा। देखें [Symlink फ़ोल्डर](docs/USAGE.md#symlinked-folders) | - |
+| `CRG_MAX_FOLLOWED_FILES` | symlink फ़ोल्डरों से ली जाने वाली फ़ाइलों की अधिकतम संख्या | `10000` |
 | `CRG_TOOLS` | सर्व करते समय दिखाए जाने वाले MCP टूल की अल्पविराम से अलग सूची | - |
 | `GOOGLE_API_KEY` | Google Gemini एम्बेडिंग की API कुंजी | - |
 | `MINIMAX_API_KEY` | MiniMax एम्बेडिंग की API कुंजी | - |

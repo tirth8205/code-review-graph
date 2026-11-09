@@ -1837,6 +1837,23 @@ class GraphStore:
             raise
         self._invalidate_cache()
 
+    def relocate_edge_targets(self, old_prefix: str, new_prefix: str) -> int:
+        """Rewrite edge targets that start with *old_prefix* to *new_prefix*.
+
+        Used for files behind a followed symlinked folder outside the
+        repository: a resolver that resolves symlinks names the outside real
+        path, and the graph stores those files under the in-repo path (#269).
+        """
+        cursor = self._conn.execute(
+            "UPDATE edges SET target_qualified = ? || substr(target_qualified, ?) "
+            "WHERE substr(target_qualified, 1, ?) = ?",
+            (new_prefix, len(old_prefix) + 1, len(old_prefix), old_prefix),
+        )
+        self._conn.commit()
+        if cursor.rowcount:
+            self._invalidate_cache()
+        return cursor.rowcount
+
     def _replace_file_data(
         self, file_path: str, nodes: list[NodeInfo], edges: list[EdgeInfo], fhash: str = ""
     ) -> None:

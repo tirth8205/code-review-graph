@@ -593,6 +593,8 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_CONTEXT_HISTORY` | `1`로 설정하면 각 `context_savings` 추정치를 로컬 로그 `.code-review-graph/context-history.jsonl`에 기록합니다. `code-review-graph context-history`로 확인합니다. 토큰 수와 도구 이름만 남기며 외부로 보내지 않습니다 | - |
 | `CRG_LEIDEN_SEED` | Leiden 커뮤니티 탐지의 시드 | `42` |
 | `CRG_RECURSE_SUBMODULES` | `1`, `true`, `yes`일 때 git 서브모듈 포함 | - |
+| `CRG_FOLLOW_SYMLINKS` | `1`, `true`, `yes`, `on`일 때 심볼릭 링크 폴더(저장소 안팎)를 따라감. `--follow-symlinks`와 같음. [심볼릭 링크 폴더](docs/USAGE.md#symlinked-folders) 참고 | - |
+| `CRG_MAX_FOLLOWED_FILES` | 심볼릭 링크 폴더로 가져오는 파일의 최대 수 | `10000` |
 | `CRG_TOOLS` | 서버로 띄울 때 노출할 MCP 도구의 쉼표 구분 허용 목록 | - |
 | `GOOGLE_API_KEY` | Google Gemini 임베딩의 API 키 | - |
 | `MINIMAX_API_KEY` | MiniMax 임베딩의 API 키 | - |

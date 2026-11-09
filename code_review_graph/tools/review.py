@@ -22,6 +22,8 @@ from ..graph import GraphNode, GraphStore, edge_to_dict, node_to_dict
 from ..hints import generate_hints, get_session
 from ..incremental import (
     discover_review_changes,
+    followed_files,
+    path_within_repo,
     resolve_review_base,
 )
 from ..parser import is_test_file, normalize_file_path
@@ -641,9 +643,15 @@ def get_review_context(
             file_lines: dict[str, list[str]] = {}
             regions_by_file: dict[str, list[tuple[int, int]]] = {}
             snippets: dict[str, str] = {}
+            followed = followed_files(store)
             for rel_path in shown_files:
                 full_path = root / rel_path
                 if not full_path.is_file():
+                    continue
+                if not path_within_repo(root, full_path, followed):
+                    # Never read outside the repository, unless through a
+                    # symlinked folder the graph was asked to follow.
+                    snippets[rel_path] = "(outside the repository)"
                     continue
                 try:
                     lines = full_path.read_text(
@@ -1066,6 +1074,7 @@ def detect_changes_func(
         # whole-repo diff into a 30k-token ``changed_functions`` list.
         if include_source:
             budget = _MAX_DETECT_SOURCE_LINES
+            followed = followed_files(store)
             for func in analysis.get("changed_functions", []):
                 if budget <= 0:
                     break
@@ -1074,7 +1083,7 @@ def detect_changes_func(
                 le = func.get("line_end")
                 if fp and ls and le:
                     file_path = Path(fp)
-                    if file_path.is_file():
+                    if file_path.is_file() and path_within_repo(root, file_path, followed):
                         try:
                             lines = file_path.read_text(encoding="utf-8",
                                 errors="replace"

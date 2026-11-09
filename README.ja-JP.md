@@ -592,6 +592,8 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_CONTEXT_HISTORY` | `1` にすると、`context_savings` の推定値を毎回ローカルログ `.code-review-graph/context-history.jsonl` に記録します。`code-review-graph context-history` で表示します。記録するのはトークン数とツール名だけで、外部には送信しません | - |
 | `CRG_LEIDEN_SEED` | Leiden のコミュニティ検出のシード | `42` |
 | `CRG_RECURSE_SUBMODULES` | `1`、`true`、`yes` のとき git サブモジュールを含める | - |
+| `CRG_FOLLOW_SYMLINKS` | `1`、`true`、`yes`、`on` のとき、シンボリックリンクのフォルダ（リポジトリの内外）をたどる。`--follow-symlinks` と同じ。[シンボリックリンクのフォルダ](docs/USAGE.md#symlinked-folders) を参照 | - |
+| `CRG_MAX_FOLLOWED_FILES` | シンボリックリンクのフォルダから取り込むファイルの上限 | `10000` |
 | `CRG_TOOLS` | サーバー起動時に公開する MCP ツールのカンマ区切り許可リスト | - |
 | `GOOGLE_API_KEY` | Google Gemini 埋め込みの API キー | - |
 | `MINIMAX_API_KEY` | MiniMax 埋め込みの API キー | - |

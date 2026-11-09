@@ -590,6 +590,8 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_CONTEXT_HISTORY` | 设为 `1` 时，把每次 `context_savings` 估算记入本地日志 `.code-review-graph/context-history.jsonl`；用 `code-review-graph context-history` 查看。只记录 token 数和工具名，从不外发 | - |
 | `CRG_LEIDEN_SEED` | Leiden 社区检测的随机种子 | `42` |
 | `CRG_RECURSE_SUBMODULES` | 设为 `1`、`true` 或 `yes` 时包含 git 子模块 | - |
+| `CRG_FOLLOW_SYMLINKS` | 设为 `1`、`true`、`yes` 或 `on` 时跟随符号链接文件夹（仓库内外均可），与 `--follow-symlinks` 相同。见 [符号链接文件夹](docs/USAGE.md#symlinked-folders) | - |
+| `CRG_MAX_FOLLOWED_FILES` | 通过符号链接文件夹最多读取的文件数 | `10000` |
 | `CRG_TOOLS` | 提供服务时暴露的 MCP 工具白名单，逗号分隔 | - |
 | `GOOGLE_API_KEY` | Google Gemini 嵌入的 API 密钥 | - |
 | `MINIMAX_API_KEY` | MiniMax 嵌入的 API 密钥 | - |

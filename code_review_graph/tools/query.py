@@ -32,7 +32,9 @@ from ..graph import (
 from ..hints import generate_hints, get_session
 from ..incremental import (
     discover_review_changes,
+    followed_files,
     get_db_path,
+    path_within_repo,
 )
 from ..parser import is_test_file, normalize_file_path, repo_relative_path
 from ..search import hybrid_search
@@ -1821,9 +1823,11 @@ class _SourceBudget:
     hot symbol has. Files are read once and reused.
     """
 
-    def __init__(self, root: Path, total: int, per_node: int) -> None:
+    def __init__(
+        self, root: Path, total: int, per_node: int, followed: set[str] | None = None,
+    ) -> None:
         self._root = root
-        self._root_resolved = root.resolve()
+        self._followed = followed or set()
         self._left = total
         self._chars_left = _MAX_SEARCH_SOURCE_CHARS
         self._per_node = per_node
@@ -1843,8 +1847,10 @@ class _SourceBudget:
             path = self._root / path
         try:
             # The graph stores paths it parsed from inside the repo, but a
-            # stale row must never be able to read outside it.
-            path.resolve().relative_to(self._root_resolved)
+            # stale row must never be able to read outside it. A file behind
+            # a followed symlinked folder is read through its in-repo path.
+            if not path_within_repo(self._root, path, self._followed):
+                raise ValueError("outside the repository")
             text = path.read_text(encoding="utf-8", errors="replace")
             # Notebook nodes are numbered in the parser's joined-up code cells,
             # so slicing the file by those numbers returns the wrong text.
@@ -2059,6 +2065,7 @@ def semantic_search_nodes(
                 _MAX_EXPANDED_SOURCE_LINES if expand_neighbors
                 else _MAX_SEARCH_SOURCE_LINES,
                 per_node,
+                followed_files(store),
             )
             # Expansion was asked for, so lower-ranked hits must not spend the
             # budget before the top hits' callers and callees get any of it.

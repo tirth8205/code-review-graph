@@ -496,6 +496,8 @@ code-review-graph update --base origin/main    # Custom base ref
 code-review-graph update --brief               # Update graph, then show the risk panel
 code-review-graph update --brief --verify      # ...and cross-check against tiktoken
 code-review-graph update --wait                # Wait for a running build to finish, then update
+code-review-graph build --follow-symlinks      # Also follow symlinked folders, inside or outside the repo
+                                                #   (off by default; also on update and watch, or CRG_FOLLOW_SYMLINKS=1)
 code-review-graph postprocess                  # Re-run flows, communities, FTS
 code-review-graph forget PATH [PATH ...]       # Drop parsed files from the graph (no full rebuild)
 code-review-graph forget src/legacy --dry-run  # Preview which files would be forgotten
