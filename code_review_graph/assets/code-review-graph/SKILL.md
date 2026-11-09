@@ -45,6 +45,7 @@ python3 <skill-root>/scripts/crg_readonly.py status --repo "<repo-root>"
 python3 <skill-root>/scripts/crg_readonly.py architecture --repo "<repo-root>"
 python3 <skill-root>/scripts/crg_readonly.py search "<query>" --repo "<repo-root>"
 python3 <skill-root>/scripts/crg_readonly.py query callers_of "<symbol>" --repo "<repo-root>"
+python3 <skill-root>/scripts/crg_readonly.py query path_to "<symbol>" --to "<other>" --repo "<repo-root>"
 python3 <skill-root>/scripts/crg_readonly.py impact --repo "<repo-root>"
 python3 <skill-root>/scripts/crg_readonly.py detect-changes --brief --repo "<repo-root>"
 ```

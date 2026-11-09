@@ -14,6 +14,7 @@ from code_review_graph import custom_languages
 from code_review_graph.custom_languages import (
     CONFIG_RELATIVE_PATH,
     MAX_CUSTOM_LANGUAGES,
+    _validate_entry,
     load_custom_languages,
 )
 from code_review_graph.parser import (
@@ -479,3 +480,37 @@ class TestNameFieldResolution:
 
         assert "build" in functions
         assert "Result" not in functions
+
+
+class TestCustomLanguagesDirectHelpers:
+    def test_validate_entry_and_getattr_direct(self, tmp_path: Path):
+        entry = _validate_entry(
+            "erlang",
+            {
+                "extensions": [".erl"],
+                "grammar": "erlang",
+                "function_node_types": ["function_clause"],
+            },
+            EXTENSION_TO_LANGUAGE,
+            BUILTIN_LANGUAGES,
+            set(),
+            tmp_path / "languages.toml",
+        )
+        assert entry is not None
+        assert entry.name == "erlang"
+        assert entry.extensions == (".erl",)
+
+        invalid = _validate_entry(
+            "bad name!",
+            {},
+            EXTENSION_TO_LANGUAGE,
+            BUILTIN_LANGUAGES,
+            set(),
+            tmp_path / "languages.toml",
+        )
+        assert invalid is None
+
+        tslp_mod = custom_languages.__getattr__("tslp")
+        assert hasattr(tslp_mod, "get_language")
+        with pytest.raises(AttributeError):
+            custom_languages.__getattr__("nonexistent_attr")

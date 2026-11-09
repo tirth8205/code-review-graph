@@ -62,13 +62,13 @@ code-review-graph install              # detect installed AI coding tools and co
 code-review-graph build                # parse the codebase
 ```
 
-`install` 会检测你安装了哪些 AI 编码工具，为每个工具写入一条 MCP 服务器配置，在平台支持的地方安装钩子和技能，并把图谱说明加入平台的规则文件。在 Poetry 或 uv 项目环境中，MCP 配置使用 `poetry run` 或 `uv run`；当 PATH 上有 `uvx` 时使用 `uvx code-review-graph serve`；否则使用当前的 Python 解释器。安装后请重启编辑器或工具。
+`install` 会检测你安装了哪些 AI 编码工具，为每个工具写入一条 MCP 服务器配置，在平台支持的地方安装钩子和技能，并把图谱说明加入平台的规则文件。在 Poetry 或 uv 项目环境中，MCP 配置使用 `poetry run` 或 `uv run`；当 PATH 上有 `uvx` 时使用 `uvx code-review-graph serve`；否则使用当前的 Python 解释器。`install` 会先列出要改动的文件，并在你回答它关于说明文件的问题之后才写入任何内容；`install --dry-run` 把每处改动显示为 diff，什么都不写。安装后请重启编辑器或工具。
 
 <p align="center">
-  <img src="diagrams/diagram8_supported_platforms.png" alt="一次安装，覆盖所有平台：检测 Codex、Claude Code、CodeBuddy Code、Cursor、Windsurf、Zed、Continue、OpenCode、Antigravity、Gemini CLI、Qwen、Qoder、Kiro、GitHub Copilot、GitHub Copilot CLI 和 Hermes Agent" width="85%" />
+  <img src="diagrams/diagram8_supported_platforms.png" alt="一次安装，覆盖所有平台：检测 Codex、Claude Code、CodeBuddy Code、Cursor、Windsurf、Zed、Continue、OpenCode、MiMo Code、Antigravity、Gemini CLI、Qwen、Qoder、Kiro、GitHub Copilot、GitHub Copilot CLI 和 Hermes Agent" width="85%" />
 </p>
 
-只配置一个平台时，给 `--platform` 传入 `codex`、`claude-code`、`cursor`、`windsurf`、`zed`、`continue`、`opencode`、`antigravity`、`gemini-cli`、`qwen`、`kiro`、`qoder`、`copilot`、`copilot-cli`、`codebuddy` 或 `hermes` 之一：
+只配置一个平台时，给 `--platform` 传入 `codex`、`claude-code`、`cursor`、`windsurf`、`zed`、`continue`、`opencode`、`mimo`、`antigravity`、`gemini-cli`、`qwen`、`kiro`、`qoder`、`copilot`、`copilot-cli`、`codebuddy`、`hermes` 或 `dsh` 之一：
 
 ```bash
 code-review-graph install --platform cursor
@@ -76,6 +76,14 @@ code-review-graph install --platform codebuddy
 ```
 
 配置文件的位置列在 [docs/USAGE.md](docs/USAGE.md#supported-platforms) 中。需要 Python 3.10+。
+
+`install` 写入的文件（例如 `.claude/` 和 `.mcp.json`）对 git 仍然可见，以便你的团队提交它们。`install --gitignore` 会把本次运行新建的文件加入 `.gitignore` 中一个带标记的块；`uninstall` 会移除这个块。
+
+对于 Codex，安装程序还会在 `$CODEX_HOME/skills/code-review-graph/`（默认：
+`~/.codex/skills/code-review-graph/`）放置一个全局的 `code-review-graph` Skill。它优先使用 CRG MCP 工具，
+MCP 不可用时回退到随包提供的只读 CLI（read-only CLI）；图谱缺失、为空或过期时，绝不会隐式触发构建或更新。
+WSL 和 Windows 上的 Codex 运行环境各有自己的 `CODEX_HOME` 目录和工具清单，
+所以请在实际执行任务的那个运行环境中安装和刷新。
 
 `uninstall` 会从 Git 或 SVN 工作树中移除 CRG 自己写入的文件和配置项，不动其他 MCP 服务器、钩子、技能和 JSONC 注释。在工作树内的任意位置运行即可。共享配置文件采用原子替换，写入失败时原文件保持完整。
 
@@ -96,6 +104,52 @@ Build the code review graph for this project
 
 构建时间随仓库规模增长；一个约 3,000 个文件的仓库冷构建约需 40 秒（[实测](docs/REPRODUCING.md#incremental-update-latency)）。之后由钩子和 watch 模式保持图谱更新。如果部分文件解析失败，结果状态为 `partial` 并在摘要中列出这些文件；CLI 还会在 stderr 上打印一行 `Warning:`，这些文件保留原有的图谱记录。
 
+
+### 使用 Docker 或 Podman 运行
+
+在项目仓库根目录构建镜像：
+
+```bash
+docker build -t code-review-graph:local .
+```
+
+在要分析的仓库目录中运行：
+
+```bash
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --env HOME=/tmp \
+  --volume "$PWD:/workspace" \
+  code-review-graph:local build
+```
+
+挂载的仓库必须可写。上述命令使用你的用户 ID 和组 ID，
+使生成的 `.code-review-graph/` 目录仍归你的用户所有。
+请以非 root 主机用户运行这些命令。
+
+使用 Podman 时，构建同一个 Dockerfile 并保留用户映射：
+
+```bash
+podman build -t code-review-graph:local .
+podman run --rm \
+  --userns=keep-id \
+  --env HOME=/tmp \
+  --volume "$PWD:/workspace" \
+  code-review-graph:local build
+```
+
+图会保存在挂载仓库的 `.code-review-graph/` 中，并记录 `/workspace/app.py` 等容器内的绝对路径。
+请通过 Docker 或 Podman 使用相同的 `/workspace` 挂载路径运行 `update` 和 `detect-changes`。
+在宿主机上对该图运行 `update` 可能会报错 "built with a different repository root"。
+如需改用宿主机命令，请先在宿主机上运行 `code-review-graph build`，使用宿主机路径重新构建图。
+
+将 `build` 替换为 `status` 可查看已保存的图。
+镜像包含 Git，默认以非 root 用户运行。
+构建镜像时不会生成图。
+
+这些示例使用 macOS/Linux shell 语法。在 macOS 上，
+运行前请启动兼容 Docker 的容器引擎或 Podman 虚拟机。
+在启用 SELinux 的主机（如 Fedora）上，请在挂载中加上 `:z`（`"$PWD:/workspace:z"`），否则容器无法访问仓库。
 
 ## 工作原理
 
@@ -119,7 +173,7 @@ Build the code review graph for this project
 
 ### 增量更新
 
-钩子、pre-commit 钩子和 watch 模式都会触发增量更新。更新时对变更文件做 diff，沿图谱的导入边和调用边找出依赖方，并只重新解析 SHA-256 哈希发生变化的文件。在一个约 3,000 个文件的项目（django）上，修改两个文件后沿钩子路径重新索引约需 2.5 秒，其中约 1.4 秒是进程启动；空更新只花这段启动时间。参见[增量更新延迟](docs/REPRODUCING.md#incremental-update-latency)。
+编辑器钩子、git 钩子（pre-commit、post-checkout、post-merge、post-rewrite）和 watch 模式都会触发增量更新。更新时对变更文件做 diff，沿图谱的导入边和调用边找出依赖方，并只重新解析 SHA-256 哈希发生变化的文件。在一个约 3,000 个文件的项目（django）上，修改两个文件后沿钩子路径重新索引约需 2.5 秒，其中约 1.4 秒是进程启动；空更新只花这段启动时间。参见[增量更新延迟](docs/REPRODUCING.md#incremental-update-latency)。
 
 <p align="center">
   <img src="diagrams/diagram4_incremental_update.png" alt="增量更新流程：钩子或 watch 更新触发 git diff，通过图谱的边找到依赖方，只重新解析 SHA-256 哈希发生变化的文件" width="90%" />
@@ -139,11 +193,11 @@ Build the code review graph for this project
   <img src="diagrams/diagram9_language_coverage.png" alt="按类别划分的语言覆盖：Web、后端、系统、移动端、脚本、Shell、领域专用和其他，外加 Jupyter 和 Databricks 笔记本" width="90%" />
 </p>
 
-解析器提取函数、类、导入、调用点、继承和测试：有语法的地方用 Tree-sitter，其他地方用有针对性的回退解析。支持范围：Python、JavaScript/TypeScript/TSX、Go、Rust、Java、C/C++、C#、VB.NET、Ruby、Kotlin、Swift、PHP、Scala、Solidity、Dart、R、Perl、Lua/Luau、Objective-C、shell 脚本、Elixir、Zig、PowerShell、Julia、ReScript、GDScript、Nix、Verilog/SystemVerilog、SQL、Terraform/OpenTofu（`.tf`；其他 `.hcl` 文件只生成文件节点）、Ansible YAML（playbook、role、task）、Spring Boot 应用配置（`application.properties`、`application.yml`、`application.yaml` 及其 `application-<profile>` 变体；只记录键名和值的类型，绝不记录值）、Vue/Svelte 单文件组件、Astro 文件（用 TypeScript 语法解析）、Jupyter 和 Databricks 笔记本（`.ipynb`），以及 Perl XS 文件（`.xs`）。其他 YAML 和其他 `.properties` 文件不被当作源代码。
+解析器提取函数、类、导入、调用点、继承和测试：有语法的地方用 Tree-sitter，其他地方用有针对性的回退解析。支持范围：Python、JavaScript/TypeScript/TSX（包括 `.mjs`、`.cjs`、`.mts` 和 `.cts`）、Go、Rust、Java、C/C++、C#、VB.NET、Ruby、Kotlin（`.kt`、`.kts`）、Swift、PHP、Scala、Solidity、Dart、R、Perl、Lua/Luau、Objective-C、shell 脚本、Elixir、Zig、PowerShell、Julia、ReScript、GDScript、Nix、Verilog/SystemVerilog、SQL/PL/SQL（Oracle）和 dbt 模型、Terraform/OpenTofu（`.tf`；其他 `.hcl` 文件只生成文件节点）、Ansible YAML（playbook、role、task）、Spring Boot 应用配置（`application.properties`、`application.yml`、`application.yaml` 及其 `application-<profile>` 变体；只记录键名和值的类型，绝不记录值）、不含值的通用 YAML 结构（`locales/` 等文件夹中的翻译文件只生成文件节点）、XSLT 样式表（`.xsl`、`.xslt`）、不含值的 JSON 结构（`.json`；翻译、测试、文档、示例和数据文件只保留文件节点，锁文件会被跳过）、Vue/Svelte 单文件组件、HTML 页面（`.html`、`.htm`；内联脚本，以及带 id 的 `div`、`section` 和 `article` 块作为 `DocSection` 节点）、Astro 文件（用 TypeScript 语法解析）、Jupyter 和 Databricks 笔记本（`.ipynb`，以及 Databricks 导出的 `.py` 文件）、Perl XS 文件（`.xs`）、Robot Framework 文件（`.robot`、`.resource`），以及 Liquid 模板（`.liquid`）。其他 `.properties` 文件不被当作源代码。
 
-PHP 项目还会得到仓库范围内的 Composer PSR-4 解析、Blade 模板引用，以及在源码中出现明确的框架导入、模型继承和接收者证据时生成的 Laravel Route 与 Eloquent 边。
+PHP 项目还会得到仓库范围内的 Composer PSR-4 解析、Blade 模板引用，以及在源码中出现明确的框架导入、模型继承和接收者证据时生成的 Laravel Route 与 Eloquent 边。`routes/*.php` 中的静态 Laravel 路由会生成 Endpoint 节点和指向控制器的 HANDLES 边，包括字面量的路由组前缀。
 
-Java 项目会得到 Spring 依赖注入的调用解析、请求端点与 WebFlux 路由、定时触发器、应用事件的发布者到监听者的边，以及 Temporal 工作流与活动的边。每个解析器都在解析之后运行，并且需要被注入的字段、发布的事件或工作流 stub 在仓库中可见。
+Java 项目会得到 Spring 依赖注入的调用解析、请求端点与 WebFlux 路由、定时触发器、应用事件的发布者到监听者的边、Spring AOP 通知到目标的边，以及 Temporal 工作流与活动的边。每个解析器都在解析之后运行，并且需要被注入的字段、发布的事件或工作流 stub 在仓库中可见。
 
 ### 添加你自己的语言
 
@@ -163,7 +217,7 @@ call_node_types = ["call"]
 
 ### 在 CI 中做风险评分的 PR 审查（GitHub Action）
 
-同样的分析也以组合式 GitHub Action 的形式运行。图谱在你的 CI runner 上构建和查询，不会把源代码发送给外部服务。每个 pull request 上，该 action 会发布一条常驻评论，列出风险评分的函数、受影响的执行流和测试缺口，并在每次推送时就地更新。可选的 `fail-on-risk` 输入可以把它变成合并门禁。
+同样的分析也以组合式 GitHub Action 的形式运行。图谱在你的 CI runner 上构建和查询，不会把源代码发送给外部服务。每个 pull request 上，该 action 会发布一条常驻评论，列出风险评分的函数、受影响的执行流和测试缺口，并在每次推送时就地更新。可选的 `fail-on-risk` 输入可以把它变成合并门禁。可选的 `details` 输入会加入更多图谱上下文，默认折叠并限制大小：每个排名靠前的符号为什么得到这个分数、改动涉及的社区、枢纽和跨边界连接、它的影响半径、未测试的热点，以及图谱的来源。
 
 ```yaml
 # .github/workflows/code-review-graph.yml
@@ -245,7 +299,9 @@ jobs:
 | gin | 3 | 0.609 | 0.439 | 1.0 |
 | **平均** | **13** | **0.693** | **0.546** | **1.000** |
 
-该基准还会运行一种**共变更模式**：给预测器一个变更文件作为种子，再用作者在同一次提交中改动的其他文件来评分，这是来自 git 历史而非图谱的证据。两种模式都出现在结果 CSV 中（`ground_truth_mode` 列）。在 2026-08-02 的采集中，共变更模式在每个被评分的提交上都返回 `predicted_files = 0`，因此它还不是可用的测量结果，也不引用任何共变更数字。
+此表来自 2026-08-02 的采集，早于下文所述的路径修复。那个 bug 也让真实的相邻文件没能进入图谱生成的基准答案，所以重新运行基准后这些数字会变化。
+
+该基准还会运行一种**共变更模式**：给预测器一个变更文件作为种子，再用作者在同一次提交中改动的其他文件来评分，这是来自 git 历史而非图谱的证据。两种模式都出现在结果 CSV 中（`ground_truth_mode` 列）。在 2026-08-02 的采集中，共变更模式在每个被评分的提交上都返回 `predicted_files = 0`，代码种子也不例外（例如 `code_review_graph/cli.py` 和 gin 的 `context.go`）。原因是基准中的一个路径 bug：`git diff` 给出相对仓库的路径，而图谱存储的是绝对路径，所以种子从未匹配到任何节点。这个 bug 现已修复，但基准还没有重新运行，因此不引用任何共变更数字。
 
 </details>
 
@@ -268,7 +324,7 @@ jobs:
 
 ### 局限
 
-- **影响分析的"召回率 1.0"是循环论证。** 历史基准答案来自预测器所遍历的同一批图谱边，因此按构造它就是一个上限。共变更模式还不是可用的测量结果。
+- **影响分析的"召回率 1.0"是循环论证。** 历史基准答案来自预测器所遍历的同一批图谱边，因此按构造它就是一个上限。在带着路径修复重新运行基准之前，不引用共变更数字。
 - **小的单文件改动。** 对于琐碎的编辑，图谱上下文可能比直接读文件还大。多出来的是让多文件分析成为可能的结构化元数据。
 - **搜索排序。** 关键词搜索通常能把正确结果排在靠前位置，但排序还需要改进。由于模块模式的命名方式，针对 Express 的查询可能返回零命中。
 - **执行流检测。** 入口点检测对 Python 和 PHP/Laravel 最强。JavaScript 和 Go 的流检测还需要改进。
@@ -283,17 +339,17 @@ jobs:
 | **增量更新** | 只重新解析哈希发生变化的文件。在一个约 3,000 个文件的仓库上，修改两个文件沿钩子路径约需 2.5 秒（[实测](docs/REPRODUCING.md#incremental-update-latency)）。 |
 | **语言与笔记本支持** | 见上文[语言覆盖](#语言覆盖与笔记本)。 |
 | **框架感知的 PHP 解析** | 仓库范围内的 Composer PSR-4 导入、Blade 模板引用、有证据支撑的 Laravel Route 到控制器以及 Eloquent 关系边 |
-| **框架感知的 Java 解析** | Spring 依赖注入的调用解析、请求端点与 WebFlux 路由、定时触发器、应用事件的发布者到监听者的边、Temporal 工作流与活动的边，以及只索引键名不索引值的 Spring Boot 配置键 |
+| **框架感知的 Java 解析** | Spring 依赖注入的调用解析、请求端点与 WebFlux 路由、定时触发器、应用事件的发布者到监听者的边、Spring AOP 通知边、Temporal 工作流与活动的边，以及只索引键名不索引值的 Spring Boot 配置键 |
 | **影响半径分析** | 一次改动可能影响哪些函数、类和文件 |
-| **自动更新钩子** | 编辑器钩子、git pre-commit 钩子和 watch 模式在你工作时更新图谱 |
+| **自动更新钩子** | 编辑器钩子、git 钩子（每次提交前，以及 checkout、merge 和 rebase 之后）和 watch 模式在你工作时更新图谱 |
 | **语义搜索** | 可选的向量嵌入，通过 sentence-transformers、Google Gemini、MiniMax、Voyage AI，或任何 OpenAI 兼容端点（OpenAI、Azure、new-api、LiteLLM、vLLM、LocalAI） |
-| **交互式可视化** | D3.js 力导向图，支持搜索、社区图例开关和按度数缩放的节点 |
+| **交互式可视化** | D3.js 力导向图，支持搜索、社区图例开关和按度数缩放的节点，还有以某个符号、文件、执行流或改动为种子的邻域视图 |
 | **枢纽与桥接检测** | 连接最多的节点和瓶颈点（介数中心性） |
 | **意外度评分** | 意外耦合：跨社区、跨语言、外围到枢纽的边 |
-| **知识缺口分析** | 孤立节点、未测试的热点、稀薄的社区 |
+| **知识缺口分析** | 孤立节点、未测试的热点、稀薄的社区、导入环 |
 | **建议问题** | 从桥接点、枢纽和意外耦合生成的审查问题 |
-| **边置信度** | 两级置信度（EXTRACTED/INFERRED），边上带浮点分数 |
-| **图谱遍历** | 从任意节点出发的 BFS/DFS，深度和 token 预算可配置 |
+| **边置信度** | 四级置信度（EXTRACTED、INFERRED、AMBIGUOUS、UNRESOLVED），边上带浮点分数，图谱无法绑定的调用会如实标明 |
+| **图谱遍历** | 从任意节点出发的 BFS/DFS，深度和 token 预算可配置；`path_to` 显示一个符号如何到达另一个符号，并指出最弱的一跳 |
 | **导出格式** | GraphML（Gephi/yEd）、Neo4j Cypher、Obsidian 知识库、JSON，以及 SVG（SVG 需要 `eval` 附加依赖中的 matplotlib） |
 | **Token 基准测试** | `code_review_graph/token_benchmark.py` 按问题测量全语料 token 与图谱查询 token |
 | **估算的上下文节省** | 在审查、影响、detect-changes 和架构响应上附带 `context_savings` 元数据（`estimated`、`saved_tokens`、`saved_percent`） |
@@ -301,7 +357,7 @@ jobs:
 | **执行流** | 从入口点出发的调用链，按加权关键度排序 |
 | **社区检测** | Leiden 聚类，分辨率随图谱规模调整 |
 | **架构概览** | 基于社区结构的架构图，附带耦合警告 |
-| **风险评分审查** | `detect_changes` 把 diff 映射到受影响的函数、执行流和测试缺口 |
+| **风险评分审查** | `detect_changes` 把 diff 映射到受影响的函数、YAML 和 JSON 路径、执行流和测试缺口 |
 | **自定义语言** | 通过 `.code-review-graph/languages.toml` 添加新语言，无需 fork |
 | **GitHub Action** | 在 CI 中发布常驻的风险评分 PR 审查评论，可选 `fail-on-risk` 合并门禁 |
 | **重构工具** | 重命名预览、框架感知的死代码检测、基于社区的建议 |
@@ -340,14 +396,19 @@ Qoder 还会从本仓库的 `skills/` 目录得到 `build-graph`、`review-delta
 ```bash
 code-review-graph install          # Detect and configure all platforms
 code-review-graph install --platform <name>  # One platform
+code-review-graph install --steering  # Claude Code: graph context beside each search and read
 code-review-graph uninstall --dry-run  # Preview removal of installed artifacts
 code-review-graph build            # Parse the whole codebase
+code-review-graph build --follow-symlinks  # Also index symlinked folders
 code-review-graph update           # Incremental update (changed files only)
 code-review-graph status           # Graph statistics
 code-review-graph watch            # Update on file changes
 code-review-graph forget <path>    # Drop already-parsed files from the graph
 code-review-graph dead-code        # Functions and classes with no callers or tests
+code-review-graph query path_to <from> --to <to>  # How one symbol reaches another
+code-review-graph impact --detail-level compact  # Blast radius as ranked file paths
 code-review-graph visualize        # Interactive HTML graph
+code-review-graph visualize --seed-symbol <name>  # Neighbourhood of one symbol
 code-review-graph visualize --format json      # Export graph data as JSON
 code-review-graph visualize --format graphml   # Export as GraphML
 code-review-graph visualize --format svg       # Export as SVG (needs matplotlib)
@@ -358,6 +419,8 @@ code-review-graph detect-changes --brief         # Risk panel + token savings (r
 code-review-graph detect-changes --brief --base main  # Against the merge base of main and HEAD
 code-review-graph update --brief                 # Refresh graph + same panel
 code-review-graph detect-changes --brief --verify  # Cross-check against tiktoken
+code-review-graph detect-changes --details all  # Add graph context to the JSON
+code-review-graph context-history  # Trend of the opt-in savings log (CRG_CONTEXT_HISTORY=1)
 code-review-graph register <path>  # Register repo in the multi-repo registry
 code-review-graph unregister <path|alias>  # Remove repo from the registry
 code-review-graph repos            # List registered repositories
@@ -367,6 +430,8 @@ code-review-graph daemon status    # Daemon status and repos
 code-review-graph eval             # Run evaluation benchmarks
 code-review-graph serve            # Start the MCP server (stdio)
 code-review-graph serve --http     # MCP over Streamable HTTP on localhost:5555
+code-review-graph serve --http --multi-repo  # One HTTP server for every registered repo
+code-review-graph serve --multi-worktree  # One child server per linked Git worktree
 ```
 
 这是一份精选列表。`code-review-graph --help` 会列出全部命令，[docs/COMMANDS.md](docs/COMMANDS.md) 记录了它们的参数。
@@ -403,13 +468,15 @@ JSON 导出写在本地图谱数据目录中，该目录默认被 Git 忽略。�
 
 同样的 `context_savings` 元数据也附在 `get_impact_radius`、`get_review_context`、`detect_changes` 和 `get_architecture_overview` 这几个 MCP 工具的 JSON 响应上。
 
+若想查看这些估算随时间的变化，设置 `CRG_CONTEXT_HISTORY=1`（默认关闭）。之后每次估算都会在 `graph.db` 旁的本地日志中追加一行，只含 token 数和工具名；`code-review-graph context-history` 按天或按工具打印。见 [docs/USAGE.md](docs/USAGE.md#context-history)。
+
 </details>
 
 <details>
 <summary><strong>多仓库守护进程</strong></summary>
 <br>
 
-如果你的编辑器不支持钩子（例如 Cursor 或 OpenCode），或者你想在没有编辑器集成的情况下保持图谱新鲜，守护进程会监视你的仓库并更新它们的图谱。它随 `code-review-graph` 一起提供，无需单独安装。
+如果 `install` 没有为你的编辑器安装钩子（例如 Windsurf 或 Zed），或者你想在没有编辑器集成的情况下保持图谱新鲜，守护进程会监视你的仓库并更新它们的图谱。它随 `code-review-graph` 一起提供，无需单独安装。
 
 ```bash
 # 1. Register the repos to watch
@@ -456,9 +523,9 @@ alias = "project-b"
 | `build_or_update_graph_tool` | 构建或增量更新图谱 |
 | `run_postprocess_tool` | 重新运行执行流检测、社区检测和 FTS 索引 |
 | `get_minimal_context_tool` | 紧凑上下文（约 100 token）；先调用这个 |
-| `get_impact_radius_tool` | 变更文件的影响半径 |
+| `get_impact_radius_tool` | 变更文件的影响半径；`detail_level="compact"` 给出排好序的文件路径 |
 | `get_review_context_tool` | 带结构摘要的审查上下文 |
-| `query_graph_tool` | 调用者、被调用者、测试、导入、继承查询 |
+| `query_graph_tool` | 调用者、被调用者、测试、导入、继承查询，以及两个符号之间的 `path_to` |
 | `traverse_graph_tool` | 从任意节点出发的 BFS/DFS 遍历，带 token 预算 |
 | `semantic_search_nodes_tool` | 按名称或语义搜索代码实体 |
 | `embed_graph_tool` | 计算用于语义搜索的向量嵌入 |
@@ -474,7 +541,7 @@ alias = "project-b"
 | `detect_changes_tool` | 风险评分的变更影响分析 |
 | `get_hub_nodes_tool` | 连接最多的节点 |
 | `get_bridge_nodes_tool` | 按介数中心性得出的瓶颈点 |
-| `get_knowledge_gaps_tool` | 结构性弱点和未测试的热点 |
+| `get_knowledge_gaps_tool` | 结构性弱点、未测试的热点和导入环 |
 | `get_surprising_connections_tool` | 意外的跨社区耦合 |
 | `get_suggested_questions_tool` | 由分析生成的审查问题 |
 | `refactor_tool` | 重命名预览、死代码检测、建议 |
@@ -510,7 +577,7 @@ node_modules/**
 pip install "code-review-graph[embeddings]"          # Local vector embeddings (sentence-transformers)
 pip install "code-review-graph[google-embeddings]"   # Google Gemini embeddings
 pip install "code-review-graph[communities]"         # Community detection (igraph)
-pip install "code-review-graph[enrichment]"          # Python call-resolution enrichment (Jedi)
+pip install "code-review-graph[enrichment]"          # Python call resolution with Jedi (then build --enrich)
 pip install "code-review-graph[eval]"                # Evaluation benchmarks and SVG export (matplotlib)
 pip install "code-review-graph[wiki]"                # ollama client (not used by the current wiki generator)
 pip install "code-review-graph[all]"                 # All optional dependencies
@@ -523,7 +590,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_GIT_TIMEOUT` | Git 操作的超时秒数（build / update / watch） | `30` |
 | `CRG_DISCOVERY_TIMEOUT` | 未显式给出文件清单时，用于识别变更的每个 Git 命令的超时秒数。超时会返回错误，而不会报告“没有变更” | `5`（显式设置 `CRG_GIT_TIMEOUT` 时取该值） |
 | `CRG_DATA_DIR` | 存放图谱数据库和生成产物的目录 | - |
-| `CRG_HOOK_WORKTREES` | 设为 `1` 时允许 pre-commit 钩子在链接的 git worktree 中运行 | - |
+| `CRG_HOOK_WORKTREES` | 设为 `1` 时允许生成的 git 钩子在链接的 git worktree 中运行 | - |
 | `CRG_EMBEDDING_MODEL` | 本地向量嵌入的默认模型 | `all-MiniLM-L6-v2` |
 | `CRG_ACCEPT_CLOUD_EMBEDDINGS` | 设为 `1` 可抑制云端嵌入的出网警告 | - |
 | `CRG_ALLOW_REMOTE_CODE` | 允许需要 `trust_remote_code=True` 的 HuggingFace 模型 | `0` |
@@ -532,13 +599,17 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_MAX_IMPACT_DEPTH` | 影响半径分析的搜索深度 | `2` |
 | `CRG_MAX_BFS_DEPTH` | 图谱遍历的最大深度 | `15` |
 | `CRG_MAX_CHANGED_FUNCS` | 单份变更报告中分析的最大变更函数数 | `500` |
-| `CRG_MAX_TRANSITIVE_FRONTIER` | 传递性调用者/被调用者扩展的最大前沿规模 | `50` |
+| `CRG_MAX_DELETION_FILES` | 单份变更报告中读取旧版本的最大文件数，用于列出差异删除的函数和类 | `100` |
+| `CRG_MAX_TRANSITIVE_FRONTIER` | `tests_for` 和 `detect-changes` 查找测试时每一跳最多跟随的被调用者数。按名称取前面的，因此同一张图谱总是给出同一个答案 | `50` |
 | `CRG_CALLER_TEST_ROUTE_DEPTH` | 为没有测试的变更符号向上回溯 `CALLS` 寻找已测试调用者的跳数。仅作为提示报告，不计为覆盖率 | `2` |
 | `CRG_CALLER_TEST_ROUTE_MAX_CALLERS` | 寻找该已测试调用者时检查的调用者数量上限 | `500` |
 | `CRG_TOOL_TIMEOUT` | 只读 MCP 工具的超时秒数（`0` 表示禁用）。不限制写入类工具：build、postprocess、embed、wiki 和 apply-refactor | `0` |
 | `CRG_CHURN_WINDOW_DAYS` | `detect-changes --churn` 统计提交数的时间窗口 | `90` |
+| `CRG_CONTEXT_HISTORY` | 设为 `1` 时，把每次 `context_savings` 估算记入本地日志 `.code-review-graph/context-history.jsonl`；用 `code-review-graph context-history` 查看。只记录 token 数和工具名，从不外发 | - |
 | `CRG_LEIDEN_SEED` | Leiden 社区检测的随机种子 | `42` |
 | `CRG_RECURSE_SUBMODULES` | 设为 `1`、`true` 或 `yes` 时包含 git 子模块 | - |
+| `CRG_FOLLOW_SYMLINKS` | 设为 `1`、`true`、`yes` 或 `on` 时跟随符号链接文件夹（仓库内外均可），与 `--follow-symlinks` 相同。见 [符号链接文件夹](docs/USAGE.md#symlinked-folders) | - |
+| `CRG_MAX_FOLLOWED_FILES` | 通过符号链接文件夹最多读取的文件数 | `10000` |
 | `CRG_TOOLS` | 提供服务时暴露的 MCP 工具白名单，逗号分隔 | - |
 | `GOOGLE_API_KEY` | Google Gemini 嵌入的 API 密钥 | - |
 | `MINIMAX_API_KEY` | MiniMax 嵌入的 API 密钥 | - |
@@ -556,6 +627,8 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_OPENAI_BATCH_SIZE` | OpenAI 兼容请求的批大小 | `100` |
 | `NO_COLOR` | 关闭终端中的 ANSI 颜色 | - |
 | `CRG_SERIAL_PARSE` | 设为 `1` 可关闭并行解析（用于调试） | - |
+| `CRG_ENABLE_ENRICHMENT` | 设为 `1` 后每次 build 和 update 都用 Jedi 解析 Python 方法调用（需要 `enrichment` 附加包，每个 Python 文件约多 1 秒）。等同 `build --enrich` | 关闭 |
+| `CRG_DISABLE_ENRICHMENT` | 设为 `1` 后即使请求也不运行 Jedi | - |
 
 OpenAI 兼容嵌入（OpenAI、Azure，或自建网关如 new-api、LiteLLM、vLLM、LocalAI，或 OpenAI 模式下的 Ollama）无需额外安装。设置变量并给 `embed_graph` 传入 `provider="openai"`：
 
@@ -667,7 +740,8 @@ pytest
 ```
 
 Pull request 请提交到 `staging`（默认分支）。变更按
-`staging` → `testing` → `main` 的顺序推进，版本从 `main` 打标签。完整流程见
+`staging` → `testing` → `main` 的顺序推进，版本从 `main` 打标签。没有任何推进是自动的：
+每一次都由人审查并合并。完整流程见
 [CONTRIBUTING.md](CONTRIBUTING.md#branching-and-promotion)。
 
 要添加内置语言，编辑 `code_review_graph/parser.py`：把扩展名加入 `EXTENSION_TO_LANGUAGE`，并把节点类型映射加入 `_CLASS_TYPES`、`_FUNCTION_TYPES`、`_IMPORT_TYPES` 和 `_CALL_TYPES`。附上测试 fixture 并提交 PR。如果某种语言只在一个仓库里需要，请改用 [`languages.toml`](docs/CUSTOM_LANGUAGES.md)。

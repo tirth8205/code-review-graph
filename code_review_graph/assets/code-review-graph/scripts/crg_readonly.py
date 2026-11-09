@@ -19,6 +19,7 @@ QUERY_PATTERNS = (
     "tests_for",
     "inheritors_of",
     "file_summary",
+    "path_to",
 )
 SEARCH_KINDS = ("File", "Class", "Function", "Type", "Test")
 READ_ONLY_COMMANDS = {
@@ -99,6 +100,7 @@ def _build_parser() -> argparse.ArgumentParser:
     query = sub.add_parser("query", help="Query graph relationships")
     query.add_argument("pattern", choices=QUERY_PATTERNS)
     query.add_argument("target")
+    query.add_argument("--to", default=None, help="For path_to: the node or file to reach")
     _add_common(query)
     impact = sub.add_parser("impact", help="Analyze change blast radius")
     impact.add_argument("--files", nargs="+", default=None)
@@ -174,6 +176,8 @@ def _command_args(args: argparse.Namespace, root: Path) -> list[str]:
         result.extend(("--limit", str(args.limit)))
     elif command == "query":
         result.extend((args.pattern, args.target))
+        if args.to:
+            result.extend(("--to", args.to))
     elif command == "impact":
         if args.files:
             result.extend(("--files", *args.files))
@@ -237,7 +241,10 @@ def _command_args(args: argparse.Namespace, root: Path) -> list[str]:
 
 
 def main() -> int:
-    args = _build_parser().parse_args()
+    parser = _build_parser()
+    args = parser.parse_args()
+    if args.command == "query" and args.pattern == "path_to" and not args.to:
+        parser.error("path_to needs --to: the node or file to reach")
     if args.command not in READ_ONLY_COMMANDS:
         print(f"Unsupported command: {args.command}", file=sys.stderr)
         return 2

@@ -19,11 +19,13 @@ import logging
 import sqlite3
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
+from code_review_graph import incremental
 from code_review_graph.build_state import BUILD_IN_PROGRESS, BUILD_STATE_KEY
 from code_review_graph.embeddings import (
     REFRESH_SKIPPED_WARNING,
@@ -461,13 +463,26 @@ class TestWatchTellsTheUser:
             "--embedding-provider", "local", "--embedding-model", "test-model",
         ]
         caplog.set_level(logging.WARNING)
+
+        # The CLI passes no stop event, so add one that is already set: the
+        # loop ends at its first tick.  Not a patched time.sleep: the git calls
+        # in startup sleep inside subprocess.run(timeout=...), and on a busy
+        # machine a raising sleep there stopped the whole pytest run.
+        real_watch = incremental.watch
+
+        def watch_one_tick(*args, **kwargs):
+            stop = threading.Event()
+            stop.set()
+            return real_watch(*args, stop_event=stop, **kwargs)
+
         with (
             patch.object(sys, "argv", argv),
             patch("code_review_graph.embeddings.get_provider") as get_provider,
             patch("watchdog.observers.Observer") as observer,
-            patch("time.sleep", side_effect=KeyboardInterrupt),
+            patch.object(incremental, "watch", side_effect=watch_one_tick) as watched,
         ):
             cli.main()  # a fatal post-processing warning would sys.exit(1)
+        watched.assert_called_once()
         get_provider.assert_not_called()
         observer.return_value.start.assert_called_once()
         assert len(_notices(caplog)) == 1

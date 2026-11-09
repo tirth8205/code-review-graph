@@ -31,6 +31,7 @@ import logging
 import os
 import re
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +65,23 @@ _MAX_BODY = 60_000
 _ARTIFACT_NEWLINE_BYTES = len(b"\n")
 #: What the body itself may occupy, once the artifact's newline is reserved.
 _MAX_BODY_TEXT = _MAX_BODY - _ARTIFACT_NEWLINE_BYTES
+
+#: Opt-in graph context sections (``--details``), in render order. The same
+#: tuple as ``code_review_graph.change_details.DETAIL_SECTIONS``; this script
+#: runs on the standard library alone, so it keeps a copy, and a test holds
+#: the two equal.
+DETAIL_SECTIONS: tuple[str, ...] = (
+    "risk", "communities", "hubs", "coupling", "impact", "gaps", "graph",
+)
+#: Rows shown per list in a graph context section.
+_DETAIL_ROWS = 5
+#: Callers named per symbol in the impact section.
+_DETAIL_CALLERS = 3
+#: Hard cap, in UTF-8 bytes, on the whole graph context block: the wrapper,
+#: every section and the note saying what was cut. The block is also never
+#: given more room than the body budget has left, so the report it follows
+#: is never cut to make space for it.
+_MAX_DETAILS_BYTES = 12_000
 
 
 def risk_level(score: float) -> str:
@@ -221,6 +239,45 @@ def _flows_section(flows: list[dict[str, Any]], max_flows: int) -> list[str]:
     return lines
 
 
+def _removed_section(
+    removed: list[dict[str, Any]], total: int, max_rows: int = 10,
+) -> list[str]:
+    """Symbols the diff deleted, and what the graph says still uses them."""
+    lines = [
+        "### Removed symbols",
+        "",
+        "| Risk | Level | Symbol | Was at | Still used by |",
+        "| ---: | :--- | :--- | :--- | :--- |",
+    ]
+    for entry in removed[:max_rows]:
+        name = entry.get("qualified_name") or entry.get("name") or "?"
+        location = md_escape(relativize_path(entry.get("file") or "?"))
+        if entry.get("old_line_start"):
+            location += f":{entry['old_line_start']}"
+        users = [
+            md_escape(relativize_path(u.get("qualified_name") or u.get("name") or "?"), 80)
+            for u in entry.get("used_by") or []
+        ]
+        users_total = entry.get("used_by_total")
+        if not isinstance(users_total, int):
+            users_total = len(users)
+        if users_total:
+            cell = ", ".join(users)
+            if users_total > len(users):
+                cell += f" +{users_total - len(users)} more"
+        else:
+            cell = "nothing found"
+        score = float(entry.get("risk_score") or 0.0)
+        lines.append(
+            f"| {score:.2f} | {risk_level(score)} | {md_escape(relativize_path(name))} "
+            f"| {location} | {cell} |"
+        )
+    if total > min(len(removed), max_rows):
+        lines.append("")
+        lines.append(f"...and {total - min(len(removed), max_rows)} more removed symbol(s).")
+    return lines
+
+
 def _dedup_gaps(gaps: list[dict[str, Any]], max_gaps: int) -> list[dict[str, Any]]:
     seen: set[str] = set()
     shown: list[dict[str, Any]] = []
@@ -319,8 +376,15 @@ def render_markdown(
     *,
     max_functions: int = 10,
     max_flows: int = 5,
+    details: Sequence[str] = (),
 ) -> str:
-    """Render the detect-changes JSON report as a markdown PR comment."""
+    """Render the detect-changes JSON report as a markdown PR comment.
+
+    *details* names the opt-in graph context sections to add (see
+    :data:`DETAIL_SECTIONS`). Empty, the default, renders exactly the
+    comment this function rendered before the option existed, whatever the
+    report carries.
+    """
     score = float(report.get("risk_score") or 0.0)
     changed = report.get("changed_functions") or []
     flows = report.get("affected_flows") or []
@@ -352,6 +416,11 @@ def render_markdown(
         gaps_total = uncovered_total + indirect_total
     truncated = gaps_total > len(gaps)
 
+    removed = report.get("removed_symbols") or []
+    removed_total = report.get("removed_symbols_total")
+    if not isinstance(removed_total, int):
+        removed_total = len(removed)
+
     lines: list[str] = [MARKER, "", "## code-review-graph review", ""]
     gap_text = f"{gaps_total} test gap(s)"
     if indirect_total:
@@ -362,7 +431,9 @@ def render_markdown(
     lines.append(
         f"**Overall risk: {score:.2f} ({risk_level(score).upper()})** — "
         f"{len(changed)} changed function(s)/class(es), "
-        f"{len(flows)} affected flow(s), {gap_text}"
+        # The score can come from a removal alone, so say there was one.
+        + (f"{removed_total} removed, " if removed_total else "")
+        + f"{len(flows)} affected flow(s), {gap_text}"
     )
 
     if priorities:
@@ -372,6 +443,9 @@ def render_markdown(
                 priorities, gap_names, max_functions, indirect_names, truncated
             )
         )
+    if removed:
+        lines.append("")
+        lines.extend(_removed_section(removed, removed_total))
     if flows:
         lines.append("")
         lines.extend(_flows_section(flows, max_flows))
@@ -403,8 +477,420 @@ def render_markdown(
             "changed functions (set `CRG_MAX_CHANGED_FUNCS` to adjust)."
         )
 
-    lines.extend(["", "---", "", FOOTER])
+    tail = ["", "---", "", FOOTER]
+    if details:
+        # The block joins as "\n\n<block>", two bytes more than its text. It
+        # gets whatever the body budget has left and never more than its own
+        # cap, so it can never push the report itself into truncation.
+        base = len("\n".join(lines + tail).encode("utf-8"))
+        room = min(_MAX_DETAILS_BYTES, _MAX_BODY_TEXT - base - 2)
+        block = _details_block(report, details, room)
+        if block:
+            lines.append("")
+            lines.extend(block)
+    lines.extend(tail)
     return _fit_to_budget("\n".join(lines))
+
+
+# ---------------------------------------------------------------------------
+# Opt-in graph context (``--details``)
+# ---------------------------------------------------------------------------
+
+
+def parse_details(value: str) -> tuple[str, ...]:
+    """Parse a comma-separated section list; ``all`` means every section.
+
+    Mirrors ``code_review_graph.change_details.parse_detail_sections``: the
+    result follows :data:`DETAIL_SECTIONS`, an empty value is no sections,
+    and an unknown name raises :class:`ValueError`.
+    """
+    names = [part.strip().lower() for part in str(value).split(",") if part.strip()]
+    unknown = [name for name in names if name != "all" and name not in DETAIL_SECTIONS]
+    if unknown:
+        raise ValueError(
+            f"unknown detail section(s): {', '.join(unknown)}; "
+            f"choose from {', '.join(DETAIL_SECTIONS)}, or all"
+        )
+    if "all" in names:
+        return DETAIL_SECTIONS
+    return tuple(name for name in DETAIL_SECTIONS if name in names)
+
+
+def _details_arg(value: str) -> tuple[str, ...]:
+    try:
+        return parse_details(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def _utf8_len(lines: list[str]) -> int:
+    return len("\n".join(lines).encode("utf-8"))
+
+
+def _num(value: Any) -> str:
+    """An integer with thousands separators, or ``?`` for anything else."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return "?"
+    return f"{value:,}"
+
+
+def _name(value: Any) -> str:
+    return md_escape(relativize_path(value or "?"))
+
+
+def _rows(items: Any) -> list[dict[str, Any]]:
+    return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+
+
+def _communities(count: int) -> str:
+    return f"{count:,} other {'community' if count == 1 else 'communities'}"
+
+
+def _more(lines: list[str], total: Any, shown: int, what: str) -> None:
+    if isinstance(total, int) and not isinstance(total, bool) and total > shown:
+        lines.append(f"- ...and {total - shown:,} more {what}")
+
+
+_SIGNAL_ORDER = ("flows", "cross_community", "tests", "security", "callers", "churn")
+
+
+def _signal_label(key: str, count: int) -> str:
+    if key == "flows":
+        return f"in {count} flow(s)"
+    if key == "cross_community":
+        return f"{count} caller(s) from other communities"
+    if key == "tests":
+        if count == 0:
+            return "no tests"
+        return f"only {count} test(s)" if count < 5 else f"{count} tests"
+    if key == "security":
+        return "security-related name"
+    if key == "callers":
+        return f"called from {count} place(s)"
+    if key == "churn":
+        return f"{count} recent commit(s) to its file"
+    return f"{md_escape(key, limit=40)} ({count})"
+
+
+def _section_risk(data: Any) -> list[str]:
+    rows = _rows(data)
+    lines = [
+        "#### Why these risk scores",
+        "",
+        "The riskiest changed symbols. Each score is the sum of these signals, "
+        "largest first.",
+        "",
+    ]
+    if not rows:
+        lines.append("_No changed symbol to explain._")
+        return lines
+    for entry in rows[:_DETAIL_ROWS]:
+        signals = entry.get("signals") if isinstance(entry.get("signals"), dict) else {}
+        parts: list[tuple[float, int, str]] = []
+        total = 0.0
+        for key, value in signals.items():
+            if not isinstance(value, dict):
+                continue
+            try:
+                score = float(value.get("score") or 0.0)
+                count = int(value.get("count") or 0)
+            except (TypeError, ValueError):
+                continue
+            total += score
+            if score > 0:
+                order = _SIGNAL_ORDER.index(key) if key in _SIGNAL_ORDER else len(_SIGNAL_ORDER)
+                parts.append((-score, order, f"{_signal_label(str(key), count)} +{score:.2f}"))
+        parts.sort()
+        try:
+            risk = float(entry.get("risk_score") or 0.0)
+        except (TypeError, ValueError):
+            risk = 0.0
+        reasons = ", ".join(text for _, _, text in parts) or "no signal"
+        capped = (
+            f" (the signals add up to {total:.2f}, capped at 1.00)"
+            if total > 1.0 + 1e-9 else ""
+        )
+        lines.append(f"- **{_name(entry.get('qualified_name'))}** ({risk:.2f}): {reasons}{capped}")
+    return lines
+
+
+def _section_communities(data: Any) -> list[str]:
+    data = data if isinstance(data, dict) else {}
+    rows = _rows(data.get("touched"))
+    total = data.get("touched_total")
+    lines = [
+        "#### Communities touched",
+        "",
+        f"The change touches {_num(total)} of {_num(data.get('in_graph'))} communities.",
+        "",
+    ]
+    for entry in rows[:_DETAIL_ROWS]:
+        lines.append(
+            f"- **{md_escape(entry.get('name') or '?')}** ({_num(entry.get('size'))} "
+            f"symbol(s)): {_num(entry.get('changed'))} changed"
+        )
+    shown = min(len(rows), _DETAIL_ROWS)
+    known = total if isinstance(total, int) and not isinstance(total, bool) else len(rows)
+    _more(lines, max(known, len(rows)), shown, "communities")
+    unassigned = data.get("unassigned")
+    if isinstance(unassigned, int) and not isinstance(unassigned, bool) and unassigned > 0:
+        lines.extend(["", f"_{unassigned:,} changed symbol(s) belong to no community._"])
+    return lines
+
+
+def _section_hubs(data: Any) -> list[str]:
+    data = data if isinstance(data, dict) else {}
+    rows = _rows(data.get("nodes"))
+    lines = [
+        "#### Hubs and chokepoints",
+        "",
+        "Changed code by connections (edges in and out), ranked against all "
+        f"{_num(data.get('ranked'))} connected symbols in the graph. Tests are left out.",
+        "",
+    ]
+    if not rows:
+        lines.append("_No changed symbol has a connection._")
+        return lines
+    for entry in rows[:_DETAIL_ROWS]:
+        text = (
+            f"- **{_name(entry.get('qualified_name'))}** ({_location(entry)}): "
+            f"{_num(entry.get('degree'))} connections, rank #{_num(entry.get('rank'))}"
+        )
+        linked = entry.get("communities_linked")
+        if isinstance(linked, int) and not isinstance(linked, bool) and linked > 0:
+            text += f", callers and callees in {_communities(linked)}"
+        lines.append(text)
+    total = data.get("total")
+    known = total if isinstance(total, int) and not isinstance(total, bool) else len(rows)
+    _more(lines, max(known, len(rows)), min(len(rows), _DETAIL_ROWS), "symbol(s)")
+    return lines
+
+
+def _section_coupling(data: Any) -> list[str]:
+    data = data if isinstance(data, dict) else {}
+    rows = _rows(data.get("edges"))
+    lines = [
+        "#### Coupling across boundaries",
+        "",
+        f"{_num(data.get('cross_community'))} link(s) from or to the changed symbols "
+        f"cross a community boundary and {_num(data.get('cross_language'))} cross a "
+        "language boundary. Links to or from tests are left out.",
+        "",
+    ]
+    for entry in rows[:_DETAIL_ROWS]:
+        reasons = []
+        for reason in entry.get("reasons") or []:
+            if reason == "cross-language":
+                reasons.append(
+                    f"cross-language ({md_escape(entry.get('source_language') or '?', 40)} → "
+                    f"{md_escape(entry.get('target_language') or '?', 40)})"
+                )
+            elif reason == "cross-community":
+                reasons.append(
+                    f"cross-community ({md_escape(entry.get('source_community') or '?', 60)} → "
+                    f"{md_escape(entry.get('target_community') or '?', 60)})"
+                )
+        lines.append(
+            f"- {_name(entry.get('source'))} → {_name(entry.get('target'))} "
+            f"({md_escape(entry.get('kind') or '?', 40)}): {', '.join(reasons) or '?'}"
+        )
+    total = data.get("total")
+    known = total if isinstance(total, int) and not isinstance(total, bool) else len(rows)
+    _more(lines, max(known, len(rows)), min(len(rows), _DETAIL_ROWS), "link(s)")
+    return lines
+
+
+def _section_impact(data: Any) -> list[str]:
+    data = data if isinstance(data, dict) else {}
+    truncated = bool(data.get("truncated"))
+    lead = "At least " if truncated else ""
+    lines = [
+        "#### Impact radius",
+        "",
+        f"{lead}{_num(data.get('impacted_nodes'))} symbol(s) in "
+        f"{_num(data.get('impacted_files'))} file(s) depend on or test the changed "
+        f"files, within {_num(data.get('depth'))} hop(s).",
+    ]
+    files = _rows(data.get("top_files"))
+    if files:
+        lines.extend(["", "Most affected files:", ""])
+        for entry in files[:_DETAIL_ROWS]:
+            lines.append(f"- {_location(entry)} ({_num(entry.get('nodes'))} symbol(s))")
+        total = data.get("impacted_files")
+        known = total if isinstance(total, int) and not isinstance(total, bool) else len(files)
+        _more(lines, max(known, len(files)), min(len(files), _DETAIL_ROWS), "file(s)")
+    callers = _rows(data.get("callers"))
+    if callers:
+        lines.extend(["", "Direct callers of the riskiest symbols:", ""])
+        for entry in callers[:_DETAIL_ROWS]:
+            names = [c for c in entry.get("callers") or [] if isinstance(c, str)]
+            shown = names[:_DETAIL_CALLERS]
+            total = entry.get("total")
+            known = total if isinstance(total, int) and not isinstance(total, bool) else len(names)
+            text = ", ".join(_name(c) for c in shown) or "?"
+            if known > len(shown):
+                text += f" and {known - len(shown):,} more"
+            lines.append(f"- **{_name(entry.get('qualified_name'))}** is called by {text}")
+    return lines
+
+
+def _section_gaps(data: Any) -> list[str]:
+    data = data if isinstance(data, dict) else {}
+    rows = _rows(data.get("hotspots"))
+    lines = [
+        "#### Untested hotspots",
+        "",
+        f"Test gaps ranked by how many callers and flows depend on them "
+        f"({_num(data.get('total'))} gap(s) in all).",
+        "",
+    ]
+    if not rows:
+        lines.append("_No test gaps._")
+        return lines
+    for entry in rows[:_DETAIL_ROWS]:
+        coverage = (
+            "reached only through a caller"
+            if entry.get("coverage") == "indirect"
+            else "no tested caller found"
+        )
+        lines.append(
+            f"- **{_name(entry.get('qualified_name'))}** ({_location(entry)}): "
+            f"{_num(entry.get('callers'))} caller(s), {_num(entry.get('flows'))} "
+            f"flow(s), {coverage}"
+        )
+    total = data.get("total")
+    known = total if isinstance(total, int) and not isinstance(total, bool) else len(rows)
+    _more(lines, max(known, len(rows)), min(len(rows), _DETAIL_ROWS), "gap(s)")
+    return lines
+
+
+def _section_graph(data: Any) -> list[str]:
+    data = data if isinstance(data, dict) else {}
+    languages = [
+        md_escape(lang, limit=40) for lang in data.get("languages") or [] if isinstance(lang, str)
+    ]
+    detector = data.get("community_detector")
+    igraph = data.get("igraph_installed")
+    if detector == "leiden":
+        method = "found by Leiden (igraph)"
+    elif detector == "file":
+        method = "found by file-based grouping"
+        if igraph is False:
+            method += " (igraph is not installed)"
+    elif detector:
+        method = f"found by {md_escape(detector, limit=40)}"
+    else:
+        method = "method not recorded (graph built before it was tracked)"
+        if igraph is True:
+            method += "; igraph is installed"
+        elif igraph is False:
+            method += "; igraph is not installed"
+    lines = [
+        "#### Graph",
+        "",
+        f"- {_num(data.get('nodes'))} nodes, {_num(data.get('edges'))} edges, "
+        f"{_num(data.get('files'))} files"
+        + (f"; languages: {', '.join(languages)}" if languages else ""),
+        f"- {_num(data.get('communities'))} communities, {method}",
+        f"- {_num(data.get('flows'))} execution flows",
+    ]
+    build = md_escape(data.get("build_type") or "", limit=20)
+    when = md_escape(data.get("last_updated") or "?", limit=40)
+    lines.append(
+        f"- Last {build + ' ' if build else ''}build {when}; "
+        f"code-review-graph {md_escape(data.get('version') or '?', limit=40)}, "
+        f"schema {_num(data.get('schema_version'))}"
+    )
+    return lines
+
+
+_SECTION_RENDERERS = {
+    "risk": _section_risk,
+    "communities": _section_communities,
+    "hubs": _section_hubs,
+    "coupling": _section_coupling,
+    "impact": _section_impact,
+    "gaps": _section_gaps,
+    "graph": _section_graph,
+}
+
+_SECTION_HEADINGS = {
+    "risk": "Why these risk scores",
+    "communities": "Communities touched",
+    "hubs": "Hubs and chokepoints",
+    "coupling": "Coupling across boundaries",
+    "impact": "Impact radius",
+    "gaps": "Untested hotspots",
+    "graph": "Graph",
+}
+
+
+def _details_block(report: dict[str, Any], sections: Sequence[str], cap: int) -> list[str]:
+    """The graph context block for *sections*, at most *cap* UTF-8 bytes.
+
+    Sections are cut on line boundaries, in order, and a note at the end
+    names every section that was cut short or left out. Returns ``[]`` when
+    not even the wrapper and that note fit.
+    """
+    head = [
+        "<details>",
+        f"<summary>Graph context: {', '.join(sections)}</summary>",
+        "",
+    ]
+    tail = ["", "</details>"]
+    data = report.get("details")
+    if not isinstance(data, dict):
+        body = [
+            "_This report has no graph context. It is added by "
+            "`code-review-graph detect-changes --details ...`; the installed "
+            "code-review-graph may be older than that option._"
+        ]
+        block = head + body + tail
+        return block if _utf8_len(block) <= cap else []
+
+    items: list[tuple[str, str]] = []
+    for name in sections:
+        section = data.get(name)
+        if section is None:
+            lines = [
+                f"#### {_SECTION_HEADINGS[name]}",
+                "",
+                "_This section is not in the report._",
+            ]
+        else:
+            lines = _SECTION_RENDERERS[name](section)
+        if items:
+            items.append((name, ""))
+        items.extend((name, line) for line in lines)
+
+    full = head + [line for _, line in items] + tail
+    if _utf8_len(full) <= cap:
+        return full
+
+    def note(missing: Sequence[str]) -> str:
+        return (
+            f"> Graph context cut at {cap:,} bytes. Cut short or not shown: "
+            f"{', '.join(missing)}."
+        )
+
+    reserve = ["", note(list(sections))]
+    out = list(head)
+    added: list[str] = []
+    for name, line in items:
+        if _utf8_len(out + [line] + reserve + tail) > cap:
+            break
+        out.append(line)
+        added.append(name)
+    complete = [
+        name for name in sections
+        if added.count(name) == sum(1 for owner, _ in items if owner == name)
+    ]
+    # Do not leave a heading or a blank line dangling above the note.
+    while len(out) > len(head) and (not out[-1] or out[-1].startswith("####")):
+        out.pop()
+    missing = [name for name in sections if name not in complete]
+    block = out + ["", note(missing)] + tail
+    return block if _utf8_len(block) <= cap else []
 
 
 def _fit_to_budget(body: str) -> str:
@@ -538,6 +1024,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Maximum affected flows listed (default: 5).",
     )
     parser.add_argument(
+        "--details",
+        type=_details_arg,
+        default=(),
+        metavar="SECTIONS",
+        help="Add opt-in graph context sections from the report's 'details' "
+        "(from `detect-changes --details`): a comma-separated list of "
+        f"{', '.join(DETAIL_SECTIONS)}, or all. Capped at "
+        f"{_MAX_DETAILS_BYTES:,} bytes. Default: none.",
+    )
+    parser.add_argument(
         "--quiet",
         action="store_true",
         help="Skip writing the markdown body (gate-only mode).",
@@ -573,6 +1069,7 @@ def main(argv: list[str] | None = None) -> int:
             report,
             max_functions=args.max_functions,
             max_flows=args.max_flows,
+            details=args.details,
         )
 
     if not args.quiet:

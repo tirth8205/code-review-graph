@@ -516,6 +516,15 @@ def detect_entry_points(
     # Scan all nodes for entry-point candidates.
     candidate_nodes = store.get_nodes_by_kind(["Function", "Test"])
 
+    # Ruby and Java test calls did not bind to the methods they call until
+    # recently, so a method used only by its tests was an entry point. Keep it
+    # one: being well tested must not hide a method from flow analysis.
+    called_outside_tests = (
+        store.get_call_targets_outside_tests()
+        if any(node.language in ("ruby", "java") for node in candidate_nodes)
+        else set()
+    )
+
     entry_points: list[GraphNode] = []
     seen_qn: set[str] = set()
 
@@ -532,19 +541,17 @@ def detect_entry_points(
         if node.extra.get("verilog_kind"):
             continue
 
-        is_entry = False
-
         # True root: no one calls this function.
-        if node.qualified_name not in called_qnames:
-            is_entry = True
-
-        # Framework decorator match.
-        if _has_framework_decorator(node):
-            is_entry = True
-
-        # Conventional name match.
-        if _matches_entry_name(node):
-            is_entry = True
+        called = (
+            called_outside_tests
+            if node.language in ("ruby", "java")
+            else called_qnames
+        )
+        is_entry = (
+            node.qualified_name not in called
+            or _has_framework_decorator(node)
+            or _matches_entry_name(node)
+        )
 
         if is_entry and node.qualified_name not in seen_qn:
             entry_points.append(node)
@@ -758,9 +765,11 @@ def store_flows(store: GraphStore, flows: list[dict]) -> int:
         conn.execute("DELETE FROM flows")
 
         count = 0
+        membership_rows: list[tuple[int, int, int]] = []
         for flow in flows:
-            path_json = json.dumps(flow.get("path", []))
-            conn.execute(
+            node_ids = flow.get("path", [])
+            path_json = json.dumps(node_ids)
+            cursor = conn.execute(
                 """INSERT INTO flows
                    (name, entry_point_id, depth, node_count, file_count,
                     criticality, path_json)
@@ -775,18 +784,20 @@ def store_flows(store: GraphStore, flows: list[dict]) -> int:
                     path_json,
                 ),
             )
-            flow_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-
-            # Insert memberships.
-            node_ids = flow.get("path", [])
-            for position, node_id in enumerate(node_ids):
-                conn.execute(
-                    "INSERT OR IGNORE INTO flow_memberships (flow_id, node_id, position) "
-                    "VALUES (?, ?, ?)",
-                    (flow_id, node_id, position),
-                )
+            flow_id = cursor.lastrowid
+            membership_rows.extend(
+                (flow_id, node_id, position)
+                for position, node_id in enumerate(node_ids)
+            )
             count += 1
+        if membership_rows:
+            conn.executemany(
+                "INSERT OR IGNORE INTO flow_memberships (flow_id, node_id, position) "
+                "VALUES (?, ?, ?)",
+                membership_rows,
+            )
 
+        conn.execute("DELETE FROM metadata WHERE key = 'csharp_flows_dirty'")
         conn.commit()
     except BaseException:
         conn.rollback()
@@ -815,6 +826,11 @@ def incremental_trace_flows(
 
     Returns the number of re-traced flows that were stored.
     """
+    if store.get_metadata("csharp_flows_dirty") == "1":
+        # C# rebinding can change callers and entry points in files that were
+        # never reparsed, so a changed-file set cannot bound the work. Retrace
+        # in full until the binder reports a complete affected set.
+        return store_flows(store, trace_flows(store, max_depth=max_depth))
     if not changed_files and not entry_point_qns:
         return 0
 
@@ -932,35 +948,44 @@ def incremental_trace_flows(
     # 6. INSERT new flows without clearing unrelated ones
     # ------------------------------------------------------------------
     count = 0
-    for flow in new_flows:
-        path_json = json.dumps(flow.get("path", []))
-        conn.execute(
-            """INSERT INTO flows
-               (name, entry_point_id, depth, node_count, file_count,
-                criticality, path_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (
-                flow["name"],
-                flow["entry_point_id"],
-                flow["depth"],
-                flow["node_count"],
-                flow["file_count"],
-                flow["criticality"],
-                path_json,
-            ),
-        )
-        flow_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-
-        node_ids = flow.get("path", [])
-        for position, node_id in enumerate(node_ids):
-            conn.execute(
-                "INSERT OR IGNORE INTO flow_memberships (flow_id, node_id, position) "
-                "VALUES (?, ?, ?)",
-                (flow_id, node_id, position),
-            )
-        count += 1
-
-    conn.commit()
+    if new_flows:
+        store._begin_immediate()
+        try:
+            membership_rows: list[tuple[int, int, int]] = []
+            for flow in new_flows:
+                node_ids = flow.get("path", [])
+                path_json = json.dumps(node_ids)
+                cursor = conn.execute(
+                    """INSERT INTO flows
+                       (name, entry_point_id, depth, node_count, file_count,
+                        criticality, path_json)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        flow["name"],
+                        flow["entry_point_id"],
+                        flow["depth"],
+                        flow["node_count"],
+                        flow["file_count"],
+                        flow["criticality"],
+                        path_json,
+                    ),
+                )
+                flow_id = cursor.lastrowid
+                membership_rows.extend(
+                    (flow_id, node_id, position)
+                    for position, node_id in enumerate(node_ids)
+                )
+                count += 1
+            if membership_rows:
+                conn.executemany(
+                    "INSERT OR IGNORE INTO flow_memberships (flow_id, node_id, position) "
+                    "VALUES (?, ?, ?)",
+                    membership_rows,
+                )
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
     return count
 
 

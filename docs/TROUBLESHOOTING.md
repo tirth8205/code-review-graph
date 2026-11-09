@@ -24,18 +24,41 @@ delete entries it did not write. If the old flat entries are still there,
 remove them from `.claude/settings.json` by hand (`install` writes a backup to
 `.claude/settings.json.bak` first), then run `install` again.
 
+Comments and trailing commas in the file are fine; they are kept. If the file
+cannot be merged (it is not valid JSON, a `/*` comment never closes, or `hooks`
+has the wrong shape), `install` leaves it byte for byte as it was and prints
+`... left unchanged to avoid data loss. Please add the hooks manually.` Fix the
+file and run `install` again. The same holds for `.qoder/settings.json`,
+`.codebuddy/settings.json`, `.gemini/settings.json`, `~/.codex/hooks.json` and
+`~/.cursor/hooks.json`. `install --dry-run` shows each change as a diff and
+writes nothing.
+
 The generated config uses two events: `PostToolUse` (runs
-`code-review-graph update --skip-flows` after Edit/Write) and `SessionStart`
+`code-review-graph hook-update` after Edit/Write) and `SessionStart`
 (runs `code-review-graph status`). Pre-commit checks live in a git hook, not in
-Claude Code settings.
+Claude Code settings. `install --steering` adds a third, opt-in event,
+`PreToolUse`, that runs `code-review-graph enrich` before each search and read;
+`install --no-steering` removes it.
+
+`hook-update` updates the graph of the repository that holds the edited file,
+not the one the session started in, so it works from a folder of sibling
+repos, an outer repo with nested ones, or a main checkout that edits a linked
+worktree. It updates that repository only if it already has a graph, or if it
+is the repository the session started in (which is built on first edit, as
+before). An edit anywhere else on disk changes no graph. A submodule with no
+graph of its own passes the edit to its superproject. Under `CRG_DATA_DIR`
+every repository points at the same database, so it counts only as the graph
+of the repository it was built for.
 
 #### The git pre-commit hook
 
 `install` writes a `pre-commit` hook to the directory reported by
 `git rev-parse --git-path hooks`: usually `.git/hooks`, but `core.hooksPath`
-(for example `.husky`) and submodules are covered too. An existing hook is
-appended to, not overwritten. If husky or pre-commit manages your hooks, you
-can add the two commands there instead:
+(for example `.husky`) and submodules are covered too. An existing shell hook
+is appended to, not overwritten. A hook in another language, such as Python or
+Node, is left unchanged with a warning, so call the two commands below from it
+yourself. If husky or pre-commit manages your hooks, you can add the two
+commands there instead:
 
 ```sh
 code-review-graph update
@@ -46,9 +69,9 @@ code-review-graph detect-changes --brief
 that run `code-review-graph update --quiet` after a branch checkout, a merge
 and a rebase. With a hook manager, add that command to the same three hooks;
 run it from `post-checkout` only when its third argument is `1`, and from
-`post-rewrite` only when its first argument is `rebase`. The same applies to an
-existing hook written in a language other than shell: `install` leaves it
-unchanged and logs a warning, so call the command from it yourself.
+`post-rewrite` only when its first argument is `rebase`. Do the same from an
+existing hook written in a language other than shell, which `install` leaves
+unchanged.
 
 The hook skips linked worktrees, so a commit there cannot silently build a
 second graph for another branch. It finds the git dir with
@@ -233,13 +256,23 @@ The graph is SQLite in WAL mode. If you see `database is locked`:
   `.code-review-graph/graph.db`, `graph.db-wal` and `graph.db-shm`, and run
   `code-review-graph build`.
 
-## `Skipped: another code-review-graph ... is already running for this repository`
+## `Skipped: Another code-review-graph write is already running for this repository`
 
 `build`, `update` and `postprocess` take a per-repository lock before touching
 the graph, so a second invocation does not repeat work the first is already
 doing. That is expected when a commit hook, an editor save hook and an agent
 tool hook all fire at once: one run writes, the others report the overlap and
 exit `75` (`EX_TEMPFAIL`).
+
+- `forget` and `embed` take the same lock and exit `75` the same way, but nothing
+  else does their work, so the message says so: run them again, or pass `--wait`.
+  `forget --dry-run` writes nothing and takes no lock. It reads the graph
+  read-only, so a graph from an older release needs an `update` first.
+- `watch` takes the lock for each write and lets go between them, so a running
+  watcher does not stop a build. If another writer holds the lock, the watcher
+  keeps its changes and tries again a second later, and it can still be stopped
+  while it waits. A `build` or `update` that lands in one of those writes exits
+  `75` as usual.
 
 - The message names the PID that owns the write, so a live holder is
   distinguishable from a leftover lock file. The lock is
@@ -258,9 +291,10 @@ exit `75` (`EX_TEMPFAIL`).
   it.
 - External writers that do not acquire this lock themselves can use
   `flock -n .code-review-graph/write.lock external-writer` to exclude CRG
-  builds while they work. Invoke `code-review-graph build`, `update` and
-  `postprocess` directly. Wrapping those commands in `flock` makes them
-  contend with the wrapper's lock and exit `75`; adding `--wait` deadlocks.
+  builds while they work. Invoke `code-review-graph build`, `update`,
+  `postprocess`, `forget` and `embed` directly. Wrapping those commands in
+  `flock` makes them contend with the wrapper's lock and exit `75`; adding
+  `--wait` deadlocks.
 - A filesystem that does not support `flock` is not reported as another writer.
   The run logs a warning and goes ahead without the lock, so overlapping runs
   are not skipped there.
@@ -269,8 +303,8 @@ exit `75` (`EX_TEMPFAIL`).
 
 - The first `build` parses every file. Later `update` runs parse only changed
   files and their dependents.
-- Only files tracked by git are indexed, so anything in `.gitignore` is already
-  skipped.
+- Only files git tracks, plus new files it does not ignore, are indexed, so
+  anything in `.gitignore` is already skipped.
 - Exclude generated code and vendored dependencies in `.code-review-graphignore`:
 
   ```
@@ -286,8 +320,14 @@ exit `75` (`EX_TEMPFAIL`).
 
 - Check the file's language is supported (see [FEATURES.md](FEATURES.md)) or
   added through `languages.toml` (see [CUSTOM_LANGUAGES.md](CUSTOM_LANGUAGES.md)).
-- Check the file is tracked by git and not matched by `.code-review-graphignore`
-  or the nested build-output detection described below.
+- Check git does not ignore the file, and it is not matched by
+  `.code-review-graphignore` or the nested build-output detection described
+  below.
+- Files in a symlinked folder are skipped unless you pass `--follow-symlinks`
+  to `build`, `update` or `watch`, or set `CRG_FOLLOW_SYMLINKS=1`.
+- Some data files keep only their file node: YAML and JSON translation files,
+  JSON test files, JSON under folders such as `docs`, `examples`, `samples`,
+  `demo` or `data`, JSON files over 256 KB, and HTML pages over 2 MB.
 - Look for a parse warning (next entry) after `update`.
 - Run `code-review-graph build`, or the MCP tool `build_or_update_graph_tool`
   with `full_rebuild=True`, to re-parse everything.
@@ -333,7 +373,7 @@ and exits 1, instead of raising a SQLite traceback:
 ```
 Error: the graph database at <path> is unreadable (file is not a database). Run `code-review-graph build` to rebuild it from scratch.
 Error: <path> is a SQLite database but not a code-review-graph graph (it holds invoices). Point --data-dir somewhere else, or delete the file and run `code-review-graph build`.
-Error: the graph database at <path> was written by a newer code-review-graph (schema v99; this build understands v14). Upgrade code-review-graph, or delete the file and run `code-review-graph build`.
+Error: the graph database at <path> was written by a newer code-review-graph (schema v99; this build understands v15). Upgrade code-review-graph, or delete the file and run `code-review-graph build`.
 Error: the graph at <path> was built for a different repository root: none of its 12 file(s), such as /other/repo/lib.py, are under /this/repo. Run `code-review-graph build` here, or point --repo at the root it was built for.
 ```
 
@@ -403,8 +443,9 @@ on first use. Nothing else is needed.
 
 ## Graph seems stale
 
-- With hooks installed, `update --skip-flows` runs after each Edit/Write and
-  the pre-commit hook runs `update` before each commit, and the post-checkout,
+- With hooks installed, `hook-update` updates the edited file's repository
+  after each Edit/Write (see above for which repositories it touches), the
+  pre-commit hook runs `update` before each commit, and the post-checkout,
   post-merge and post-rewrite hooks run it after a branch switch, a merge and
   a rebase (not in linked worktrees; see above).
 - Run `code-review-graph update`, or `/code-review-graph:build-graph` in Claude
@@ -464,8 +505,14 @@ If you still see the message, upgrade, or run `code-review-graph build` once.
 
 Nested `target/`, `build/`, `.next/` and `.nuxt/` directories are treated as
 build output when a sibling manifest says so (`pom.xml`, `Cargo.toml`,
-`build.sbt`, `build.gradle`, `build.gradle.kts`, `next.config.*`,
-`nuxt.config.*`). Each build logs what it excluded:
+`build.sbt`, `build.gradle`, `build.gradle.kts`, `settings.gradle`,
+`settings.gradle.kts`, `next.config.*`, `nuxt.config.*`). A nested `vendor/`
+is treated as dependencies when a sibling `composer.json`, `go.mod`, `go.work`,
+`Gemfile`, `Rakefile`, `Cargo.toml` or `*.gemspec` says so. With one of those
+files at the repository root, every `vendor/` folder is skipped; otherwise a
+folder named `vendor` stays in the graph unless a sibling file marks it. Add
+`vendor/` to `.code-review-graphignore` to leave it out anyway. Each build logs
+what it excluded:
 
 ```
 Excluding 2 nested build-output directories (a sibling manifest marks them as
@@ -488,6 +535,10 @@ off for the whole repository.
 - Install the local provider: `pip install "code-review-graph[embeddings]"`.
 - Run `code-review-graph embed`, or the `embed_graph_tool` MCP tool.
 - The first local run downloads the `all-MiniLM-L6-v2` model.
+- `--embedding-provider` on `build`, `update`, `postprocess` and `watch` only
+  refreshes vectors that already exist. On a graph with none yet it warns
+  `Embedding refresh skipped: this graph has no embeddings yet.` and embeds
+  nothing; run `code-review-graph embed` once with the same provider and model.
 - Cloud providers (`--provider openai|google|minimax|voyage`) read their key
   from `CRG_OPENAI_API_KEY`, `GOOGLE_API_KEY`, `MINIMAX_API_KEY` or
   `VOYAGE_API_KEY`, and print an egress warning until
@@ -538,8 +589,10 @@ If a tool returns an ImportError, install the relevant group:
   HTTP client and need only their environment variables.
 - `pip install "code-review-graph[communities]"`: igraph-based community
   detection.
-- `pip install "code-review-graph[enrichment]"`: Python call-resolution
-  enrichment through Jedi.
+- `pip install "code-review-graph[enrichment]"`: Python call resolution
+  through Jedi. It is off until you ask for it with `build --enrich`,
+  `update --enrich` or `CRG_ENABLE_ENRICHMENT=1`, because it adds about a
+  second per Python file.
 - `pip install "code-review-graph[eval]"`: evaluation benchmarks (matplotlib,
   PyYAML).
 - `pip install "code-review-graph[wiki]"`: installs the `ollama` client. The

@@ -41,6 +41,8 @@ def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # real config. Re-point it inside this fake home so the Hermes platform
     # is exercised within the user-scope boundary uninstall enforces.
     monkeypatch.setenv("HERMES_HOME", str(home / ".hermes"))
+    # The same holds for DSH_HOME, which conftest also pins.
+    monkeypatch.setenv("DSH_HOME", str(home / ".dsh"))
     return home
 
 
@@ -68,6 +70,17 @@ def test_uninstall_removes_mcp_entry_for_every_current_platform_spec(
             "[mcp_servers.code-review-graph]\n"
             "command = \"code-review-graph\"\n\n"
             "[mcp_servers.other]\ncommand = \"other\"\n",
+        )
+    elif spec["format"] == "dsh-patch":
+        _write(
+            config_path,
+            "- id: model\n"
+            "  config: {theme: dark}\n"
+            "- insert:\n"
+            "    - id: mcp-code-review-graph\n"
+            "      name: '@deepseek-ai/dsh-mcp-client'\n"
+            "      config: {serverName: code-review-graph, transport: stdio,\n"
+            "               command: code-review-graph, args: [serve]}\n",
         )
     elif spec["format"] == "yaml":
         _write(
@@ -100,6 +113,10 @@ def test_uninstall_removes_mcp_entry_for_every_current_platform_spec(
         assert "[mcp_servers.code-review-graph]" not in text
         assert "[mcp_servers.other]" in text
         assert 'theme = "dark"' in text
+    elif spec["format"] == "dsh-patch":
+        assert config_path.read_text(encoding="utf-8") == (
+            "- id: model\n  config: {theme: dark}\n"
+        )
     elif spec["format"] == "yaml":
         import yaml
 
@@ -114,6 +131,100 @@ def test_uninstall_removes_mcp_entry_for_every_current_platform_spec(
         else:
             assert set(container) == {"other"}
         assert data["theme"] == "dark"
+
+
+def test_uninstall_mimo_jsonc_removes_only_crg_entry(
+    fake_repo: Path, fake_home: Path
+) -> None:
+    config = fake_repo / ".mimocode" / "mimocode.jsonc"
+    _write(
+        config,
+        '{\n'
+        '  // preserve MiMo settings\n'
+        '  "$schema": "https://mimo.xiaomi.com/mimocode/config.json",\n'
+        '  "theme": "dark",\n'
+        '  "mcp": {\n'
+        '    "code-review-graph": {"type": "local", "command": ["crg"]},\n'
+        '    "other": {"type": "local", "command": ["other"]}\n'
+        '  }\n'
+        '}\n',
+    )
+    json_config = config.with_suffix(".json")
+    _write(json_config, '{"theme": "light"}\n')
+
+    report = uninstall.run(repo=fake_repo, keep_data=True, platforms=["mimo"])
+
+    assert report.errors == []
+    assert "preserve MiMo settings" in config.read_text(encoding="utf-8")
+    assert _read_jsonc(config) == {
+        "$schema": "https://mimo.xiaomi.com/mimocode/config.json",
+        "theme": "dark",
+        "mcp": {"other": {"type": "local", "command": ["other"]}},
+    }
+    assert json_config.read_text(encoding="utf-8") == '{"theme": "light"}\n'
+
+
+def _mimo_entry_in_both_files(repo: Path) -> tuple[Path, Path]:
+    """Install into ``mimocode.json``, then into a ``mimocode.jsonc`` added later.
+
+    MiMo Code loads both files, so both registrations are live.
+    """
+    json_config, jsonc_config = skills._mimo_config_paths(repo)
+    assert skills.install_platform_configs(repo, target="mimo") == ["MiMo Code"]
+    _write(
+        jsonc_config,
+        '{\n'
+        '  // added by the user after the first install\n'
+        '  "theme": "dark",\n'
+        '  "mcp": {\n'
+        '    "other": {"type": "local", "command": ["other"]}\n'
+        '  }\n'
+        '}\n',
+    )
+    assert skills.install_platform_configs(repo, target="mimo") == ["MiMo Code"]
+    for path in (json_config, jsonc_config):
+        assert "code-review-graph" in _read_jsonc(path)["mcp"]  # type: ignore[index]
+    return json_config, jsonc_config
+
+
+@pytest.mark.parametrize("platforms", [["mimo"], None], ids=["unbind", "full"])
+def test_uninstall_mimo_cleans_both_config_files(
+    fake_repo: Path, fake_home: Path, platforms: list[str] | None
+) -> None:
+    """Review of #688: an entry left in either MiMo file stays registered."""
+    json_config, jsonc_config = _mimo_entry_in_both_files(fake_repo)
+
+    report = uninstall.run(repo=fake_repo, keep_data=True, platforms=platforms)
+
+    assert report.errors == []
+    assert _read_jsonc(json_config) == {"mcp": {}}
+    assert "// added by the user after the first install" in jsonc_config.read_text(
+        encoding="utf-8"
+    )
+    assert _read_jsonc(jsonc_config) == {
+        "theme": "dark",
+        "mcp": {"other": {"type": "local", "command": ["other"]}},
+    }
+    # "mimocode.json" is a prefix of "mimocode.jsonc", so match up to the bracket.
+    for path in (json_config, jsonc_config):
+        assert any(line.startswith(f"{path} (") for line in report.edited_paths)
+
+
+def test_uninstall_dry_run_lists_both_mimo_files_and_writes_nothing(
+    fake_repo: Path, fake_home: Path
+) -> None:
+    json_config, jsonc_config = _mimo_entry_in_both_files(fake_repo)
+    before = {path: path.read_bytes() for path in (json_config, jsonc_config)}
+
+    report = uninstall.run(repo=fake_repo, keep_data=True, platforms=["mimo"], dry_run=True)
+
+    assert report.errors == []
+    assert {path: path.read_bytes() for path in before} == before
+    for path in (json_config, jsonc_config):
+        assert any(
+            line.startswith(f"{path} (would remove")
+            for line in report.edited_paths
+        ), report.edited_paths
 
 
 def test_platform_inventory_is_derived_not_hard_coded(
@@ -399,6 +510,46 @@ def test_removes_codex_hooks_every_release_wrote(fake_home: Path, fake_repo: Pat
     uninstall.run(repo=fake_repo, keep_data=True)
 
     assert _read_jsonc(path) == {}
+
+
+@pytest.mark.parametrize("settings_dir", [".claude", ".qoder", ".codebuddy"])
+def test_removes_project_edit_hooks_every_release_wrote(
+    fake_home: Path, fake_repo: Path, settings_dir: str
+):
+    """The edit hook moved to hook-update (#311); older ones must still go."""
+    repo_arg = json.dumps(fake_repo.resolve().as_posix())
+    released = [
+        # v2.3.3
+        "git rev-parse --git-dir >/dev/null 2>&1"
+        f" && code-review-graph update --skip-flows --repo {repo_arg} || true",
+        # v2.3.4 - v2.3.6
+        "cat >/dev/null || true; git rev-parse --git-dir >/dev/null 2>&1"
+        f" && code-review-graph update --skip-flows --repo {repo_arg} || true",
+        # v2.3.7 - v2.3.9
+        "cat >/dev/null || true; command -v code-review-graph >/dev/null 2>&1 || exit 0;"
+        " git rev-parse --git-dir >/dev/null 2>&1 && code-review-graph update"
+        ' --skip-flows --repo "$(git rev-parse --show-toplevel 2>/dev/null)" || true',
+    ]
+    path = fake_repo / settings_dir / "settings.json"
+    for command in released:
+        _write_json(
+            path,
+            {
+                "model": "kept",
+                "hooks": {
+                    "PostToolUse": [
+                        {
+                            "matcher": "Edit|Write",
+                            "hooks": [{"type": "command", "command": command}],
+                        }
+                    ]
+                },
+            },
+        )
+
+        uninstall.run(repo=fake_repo, keep_data=True)
+
+        assert _read_jsonc(path) == {"model": "kept"}, command
 
 
 def test_shared_skill_directories_keep_user_files_and_unrelated_skills(
@@ -757,6 +908,7 @@ def test_atomic_config_replace_preserves_file_mode(
     config = fake_repo / ".mcp.json"
     _write_json(config, {"mcpServers": {"code-review-graph": {}, "other": {}}})
     config.chmod(0o640)
+    original_mode = stat.S_IMODE(config.stat().st_mode)
 
     report = uninstall.run(
         repo=fake_repo,
@@ -765,7 +917,7 @@ def test_atomic_config_replace_preserves_file_mode(
     )
 
     assert report.errors == []
-    assert stat.S_IMODE(config.stat().st_mode) == 0o640
+    assert stat.S_IMODE(config.stat().st_mode) == original_mode
     assert _read_jsonc(config) == {"mcpServers": {"other": {}}}
 
 
@@ -821,7 +973,12 @@ def test_symlink_and_out_of_boundary_paths_are_skipped(
     outside_data = tmp_path / "outside-data"
     outside_data.mkdir()
     _write(outside_data / "keep.txt", "keep")
-    os.symlink(outside_data, fake_repo / ".code-review-graph", target_is_directory=True)
+    try:
+        os.symlink(outside_data, fake_repo / ".code-review-graph", target_is_directory=True)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows account lacks symbolic-link privilege")
+        raise
 
     outside_config = tmp_path / "outside-config.json"
     _write_json(outside_config, {"servers": {"code-review-graph": {}, "other": {}}})

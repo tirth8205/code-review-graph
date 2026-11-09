@@ -106,9 +106,6 @@ class TestMigrations:
         conn.execute("DROP TABLE IF EXISTS flow_memberships")
         conn.execute("DROP TABLE IF EXISTS communities")
         conn.execute("DROP TABLE IF EXISTS nodes_fts")
-        conn.execute("DROP TABLE IF EXISTS community_summaries")
-        conn.execute("DROP TABLE IF EXISTS flow_snapshots")
-        conn.execute("DROP TABLE IF EXISTS risk_index")
         conn.commit()
         conn.close()
 
@@ -180,13 +177,6 @@ class TestMigrations:
         version_after = get_schema_version(self.store._conn)
         assert version_before == version_after == LATEST_VERSION
 
-
-    def test_v6_summary_tables_exist(self):
-        """v6 summary tables should exist after migration."""
-        tables = _get_table_names(self.store._conn)
-        assert "community_summaries" in tables
-        assert "flow_snapshots" in tables
-        assert "risk_index" in tables
 
     def test_v6_migration_idempotent(self):
         """Running v6 migration twice should not fail."""

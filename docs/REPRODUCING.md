@@ -92,10 +92,9 @@ uv run code-review-graph eval --embed \
   --benchmark token_efficiency,impact_accuracy,agent_baseline,multi_hop_retrieval
 ```
 
-`--embed` is required for `agent_baseline` and `multi_hop_retrieval`; without it their
-natural-language questions hit FTS5 only and return nothing. `code-review-graph eval --help`
-lists the remaining benchmarks (`flow_completeness`, `search_quality`, `build_performance`,
-`incremental_fidelity`) and flags.
+`--embed` is required for `agent_baseline`, `multi_hop_retrieval` and `search_quality`;
+without it their natural-language questions hit FTS5 only and return nothing. `code-review-graph eval --help` lists the remaining benchmarks (`flow_completeness`,
+`search_quality`, `build_performance`, `incremental_fidelity`) and flags.
 
 A thrown tool call is not a measurement. The row stays in the CSV with `status=error` and is
 excluded from every aggregate. Regression tests for this are in `tests/test_eval.py`.
@@ -220,10 +219,13 @@ The predictor over-predicts on some commits. The worst case is flask `fbb6f0bc`:
 flagged for a 10-file change, precision 0.303. That trade-off is deliberate: a missed
 dependency costs more than an extra reviewed file.
 
-The co-change rows are not usable yet: all 11 graded commits came back with
-`predicted_files = 0`, so their F1 of 0.000 measures a harness fault, not the predictor. No
-co-change number is quoted until that is fixed. The two single-file commits (express) are
-recorded with `status=skipped` because there is nothing independent to grade against.
+The co-change rows in this capture are not usable: all 11 graded commits came back with
+`predicted_files = 0`, so their F1 of 0.000 measures a fault in the benchmark, not the
+predictor. `git diff` gives repo-relative paths and the graph stores absolute ones, so the
+seed never matched a node. PR #823 fixed that, and the graph-derived ground truth now counts
+real neighbour files too, so both tables will change when the benchmark is run again. No
+co-change number is quoted until then. The two single-file commits (express) are recorded
+with `status=skipped` because there is nothing independent to grade against.
 
 ### Multi-hop retrieval (`code_review_graph/eval/benchmarks/multi_hop_retrieval.py`)
 
@@ -422,7 +424,9 @@ content table behind it.
 ### Results on this repository
 
 323 files, 6,509 nodes, 57,042 edges, 186 flows. Differing rows per table, incremental
-update against clean rebuild:
+update against clean rebuild. Measured at schema v14: `community_summaries`,
+`flow_snapshots` and `risk_index` were removed in v15, as nothing read them, and the
+benchmark no longer compares them.
 
 | Edit | Status | Total | nodes | node_community | edges | communities | flows | flow_memberships | nodes_fts | community_summaries | flow_snapshots | risk_index | metadata | Seconds |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -453,10 +457,7 @@ the repair path as well, so a full rebuild is the only way back.
 edit leaves 718 nodes with `community_id IS NULL` against the rebuild's 306.
 `incremental_detect_communities` and `incremental_trace_flows` both match `nodes.file_path`
 (absolute) against `incremental_update`'s `changed_files` (repo-relative), so both always
-count zero affected rows and skip. `community_summaries` inherits the error: after the same
-edit its `key_symbols` for `code-review-graph-name` read
-`["main", "GraphStore", "close", "upsert_node", "commit"]` against the rebuild's
-`["CodeParser", "main", "GraphStore", "close", "NodeInfo"]`.
+count zero affected rows and skip.
 
 **3. Deleting a file silently shortens other files' caller lists.** Deleting
 `code_review_graph/graph.py` leaves the incremental graph with 52,913 edges against the
@@ -465,8 +466,6 @@ has no outgoing `CALLS` edge at all at lines 73 and 100 in the incremental graph
 rebuild has two (`_build_networkx_graph` and `_sanitize_name`). Those edges had been
 resolved into `graph.py`, were removed with it, and `analysis.py` was never re-parsed to
 restore them as bare calls. Two edges still target `graph.py::` names that have no node.
-`risk_index` inherits it: `parser.py::EdgeInfo` reports `caller_count` 268 against the
-rebuild's 267.
 
 The six `edges` rows that differ on every edit are a separate, smaller issue: the
 `ambiguous_targets` list inside an edge's `extra` JSON is ordered by node id, so re-parsing a
@@ -474,8 +473,9 @@ file reorders it. Same set, different order, so the graph is not byte-reproducib
 
 Every edit kind is listed in `incremental_fidelity.KNOWN_FAILURES`, which keeps the run from
 reporting them as unexpected. `tests/test_incremental_fidelity.py` guards against a kind that
-currently passes starting to diverge, and carries two `xfail` tests, now passing, that pin
-defects 1 and 2 at the level of the defect.
+currently passes starting to diverge, and pins defects 1 and 2 at the level of the defect.
+Defect 2 has plain tests, one of them for a file that an update adds (#1122). Defect 1's test
+is still marked `xfail` but now passes.
 
 ## Weekly CI run (report-only)
 
@@ -544,10 +544,10 @@ python -m tests.real_repo_corpus --record   # re-record after an intentional cha
 ```
 
 The normal suite skips it: `tests/conftest.py` skips every `corpus`-marked item unless the
-run's `-m` expression names the marker, so neither `pytest tests/` nor CI's `-m "not browser"`
-job pays for it. Clones are shallow single-commit fetches (~115 MB total). A cold run takes
-about 1 minute on a warm network and roughly 40 seconds once the clones are cached; budget a
-few minutes on CI hardware.
+run's `-m` expression names the marker, so neither `pytest tests/` nor CI's
+`-m "not browser and not upgrade"` job pays for it. Clones are shallow single-commit fetches
+(~115 MB total). A cold run takes about 1 minute on a warm network and roughly 40 seconds
+once the clones are cached; budget a few minutes on CI hardware.
 
 `fastapi` and `gin` reuse the pins in `code_review_graph/eval/configs/`, so the project keeps
 one answer to "which commit of fastapi do we measure". `tests/test_real_repo_corpus_guard.py`

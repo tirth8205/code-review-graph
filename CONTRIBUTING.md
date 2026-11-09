@@ -33,6 +33,8 @@ uv run mypy code_review_graph/ --ignore-missing-imports --no-strict-optional
 
 CI also runs `bandit -r code_review_graph/ -c pyproject.toml` and checks that `LATEST_VERSION` in `code_review_graph/migrations.py` equals `SUPPORTED_SCHEMA_VERSION` in the VS Code extension.
 
+The `minimum-dependencies` job installs every direct dependency at the lowest version `pyproject.toml` allows, from `.github/requirements-minimum.txt`, and runs the tests on each supported Python. If you add a dependency or change its lower bound, change that file too; `tests/test_dependency_floors.py` fails if the two disagree.
+
 ## Code Style
 
 - Line length: 100 characters.
@@ -95,11 +97,10 @@ The `Promote` workflow in the Actions tab can open the PR instead, but it needs 
 Actions → General → Workflow permissions → **Allow GitHub Actions to create and approve pull
 requests**, which is off here on purpose. Merging into `testing` starts the promotion gate.
 
-**Promotion to `main` is never automatic.** Open it from the Actions tab (`Promote`
-workflow, pick `testing -> main`) or by hand with
-`gh pr create --base main --head testing`, read the promotion gate's verdict first, and
-merge it yourself. That is the maintainer's sign-off: CI green is necessary but not
-sufficient.
+**Promotion to `main` is never automatic.** Open it by hand with
+`gh pr create --base main --head testing` (the `Promote` workflow, `testing -> main`, needs
+the same setting as above), read the promotion gate's verdict first, and merge it
+yourself. That is the maintainer's sign-off: CI green is necessary but not sufficient.
 
 **Hotfixes** for a released version follow the same path. If a fix is urgent, open the PR
 against `staging` and promote twice in a row; do not open PRs against `main`.
@@ -162,7 +163,7 @@ it). The report names every check, whether it passed, and for a failure the exac
 assertion that moved: for example the property, its baseline and the measured delta.
 
 The gate opens no pull request and merges nothing. Promotion to `main` stays the
-maintainer's decision, made with the `Promote` workflow as before.
+maintainer's decision.
 
 To run any of these by hand:
 
@@ -199,6 +200,8 @@ code-review-graph-vscode/  # VS Code extension (separate package)
 docs/                      # user documentation
 skills/                    # shipped agent skills, bundled into the wheel
 ```
+
+The text of `skills/build-graph`, `skills/review-delta` and `skills/review-pr` lives in `DOCUMENTARY_SKILLS` in `code_review_graph/skills.py`. Edit it there, then run `uv run python scripts/generate_documentary_skills.py`; a test fails if the files drift. The other four (`debug-issue`, `explore-codebase`, `refactor-safely`, `review-changes`) come from `_SKILLS` in the same file, which `install` writes out; change the text there and in `skills/<name>/SKILL.md` together, as `tests/test_skill_template_schema_sync.py` checks that they match byte for byte.
 
 ## Adding Language Support
 
