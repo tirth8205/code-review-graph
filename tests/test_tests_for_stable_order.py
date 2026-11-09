@@ -2,9 +2,10 @@
 
 ``get_transitive_tests`` follows at most ``max_frontier`` callees per hop. It
 used to cut that list from a Python ``set``, whose order changes with the
-string hash seed, so each new process kept different callees. On koel's
-``PodcastService`` three runs on one graph gave 58, 51 and 19 tests. The
+string hash seed, so each new process kept different callees. On koel, 20
+runs on one graph gave ``SongService`` anything from 43 to 90 tests. The
 risk score in ``detect_changes`` counts the same tests, so it moved too.
+Fixed in #1182.
 """
 
 from __future__ import annotations
