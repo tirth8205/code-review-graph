@@ -959,6 +959,57 @@ class TestFullBuild:
         finally:
             store.close()
 
+    def test_full_build_wires_jedi_enrichment(self, tmp_path):
+        # Regression guard: the [enrichment] extra (jedi) used to be dead
+        # code — enrich_jedi_calls was never invoked by any build path.
+        # full_build must call it with the store + repo root and surface
+        # its stats in the result dict.
+        py_file = tmp_path / "sample.py"
+        py_file.write_text("def hello():\n    pass\n")
+        (tmp_path / ".git").mkdir()
+
+        db_path = tmp_path / "test.db"
+        store = GraphStore(db_path)
+        try:
+            with patch(
+                "code_review_graph.incremental.get_all_tracked_files",
+                return_value=["sample.py"],
+            ), patch(
+                "code_review_graph.jedi_resolver.enrich_jedi_calls",
+                return_value={"resolved": 3, "files": 1},
+            ) as mock_enrich:
+                result = full_build(tmp_path, store, enrich=True)
+            assert result["jedi_enrichment"] == {"resolved": 3, "files": 1}
+            assert mock_enrich.call_count == 1
+            assert mock_enrich.call_args[0][0] is store
+            assert mock_enrich.call_args[0][1] == tmp_path
+        finally:
+            store.close()
+
+    def test_full_build_jedi_enrichment_skips_when_disabled(self, tmp_path, monkeypatch):
+        # The opt-out must skip enrichment without failing the build and
+        # report the skip in the stats.
+        py_file = tmp_path / "sample.py"
+        py_file.write_text("def hello():\n    pass\n")
+        (tmp_path / ".git").mkdir()
+
+        db_path = tmp_path / "test.db"
+        store = GraphStore(db_path)
+        try:
+            monkeypatch.setenv("CRG_DISABLE_ENRICHMENT", "1")
+            monkeypatch.setenv("CRG_ENABLE_ENRICHMENT", "1")
+            with patch(
+                "code_review_graph.incremental.get_all_tracked_files",
+                return_value=["sample.py"],
+            ):
+                result = full_build(tmp_path, store, enrich=True)
+            assert result["jedi_enrichment"] == {
+                "skipped": True,
+                "reason": "disabled via CRG_DISABLE_ENRICHMENT",
+            }
+        finally:
+            store.close()
+
     def test_full_build_removes_nodes_left_without_a_file_node(self, tmp_path):
         from code_review_graph.parser import EdgeInfo, NodeInfo
 
@@ -1011,6 +1062,102 @@ class TestIncrementalUpdate:
         try:
             result = incremental_update(tmp_path, store, changed_files=[])
             assert result["files_updated"] == 0
+        finally:
+            store.close()
+
+    def test_incremental_update_wires_jedi_enrichment(self, tmp_path):
+        # Jedi enrichment must re-run when Python files changed, and be
+        # skipped entirely when nothing Python-related was updated.
+        py_file = tmp_path / "app.py"
+        py_file.write_text("def app():\n    pass\n")
+        db_path = tmp_path / "test.db"
+        store = GraphStore(db_path)
+        try:
+            with patch(
+                "code_review_graph.jedi_resolver.enrich_jedi_calls",
+                return_value={"resolved": 1, "files": 1},
+            ) as mock_enrich:
+                result = incremental_update(
+                    tmp_path, store, changed_files=["app.py"], enrich=True,
+                )
+                assert result["jedi_enrichment"] == {"resolved": 1, "files": 1}
+                assert mock_enrich.call_count == 1
+
+                mock_enrich.reset_mock()
+                result = incremental_update(
+                    tmp_path, store, changed_files=[], enrich=True,
+                )
+                # Nothing was re-parsed, so the Jedi step does not run.
+                assert result.get("jedi_enrichment") is None
+                mock_enrich.assert_not_called()
+        finally:
+            store.close()
+
+    def test_incremental_update_scopes_jedi_to_reparsed_files(self, tmp_path):
+        # Review of PR #823: an incremental update must not make Jedi read
+        # every Python file again. Only the files re-parsed in this update
+        # lost their Jedi edges, so only those are passed to the scan.
+        for i in range(5):
+            (tmp_path / f"mod{i}.py").write_text(f"def f{i}():\n    pass\n")
+        store = GraphStore(tmp_path / "test.db")
+        try:
+            incremental_update(
+                tmp_path, store, changed_files=[f"mod{i}.py" for i in range(5)]
+            )
+            (tmp_path / "mod2.py").write_text("def f2():\n    return 2\n")
+            with patch(
+                "code_review_graph.jedi_resolver.enrich_jedi_calls",
+                return_value={"resolved": 0, "files": 0},
+            ) as mock_enrich:
+                incremental_update(
+                    tmp_path, store, changed_files=["mod2.py"], enrich=True,
+                )
+            assert mock_enrich.call_count == 1
+            scoped = mock_enrich.call_args.kwargs["files"]
+            assert [Path(f).name for f in scoped] == ["mod2.py"]
+        finally:
+            store.close()
+
+    def test_jedi_scan_reads_only_the_given_files(self, tmp_path):
+        # enrich_jedi_calls(files=...) must read only those files from disk.
+        pytest.importorskip("jedi")
+        from code_review_graph.jedi_resolver import enrich_jedi_calls
+
+        (tmp_path / "svc.py").write_text(
+            "class Service:\n    def authenticate(self):\n        return True\n\n"
+            "def make():\n    return Service()\n"
+        )
+        (tmp_path / "app.py").write_text(
+            "from svc import make\n\ndef run():\n    s = make()\n"
+            "    return s.authenticate()\n"
+        )
+        for i in range(3):
+            (tmp_path / f"other{i}.py").write_text(f"def g{i}():\n    pass\n")
+        store = GraphStore(tmp_path / "test.db")
+        try:
+            with patch.dict(os.environ, {"CRG_DISABLE_ENRICHMENT": "1"}):
+                incremental_update(
+                    tmp_path, store,
+                    changed_files=["svc.py", "app.py"] + [f"other{i}.py" for i in range(3)],
+                )
+            read: list[str] = []
+            real_read_bytes = Path.read_bytes
+
+            def spy(self):
+                read.append(self.name)
+                return real_read_bytes(self)
+
+            with patch.object(Path, "read_bytes", spy):
+                enrich_jedi_calls(store, tmp_path, files=[str(tmp_path / "app.py")])
+            assert read == ["app.py"]
+
+            # Without a scope (full build) every Python file is read.
+            read.clear()
+            with patch.object(Path, "read_bytes", spy):
+                enrich_jedi_calls(store, tmp_path)
+            assert sorted(read) == sorted(
+                ["app.py", "svc.py"] + [f"other{i}.py" for i in range(3)]
+            )
         finally:
             store.close()
 
@@ -2879,3 +3026,172 @@ class TestUntrackedScope:
         assert get_staged_and_unstaged(tmp_path) == [
             "brandnew/a.py", "pkg/newmod.py", "src/a.py", "weird/",
         ]
+
+
+_JEDI_SERVICES = (
+    "class OldService:\n    def authenticate(self):\n        return True\n\n"
+    "class NewService:\n    def authenticate(self):\n        return False\n\n"
+)
+_JEDI_APP = (
+    "from svc import make\n\ndef run():\n    s = make()\n    return s.authenticate()\n"
+)
+
+
+def _jedi_repo(root: Path, returned: str = "OldService") -> None:
+    (root / ".git").mkdir(exist_ok=True)
+    (root / "svc.py").write_text(
+        _JEDI_SERVICES + f"def make():\n    return {returned}()\n", encoding="utf-8",
+    )
+    (root / "app.py").write_text(_JEDI_APP, encoding="utf-8")
+
+
+def _authenticate_edges(store: GraphStore, root: Path) -> list[tuple[str, dict, str]]:
+    import json
+
+    rows = store._conn.execute(
+        "SELECT target_qualified, extra, target_resolution FROM edges"
+        " WHERE kind = 'CALLS' AND file_path = ? AND line = 5",
+        (str(root.resolve() / "app.py"),),
+    ).fetchall()
+    return [
+        (r["target_qualified"].rsplit("/", 1)[-1], json.loads(r["extra"]), r["target_resolution"])
+        for r in rows
+    ]
+
+
+class TestJediEnrichment:
+    """Review of PR #823: the Jedi step must improve the edges a build stores."""
+
+    def test_build_without_jedi_skips_the_step(self, tmp_path, monkeypatch):
+        import sys
+
+        # The enrichment extra is optional: without it a build only notes the skip.
+        monkeypatch.setitem(sys.modules, "jedi", None)
+        _jedi_repo(tmp_path)
+        with GraphStore(tmp_path / "test.db") as store:
+            with patch(
+                "code_review_graph.incremental.get_all_tracked_files",
+                return_value=["svc.py", "app.py"],
+            ):
+                result = full_build(tmp_path, store, enrich=True)
+            assert result["jedi_enrichment"] == {
+                "skipped": True, "reason": "jedi not installed",
+            }
+            [(target, _extra, resolution)] = _authenticate_edges(store, tmp_path)
+            assert (target, resolution) == ("authenticate", "unresolved")
+
+    def test_full_build_refines_the_bare_call_edge(self, tmp_path):
+        pytest.importorskip("jedi")
+        _jedi_repo(tmp_path)
+        with GraphStore(tmp_path / "test.db") as store:
+            with patch(
+                "code_review_graph.incremental.get_all_tracked_files",
+                return_value=["svc.py", "app.py"],
+            ):
+                result = full_build(tmp_path, store, enrich=True)
+
+            assert result["jedi_enrichment"]["resolved"] == 1
+            assert result["jedi_enrichment"]["refined"] == 1
+            # One edge, now naming the method the factory's object has.
+            [(target, extra, resolution)] = _authenticate_edges(store, tmp_path)
+            assert target == "svc.py::OldService.authenticate"
+            assert extra["call_resolution"] == "jedi"
+            assert extra["receiver"] == "s"
+            assert resolution == "direct"
+
+    def test_update_refreshes_an_unchanged_dependent(self, tmp_path):
+        pytest.importorskip("jedi")
+        _jedi_repo(tmp_path)
+        with GraphStore(tmp_path / "test.db") as store:
+            incremental_update(
+                tmp_path, store, changed_files=["svc.py", "app.py"], enrich=True,
+            )
+            [(target, _extra, _res)] = _authenticate_edges(store, tmp_path)
+            assert target == "svc.py::OldService.authenticate"
+
+            # Only svc.py changes; app.py's bytes do not.
+            _jedi_repo(tmp_path, returned="NewService")
+            result = incremental_update(
+                tmp_path, store, changed_files=["svc.py"], enrich=True,
+            )
+
+            assert "app.py" in result["dependent_files"]
+            [(target, _extra, _res)] = _authenticate_edges(store, tmp_path)
+            assert target == "svc.py::NewService.authenticate"
+
+    def test_target_outside_the_graph_keeps_the_bare_edge(self, tmp_path):
+        pytest.importorskip("jedi")
+        _jedi_repo(tmp_path)
+        # svc.py is ignored, so no node answers to what Jedi finds there; an
+        # unrelated authenticate() keeps the name among the project's functions.
+        (tmp_path / ".code-review-graphignore").write_text("svc.py\n", encoding="utf-8")
+        (tmp_path / "other.py").write_text("def authenticate():\n    pass\n", encoding="utf-8")
+        with GraphStore(tmp_path / "test.db") as store:
+            incremental_update(
+                tmp_path, store, changed_files=["svc.py", "app.py", "other.py"],
+                enrich=True,
+            )
+            [(target, extra, _res)] = _authenticate_edges(store, tmp_path)
+            assert target == "authenticate"
+            assert "call_resolution" not in extra
+
+
+class TestJediEnrichmentIsOptIn:
+    """Review of PR #823: having jedi installed (``[all]``) is not a request."""
+
+    @staticmethod
+    def _build(tmp_path, **kwargs):
+        _jedi_repo(tmp_path)
+        store = GraphStore(tmp_path / "test.db")
+        with patch(
+            "code_review_graph.incremental.get_all_tracked_files",
+            return_value=["svc.py", "app.py"],
+        ), patch("code_review_graph.jedi_resolver.enrich_jedi_calls") as mock_enrich:
+            mock_enrich.return_value = {"resolved": 0, "files": 0}
+            result = full_build(tmp_path, store, **kwargs)
+        return store, result, mock_enrich
+
+    def test_not_asked_for_means_jedi_never_runs(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("CRG_ENABLE_ENRICHMENT", raising=False)
+        monkeypatch.delenv("CRG_DISABLE_ENRICHMENT", raising=False)
+        store, result, mock_enrich = self._build(tmp_path)
+        try:
+            mock_enrich.assert_not_called()
+            assert result["jedi_enrichment"] == {"skipped": True, "reason": "not requested"}
+            [(target, _extra, _res)] = _authenticate_edges(store, tmp_path)
+            assert target == "authenticate"
+        finally:
+            store.close()
+
+    def test_update_not_asked_for_never_runs(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("CRG_ENABLE_ENRICHMENT", raising=False)
+        _jedi_repo(tmp_path)
+        with GraphStore(tmp_path / "test.db") as store:
+            with patch("code_review_graph.jedi_resolver.enrich_jedi_calls") as mock_enrich:
+                result = incremental_update(
+                    tmp_path, store, changed_files=["svc.py", "app.py"],
+                )
+            mock_enrich.assert_not_called()
+            assert result["jedi_enrichment"] == {"skipped": True, "reason": "not requested"}
+
+    def test_env_var_asks_for_it(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CRG_ENABLE_ENRICHMENT", "1")
+        monkeypatch.delenv("CRG_DISABLE_ENRICHMENT", raising=False)
+        store, result, mock_enrich = self._build(tmp_path)
+        store.close()
+        assert mock_enrich.call_count == 1
+        assert result["jedi_enrichment"] == {"resolved": 0, "files": 0}
+
+    def test_explicit_false_beats_the_env_var(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CRG_ENABLE_ENRICHMENT", "1")
+        store, result, mock_enrich = self._build(tmp_path, enrich=False)
+        store.close()
+        mock_enrich.assert_not_called()
+        assert result["jedi_enrichment"]["reason"] == "not requested"
+
+    def test_disable_overrides_an_explicit_request(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CRG_DISABLE_ENRICHMENT", "1")
+        store, result, mock_enrich = self._build(tmp_path, enrich=True)
+        store.close()
+        mock_enrich.assert_not_called()
+        assert result["jedi_enrichment"]["reason"] == "disabled via CRG_DISABLE_ENRICHMENT"

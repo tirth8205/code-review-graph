@@ -279,6 +279,50 @@ def _run_scoped_resolver(store: GraphStore) -> Optional[dict]:
         return None
 
 
+def _enrichment_skip_reason(enrich: Optional[bool]) -> Optional[str]:
+    """Why the Jedi step does not run, or ``None`` when it was asked for.
+
+    Opt-in: Jedi costs about a second per Python file, so having the
+    ``enrichment`` extra installed (``[all]`` pulls it in) is not a request.
+    *enrich* (CLI ``--enrich``) asks for it; ``None`` falls back to
+    ``CRG_ENABLE_ENRICHMENT=1``. ``CRG_DISABLE_ENRICHMENT=1`` overrides both.
+    """
+    if os.environ.get("CRG_DISABLE_ENRICHMENT", "") == "1":
+        return "disabled via CRG_DISABLE_ENRICHMENT"
+    if enrich is None:
+        enrich = os.environ.get("CRG_ENABLE_ENRICHMENT", "") == "1"
+    return None if enrich else "not requested"
+
+
+def _run_jedi_enrichment(
+    store: GraphStore,
+    repo_root: Path,
+    files: Optional[list[str]] = None,
+    enrich: Optional[bool] = None,
+) -> Optional[dict]:
+    """Run post-build Jedi call-resolution enrichment (optional extra).
+
+    Resolves ``receiver.method()`` calls on lowercase receivers with Jedi.
+    Runs only when asked for (see :func:`_enrichment_skip_reason`); otherwise
+    Jedi is not even imported and the graph is exactly what it would be
+    without this step. Best-effort like the other resolvers: skipped when
+    the ``[enrichment]`` extra (jedi) is not installed and never fails a
+    build.
+
+    *files* limits the scan to those files (see ``enrich_jedi_calls``);
+    ``None`` scans every Python file.
+    """
+    reason = _enrichment_skip_reason(enrich)
+    if reason is not None:
+        return {"skipped": True, "reason": reason}
+    try:
+        from .jedi_resolver import enrich_jedi_calls
+        return enrich_jedi_calls(store, repo_root, files=files)
+    except Exception as exc:  # noqa: BLE001 - best-effort post-pass
+        logger.warning("Jedi enrichment failed: %s", exc)
+        return None
+
+
 def _refresh_target_resolution(store: GraphStore) -> None:
     """Reclassify CALLS/REFERENCES targets after the cross-file resolvers.
 
@@ -1989,6 +2033,7 @@ def full_build(
     repo_root: Path,
     store: GraphStore,
     recurse_submodules: bool | None = None,
+    enrich: bool | None = None,
 ) -> dict:
     """Full rebuild of the entire graph.
 
@@ -1997,6 +2042,9 @@ def full_build(
         store: Graph database store.
         recurse_submodules: If True, include files from git submodules.
             When *None*, falls back to ``CRG_RECURSE_SUBMODULES`` env var.
+        enrich: If True, resolve Python method calls with Jedi (the
+            ``enrichment`` extra). When *None*, falls back to
+            ``CRG_ENABLE_ENRICHMENT``. Off by default.
     """
     repo_root = _canonical_repo_root(repo_root)
     parser = CodeParser(repo_root)
@@ -2091,6 +2139,7 @@ def full_build(
     temporal_stats = _run_temporal_resolver(store)
     hcl_stats = _run_hcl_resolver(store)
     scoped_stats = _run_scoped_resolver(store)
+    jedi_stats = _run_jedi_enrichment(store, repo_root, enrich=enrich)
     _refresh_target_resolution(store)
     store.set_metadata(_DEPENDENTS_PENDING_KEY, "[]")
     # Storing is over: every file that could be parsed has its rows. Recorded
@@ -2117,6 +2166,7 @@ def full_build(
         "temporal_resolution": temporal_stats,
         "hcl_resolution": hcl_stats,
         "scoped_resolution": scoped_stats,
+        "jedi_enrichment": jedi_stats,
     }
 
 
@@ -2144,8 +2194,12 @@ def incremental_update(
     base: str = "HEAD~1",
     changed_files: list[str] | None = None,
     reconcile_stale: bool = True,
+    enrich: bool | None = None,
 ) -> dict:
-    """Incremental update: re-parse changed + dependent files only."""
+    """Incremental update: re-parse changed + dependent files only.
+
+    *enrich* is as for :func:`full_build`.
+    """
     repo_root = _canonical_repo_root(repo_root)
     if reconcile_stale:
         _assert_graph_matches_root(repo_root, store)
@@ -2168,7 +2222,7 @@ def incremental_update(
         logger.info(
             "C++ identity format changed; rebuilding the graph before incremental update",
         )
-        rebuilt = full_build(repo_root, store)
+        rebuilt = full_build(repo_root, store, enrich=enrich)
         return {
             "files_updated": rebuilt["files_parsed"],
             "total_nodes": rebuilt["total_nodes"],
@@ -2367,7 +2421,12 @@ def incremental_update(
     cleared_entry_qns: set[str] = set()
     flow_node_ids: dict[int, str] = {}
 
+    # Stored paths of the files re-parsed here. Re-parsing replaces a file's
+    # edges, so these are the only files the Jedi step needs to scan again.
+    reparsed_paths: list[str] = []
+
     def store_parsed(rel_path: str, nodes: list, edges: list, fhash: str) -> None:
+        reparsed_paths.append(str(repo_root / rel_path))
         # Same bytes, same symbols: keep the node ids that flows and communities
         # refer to. Only what the file's edges resolve to can have moved.
         if edges_only.get(rel_path) == fhash:
@@ -2489,6 +2548,11 @@ def incremental_update(
     hcl_stats = _run_hcl_resolver(store) if hcl_changed else None
     scoped_changed = any(rp.endswith((".php", ".rs", ".cs")) for rp in all_files)
     scoped_stats = _run_scoped_resolver(store) if scoped_changed else None
+    reparsed_py = [p for p in reparsed_paths if p.endswith(".py")]
+    jedi_stats = (
+        _run_jedi_enrichment(store, repo_root, files=reparsed_py, enrich=enrich)
+        if reparsed_py else None
+    )
     if files_updated or stale_files:
         _refresh_target_resolution(store)
 
@@ -2531,6 +2595,7 @@ def incremental_update(
         "temporal_resolution": temporal_stats,
         "hcl_resolution": hcl_stats,
         "scoped_resolution": scoped_stats,
+        "jedi_enrichment": jedi_stats,
     }
 
 

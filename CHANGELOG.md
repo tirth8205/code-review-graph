@@ -47,6 +47,20 @@
   at most 200) limits each file list without shrinking the traversal, and
   changed files the graph has no nodes for are listed in `unmatched_files`. The
   CLI can also ask for `--detail-level minimal`.
+- `build --enrich` and `update --enrich` resolve Python method calls on a
+  local variable with Jedi, from the `enrichment` extra (PR #823). For
+  `s = make()` then `s.authenticate()`, the CALLS edge to the bare name
+  `authenticate` then names `svc.py::OldService.authenticate`, so
+  `callers_of` and the impact radius find the call. Jedi was a declared
+  extra that no build ever ran. It is off unless you ask for it, with the
+  flag or `CRG_ENABLE_ENRICHMENT=1` (for hooks, the watcher and MCP builds),
+  because it is slow: on an 88-file Python repository a full build went from
+  about 5 to 32 seconds and resolved 43 more calls. Having the extra installed,
+  for example through `[all]`, changes nothing on its own: the graph and the
+  build time stay the same. `CRG_DISABLE_ENRICHMENT=1` keeps it off even
+  when asked for. With it on, `update` scans only the Python files it
+  re-parses, plus their dependents, whose edges it rewrites, and a target
+  with no node in the graph is never written.
 - Python modules that replace themselves in `sys.modules` are followed to the
   module they install. A compatibility shim such as
   `sys.modules[__name__] = importlib.import_module("app.services.billing")`
@@ -223,6 +237,12 @@
   stopped the run, such as a pre-commit hook timeout, left up to 8 worker
   processes behind each time. Only a real console now keeps the process pool
   (#1163, PR #1166 by @xOscarCodes).
+- The impact-accuracy benchmark's co-change mode no longer reports
+  `predicted_files = 0` on every commit (PR #823). `git diff` gives
+  repo-relative paths and the graph stores absolute ones under the resolved
+  root, so the seed never matched a node. The graph-derived ground truth now
+  counts real neighbour files too, and `seed_file` stays relative to the
+  repository.
 - TypeScript and JavaScript imports resolve against `compilerOptions.baseUrl`
   when no `paths` pattern matches them, as `tsc` does. A tsconfig that sets
   `baseUrl` without `paths` resolved no non-relative import at all: on a

@@ -538,8 +538,10 @@ If a tool returns an ImportError, install the relevant group:
   HTTP client and need only their environment variables.
 - `pip install "code-review-graph[communities]"`: igraph-based community
   detection.
-- `pip install "code-review-graph[enrichment]"`: Python call-resolution
-  enrichment through Jedi.
+- `pip install "code-review-graph[enrichment]"`: Python call resolution
+  through Jedi. It is off until you ask for it with `build --enrich`,
+  `update --enrich` or `CRG_ENABLE_ENRICHMENT=1`, because it adds about a
+  second per Python file.
 - `pip install "code-review-graph[eval]"`: evaluation benchmarks (matplotlib,
   PyYAML).
 - `pip install "code-review-graph[wiki]"`: installs the `ollama` client. The

@@ -447,6 +447,7 @@ code-review-graph uninstall --platform codex  # Unbind one platform (keeps graph
 code-review-graph build                        # Full build
 code-review-graph build --skip-flows           # Parse + signatures + FTS only
 code-review-graph build --skip-postprocess     # Raw parse only
+code-review-graph build --enrich               # Also resolve Python calls with Jedi (needs [enrichment])
 code-review-graph update                       # Incremental update from the last-built commit
 code-review-graph update --base origin/main    # Custom base ref
 code-review-graph update --brief               # Update graph, then show the risk panel
