@@ -1596,27 +1596,31 @@ class GraphStore:
         *qualified_name*. That is a guess, never coverage: risk scoring and the
         test-gap report do not read it.
 
-        A test that builds one of those classes itself, as in
-        ``(new UpdateBooks)->handle()``, is taken to call that class's method,
-        so it is not a guess for the others.
+        A call made on a class the test builds, as in
+        ``(new UpdateBooks)->handle()``, is taken to mean that class's method,
+        so it is not a guess for the others. A class built on the call's own
+        line settles only that call. A class built on a line with no such
+        call, as in ``$job = new UpdateBooks()`` and a later
+        ``$job->withBatchId($id)->handle()``, settles the test's other calls.
 
         Only PHP is answered (#850). A class or file target is expanded to its
         methods, as :meth:`get_transitive_tests` does. A list cut at 20
         entries can leave a guess out, never put a wrong one in.
         """
         conn = self._conn
-        built_by_test: dict[str, set[str]] = {}
+        built_by_test: dict[str, set[tuple[str, int]]] = {}
 
         def owner(method_qn: str) -> str:
             path, _, tail = method_qn.rpartition("::")
             return f"{path}::{tail.rpartition('.')[0]}"
 
-        def built(test: str) -> set[str]:
-            # ``new Cart()`` in a test is a traced call to the class node.
+        def built(test: str) -> set[tuple[str, int]]:
+            # ``new Cart()`` in a test is a traced call to the class node, so
+            # its line says where the class was built.
             if test not in built_by_test:
                 built_by_test[test] = {
-                    r["source_qualified"] for r in conn.execute(
-                        "SELECT e.source_qualified FROM edges e "
+                    (r["source_qualified"], r["line"]) for r in conn.execute(
+                        "SELECT e.source_qualified, e.line FROM edges e "
                         "JOIN nodes n ON n.qualified_name = e.source_qualified "
                         "WHERE e.kind = 'TESTED_BY' AND e.target_qualified = ? "
                         "AND n.kind = 'Class'",
@@ -1657,12 +1661,16 @@ class GraphStore:
         ):
             # The edge's source stays the bare name while it is ambiguous. The
             # text match only narrows the rows; the parsed list decides.
-            for edge in conn.execute(
-                "SELECT target_qualified, extra FROM edges "
+            edges = conn.execute(
+                "SELECT target_qualified, line, extra FROM edges "
                 "WHERE kind = 'TESTED_BY' AND source_qualified = ? "
                 "AND instr(extra, ?) > 0",
                 (symbol_name, json.dumps(symbol_qn)),
-            ).fetchall():
+            ).fetchall()
+            call_lines: dict[str, set[int]] = {}
+            for edge in edges:
+                call_lines.setdefault(edge["target_qualified"], set()).add(edge["line"])
+            for edge in edges:
                 try:
                     extra = json.loads(edge["extra"] or "{}")
                 except (TypeError, json.JSONDecodeError):
@@ -1676,9 +1684,13 @@ class GraphStore:
                     or test in tests
                 ):
                     continue
-                owners = built(test) & {
-                    owner(c) for c in candidates if isinstance(c, str)
-                }
+                possible = {owner(c) for c in candidates if isinstance(c, str)}
+                made = built(test)
+                owners = {qn for qn, at in made if at == edge["line"]} & possible
+                if not owners:
+                    owners = {
+                        qn for qn, at in made if at not in call_lines[test]
+                    } & possible
                 if owners and owner(symbol_qn) not in owners:
                     continue
                 tests.append(test)

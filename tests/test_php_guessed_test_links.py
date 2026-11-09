@@ -330,6 +330,97 @@ def test_a_test_that_builds_one_candidate_is_no_guess_for_the_others(
     assert _rows(update) == {"test_it_queues_a_sync": None}
 
 
+def test_building_one_class_does_not_hide_a_guess_for_another_call(
+    tmp_path: Path,
+) -> None:
+    job = (
+        "<?php\n"
+        "namespace App\\Jobs;\n"
+        "\n"
+        "class {name}\n"
+        "{{\n"
+        "    public function handle(): void {{}}\n"
+        "}}\n"
+    )
+    _build(tmp_path, {
+        "composer.json": _COMPOSER,
+        "app/Jobs/UpdateBooks.php": job.format(name="UpdateBooks"),
+        "app/Jobs/SyncBooks.php": job.format(name="SyncBooks"),
+        "tests/Jobs/BooksTest.php": (
+            "<?php\n"
+            "namespace Tests\\Jobs;\n"
+            "\n"
+            "use App\\Jobs\\SyncBooks;\n"
+            "use App\\Jobs\\UpdateBooks;\n"
+            "use Tests\\TestCase;\n"
+            "\n"
+            "class BooksTest extends TestCase\n"
+            "{\n"
+            "    public function test_it_runs_both(): void\n"
+            "    {\n"
+            "        (new UpdateBooks)->handle();\n"
+            "        app(SyncBooks::class)->handle();\n"
+            "    }\n"
+            "}\n"
+        ),
+    }).close()
+
+    sync = query_graph(
+        "tests_for", "app/Jobs/SyncBooks.php", repo_root=str(tmp_path),
+    )
+
+    # ``new UpdateBooks`` settles only the call made on it; the second call
+    # could still mean SyncBooks::handle.
+    assert _rows(sync) == {"test_it_runs_both": "ambiguous_call"}
+
+
+def test_a_class_built_on_its_own_line_still_settles_a_later_call(
+    tmp_path: Path,
+) -> None:
+    job = (
+        "<?php\n"
+        "namespace App\\Jobs;\n"
+        "\n"
+        "class {name}\n"
+        "{{\n"
+        "    public function handle(): void {{}}\n"
+        "}}\n"
+    )
+    _build(tmp_path, {
+        "composer.json": _COMPOSER,
+        "app/Jobs/DeleteLocalVCard.php": job.format(name="DeleteLocalVCard"),
+        "app/Jobs/DeleteMultipleVCard.php": job.format(name="DeleteMultipleVCard"),
+        # From monica: the job is built inside a batch, then run through a
+        # chained call some lines later.
+        "tests/Jobs/DeleteMultipleVCardTest.php": (
+            "<?php\n"
+            "namespace Tests\\Jobs;\n"
+            "\n"
+            "use App\\Jobs\\DeleteLocalVCard;\n"
+            "use App\\Jobs\\DeleteMultipleVCard;\n"
+            "use Tests\\TestCase;\n"
+            "\n"
+            "class DeleteMultipleVCardTest extends TestCase\n"
+            "{\n"
+            "    public function test_it_deletes_cards(): void\n"
+            "    {\n"
+            "        $batch = $this->fake->batch([\n"
+            "            $job = new DeleteMultipleVCard(),\n"
+            "        ]);\n"
+            "        $job->withBatchId($batch->id)->handle();\n"
+            "        $this->assertDispatched(DeleteLocalVCard::class);\n"
+            "    }\n"
+            "}\n"
+        ),
+    }).close()
+
+    local = query_graph(
+        "tests_for", "app/Jobs/DeleteLocalVCard.php", repo_root=str(tmp_path),
+    )
+
+    assert local["results"] == []
+
+
 def test_guesses_are_not_coverage_and_the_gap_report_says_so(
     tmp_path: Path,
 ) -> None:

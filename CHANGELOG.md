@@ -294,9 +294,11 @@
     itself: 113 such edges from tests on koel/koel. It now stays unresolved, as
     the same call in Python does.
   - When more than one class the test imports defines the called method, the
-    test is listed with `inferred_by: "ambiguous_call"`, unless the test builds
-    one of those classes itself. On koel, classes with a test file that names
-    them but no `tests_for` answer went from 17 to 12.
+    test is listed with `inferred_by: "ambiguous_call"`, unless the call is made
+    on one of those classes that the test builds, as in
+    `(new UpdateBooks)->handle()`. Building one class does not settle the
+    test's other calls. On koel, classes with a test file that names them but
+    no `tests_for` answer went from 17 to 12.
   - The summary says how many rows are guesses, and `detail_level="minimal"`
     keeps `inferred_by` on `tests_for` rows.
   - A guess is never coverage: test gaps and risk scores do not count it. The
