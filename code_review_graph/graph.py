@@ -1431,12 +1431,33 @@ class GraphStore:
         For a file whose bytes did not change. Its symbols are the same, and
         flows and communities point at their node ids, so those ids must stay.
         """
+        normalized = normalize_file_path(file_path)
         self._begin_immediate()
         try:
-            self._conn.execute(
-                "DELETE FROM edges WHERE file_path = ?", (normalize_file_path(file_path),)
+            # The edges come from a fresh parse and name base identities; align
+            # them with the collision identities this file's rows already hold.
+            stored = self._conn.execute(
+                "SELECT qualified_name, line_start, line_end FROM nodes "
+                "WHERE file_path = ?",
+                (normalized,),
+            ).fetchall()
+            collisions = self._collision_map(
+                (
+                    self._collision_base(row["qualified_name"]),
+                    row["line_start"], row["line_end"], row["qualified_name"],
+                )
+                for row in stored
             )
-            self._insert_edges(edges, time.time())
+            self._conn.execute("DELETE FROM edges WHERE file_path = ?", (normalized,))
+            self._insert_edges(
+                [
+                    self._resolve_edge_identities(
+                        self._align_edge_with_collisions(edge, collisions),
+                    )
+                    for edge in edges
+                ],
+                time.time(),
+            )
             self._conn.commit()
         except BaseException:
             self._conn.rollback()
@@ -1504,12 +1525,10 @@ class GraphStore:
                 """,
                 node_rows,
             )
-        by_base: dict[str, list[tuple[NodeInfo, str]]] = {}
-        for node, qualified in zip(nodes, identities):
-            by_base.setdefault(self._make_qualified(node), []).append((node, qualified))
-        collisions = {
-            base: entries for base, entries in by_base.items() if len(entries) > 1
-        }
+        collisions = self._collision_map(
+            (self._make_qualified(node), node.line_start, node.line_end, qualified)
+            for node, qualified in zip(nodes, identities)
+        )
         self._insert_edges(
             [
                 self._resolve_edge_identities(
@@ -1550,10 +1569,20 @@ class GraphStore:
             list(edge_by_site.values()),
         )
 
+    @staticmethod
+    def _collision_map(
+        entries: Iterable[tuple[str, int, int, str]],
+    ) -> dict[str, list[tuple[int, int, str]]]:
+        """Group ``(base, line_start, line_end, identity)`` by colliding base."""
+        by_base: dict[str, list[tuple[int, int, str]]] = {}
+        for base, line_start, line_end, qualified in entries:
+            by_base.setdefault(base, []).append((line_start, line_end, qualified))
+        return {base: found for base, found in by_base.items() if len(found) > 1}
+
     def _align_edge_with_collisions(
         self,
         edge: EdgeInfo,
-        collisions: dict[str, list[tuple[NodeInfo, str]]],
+        collisions: dict[str, list[tuple[int, int, str]]],
     ) -> EdgeInfo:
         """Point an edge at the colliding definition evidenced by its line."""
         if edge.kind == "TESTED_BY":
@@ -1573,23 +1602,20 @@ class GraphStore:
         source = edge.source
         source_candidates = collisions.get(source, [])
         containing_sources = [
-            (node, qualified)
-            for node, qualified in source_candidates
-            if node.line_start <= edge.line <= node.line_end
+            (line_start, line_end, qualified)
+            for line_start, line_end, qualified in source_candidates
+            if line_start <= edge.line <= line_end
         ]
         if containing_sources:
-            _, source = min(
-                containing_sources,
-                key=lambda item: item[0].line_end - item[0].line_start,
-            )
+            source = min(containing_sources, key=lambda item: item[1] - item[0])[2]
 
         target = edge.target
         target_candidates = collisions.get(target, [])
         if edge.kind == "CONTAINS" and target_candidates:
             starting_targets = [
                 qualified
-                for node, qualified in target_candidates
-                if node.line_start == edge.line
+                for line_start, _, qualified in target_candidates
+                if line_start == edge.line
             ]
             if len(starting_targets) == 1:
                 target = starting_targets[0]

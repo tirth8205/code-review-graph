@@ -2257,3 +2257,42 @@ class TestQualifiedNameCollisionLifecycle:
                      if e.kind == "TESTED_BY"}
         assert calls == {(11, first), (22, second)}
         assert tested_by == calls
+
+    def test_edges_only_restore_keeps_calls_on_their_duplicate(self):
+        """Incremental updates re-store an unchanged file's edges alone
+        (``store_file_edges``). Those edges come from a fresh parse, so they
+        name the base identity and need the same alignment as a full store.
+        """
+        path = "/test/target.py"
+        base = f"{path}::render"
+        nodes = [self._render(path, 10, "(a)"), self._render(path, 20, "(b)")]
+        edges = [EdgeInfo(kind="CALLS", source=base, target="/test/lib.py::log",
+                          file_path=path, line=line) for line in (11, 21)]
+        self.store.store_file_nodes_edges(path, nodes, edges)
+        first, second = self._identity_at(path, 10), self._identity_at(path, 20)
+        stored = {(e.line, e.source_qualified) for e in self.store.get_edges_by_target(
+            "/test/lib.py::log")}
+        assert stored == {(11, first), (21, second)}
+
+        self.store.store_file_edges(path, edges)
+
+        assert {(e.line, e.source_qualified) for e in self.store.get_edges_by_target(
+            "/test/lib.py::log")} == stored
+
+    def test_edges_only_restore_keeps_a_lone_survivors_suffix(self):
+        path = "/test/target.py"
+        base = f"{path}::render"
+        self.store.store_file_nodes_edges(
+            path, [self._render(path, 10, "(a)"), self._render(path, 20, "(b)")], [],
+        )
+        survivor = self._identity_at(path, 20)
+        edge = EdgeInfo(kind="CALLS", source=base, target="/test/lib.py::log",
+                        file_path=path, line=22)
+        self.store.store_file_nodes_edges(path, [self._render(path, 21, "(b)")], [edge])
+        assert [e.source_qualified for e in self.store.get_edges_by_target(
+            "/test/lib.py::log")] == [survivor]
+
+        self.store.store_file_edges(path, [edge])
+
+        assert [e.source_qualified for e in self.store.get_edges_by_target(
+            "/test/lib.py::log")] == [survivor]
