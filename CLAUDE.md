@@ -104,6 +104,7 @@ uv run code-review-graph --help             # full command list
 - security: bandit with the exemptions in `pyproject.toml`.
 - schema-sync: `LATEST_VERSION` in `migrations.py` must equal `SUPPORTED_SCHEMA_VERSION` in the VS Code extension.
 - test: pytest on Python 3.10, 3.11, 3.12 and 3.13; coverage must be at least 65%.
+- minimum-dependencies: pytest at the exact floors in `.github/requirements-minimum.txt` on the same four Pythons. Raise a floor in `pyproject.toml` and that file together; `tests/test_dependency_floors.py` checks they match.
 - google-embeddings: constructs the Google provider with the `google-embeddings` and `all` extras.
 - windows-native: a subset of the suite on windows-latest.
 

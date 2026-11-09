@@ -22,6 +22,10 @@
   edge is added and `dynamic_apply_count` on the template says so. A template with
   a `match`, named or not, is never reported as dead code. Run `build` to pick up
   stylesheets in a graph you already have.
+- CI now installs every direct dependency at its declared minimum, on each
+  supported Python, and runs the test suite there. `tests/test_dependency_floors.py`
+  keeps `pyproject.toml` and the pinned list in step in both directions. (#896)
+
 - Python modules that replace themselves in `sys.modules` are followed to the
   module they install. A compatibility shim such as
   `sys.modules[__name__] = importlib.import_module("app.services.billing")`
@@ -75,6 +79,12 @@
 
 ### Changed
 
+- Dependency minimums are raised to versions that are tested and that install
+  on every supported Python: `mcp>=1.29.0`, `anyio>=4.8.0`, `tree-sitter>=0.26.0`,
+  `tree-sitter-language-pack>=0.13.0` and `pyyaml>=6.0.2`. PyYAML 6.0 fails to
+  build on Python 3.12 and newer, and `mcp` 1.29 and `fastmcp` 3.2.4 already need
+  a newer `anyio` than the old minimum of 4.0. Ranges stay ranges; pin exact
+  versions in your own lockfile if you need them. (#896, #265)
 - `staging` is no longer promoted to `testing` automatically. The `Auto promote` workflow and its script are gone, so a person reviews and merges every promotion, and a test fails if any workflow merges a pull request.
 - After upgrading, run `build` once to pick up generic YAML and workspace imports: `update` only re-parses files that changed.
 - Generic `.yml` and `.yaml` files are indexed as `YamlPath` nodes that hold key

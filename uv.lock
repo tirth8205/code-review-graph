@@ -512,7 +512,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "anyio", specifier = ">=4.0,<5" },
+    { name = "anyio", specifier = ">=4.8.0,<5" },
     { name = "code-review-graph", extras = ["communities"], marker = "extra == 'all'" },
     { name = "code-review-graph", extras = ["embeddings"], marker = "extra == 'all'" },
     { name = "code-review-graph", extras = ["enrichment"], marker = "extra == 'all'" },
@@ -524,7 +524,7 @@ requires-dist = [
     { name = "igraph", marker = "extra == 'communities'", specifier = ">=0.11.0" },
     { name = "jedi", marker = "extra == 'enrichment'", specifier = ">=0.19.2" },
     { name = "matplotlib", marker = "extra == 'eval'", specifier = ">=3.7.0" },
-    { name = "mcp", specifier = ">=1.0.0,<3" },
+    { name = "mcp", specifier = ">=1.29.0,<3" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10,<3" },
     { name = "networkx", specifier = ">=3.2,<4" },
     { name = "numpy", marker = "extra == 'dev'", specifier = ">=1.26,<3" },
@@ -535,14 +535,14 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23,<2" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0,<8" },
     { name = "pytest-playwright", marker = "extra == 'browser-test'", specifier = ">=0.5,<1" },
-    { name = "pyyaml", specifier = ">=6.0,<7" },
+    { name = "pyyaml", specifier = ">=6.0.2,<7" },
     { name = "pyyaml", marker = "extra == 'eval'", specifier = ">=6.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.3.0,<1" },
     { name = "sentence-transformers", marker = "extra == 'embeddings'", specifier = ">=3.0.0,<7" },
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0.0,<3" },
     { name = "tomli", marker = "python_full_version < '3.11' and extra == 'dev'", specifier = ">=2.0" },
-    { name = "tree-sitter", specifier = ">=0.23.0,<1" },
-    { name = "tree-sitter-language-pack", specifier = ">=0.3.0,<1" },
+    { name = "tree-sitter", specifier = ">=0.26.0,<1" },
+    { name = "tree-sitter-language-pack", specifier = ">=0.13.0,<1" },
     { name = "watchdog", specifier = ">=4.0.0,<7" },
 ]
 provides-extras = ["embeddings", "google-embeddings", "communities", "eval", "wiki", "all", "enrichment", "dev", "browser-test"]
