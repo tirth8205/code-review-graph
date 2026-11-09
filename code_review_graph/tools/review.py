@@ -1020,6 +1020,7 @@ def detect_changes_func(
                 "risk_score": 0.0,
                 "changed_functions": [],
                 "changed_yaml_paths": [],
+                "changed_json_paths": [],
                 "affected_flows": [],
                 "test_gaps": [],
                 "review_priorities": [],
@@ -1095,6 +1096,7 @@ def detect_changes_func(
                 "risk_score": analysis.get("risk_score", 0.0),
                 "changed_file_count": len(changed_files),
                 "changed_yaml_path_count": len(analysis.get("changed_yaml_paths", [])),
+                "changed_json_path_count": len(analysis.get("changed_json_paths", [])),
                 "test_gap_count": len(analysis.get("test_gaps", [])),
                 "review_priorities": top_priorities,
                 # Minimal mode still has to say when the score it reports is
@@ -1121,9 +1123,15 @@ def detect_changes_func(
                 analysis.get("changed_yaml_paths", []),
                 max_results, _MAX_CHANGED_FUNCTIONS,
             )
+            json_paths, json_paths_total, json_paths_cut = _bounded(
+                analysis.get("changed_json_paths", []),
+                max_results, _MAX_CHANGED_FUNCTIONS,
+            )
             any_cut = (
                 funcs_cut or gaps_cut or flows_cut or files_cut or yaml_paths_cut
+                or json_paths_cut
                 or bool(analysis.get("yaml_paths_truncated"))
+                or bool(analysis.get("json_paths_truncated"))
             )
             summary = analysis.get("summary", "")
             if any_cut:
@@ -1131,7 +1139,11 @@ def detect_changes_func(
                     "\n  - Response bounded: "
                     f"{len(funcs)} of {funcs_total} changed function(s), "
                     f"{len(yaml_paths)} of {yaml_paths_total} changed YAML path(s), "
-                    f"{len(gaps)} of {gaps_total} test gap(s), "
+                    + (
+                        f"{len(json_paths)} of {json_paths_total} changed JSON path(s), "
+                        if json_paths_total else ""
+                    )
+                    + f"{len(gaps)} of {gaps_total} test gap(s), "
                     f"{len(flows)} of {flows_total} flow(s) shown"
                 )
             result = {
@@ -1144,6 +1156,8 @@ def detect_changes_func(
                 "changed_functions_total": funcs_total,
                 "changed_yaml_paths": yaml_paths,
                 "changed_yaml_paths_total": yaml_paths_total,
+                "changed_json_paths": json_paths,
+                "changed_json_paths_total": json_paths_total,
                 "test_gaps": gaps,
                 "test_gaps_total": gaps_total,
                 "affected_flows": _project(flows, _DETECT_FLOW_FIELDS),

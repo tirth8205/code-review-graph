@@ -20,6 +20,7 @@ import subprocess
 import sys
 import threading
 from bisect import bisect_left, bisect_right
+from collections import deque
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path, PurePath
@@ -1184,6 +1185,7 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
     ".properties": "properties",
     ".yml": "yaml",
     ".yaml": "yaml",
+    ".json": "json",
     ".robot": "robot",
     ".resource": "robot",
 }
@@ -3129,6 +3131,53 @@ def _yaml_get_key(mapping_node: object, key: str) -> Optional[object]:
     return None
 
 
+_JSON_VALUE_TYPES = {
+    "array": "array",
+    "false": "boolean",
+    "null": "null",
+    "number": "number",
+    "object": "object",
+    "string": "string",
+    "true": "boolean",
+}
+# Folders whose JSON is data for a test, a demo or the docs, not settings for
+# the project. On vega, ``docs/`` alone held 168 example specs and data sets
+# that would have become 12,725 paths.
+_JSON_DATA_DIR_NAMES = frozenset({
+    "__fixtures__",
+    "__mocks__",
+    "__snapshots__",
+    "data",
+    "datasets",
+    "demo",
+    "demos",
+    "doc",
+    "docs",
+    "example",
+    "examples",
+    "fixtures",
+    "mocks",
+    "sample",
+    "samples",
+    "snapshots",
+    "test-data",
+    "test_data",
+    "testdata",
+})
+
+
+def _json_key(key_node: Any) -> Optional[str]:
+    """Return a key's text with its escapes read, or None if it is not a string."""
+    if key_node is None or key_node.type != "string":
+        return None
+    raw = key_node.text.decode("utf-8", errors="replace")
+    try:
+        key = json.loads(raw)
+    except ValueError:
+        key = raw[1:-1]
+    return key if isinstance(key, str) else None
+
+
 def _yaml_scalar(node: object) -> Optional[str]:
     if isinstance(node, _YamlScalar):
         return node.value  # type: ignore[attr-defined]
@@ -3136,6 +3185,26 @@ def _yaml_scalar(node: object) -> Optional[str]:
 
 
 _YAML_SIMPLE_PATH_SEGMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
+
+# Folders that hold translations. ``lang`` and ``languages`` are left out on
+# purpose: they hold programming-language settings as often as translations.
+_LOCALE_DIR_NAMES = frozenset({"i18n", "l10n", "locale", "locales", "translations"})
+
+_LANGUAGE_TAG_RE = re.compile(r"([a-z]{2,3})(?:[-_@][a-z0-9]{2,8})*")
+
+# ISO 639-1, then the three-letter codes translation projects commonly use. Any
+# other three letters are not trusted: ``api.yml`` and ``web.yml`` fit the shape.
+_LANGUAGE_CODES = frozenset((
+    "aa ab ae af ak am an ar as av ay az ba be bg bh bi bm bn bo br bs ca ce ch "
+    "co cr cs cu cv cy da de dv dz ee el en eo es et eu fa ff fi fj fo fr fy ga "
+    "gd gl gn gu gv ha he hi ho hr ht hu hy hz ia id ie ig ii ik io is it iu ja "
+    "jv ka kg ki kj kk kl km kn ko kr ks ku kv kw ky la lb lg li ln lo lt lu lv "
+    "mg mh mi mk ml mn mr ms mt my na nb nd ne ng nl nn no nr nv ny oc oj om or "
+    "os pa pi pl ps pt qu rm rn ro ru rw sa sc sd se sg si sk sl sm sn so sq sr "
+    "ss st su sv sw ta te tg th ti tk tl tn to tr ts tt tw ty ug uk ur uz ve vi "
+    "vo wa wo xh yi yo za zh zu "
+    "ast ceb ckb fil gsw haw hsb kab kmr nds sco szl tok tzl yue zgh"
+).split())
 
 
 def _yaml_path_child(prefix: str, segment: str) -> str:
@@ -3157,6 +3226,41 @@ def _yaml_value_type(node: object) -> str:
     if scalar_type in {"binary", "bool", "float", "int", "null", "str", "timestamp"}:
         return scalar_type
     return "scalar"
+
+
+def _is_language_tag(text: str) -> bool:
+    """Whether *text* is a language tag such as ``en``, ``pt-BR`` or ``zh_Hans``."""
+    match = _LANGUAGE_TAG_RE.fullmatch(text.lower())
+    return match is not None and match.group(1) in _LANGUAGE_CODES
+
+
+def _is_locale_yaml(path: "str | PurePath", repo_root: "str | PurePath | None") -> bool:
+    """Whether *path* is a translation file, judged inside the repository.
+
+    A translation catalogue repeats the same keys once per language, so it adds
+    thousands of paths that say nothing about the code. It takes two pieces of
+    evidence to call a file one. A translation folder alone is not enough
+    (``locales/deploy.yml``), and neither is the name alone: ``config/en.yml``
+    could be anything, and ``it.yml`` or ``no.yml`` are ordinary words. A file
+    this misses keeps its paths, which costs some noise; a false match would
+    lose real config, so doubtful files stay indexed.
+
+    The folders above a checkout belong to whoever cloned it, so with no root
+    to read the path against, nothing is called a translation file.
+    """
+    relative = repo_relative_path(path, repo_root)
+    if relative is None:
+        return False
+    *folders, filename = relative.lower().split("/")
+    names = [folder.lstrip("_") for folder in folders]
+    if not _LOCALE_DIR_NAMES.intersection(names):
+        return False
+    if any(_is_language_tag(part) for part in filename.split(".")[:-1]):
+        return True
+    return any(
+        parent in _LOCALE_DIR_NAMES and _is_language_tag(child)
+        for parent, child in zip(names, names[1:])
+    )
 
 
 def _ansible_is_play_item(item: object) -> bool:
@@ -3213,6 +3317,11 @@ class CodeParser:
     _MAX_YAML_OCCURRENCE_SAMPLES = 10_000
     _MAX_YAML_DUPLICATE_GROUP_SAMPLES = 100
     _MAX_YAML_DUPLICATE_LINE_SAMPLES = 20
+    _MAX_JSON_BYTES = 262_144
+    _MAX_JSON_DEPTH = 32
+    _MAX_JSON_NODES = 1_000
+    _MAX_JSON_OCCURRENCE_SAMPLES = 50
+    _MAX_JSON_OBJECT_KEYS = 200
     # Ruby load-root discovery reads a handful of repository-root scripts.
     _RUBY_MANIFEST_SCAN_MAX = 10
     _RUBY_MANIFEST_MAX_BYTES = 256 * 1024
@@ -3574,6 +3683,10 @@ class CodeParser:
             if _yaml is None:
                 return [], []
             return self._parse_yaml(path, source)
+
+        # JSON: the same value-free paths, and data files stay out.
+        if language == "json":
+            return self._parse_json(path, source)
 
         if parser is None:
             parser = self._get_parser(language)
@@ -9599,6 +9712,160 @@ class CodeParser:
         file_extra["yaml_duplicate_keys"] = duplicate_summaries
         file_extra["yaml_unsupported_key_count"] = unsupported_key_count
         file_extra["yaml_truncated"] = truncated
+        return nodes, edges
+
+    def _parse_json(
+        self,
+        path: Path,
+        source: bytes,
+    ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
+        """Index a JSON file's paths while deliberately discarding its values.
+
+        The shape follows generic YAML: repeated array items share one ``[*]``
+        path, and scalar values never enter node or edge metadata. JSON is far
+        more often data than YAML, so more of it stays out. Translation files
+        follow the YAML rule (``_is_locale_yaml``); test data, docs, examples,
+        data folders and oversized files keep only their file node; and an
+        object used as a table collapses to ``.*``. Paths are read breadth
+        first, so a file over the cap loses its deepest paths, not its last
+        top-level keys.
+        """
+        file_path = normalize_file_path(path)
+        file_extra: dict[str, Any] = {
+            "config_format": "json",
+            "json_truncated": False,
+            "values_indexed": False,
+        }
+        nodes = [NodeInfo(
+            kind="File",
+            name=file_path,
+            file_path=file_path,
+            line_start=1,
+            line_end=source.count(b"\n") + 1,
+            language="json",
+            extra=file_extra,
+        )]
+        edges: list[EdgeInfo] = []
+        if _is_locale_yaml(path, self._repo_root):
+            file_extra["json_locale_file"] = True
+            return nodes, edges
+        relative = repo_relative_path(path, self._repo_root)
+        if self._is_test_path(file_path) or (
+            relative is not None
+            and _JSON_DATA_DIR_NAMES.intersection(relative.lower().split("/")[:-1])
+        ):
+            file_extra["json_data_file"] = True
+            return nodes, edges
+        if len(source) > self._MAX_JSON_BYTES:
+            file_extra["json_truncated"] = True
+            return nodes, edges
+        json_parser = self._get_parser("json")
+        if not json_parser:
+            return nodes, edges
+
+        def qualified(schema_path: str) -> str:
+            return f"{file_path}::json:{schema_path}"
+
+        path_nodes: dict[str, NodeInfo] = {}
+        path_value_types: dict[str, set[str]] = {}
+        # (value, exact path, schema path, parent, depth, first line)
+        queue: deque[tuple[Any, str, str, str, int, int]] = deque(
+            (child, "$", "$", file_path, 0, child.start_point[0] + 1)
+            for child in json_parser.parse(source).root_node.children
+            if child.type in _JSON_VALUE_TYPES
+        )
+        while queue:
+            value, exact_path, schema_path, parent, depth, line_start = queue.popleft()
+            line_end = value.end_point[0] + 1
+            value_type = _JSON_VALUE_TYPES[value.type]
+            node = path_nodes.get(schema_path)
+            if node is None:
+                if (
+                    len(path_nodes) >= self._MAX_JSON_NODES
+                    or depth > self._MAX_JSON_DEPTH
+                    or len(schema_path) > self._MAX_YAML_PATH_LENGTH
+                ):
+                    file_extra["json_truncated"] = True
+                    continue
+                node = NodeInfo(
+                    kind="JsonPath",
+                    name=schema_path,
+                    file_path=file_path,
+                    line_start=line_start,
+                    line_end=line_end,
+                    language="json",
+                    extra={
+                        "path": schema_path,
+                        "schema_path": schema_path,
+                        "example_path": exact_path[: self._MAX_YAML_PATH_LENGTH],
+                        "source_file": path.name,
+                        "value_type": value_type,
+                        "value_types": [value_type],
+                        "occurrence_count": 1,
+                        "line_samples": [line_start],
+                        "range_samples": [[line_start, line_end]],
+                        "lines_truncated": False,
+                    },
+                    identity_name=f"json:{schema_path}",
+                )
+                nodes.append(node)
+                path_nodes[schema_path] = node
+                path_value_types[schema_path] = {value_type}
+                edges.append(EdgeInfo(
+                    kind="CONTAINS",
+                    source=parent,
+                    target=qualified(schema_path),
+                    file_path=file_path,
+                    line=line_start,
+                ))
+            else:
+                node.line_start = min(node.line_start, line_start)
+                node.line_end = max(node.line_end, line_end)
+                node.extra["occurrence_count"] += 1
+                if len(node.extra["line_samples"]) < self._MAX_JSON_OCCURRENCE_SAMPLES:
+                    node.extra["line_samples"].append(line_start)
+                    node.extra["range_samples"].append([line_start, line_end])
+                else:
+                    node.extra["lines_truncated"] = True
+                value_types = path_value_types[schema_path]
+                value_types.add(value_type)
+                node.extra["value_types"] = sorted(value_types)
+                node.extra["value_type"] = (
+                    value_type if len(value_types) == 1 else "mixed"
+                )
+
+            this_path = qualified(schema_path)
+            if value.type == "object":
+                pairs = [child for child in value.children if child.type == "pair"]
+                # Keys past this many are data (ids, hashes, countries), like
+                # array items, so they share one path.
+                is_table = len(pairs) > self._MAX_JSON_OBJECT_KEYS
+                for pair in pairs:
+                    key = _json_key(pair.child_by_field_name("key"))
+                    child_value = pair.child_by_field_name("value")
+                    if key is None or child_value is None:
+                        continue
+                    if child_value.type not in _JSON_VALUE_TYPES:
+                        continue
+                    queue.append((
+                        child_value,
+                        _yaml_path_child(exact_path, key),
+                        f"{schema_path}.*" if is_table else _yaml_path_child(schema_path, key),
+                        this_path,
+                        depth + 1,
+                        pair.start_point[0] + 1,
+                    ))
+            elif value.type == "array":
+                items = (child for child in value.children if child.type in _JSON_VALUE_TYPES)
+                for index, item in enumerate(items):
+                    queue.append((
+                        item,
+                        f"{exact_path}[{index}]",
+                        f"{schema_path}[*]",
+                        this_path,
+                        depth + 1,
+                        item.start_point[0] + 1,
+                    ))
         return nodes, edges
 
     # -----------------------------------------------------------------------

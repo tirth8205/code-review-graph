@@ -106,6 +106,19 @@ The persisted `extra` JSON is the internal source of truth. Query and change-ana
 
 `CONTAINS` connects files and nested paths. Alias nodes use `REFERENCES` with canonical qualified endpoints. Generic YAML `File` responses use the same `yaml` object for document, duplicate-key, unsupported-key, truncation, and `values_indexed: false` metadata.
 
+### JsonPath
+A key or array shape parsed from a `.json` file, in the same value-free shape as `YamlPath`: array items share one `[*]` path, an object with more than 200 keys is a table whose keys share one `.*` path, and values never enter the graph. Comments and trailing commas are accepted. Responses expose the same fields as `YamlPath`, without `document_index` or the YAML alias fields, under a nested `json` object.
+
+Some JSON files keep only their `File` node, and its `json` object says why:
+
+| Property | Files |
+|----------|-------|
+| locale_file | Translation files, by the same rule as YAML: a `locale`, `locales`, `i18n`, `l10n` or `translations` folder and a language code in the file or folder name |
+| data_file | Test files and files under `docs`, `examples`, `samples`, `demo`, `data`, `fixtures`, `mocks`, `snapshots` or `testdata` folders |
+| truncated | Files over 256 KB. A file cut at 1,000 paths or 32 levels keeps the paths before the cut and carries the same mark |
+
+Lock files (`package-lock.json`, `npm-shrinkwrap.json`, `*.lock.json`, `project.assets.json`) and `*.min.json` are ignored by default. Search ranks JSON files and paths below code unless the query asks for them with `kind="JsonPath"`, a `$` path or a `.json` file name.
+
 ## Edge Types
 
 Every edge has `source_qualified`, `target_qualified`, `file_path` (where the relationship
@@ -142,6 +155,7 @@ was seen), `line`, `extra` (JSON), `confidence`, `confidence_tier` and, for
 /absolute/path/to/file.py::OuterClass.InnerClass.method        # nested class method
 /absolute/path/to/file.yml::yaml:0:$.services[*].metadata.tier # aggregated YAML path in document 0
 /absolute/path/to/file.yml::yaml:0:alias:$.service["<<"]@12    # alias or anchor identity
+/absolute/path/to/package.json::json:$.scripts.build            # JSON path
 ```
 
 `nodes.symbol` stores the part after the first `::` (or the whole name when there is none)

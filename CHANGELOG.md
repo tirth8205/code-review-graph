@@ -54,6 +54,24 @@
 - `serve` has an opt-in mode for parallel graph access across Git worktrees (#1063).
 - Read-only MCP tools carry `readOnlyHint`, so clients can skip the approval prompt (#1124, #1123).
 - The troubleshooting guide explains the local-checkout workaround for Zed SSH projects (#1130).
+- `.json` files are indexed; before, they gave no nodes at all (part of #436).
+  Each key and array shape becomes a `JsonPath` node joined by `CONTAINS`
+  edges, in the same value-free shape as generic YAML: array items share one
+  `[*]` path, and values never enter the graph. Comments and trailing commas,
+  as in `tsconfig.json`, are fine. JSON is often data, so a lot stays out:
+  translation files keep only a file node by the rule YAML uses (#1150), and
+  so do test files, files under `docs`, `examples`, `samples`, `demo` or
+  `data` folders, and files over 256 KB. A file stops at 1,000 paths, and an
+  object with more than 200 keys shares one `.*` path. `package-lock.json`,
+  `npm-shrinkwrap.json`, `*.lock.json`, `project.assets.json` and `*.min.json`
+  are ignored. On vega, 473 JSON files add 1,228 paths, mostly its 37
+  `package.json` files; without the folder rule, `docs/` alone would have
+  added 12,725. Search ranks JSON below code unless you ask for it with
+  `kind="JsonPath"`, a `$` path or a `.json` name, and JSON rows no longer
+  take the places code needs: six `translation.json` files had pushed
+  `appWithTranslation` out of the hits for "translation" on next-i18next.
+  `detect_changes_tool` reports `changed_json_paths`. Run `build` to add JSON
+  to a graph you already have.
 
 ### Changed
 

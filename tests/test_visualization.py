@@ -459,6 +459,8 @@ def test_generate_html_includes_yaml_path_visuals(store_with_data, tmp_path):
     community = community_path.read_text()
     assert "YamlPath" in full
     assert 'data-kind="YamlPath"' in full
+    assert 'data-kind="JsonPath"' in full
+    assert 'JsonPath: "#a371f7"' in community
     assert 'data-edge-kind="REFERENCES"' in full
     assert "YamlPath" in community
     assert 'REFERENCES: "#39c5cf"' in community

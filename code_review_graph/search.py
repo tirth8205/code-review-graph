@@ -65,6 +65,12 @@ _TEST_INTENT_WORDS = frozenset({
     "fixtures", "mock", "mocks", "stub", "stubs", "coverage",
 })
 
+# JSON shares words with code: ``package.json`` names ``cookie`` as a
+# dependency, and ``locales/en/translation.json`` matches "translation" by its
+# path alone. Rank JSON files and paths below code unless the caller asks for
+# them: by kind, by a ``$`` path, or by naming a ``.json`` file.
+_JSON_RANK_PENALTY = 0.25
+
 
 # ---------------------------------------------------------------------------
 # FTS5 index management
@@ -879,6 +885,50 @@ def _keyword_search(
 # ---------------------------------------------------------------------------
 
 
+def _has_json_intent(query: str, kind: Optional[str]) -> bool:
+    """Whether the caller asked for JSON: by kind, a ``$`` path or a file name."""
+    return (
+        kind == "JsonPath"
+        or query.lstrip().startswith("$")
+        or ".json" in query.lower()
+    )
+
+
+def _fts_search_past_json(
+    conn: sqlite3.Connection,
+    query: str,
+    results: list[tuple[int, float]],
+    limit: int,
+) -> list[tuple[int, float]]:
+    """Widen an FTS window by the JSON rows in it, so they leave code its places.
+
+    On next-i18next, six ``translation.json`` files filled the window for
+    "translation" and pushed ``appWithTranslation`` out of the results. The
+    window grows until it holds *limit* other rows or the matches run out, in
+    a few bounded steps.
+    """
+    for _ in range(4):
+        if len(results) < limit:
+            return results
+        ids = [node_id for node_id, _ in results]
+        json_rows = 0
+        for start in range(0, len(ids), 450):
+            batch = ids[start:start + 450]
+            placeholders = ",".join("?" for _ in batch)
+            json_rows += conn.execute(
+                "SELECT count(*) FROM nodes WHERE language = 'json' "  # nosec B608
+                f"AND id IN ({placeholders})",
+                batch,
+            ).fetchone()[0]
+        if len(results) - json_rows >= limit:
+            return results
+        wider = _fts_search(conn, query, limit=limit + json_rows)
+        if len(wider) <= len(results):
+            return results
+        results = wider
+    return results
+
+
 def hybrid_search(
     store: GraphStore,
     query: str,
@@ -937,6 +987,11 @@ def hybrid_search(
         store, query, limit=fetch_limit, model=model, provider=provider,
     )
 
+    # JSON rows rank below code (``_JSON_RANK_PENALTY``), so they must not use
+    # up the window that code would otherwise fill.
+    if fts_results and kind is None and not _has_json_intent(query, kind):
+        fts_results = _fts_search_past_json(conn, query, fts_results, fetch_limit)
+
     # ------ Phase 2: Merge via RRF or fallback ------
     if fts_results or emb_results:
         lists_to_merge = []
@@ -977,6 +1032,7 @@ def hybrid_search(
     test_intent = kind == "Test" or bool(
         {w.lower() for w in query_words} & _TEST_INTENT_WORDS
     )
+    json_intent = _has_json_intent(query, kind)
 
     # Batch-fetch all candidate nodes in one query
     candidate_ids = [node_id for node_id, _ in merged]
@@ -1031,6 +1087,8 @@ def hybrid_search(
                 boost *= _EXACT_SYMBOL_BOOST
         if context_set and file_path in context_set:
             boost *= 1.5
+        if row["language"] == "json" and not json_intent:
+            boost *= _JSON_RANK_PENALTY
 
         if not test_intent:
             row_keys = row.keys()
