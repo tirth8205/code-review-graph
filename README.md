@@ -354,7 +354,7 @@ From the same 2026-08-02 clean-room build at the pinned SHAs above. Embedding co
 | **Surprise scoring** | Unexpected coupling: cross-community, cross-language, peripheral-to-hub edges |
 | **Knowledge gap analysis** | Isolated nodes, untested hotspots, thin communities, import cycles |
 | **Suggested questions** | Review questions generated from bridges, hubs and surprises |
-| **Edge confidence** | Two-tier confidence (EXTRACTED/INFERRED) with float scores on edges |
+| **Edge confidence** | Four tiers (EXTRACTED, INFERRED, AMBIGUOUS, UNRESOLVED) with float scores on edges, so a call the graph could not bind says so |
 | **Graph traversal** | BFS/DFS from any node with configurable depth and token budget |
 | **Export formats** | GraphML (Gephi/yEd), Neo4j Cypher, Obsidian vault, JSON, and SVG (SVG needs matplotlib from the `eval` extra) |
 | **Token benchmarking** | `code_review_graph/token_benchmark.py` measures whole-corpus tokens against graph query tokens per question |

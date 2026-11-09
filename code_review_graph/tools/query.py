@@ -39,6 +39,7 @@ from ..uncertainty import (
     empty_impact_confidence,
     empty_query_confidence,
     empty_search_confidence,
+    guessed_calls_confidence,
 )
 from ._common import (
     _BUILTIN_CALL_NAMES,
@@ -1713,13 +1714,14 @@ def query_graph(
 
         # A zero here is the dangerous direction: agents read it as "none
         # exist" and either conclude wrongly or fall back to grepping the
-        # repository. One capped sentence prevents both, and is attached only
-        # when the result set is empty so non-empty responses are unchanged.
-        confidence = (
-            empty_query_confidence(store, root, pattern, target, node)
-            if total_results == 0
-            else None
-        )
+        # repository. One capped sentence prevents both. The same field tells
+        # a reader when part of a non-empty answer is only name matches, unless
+        # they filtered by resolution and so already know.
+        confidence: str | None = None
+        if total_results == 0:
+            confidence = empty_query_confidence(store, root, pattern, target, node)
+        elif resolution == RESOLUTION_ALL:
+            confidence = guessed_calls_confidence(resolution_split)
 
         if detail_level == "minimal":
             result_fields: tuple[str, ...] = ("name", "kind", "file_path", "indirect")

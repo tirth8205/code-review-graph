@@ -173,7 +173,7 @@ def test_impact_radius_of_definition_file_includes_caller(tmp_path: Path) -> Non
 
 def test_unresolved_external_scoped_call_is_left_untouched(tmp_path: Path) -> None:
     # ``Vec::new`` / ``String::from`` are stdlib types with no in-graph node —
-    # the edge must stay a raw, directly-extracted target.
+    # the edge must stay a raw target that says it names no node.
     store = _build(
         tmp_path,
         {
@@ -186,13 +186,13 @@ def test_unresolved_external_scoped_call_is_left_untouched(tmp_path: Path) -> No
     )
     external = [c for c in _calls(store) if c["target_qualified"] == "Vec::new"]
     assert len(external) == 1
-    assert external[0]["confidence_tier"] == "EXTRACTED"
+    assert external[0]["confidence_tier"] == "UNRESOLVED"
 
 
 def test_case_sensitive_identifiers_are_not_conflated(tmp_path: Path) -> None:
     # Rust is case-sensitive: a call to ``Mailer::send`` must NOT resolve to a
     # differently-cased definition ``Mailer::Send``. The edge must stay a raw,
-    # directly-extracted target rather than a bogus resolved caller.
+    # target that says it names no node, rather than a bogus resolved caller.
     store = _build(
         tmp_path,
         {
@@ -212,7 +212,7 @@ def test_case_sensitive_identifiers_are_not_conflated(tmp_path: Path) -> None:
     )
     dangling = [c for c in _calls(store) if c["target_qualified"] == "Mailer::send"]
     assert len(dangling) == 1
-    assert dangling[0]["confidence_tier"] == "EXTRACTED"
+    assert dangling[0]["confidence_tier"] == "UNRESOLVED"
     # And nothing falsely resolved onto the capital-S ``Send`` definition.
     assert not any(
         c["target_qualified"].endswith("Mailer.Send")
@@ -372,4 +372,4 @@ def test_multi_segment_module_path_is_left_untouched(tmp_path: Path) -> None:
         if c["target_qualified"] == "crate::mailer::Mailer::dispatch"
     ]
     assert len(multi) == 1
-    assert multi[0]["confidence_tier"] == "EXTRACTED"
+    assert multi[0]["confidence_tier"] == "UNRESOLVED"

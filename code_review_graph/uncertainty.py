@@ -1,4 +1,4 @@
-"""Honest uncertainty markers for empty graph results (#314, #819, #850, #851).
+"""Honest uncertainty markers for graph results (#314, #819, #850, #851, #984).
 
 A bare ``result_count: 0`` is ambiguous. It can mean "the code really has no
 such relationship", or it can mean "this graph cannot see that relationship":
@@ -10,8 +10,9 @@ graph and grep the whole repository.
 One short sentence on the empty case is therefore a *token saving*, not a
 cost: it replaces a multi-thousand-token fallback search with roughly thirty
 tokens of honesty. To keep that trade favourable the marker is hard-capped at
-``MAX_CONFIDENCE_CHARS`` and is attached only when a result list is empty, so
-every response that carries results stays byte-identical to before.
+``MAX_CONFIDENCE_CHARS`` and is attached only when a result list is empty, or
+when call-site rows in it are name matches rather than confirmed links, so a
+response whose results are all certain stays byte-identical to before.
 
 The language table below is data, not scattered conditionals. Every entry
 describes a gap that is real in this codebase *today*; capabilities that have
@@ -530,6 +531,21 @@ def empty_impact_confidence(
     except Exception:
         logger.debug("Could not compute empty-impact confidence", exc_info=True)
         return None
+
+
+def guessed_calls_confidence(split: dict[str, int] | None) -> str | None:
+    """Return the marker for call-site rows that are only name matches.
+
+    A row marked ``target_resolution`` says it is a guess; this says how much of
+    the answer is, and how to ask for the rest.
+    """
+    if not split or not split.get("unresolved"):
+        return None
+    total = split["unresolved"] + split.get("direct", 0)
+    return _bounded(
+        f"{split['unresolved']} of {total} call sites match by name only and may "
+        "be wrong; resolution='direct' keeps the confirmed ones"
+    )
 
 
 def empty_search_confidence(

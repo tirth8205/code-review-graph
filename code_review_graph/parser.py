@@ -1967,6 +1967,11 @@ _JS_IMPORT_ORIGINAL_PREFIX_KEY = "__crg_js_import_original__:"
 # one (``from . import cli``). The value is that module's file; a reference to
 # the name belongs to the file node, not to ``<file>::<name>``.
 _PY_MODULE_BINDING_KEY = "__crg_py_module_binding__:"
+# Marks an item defined in a Rust ``mod name { ... }`` written inline in the
+# file, as ``<key>name::item``. Its items are named after the file, so
+# ``name::item()`` means ``<file>::item``. A name the module only re-exports
+# with ``pub use`` is not one of them.
+_RUST_INLINE_MODULE_KEY = "__crg_rust_inline_module__:"
 # Value syntax that pins a Python name to a builtin container or scalar. A
 # method called on such a name can never belong to a repository node, so the
 # resolver must not attribute it to one. Derived from the literal grammar, not
@@ -19737,6 +19742,28 @@ class CodeParser:
                     defined_names.add(name)
                     continue
 
+            if (
+                language == "rust"
+                and node_type == "mod_item"
+                and child.child_by_field_name("body") is not None
+            ):
+                name_node = child.child_by_field_name("name")
+                body = child.child_by_field_name("body")
+                if name_node is not None:
+                    module_name = name_node.text.decode("utf-8", errors="replace")
+                    for item in body.named_children:
+                        if item.type not in func_types and item.type not in class_types:
+                            continue
+                        item_name = self._get_name(
+                            item, language,
+                            "class" if item.type in class_types else "function",
+                        )
+                        if item_name:
+                            import_map[
+                                f"{_RUST_INLINE_MODULE_KEY}{module_name}::{item_name}"
+                            ] = module_name
+                continue
+
             # Collect defined function/class names
             if target_type in func_types or target_type in class_types:
                 name = self._get_name(target, language,
@@ -22059,11 +22086,29 @@ class CodeParser:
         relative = Path(*parts)
         flat = source_root / relative.with_suffix(".rs")
         nested = source_root / relative / "mod.rs"
-        if flat.is_file():
-            return flat
-        if nested.is_file():
-            return nested
+        for candidate in (flat, nested):
+            if candidate.is_file() and CodeParser._rust_names_match_case(
+                source_root, candidate,
+            ):
+                return candidate
         return None
+
+    @staticmethod
+    def _rust_names_match_case(source_root: Path, candidate: Path) -> bool:
+        """Is every name below *source_root* spelt on disk as in *candidate*?
+
+        macOS and Windows find ``src/Glob.rs`` when only ``src/glob.rs`` exists,
+        and the type ``Glob`` would then pass for the module ``glob`` (#984).
+        """
+        directory = source_root
+        try:
+            for name in candidate.relative_to(source_root).parts:
+                if name not in os.listdir(directory):
+                    return False
+                directory = directory / name
+        except (OSError, ValueError):
+            return False
+        return True
 
     def _resolve_rust_module_file(
         self, module: str, file_path: str,
@@ -22081,6 +22126,7 @@ class CodeParser:
         current_file = root_file
         remaining = list(segments)
         first = remaining[0]
+        anchored = first in ("crate", "self", "super") or first in dependencies
         if first == "crate":
             remaining.pop(0)
         elif first == "self":
@@ -22122,8 +22168,12 @@ class CodeParser:
                 current_parts = candidate_parts
                 current_file = candidate
                 continue
-            # The final segment can be an item exported by the current module.
-            if index != len(remaining) - 1:
+            # The final segment can be an item exported by the current module,
+            # but only a module the path reached. ``Vec`` on its own reached
+            # nothing: it comes from the prelude or another crate, and calling
+            # it an item of the crate root is how ``Vec::new()`` became
+            # ``src/lib.rs::new`` (#984).
+            if index != len(remaining) - 1 or (index == 0 and not anchored):
                 return None
             break
 
@@ -22269,6 +22319,10 @@ class CodeParser:
             return None
         if len(prefix) == 1 and prefix[0] in defined_names:
             return f"{self._qualify(prefix[0], file_path, None)}.{method}"
+        if len(prefix) == 1 and (
+            f"{_RUST_INLINE_MODULE_KEY}{prefix[0]}::{method}" in import_map
+        ):
+            return self._qualify(method, file_path, None)
 
         if prefix[0] in import_map:
             prefix = import_map[prefix[0]].split("::") + prefix[1:]

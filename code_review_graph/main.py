@@ -542,7 +542,8 @@ async def query_graph_tool(
     callers_of, callees_of and references_to return one row per call site, each
     carrying the ``call_site`` (file and line) the call is written at, plus a
     ``resolution_split`` saying how many of those call sites are bound to an
-    indexed node and how many are bare-name matches.
+    indexed node and how many are bare-name matches. When some are bare-name
+    matches, ``confidence`` says so in one short sentence.
 
     path_to picks the route whose weakest hop is strongest. Each hop's
     ``certainty`` says how it was bound: ``direct`` to that node, ``unique_name``
