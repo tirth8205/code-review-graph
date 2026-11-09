@@ -15,6 +15,7 @@ stdio and plain ``serve --http`` keep their old fallback.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
 import shutil
@@ -313,6 +314,19 @@ except ImportError:  # pragma: no cover - older ``mcp`` releases spell it this w
     )
 
 
+def _read_timeout() -> Any:
+    """mcp 1.x takes the read timeout as a timedelta; mcp 2.x takes seconds."""
+    if ClientSession is None:
+        return None
+    param = inspect.signature(ClientSession.__init__).parameters["read_timeout_seconds"]
+    if "timedelta" in str(param.annotation):
+        return timedelta(seconds=CALL_TIMEOUT)
+    return CALL_TIMEOUT
+
+
+_READ_TIMEOUT = _read_timeout()
+
+
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
@@ -397,7 +411,7 @@ async def _session_call(server: dict, calls: list[tuple[str, dict]]) -> list[Any
     async with streamable_http_client(server["url"]) as streams:
         read, write = streams[0], streams[1]
         async with ClientSession(
-            read, write, read_timeout_seconds=timedelta(seconds=CALL_TIMEOUT),
+            read, write, read_timeout_seconds=_READ_TIMEOUT,
         ) as session:
             await asyncio.wait_for(session.initialize(), timeout=CALL_TIMEOUT)
             return list(await asyncio.gather(*(
@@ -412,8 +426,14 @@ def _text(result: Any) -> str:
     )
 
 
+def _is_error(result: Any) -> bool:
+    """mcp 2.x renamed ``isError`` to ``is_error``."""
+    is_error = getattr(result, "is_error", None)
+    return bool(result.isError if is_error is None else is_error)
+
+
 def _payload(result: Any) -> dict:
-    assert not result.isError, _text(result)
+    assert not _is_error(result), _text(result)
     return json.loads(result.content[0].text)
 
 
@@ -473,11 +493,11 @@ async def test_a_call_naming_no_repo_or_an_unregistered_one_is_refused(
         ("build_or_update_graph_tool", {"repo_root": str(stranger)}),
         ("list_graph_stats_tool", {"repo_root": "repo_a"}),
     ])
-    assert missing.isError
+    assert _is_error(missing)
     assert "repo_root is required" in _text(missing)
-    assert unregistered.isError
+    assert _is_error(unregistered)
     assert "not a registered repository" in _text(unregistered)
-    assert relative.isError
+    assert _is_error(relative)
     assert "absolute path" in _text(relative)
     # Refused before anything touched the unregistered repo.
     assert not (stranger / ".code-review-graph").exists()
@@ -492,7 +512,7 @@ async def test_the_handshake_tells_the_client_to_name_a_repo(http_server) -> Non
     async with streamable_http_client(http_server["url"]) as streams:
         read, write = streams[0], streams[1]
         async with ClientSession(
-            read, write, read_timeout_seconds=timedelta(seconds=CALL_TIMEOUT),
+            read, write, read_timeout_seconds=_READ_TIMEOUT,
         ) as session:
             init = await asyncio.wait_for(session.initialize(), timeout=CALL_TIMEOUT)
     assert init.instructions == (
