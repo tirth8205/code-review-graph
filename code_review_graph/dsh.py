@@ -8,11 +8,11 @@ row for DSH's own ``@deepseek-ai/dsh-mcp-client`` plugin starts a stdio MCP
 server. See the DSH repository: ``apps/cli/README.md`` ("Profiles"),
 ``packages/mcp/mcp-client/README.md`` and ``docs/user/guide/mcp-memory.md``.
 
-``skills._dsh_config_path`` finds the file. This module only reads and edits
-its text. The file is written by hand and
-uses DSH's ``!!js`` tag, so it is never re-serialised: the one ``insert``
-operation this project owns is added, replaced or cut out as a block of lines,
-and the result is parsed again before anything is written.
+``skills._dsh_config_path`` finds the file; this module only reads and edits
+its text. The file is written by hand and uses DSH's ``!!js`` tag, so it is
+never re-serialised: the one ``insert`` operation this project owns is added,
+replaced or cut out as a block of lines, and the result is parsed again before
+anything is written.
 """
 from __future__ import annotations
 
