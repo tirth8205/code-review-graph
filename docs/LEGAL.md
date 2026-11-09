@@ -7,6 +7,8 @@ the same licence.
 
 - No telemetry.
 - Graph data is stored locally, by default in `.code-review-graph/graph.db`.
+- The context history log (`CRG_CONTEXT_HISTORY=1`, off by default) is a local file next to
+  `graph.db` that holds token counts and tool names only. It is never sent anywhere.
 - Graph build, review, search and the CLI/MCP workflows run on your machine.
 - The optional local embedding provider downloads a sentence-transformers model from
   Hugging Face on first use.

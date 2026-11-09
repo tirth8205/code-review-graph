@@ -28,7 +28,6 @@ import os
 import shutil
 import subprocess
 import sys
-from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -37,12 +36,15 @@ import pytest
 try:
     from mcp import ClientSession
     from mcp.client.stdio import StdioServerParameters, stdio_client
-    from mcp.shared.exceptions import McpError
+
+    from tests.mcp_client_compat import McpError, read_timeout, wire
 except ImportError:  # pragma: no cover - ``mcp`` is a hard runtime dependency
     ClientSession = None  # type: ignore[assignment,misc]
     StdioServerParameters = None  # type: ignore[assignment,misc]
     stdio_client = None  # type: ignore[assignment]
     McpError = None  # type: ignore[assignment,misc]
+    read_timeout = None  # type: ignore[assignment]
+    wire = None  # type: ignore[assignment]
 
 # Generous: a cold interpreter start plus a full tree-sitter build on a loaded
 # Windows CI runner is slow, but nothing here should ever take minutes.
@@ -204,7 +206,7 @@ def _text_blocks(result: Any) -> list[str]:
 
 def _payload(result: Any) -> dict[str, Any]:
     """Decode a successful tool result into the dict the tool returned."""
-    assert not result.isError, f"tool call failed: {_text_blocks(result)}"
+    assert not wire(result, "isError"), f"tool call failed: {_text_blocks(result)}"
     blocks = _text_blocks(result)
     assert blocks, f"tool returned no text content: {result!r}"
     payload = json.loads(blocks[0])
@@ -239,11 +241,11 @@ async def test_mcp_client_full_review_journey(tmp_path: Path) -> None:
         async with ClientSession(
             read,
             write,
-            read_timeout_seconds=timedelta(seconds=CALL_TIMEOUT),
+            read_timeout_seconds=read_timeout(CALL_TIMEOUT),
         ) as session:
             # --- handshake -------------------------------------------------
             init = await asyncio.wait_for(session.initialize(), timeout=CALL_TIMEOUT)
-            assert init.serverInfo.name == "code-review-graph"
+            assert wire(init, "serverInfo").name == "code-review-graph"
             assert init.capabilities.tools is not None
 
             # --- tool discovery --------------------------------------------
@@ -268,7 +270,7 @@ async def test_mcp_client_full_review_journey(tmp_path: Path) -> None:
             build_schema = next(
                 tool for tool in listed.tools if tool.name == "build_or_update_graph_tool"
             )
-            assert "full_rebuild" in build_schema.inputSchema["properties"]
+            assert "full_rebuild" in wire(build_schema, "inputSchema")["properties"]
 
             # --- build ------------------------------------------------------
             built = _payload(
@@ -384,7 +386,7 @@ async def test_mcp_multi_worktree_routes_parallel_graphs(tmp_path: Path) -> None
         async with ClientSession(
             read,
             write,
-            read_timeout_seconds=timedelta(seconds=CALL_TIMEOUT),
+            read_timeout_seconds=read_timeout(CALL_TIMEOUT),
         ) as session:
             await asyncio.wait_for(session.initialize(), timeout=CALL_TIMEOUT)
 
@@ -463,7 +465,7 @@ async def test_mcp_client_rejects_repo_root_outside_a_project(tmp_path: Path) ->
         async with ClientSession(
             read,
             write,
-            read_timeout_seconds=timedelta(seconds=CALL_TIMEOUT),
+            read_timeout_seconds=read_timeout(CALL_TIMEOUT),
         ) as session:
             await asyncio.wait_for(session.initialize(), timeout=CALL_TIMEOUT)
 
@@ -476,7 +478,7 @@ async def test_mcp_client_rejects_repo_root_outside_a_project(tmp_path: Path) ->
                     "repo_root": str(outsider),
                 },
             )
-            assert result.isError, f"traversal was not refused: {_text_blocks(result)}"
+            assert wire(result, "isError"), f"traversal was not refused: {_text_blocks(result)}"
             message = " ".join(_text_blocks(result))
             assert "repo_root" in message, message
             assert "project root" in message, message

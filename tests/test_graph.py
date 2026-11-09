@@ -10,6 +10,8 @@ from pathlib import Path, PureWindowsPath
 import pytest
 
 import code_review_graph.constants as constants_module
+import code_review_graph.graph as graph_module
+from code_review_graph.analysis import find_bridge_nodes
 from code_review_graph.errors import GraphStoreError
 from code_review_graph.graph import (
     CorruptGraphDatabaseError,
@@ -18,6 +20,27 @@ from code_review_graph.graph import (
 )
 from code_review_graph.incremental import full_build
 from code_review_graph.parser import EdgeInfo, NodeInfo
+
+
+def _assert_callers_survive(store, identities, base):
+    """Each suffixed duplicate keeps its caller across a re-index. A caller that
+    named the base gives no evidence for either definition, so it lists every
+    duplicate instead of claiming the first one (#585, #586)."""
+    for identity in identities:
+        assert store.get_node(identity) is not None
+        callers = store.get_edges_by_target(identity)
+        if identity == base:
+            assert callers == []
+        else:
+            assert len(callers) == 1
+            assert store.get_node(callers[0].source_qualified) is not None
+    if base in identities:
+        [ambiguous] = [
+            edge for edge in store.get_all_edges()
+            if edge.kind == "CALLS" and edge.target_qualified == "render"
+        ]
+        assert set(ambiguous.extra["ambiguous_targets"]) == set(identities)
+        assert store.get_node(ambiguous.source_qualified) is not None
 
 
 class TestGraphStore:
@@ -84,7 +107,10 @@ class TestGraphStore:
         assert result is not None
         assert (result.line_start, result.line_end) == (10, 12)
 
-    def test_store_file_nodes_edges_overwrites_duplicate_node_range(self):
+    def test_store_file_nodes_edges_keeps_each_duplicate_node_range(self):
+        """#585: a same-file duplicate keeps its own row and range instead of
+        overwriting the first definition's (the pre-#585 collapse #980 pinned).
+        """
         first = self._make_func_node(name="helper")
         second = self._make_func_node(name="helper")
         first.parent_name = "outer1"
@@ -98,7 +124,13 @@ class TestGraphStore:
 
         result = self.store.get_node("/test/file.py::outer1.helper")
         assert result is not None
-        assert (result.line_start, result.line_end) == (8, 9)
+        assert (result.line_start, result.line_end) == (2, 3)
+        ranges = sorted(
+            (node.line_start, node.line_end)
+            for node in self.store.get_nodes_by_file("/test/file.py")
+            if node.name == "helper"
+        )
+        assert ranges == [(2, 3), (8, 9)]
 
     def test_same_name_nested_functions_keep_separate_line_ranges(self):
         first = self._make_func_node(name="helper")
@@ -415,6 +447,379 @@ class TestGraphStore:
 
         result = self.store.get_nodes_by_file("/test/file.py")
         assert len(result) == 2
+
+    def test_store_file_preserves_qualified_name_collisions(self):
+        nodes = [
+            NodeInfo(kind="Function", name="render", file_path="/test/file.py",
+                     line_start=10, line_end=12, language="python"),
+            NodeInfo(kind="Function", name="render", file_path="/test/file.py",
+                     line_start=20, line_end=24, language="python"),
+        ]
+
+        self.store.store_file_nodes_edges("/test/file.py", nodes, [])
+
+        stored = self.store.get_nodes_by_file("/test/file.py")
+        assert sorted((node.line_start, node.line_end) for node in stored) == [
+            (10, 12),
+            (20, 24),
+        ]
+
+    def test_reindex_line_shift_preserves_collision_identities_and_callers(self):
+        target_file = "/test/target.py"
+        caller_file = "/test/caller.py"
+        nodes = [
+            NodeInfo(kind="Function", name="render", file_path=target_file,
+                     line_start=10, line_end=12, language="python"),
+            NodeInfo(kind="Function", name="render", file_path=target_file,
+                     line_start=20, line_end=24, language="python"),
+        ]
+        self.store.store_file_nodes_edges(target_file, nodes, [])
+        original_qns = {
+            node.qualified_name
+            for node in self.store.get_nodes_by_file(target_file)
+        }
+        caller_nodes = [
+            NodeInfo(kind="Function", name="call_first", file_path=caller_file,
+                     line_start=1, line_end=3, language="python"),
+            NodeInfo(kind="Function", name="call_second", file_path=caller_file,
+                     line_start=5, line_end=7, language="python"),
+        ]
+        caller_edges = [
+            EdgeInfo(
+                kind="CALLS", source=f"{caller_file}::{caller.name}", target=target,
+                file_path=caller_file, line=caller.line_start + 1,
+            )
+            for caller, target in zip(caller_nodes, sorted(original_qns))
+        ]
+        self.store.store_file_nodes_edges(caller_file, caller_nodes, caller_edges)
+
+        shifted_nodes = [
+            NodeInfo(kind="Function", name="render", file_path=target_file,
+                     line_start=11, line_end=13, language="python"),
+            NodeInfo(kind="Function", name="render", file_path=target_file,
+                     line_start=21, line_end=25, language="python"),
+        ]
+        self.store.store_file_nodes_edges(target_file, shifted_nodes, [])
+
+        shifted_qns = {
+            node.qualified_name
+            for node in self.store.get_nodes_by_file(target_file)
+        }
+        assert shifted_qns == original_qns
+        _assert_callers_survive(self.store, original_qns, f"{target_file}::render")
+
+    def test_reindex_collision_shrink_preserves_survivor_identity_and_caller(self):
+        target_file = "/test/target.py"
+        caller_file = "/test/caller.py"
+        nodes = [
+            NodeInfo(kind="Function", name="render", file_path=target_file,
+                     line_start=10, line_end=12, language="python"),
+            NodeInfo(kind="Function", name="render", file_path=target_file,
+                     line_start=20, line_end=24, language="python"),
+        ]
+        self.store.store_file_nodes_edges(target_file, nodes, [])
+        survivor = next(
+            node for node in self.store.get_nodes_by_file(target_file)
+            if node.line_start == 20
+        )
+        caller = NodeInfo(
+            kind="Function", name="call_render", file_path=caller_file,
+            line_start=1, line_end=3, language="python",
+        )
+        self.store.store_file_nodes_edges(
+            caller_file,
+            [caller],
+            [EdgeInfo(
+                kind="CALLS", source=f"{caller_file}::call_render",
+                target=survivor.qualified_name, file_path=caller_file, line=2,
+            )],
+        )
+
+        self.store.store_file_nodes_edges(
+            target_file,
+            [NodeInfo(kind="Function", name="render", file_path=target_file,
+                      line_start=21, line_end=25, language="python")],
+            [],
+        )
+
+        stored = self.store.get_nodes_by_file(target_file)
+        assert len(stored) == 1
+        assert stored[0].qualified_name == survivor.qualified_name
+        callers = self.store.get_edges_by_target(survivor.qualified_name)
+        assert len(callers) == 1
+        assert self.store.get_node(callers[0].target_qualified) == stored[0]
+
+        later_caller_file = "/test/later_caller.py"
+        later_caller = NodeInfo(
+            kind="Function", name="call_render", file_path=later_caller_file,
+            line_start=1, line_end=3, language="python",
+        )
+        self.store.store_file_nodes_edges(
+            later_caller_file,
+            [later_caller],
+            [EdgeInfo(
+                kind="CALLS", source=f"{later_caller_file}::call_render",
+                target=f"{target_file}::render", file_path=later_caller_file, line=2,
+            )],
+        )
+        callers = self.store.get_edges_by_target(survivor.qualified_name)
+        assert len(callers) == 2
+
+    def test_reindex_collision_growth_preserves_existing_identity_and_caller(self):
+        target_file = "/test/target.py"
+        caller_file = "/test/caller.py"
+        original = NodeInfo(
+            kind="Function", name="render", file_path=target_file,
+            line_start=20, line_end=24, language="python",
+        )
+        self.store.store_file_nodes_edges(target_file, [original], [])
+        original_qn = self.store.get_nodes_by_file(target_file)[0].qualified_name
+        caller = NodeInfo(
+            kind="Function", name="call_render", file_path=caller_file,
+            line_start=1, line_end=3, language="python",
+        )
+        self.store.store_file_nodes_edges(
+            caller_file,
+            [caller],
+            [EdgeInfo(
+                kind="CALLS", source=f"{caller_file}::call_render",
+                target=original_qn, file_path=caller_file, line=2,
+            )],
+        )
+
+        self.store.store_file_nodes_edges(
+            target_file,
+            [
+                NodeInfo(kind="Function", name="render", file_path=target_file,
+                         line_start=10, line_end=12, language="python"),
+                NodeInfo(kind="Function", name="render", file_path=target_file,
+                         line_start=21, line_end=25, language="python"),
+            ],
+            [],
+        )
+
+        survivor = self.store.get_node(original_qn)
+        assert survivor is not None
+        assert (survivor.line_start, survivor.line_end) == (21, 25)
+        callers = self.store.get_edges_by_target(original_qn)
+        assert len(callers) == 1
+        assert self.store.get_node(callers[0].target_qualified) == survivor
+
+    def test_reindex_collision_reorder_preserves_identities_and_callers(self):
+        target_file = "/test/target.py"
+        caller_file = "/test/caller.py"
+        nodes = [
+            NodeInfo(kind="Function", name="render", file_path=target_file,
+                     line_start=10, line_end=12, language="python", params="(first)"),
+            NodeInfo(kind="Function", name="render", file_path=target_file,
+                     line_start=20, line_end=24, language="python", params="(second)"),
+        ]
+        self.store.store_file_nodes_edges(target_file, nodes, [])
+        original_qns = {
+            node.params: node.qualified_name
+            for node in self.store.get_nodes_by_file(target_file)
+        }
+        caller_nodes = [
+            NodeInfo(kind="Function", name="call_first", file_path=caller_file,
+                     line_start=1, line_end=3, language="python"),
+            NodeInfo(kind="Function", name="call_second", file_path=caller_file,
+                     line_start=5, line_end=7, language="python"),
+        ]
+        self.store.store_file_nodes_edges(
+            caller_file,
+            caller_nodes,
+            [
+                EdgeInfo(
+                    kind="CALLS", source=f"{caller_file}::call_first",
+                    target=original_qns["(first)"], file_path=caller_file, line=2,
+                ),
+                EdgeInfo(
+                    kind="CALLS", source=f"{caller_file}::call_second",
+                    target=original_qns["(second)"], file_path=caller_file, line=6,
+                ),
+            ],
+        )
+
+        self.store.store_file_nodes_edges(
+            target_file,
+            [
+                NodeInfo(kind="Function", name="render", file_path=target_file,
+                         line_start=10, line_end=14, language="python", params="(second)"),
+                NodeInfo(kind="Function", name="render", file_path=target_file,
+                         line_start=20, line_end=22, language="python", params="(first)"),
+            ],
+            [],
+        )
+
+        reordered = {
+            node.params: node.qualified_name
+            for node in self.store.get_nodes_by_file(target_file)
+        }
+        assert reordered == original_qns
+        _assert_callers_survive(
+            self.store, set(original_qns.values()), f"{target_file}::render",
+        )
+
+    def test_reindex_unique_signature_and_line_change_keeps_bare_identity(self):
+        target_file = "/test/target.py"
+        caller_file = "/test/caller.py"
+        base_qualified = f"{target_file}::render"
+        original = NodeInfo(
+            kind="Function", name="render", file_path=target_file,
+            line_start=10, line_end=12, language="python", params="(a)",
+        )
+        self.store.store_file_nodes_edges(target_file, [original], [])
+        caller = NodeInfo(
+            kind="Function", name="call_render", file_path=caller_file,
+            line_start=1, line_end=3, language="python",
+        )
+        self.store.store_file_nodes_edges(
+            caller_file,
+            [caller],
+            [EdgeInfo(
+                kind="CALLS", source=f"{caller_file}::call_render",
+                target=base_qualified, file_path=caller_file, line=2,
+            )],
+        )
+
+        for line_start, params in [(12, "(a, b)"), (14, "(a, b, c)")]:
+            self.store.store_file_nodes_edges(
+                target_file,
+                [NodeInfo(
+                    kind="Function", name="render", file_path=target_file,
+                    line_start=line_start, line_end=line_start + 2,
+                    language="python", params=params,
+                )],
+                [],
+            )
+            stored = self.store.get_node(base_qualified)
+            assert stored is not None
+            assert stored.params == params
+            assert len(self.store.get_nodes_by_file(target_file)) == 1
+            assert len(self.store.get_edges_by_target(base_qualified)) == 1
+
+    def test_upsert_same_colliding_definition_updates_in_place(self):
+        nodes = [
+            NodeInfo(kind="Function", name="render", file_path="/test/file.py",
+                     line_start=10, line_end=12, language="python"),
+            NodeInfo(kind="Function", name="render", file_path="/test/file.py",
+                     line_start=20, line_end=24, language="python"),
+        ]
+        self.store.store_file_nodes_edges("/test/file.py", nodes, [])
+        original = next(
+            node for node in self.store.get_nodes_by_file("/test/file.py")
+            if node.line_start == 20
+        )
+
+        node_id = self.store.upsert_node(nodes[1])
+
+        assert len(self.store.get_nodes_by_file("/test/file.py")) == 2
+        assert node_id == original.id
+
+    def test_recursive_edge_resolves_for_disambiguated_node(self):
+        base_qualified = "/test/file.py::render"
+        nodes = [
+            NodeInfo(kind="Function", name="render", file_path="/test/file.py",
+                     line_start=10, line_end=12, language="python"),
+            NodeInfo(kind="Function", name="render", file_path="/test/file.py",
+                     line_start=20, line_end=24, language="python"),
+        ]
+        edges = [
+            EdgeInfo(
+                kind="CALLS", source=base_qualified, target=base_qualified,
+                file_path="/test/file.py", line=22,
+            )
+        ]
+
+        self.store.store_file_nodes_edges("/test/file.py", nodes, edges)
+
+        disambiguated = next(
+            node for node in self.store.get_nodes_by_file("/test/file.py")
+            if node.line_start == 20
+        )
+        callers = self.store.get_edges_by_target(disambiguated.qualified_name)
+        callees = self.store.get_edges_by_source(disambiguated.qualified_name)
+        assert disambiguated.qualified_name.startswith(f"{base_qualified}:S")
+        assert len(callers) == 1
+        assert len(callees) == 1
+        assert self.store.get_node(callers[0].source_qualified) == disambiguated
+        assert self.store.get_node(callees[0].target_qualified) == disambiguated
+
+    def test_unevidenced_cross_file_call_lists_every_duplicate(self):
+        """A caller naming the base cannot say which duplicate it means, so it
+        claims neither (#586): plain name, every candidate, AMBIGUOUS 0.4."""
+        target_file = "/test/target.py"
+        base_qualified = f"{target_file}::render"
+        nodes = [
+            NodeInfo(kind="Function", name="render", file_path=target_file,
+                     line_start=10, line_end=12, language="python"),
+            NodeInfo(kind="Function", name="render", file_path=target_file,
+                     line_start=20, line_end=24, language="python"),
+        ]
+        self.store.store_file_nodes_edges(target_file, nodes, [])
+        identities = {n.qualified_name for n in self.store.get_nodes_by_file(target_file)}
+        caller = NodeInfo(
+            kind="Function", name="call_render", file_path="/test/caller.py",
+            line_start=1, line_end=3, language="python",
+        )
+        edge = EdgeInfo(
+            kind="CALLS", source="/test/caller.py::call_render",
+            target=base_qualified, file_path="/test/caller.py", line=2,
+        )
+
+        self.store.store_file_nodes_edges("/test/caller.py", [caller], [edge])
+
+        for identity in identities:
+            assert self.store.get_edges_by_target(identity) == []
+        [stored] = self.store.get_edges_by_source("/test/caller.py::call_render")
+        assert stored.target_qualified == "render"
+        assert stored.extra["ambiguous_targets"][0] == base_qualified
+        assert set(stored.extra["ambiguous_targets"]) == identities
+        assert stored.confidence == 0.4
+        assert stored.confidence_tier == "AMBIGUOUS"
+
+    def test_unresolved_identity_lookup_uses_qualified_name_index_range(self):
+        statements = []
+        self.store._conn.set_trace_callback(statements.append)
+        try:
+            self.store._resolve_stored_identity("/test/file.py::missing")
+        finally:
+            self.store._conn.set_trace_callback(None)
+
+        prefix_queries = [
+            statement
+            for statement in statements
+            if statement.startswith("SELECT qualified_name FROM nodes")
+        ]
+        assert len(prefix_queries) == 1
+        assert "qualified_name >=" in prefix_queries[0]
+        assert "qualified_name <" in prefix_queries[0]
+        assert "substr(" not in prefix_queries[0]
+
+    def test_colon_symbol_is_not_mistaken_for_collision_suffix(self):
+        target_file = "/test/target.m"
+        caller_file = "/test/caller.m"
+        bare_target = f"{target_file}::render"
+        selector = NodeInfo(
+            kind="Function", name="render:Save:", file_path=target_file,
+            line_start=10, line_end=12, language="objc",
+        )
+        self.store.store_file_nodes_edges(target_file, [selector], [])
+        caller = NodeInfo(
+            kind="Function", name="callRender", file_path=caller_file,
+            line_start=1, line_end=3, language="objc",
+        )
+        self.store.store_file_nodes_edges(
+            caller_file,
+            [caller],
+            [EdgeInfo(
+                kind="CALLS", source=f"{caller_file}::callRender",
+                target=bare_target, file_path=caller_file, line=2,
+            )],
+        )
+
+        assert len(self.store.get_edges_by_target(bare_target)) == 1
+        assert self.store.get_edges_by_target(f"{target_file}::render:Save:") == []
 
     def test_store_file_nodes_edges_collapses_duplicate_call_sites(self):
         """Regression for #721: the batched store must collapse duplicate call
@@ -1630,3 +2035,592 @@ class TestUnusableDatabaseRecovery:
         assert not _has_incompatible_schema(
             db, sqlite3.OperationalError("no such column: file_path")
         )
+
+
+class TestGraphDirectHelpersAndBatching:
+    def test_graph_store_batch_memory_and_resolution_direct(self, tmp_path: Path):
+        assert constants_module.normalize_file_path(r"a\b\c.py") == "a/b/c.py"
+        constants_module.release_os_memory()
+
+        assert graph_module.__getattr__("NodeInfo") is NodeInfo
+        assert hasattr(graph_module.__getattr__("nx"), "DiGraph")
+        with pytest.raises(AttributeError):
+            graph_module.__getattr__("nonexistent_symbol")
+
+        store = GraphStore(tmp_path / "direct.db")
+        try:
+            f_a = NodeInfo(
+                kind="File", name="/test/a.py", file_path="/test/a.py",
+                line_start=1, line_end=20, language="python",
+            )
+            fn_a = NodeInfo(
+                kind="Function", name="fn_a", file_path="/test/a.py",
+                line_start=2, line_end=10, language="python",
+            )
+            f_b = NodeInfo(
+                kind="File", name="/test/b.py", file_path="/test/b.py",
+                line_start=1, line_end=20, language="python",
+            )
+            fn_b = NodeInfo(
+                kind="Function", name="fn_b", file_path="/test/b.py",
+                line_start=2, line_end=10, language="python",
+            )
+            f_t = NodeInfo(
+                kind="File", name="/test/test_b.py", file_path="/test/test_b.py",
+                line_start=1, line_end=20, language="python",
+            )
+            test_b = NodeInfo(
+                kind="Test", name="test_fn_b", file_path="/test/test_b.py",
+                line_start=2, line_end=10, language="python", is_test=True,
+            )
+            edges_b = [
+                EdgeInfo(
+                    kind="IMPORTS_FROM",
+                    source="/test/b.py",
+                    target="/test/a.py",
+                    file_path="/test/b.py",
+                    line=1,
+                ),
+                EdgeInfo(
+                    kind="CALLS",
+                    source="/test/b.py::fn_b",
+                    target="fn_a",
+                    file_path="/test/b.py",
+                    line=5,
+                ),
+            ]
+            edges_t = [
+                EdgeInfo(
+                    kind="TESTED_BY",
+                    source="/test/b.py::fn_b",
+                    target="/test/test_b.py::test_fn_b",
+                    file_path="/test/test_b.py",
+                    line=4,
+                ),
+            ]
+            store.store_file_batch([
+                ("/test/a.py", [f_a, fn_a], [], "hash_a"),
+                ("/test/b.py", [f_b, fn_b], edges_b, "hash_b"),
+                ("/test/test_b.py", [f_t, test_b], edges_t, "hash_t"),
+            ])
+
+            hashes = store.get_file_hashes()
+            assert hashes["/test/a.py"] == "hash_a"
+            assert hashes["/test/b.py"] == "hash_b"
+
+            ctx = store._get_bare_endpoint_context(store._conn)
+            assert "fn_a" in ctx[0]
+
+            resolved_count = store._resolve_bare_endpoints("CALLS", "target_qualified")
+            assert resolved_count == 1
+
+            refreshed = store.refresh_target_resolution()
+            assert refreshed >= 1
+
+            impact = store.get_impact_radius_sql(["/test/a.py"], max_depth=2)
+            assert any(n.name == "fn_b" for n in impact["impacted_nodes"])
+
+            routes = store.get_caller_test_routes(["/test/a.py::fn_a"])
+            assert "/test/a.py::fn_a" in routes
+
+            unresolved = store.count_unresolved_call_sites({"fn_a"})
+            assert unresolved == 0
+
+            nxg = store._build_networkx_graph()
+            assert nxg.number_of_nodes() >= 3
+
+            bridges = find_bridge_nodes(store, top_n=5)
+            assert isinstance(bridges, list)
+
+            node_row = store._conn.execute("SELECT * FROM nodes LIMIT 1").fetchone()
+            edge_row = store._conn.execute("SELECT * FROM edges LIMIT 1").fetchone()
+            assert store._row_to_node(node_row).name
+            assert store._row_to_edge(edge_row).kind
+
+            store._invalidate_cache()
+            store.shrink_memory(clear_nx_cache=True)
+            assert store._nxg_cache is None
+        finally:
+            store.close()
+
+
+class TestQualifiedNameCollisionLifecycle:
+    """Review fixes for same-file qualified-name collisions (#585, PR #715)."""
+
+    def setup_method(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmp.close()
+        self.store = GraphStore(self.tmp.name)
+
+    def teardown_method(self):
+        self.store.close()
+        Path(self.tmp.name).unlink(missing_ok=True)
+
+    @staticmethod
+    def _render(path, line_start, params=None, line_end=None, is_test=False):
+        return NodeInfo(
+            kind="Test" if is_test else "Function", name="render", file_path=path,
+            line_start=line_start,
+            line_end=line_end if line_end is not None else line_start + 2,
+            language="python", params=params, is_test=is_test,
+        )
+
+    def _call(self, caller_file, name, target, line=2):
+        self.store.store_file_nodes_edges(
+            caller_file,
+            [NodeInfo(kind="Function", name=name, file_path=caller_file,
+                      line_start=line - 1, line_end=line + 1, language="python")],
+            [EdgeInfo(kind="CALLS", source=f"{caller_file}::{name}", target=target,
+                      file_path=caller_file, line=line)],
+        )
+
+    def _identity_at(self, path, line_start):
+        return next(
+            node.qualified_name for node in self.store.get_nodes_by_file(path)
+            if node.line_start == line_start
+        )
+
+    def test_backslash_spelling_keeps_the_shrink_survivor_identity(self):
+        """Windows callers pass ``C:\\t\\target.py``; rows are stored as
+        ``C:/t/target.py``. Planning must look old rows up by the stored spelling
+        or the survivor re-keys to the bare name and its caller dangles.
+        """
+        posix = "C:/t/target.py"
+        windows = "C:\\t\\target.py"
+        self.store.store_file_nodes_edges(
+            windows, [self._render(posix, 10, "(a)"), self._render(posix, 20, "(b)")], [],
+        )
+        survivor = self._identity_at(posix, 20)
+        assert survivor != f"{posix}::render"
+        self._call("C:/t/caller.py", "go", survivor)
+
+        self.store.store_file_nodes_edges(windows, [self._render(posix, 21, "(b)")], [])
+
+        assert [n.qualified_name for n in self.store.get_nodes_by_file(posix)] == [survivor]
+        callers = self.store.get_edges_by_target(survivor)
+        assert [e.source_qualified for e in callers] == ["C:/t/caller.py::go"]
+
+    def test_replacement_plan_reads_each_previous_row_once(self, monkeypatch):
+        """Planning bucketed old rows per new base, rescanning every old row for
+        every name: 6000 unique definitions took seconds. One pass suffices.
+        """
+        path = "/test/many.py"
+        nodes = [
+            NodeInfo(kind="Function", name=f"f{i}", file_path=path,
+                     line_start=i * 3 + 1, line_end=i * 3 + 2, language="python")
+            for i in range(300)
+        ]
+        self.store.store_file_nodes_edges(path, nodes, [])
+        checks = []
+        for helper in ("_is_collision_identity", "_collision_base"):
+            real = getattr(GraphStore, helper, None)
+            if real is None:
+                continue
+            monkeypatch.setattr(GraphStore, helper, staticmethod(
+                lambda *args, _real=real: checks.append(args) or _real(*args)))
+
+        shifted = [
+            NodeInfo(kind="Function", name=n.name, file_path=path,
+                     line_start=n.line_start + 1, line_end=n.line_end + 1,
+                     language="python")
+            for n in nodes
+        ]
+        self.store.store_file_nodes_edges(path, shifted, [])
+
+        assert len(checks) <= 2 * (len(nodes) + len(shifted))
+        assert {n.qualified_name for n in self.store.get_nodes_by_file(path)} == {
+            f"{path}::f{i}" for i in range(300)
+        }
+
+    @pytest.mark.parametrize("shift", [1, 6, 30])
+    def test_identical_duplicates_keep_their_order_across_a_large_shift(self, shift):
+        """Nearest-line pairing swapped identical twins at 10 and 20 once six
+        lines were inserted above both (16 is nearer 20 than 10). Each one must
+        keep its own identity, so each caller still names the same definition.
+        """
+        path = "/test/target.py"
+        self.store.store_file_nodes_edges(
+            path, [self._render(path, 10), self._render(path, 20)], [],
+        )
+        first, second = self._identity_at(path, 10), self._identity_at(path, 20)
+        assert first != second
+
+        self.store.store_file_nodes_edges(
+            path, [self._render(path, 10 + shift), self._render(path, 20 + shift)], [],
+        )
+
+        assert self._identity_at(path, 10 + shift) == first
+        assert self._identity_at(path, 20 + shift) == second
+
+    @pytest.mark.parametrize(("new_lines", "added"), [
+        ([16, 26, 40], 40),   # shifted by six, a third twin appended
+        ([10, 15, 20], 15),   # a third twin inserted between, nothing shifted
+        ([3, 16, 26], 3),     # a third twin inserted above both, which shift
+    ])
+    def test_identical_duplicates_keep_order_when_one_is_added(self, new_lines, added):
+        path = "/test/target.py"
+        self.store.store_file_nodes_edges(
+            path, [self._render(path, 10), self._render(path, 20)], [],
+        )
+        first, second = self._identity_at(path, 10), self._identity_at(path, 20)
+
+        self.store.store_file_nodes_edges(
+            path, [self._render(path, line) for line in new_lines], [],
+        )
+
+        kept = [line for line in new_lines if line != added]
+        assert [self._identity_at(path, line) for line in kept] == [first, second]
+        assert self._identity_at(path, added) not in (first, second)
+
+    def test_identical_duplicates_keep_order_when_one_is_removed(self):
+        path = "/test/target.py"
+        self.store.store_file_nodes_edges(
+            path, [self._render(path, line) for line in (10, 20, 30)], [],
+        )
+        identities = [self._identity_at(path, line) for line in (10, 20, 30)]
+
+        # The middle twin is deleted (three lines) and the rest shift by -3.
+        self.store.store_file_nodes_edges(
+            path, [self._render(path, 10), self._render(path, 27)], [],
+        )
+
+        assert [self._identity_at(path, line) for line in (10, 27)] == [
+            identities[0], identities[2],
+        ]
+
+    def test_edited_duplicate_keeps_its_identity_beside_an_unchanged_one(self):
+        """``render(a)`` at 10 becomes ``render(a, b)`` at 12 while ``render(c)``
+        shifts 20 -> 22. The edited definition matches nothing semantically, but
+        it is the only old and only new one left, so it keeps its identity
+        rather than taking a suffix and stranding its caller on the bare name.
+        """
+        path = "/test/target.py"
+        self.store.store_file_nodes_edges(
+            path, [self._render(path, 10, "(a)"), self._render(path, 20, "(c)")], [],
+        )
+        edited, unchanged = self._identity_at(path, 10), self._identity_at(path, 20)
+        assert edited == f"{path}::render"
+        self._call("/test/caller_a.py", "go_a", edited)
+        self._call("/test/caller_c.py", "go_c", unchanged)
+
+        self.store.store_file_nodes_edges(
+            path, [self._render(path, 12, "(a, b)"), self._render(path, 22, "(c)")], [],
+        )
+
+        assert self._identity_at(path, 12) == edited
+        assert self._identity_at(path, 22) == unchanged
+        _assert_callers_survive(self.store, {edited, unchanged}, f"{path}::render")
+
+    def test_every_edited_duplicate_keeps_its_identity_in_order(self):
+        path = "/test/target.py"
+        self.store.store_file_nodes_edges(
+            path, [self._render(path, 10, "(a)"), self._render(path, 20, "(c)")], [],
+        )
+        before = [self._identity_at(path, 10), self._identity_at(path, 20)]
+
+        self.store.store_file_nodes_edges(
+            path, [self._render(path, 14, "(a, x)"), self._render(path, 24, "(c, y)")], [],
+        )
+
+        assert [self._identity_at(path, 14), self._identity_at(path, 24)] == before
+
+    def test_upsert_of_a_moved_definition_updates_it_in_place(self):
+        """Staging updates a re-upserted definition in place; a moved line must
+        not turn the same definition into a second, suffixed row.
+        """
+        path = "/test/file.py"
+        first_id = self.store.upsert_node(self._render(path, 10, "(a)"))
+        moved_id = self.store.upsert_node(self._render(path, 11, "(a)"))
+
+        [node] = self.store.get_nodes_by_file(path)
+        assert moved_id == first_id
+        assert (node.qualified_name, node.line_start) == (f"{path}::render", 11)
+
+    def test_upsert_of_a_moved_duplicate_updates_its_own_row(self):
+        path = "/test/file.py"
+        self.store.store_file_nodes_edges(
+            path, [self._render(path, 10, "(a)"), self._render(path, 20, "(b)")], [],
+        )
+        second = self._identity_at(path, 20)
+
+        self.store.upsert_node(self._render(path, 25, "(b)"))
+
+        assert sorted(
+            (n.qualified_name, n.line_start) for n in self.store.get_nodes_by_file(path)
+        ) == sorted([(f"{path}::render", 10), (second, 25)])
+
+    def test_upsert_of_a_different_definition_keeps_both(self):
+        """#586's review: direct upserts must not collapse distinct definitions."""
+        path = "/test/file.py"
+        self.store.upsert_node(self._render(path, 10, "(a)"))
+        self.store.upsert_node(self._render(path, 20, "(b)"))
+
+        assert sorted(
+            (n.params, n.line_start) for n in self.store.get_nodes_by_file(path)
+        ) == [("(a)", 10), ("(b)", 20)]
+
+    def test_tested_by_follows_the_duplicate_test_that_made_the_call(self):
+        """The parser mints TESTED_BY as the reverse of a test's CALLS edge on
+        the same line. Its target (the test) must be the same duplicate the
+        CALLS source was aligned to, or coverage names the wrong test.
+        """
+        tests = "/test/test_app.py"
+        helper = "/test/app.py::helper"
+        nodes = [self._render(tests, 10, is_test=True),
+                 self._render(tests, 20, is_test=True, line_end=24)]
+        base = f"{tests}::render"
+        edges = []
+        for line in (11, 22):
+            edges.append(EdgeInfo(kind="CALLS", source=base, target=helper,
+                                  file_path=tests, line=line))
+            edges.append(EdgeInfo(kind="TESTED_BY", source=helper, target=base,
+                                  file_path=tests, line=line))
+
+        self.store.store_file_nodes_edges(tests, nodes, edges)
+
+        first, second = self._identity_at(tests, 10), self._identity_at(tests, 20)
+        calls = {(e.line, e.source_qualified) for e in self.store.get_edges_by_target(helper)
+                 if e.kind == "CALLS"}
+        tested_by = {(e.line, e.target_qualified) for e in self.store.get_edges_by_source(helper)
+                     if e.kind == "TESTED_BY"}
+        assert calls == {(11, first), (22, second)}
+        assert tested_by == calls
+
+    def test_edges_only_restore_keeps_calls_on_their_duplicate(self):
+        """Incremental updates re-store an unchanged file's edges alone
+        (``store_file_edges``). Those edges come from a fresh parse, so they
+        name the base identity and need the same alignment as a full store.
+        """
+        path = "/test/target.py"
+        base = f"{path}::render"
+        nodes = [self._render(path, 10, "(a)"), self._render(path, 20, "(b)")]
+        edges = [EdgeInfo(kind="CALLS", source=base, target="/test/lib.py::log",
+                          file_path=path, line=line) for line in (11, 21)]
+        self.store.store_file_nodes_edges(path, nodes, edges)
+        first, second = self._identity_at(path, 10), self._identity_at(path, 20)
+        stored = {(e.line, e.source_qualified) for e in self.store.get_edges_by_target(
+            "/test/lib.py::log")}
+        assert stored == {(11, first), (21, second)}
+
+        self.store.store_file_edges(path, edges)
+
+        assert {(e.line, e.source_qualified) for e in self.store.get_edges_by_target(
+            "/test/lib.py::log")} == stored
+
+    def test_edges_only_restore_keeps_a_lone_survivors_suffix(self):
+        path = "/test/target.py"
+        base = f"{path}::render"
+        self.store.store_file_nodes_edges(
+            path, [self._render(path, 10, "(a)"), self._render(path, 20, "(b)")], [],
+        )
+        survivor = self._identity_at(path, 20)
+        edge = EdgeInfo(kind="CALLS", source=base, target="/test/lib.py::log",
+                        file_path=path, line=22)
+        self.store.store_file_nodes_edges(path, [self._render(path, 21, "(b)")], [edge])
+        assert [e.source_qualified for e in self.store.get_edges_by_target(
+            "/test/lib.py::log")] == [survivor]
+
+        self.store.store_file_edges(path, [edge])
+
+        assert [e.source_qualified for e in self.store.get_edges_by_target(
+            "/test/lib.py::log")] == [survivor]
+
+    def test_bulk_store_looks_up_each_other_file_endpoint_once(self):
+        """The bulk path (#721) must not seek the index for every endpoint:
+        bare names and the file's own symbols need no lookup, and a repeated
+        cross-file target is looked up once.
+        """
+        path = "/test/app.py"
+        nodes = [
+            NodeInfo(kind="Function", name=f"f{i}", file_path=path,
+                     line_start=i * 3 + 1, line_end=i * 3 + 2, language="python")
+            for i in range(50)
+        ]
+        edges = []
+        for i, node in enumerate(nodes):
+            line = node.line_start
+            edges.append(EdgeInfo(kind="CALLS", source=f"{path}::f{i}",
+                                  target=f"{path}::f{(i + 1) % 50}", file_path=path, line=line))
+            edges.append(EdgeInfo(kind="CALLS", source=f"{path}::f{i}", target="print",
+                                  file_path=path, line=line))
+            edges.append(EdgeInfo(kind="CALLS", source=f"{path}::f{i}",
+                                  target="/test/lib.py::log", file_path=path, line=line))
+        statements = []
+        self.store._conn.set_trace_callback(statements.append)
+        try:
+            self.store.store_file_nodes_edges(path, nodes, edges)
+        finally:
+            self.store._conn.set_trace_callback(None)
+
+        seeks = [s for s in statements if "qualified_name >=" in s]
+        assert len(seeks) == 1
+        assert "/test/lib.py::log" in seeks[0]
+
+    def test_symbol_tail_lookup_sees_every_duplicate(self):
+        """``query_graph`` resolves ``Class.method`` targets through the indexed
+        ``symbol`` column. A suffixed duplicate must share its base symbol, or a
+        tail lookup reports one confident match and hides the other definition.
+        """
+        path = "/test/handlers.py"
+        nodes = [
+            NodeInfo(kind="Function", name="process", file_path=path, parent_name="Handler",
+                     line_start=line, line_end=line + 2, language="python")
+            for line in (10, 20)
+        ]
+        self.store.store_file_nodes_edges(path, nodes, [])
+
+        found = self.store.search_nodes_by_qualified_tail("Handler.process")
+        assert sorted(n.line_start for n in found) == [10, 20]
+        assert self.store.count_nodes_by_qualified_tail("Handler.process") == 2
+
+    def test_a_called_later_overload_is_not_dead_code(self, tmp_path):
+        """Staging collapses ``area(int)`` and ``area(int, int)`` into one called
+        node. Keeping both rows must not leave the second one without callers:
+        ``rect()`` calls it, and nothing at either call picks an overload, so
+        both calls list both and neither overload is claimed (#586).
+        """
+        from code_review_graph.refactor import find_dead_code
+
+        (tmp_path / "Shapes.java").write_text(
+            "public class Shapes {\n"
+            "    public int area(int side) { return side * side; }\n"
+            "    public int area(int w, int h) { return w * h; }\n"
+            "    public int perimeter(int side) { return area(side) + 4 * side; }\n"
+            "    public int rect() { return area(2, 3); }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        with GraphStore(tmp_path / "graph.db") as store:
+            full_build(tmp_path, store)
+            overloads = [n for n in store.get_nodes_by_file(
+                (tmp_path / "Shapes.java").as_posix()) if n.name == "area"]
+            assert len(overloads) == 2
+            dead = {d["qualified_name"] for d in find_dead_code(store)}
+        assert not {n.qualified_name for n in overloads} & dead
+
+
+class TestUnevidencedCallsToDuplicates:
+    """A call that cannot choose between same-file duplicates claims neither
+    (#585, as #586 was refused for); one with evidence keeps its binding."""
+
+    SHAPES = (
+        "public class Shapes {\n"
+        "    public int area(int side) { return side * side; }\n"
+        "    public int area(int w, int h) { return w * h; }\n"
+        "    public int rect() { return area(2, 3); }\n"
+        "}\n"
+    )
+
+    def test_same_file_call_lists_both_overloads_and_claims_neither(self, tmp_path):
+        from code_review_graph.tools.query import query_graph
+
+        (tmp_path / ".git").mkdir()
+        (tmp_path / "Shapes.java").write_text(self.SHAPES, encoding="utf-8")
+        with GraphStore(tmp_path / ".code-review-graph" / "graph.db") as store:
+            full_build(tmp_path, store)
+            overloads = sorted(
+                n.qualified_name for n in store.get_nodes_by_file(
+                    (tmp_path / "Shapes.java").as_posix(),
+                ) if n.name == "area"
+            )
+            [call] = [
+                e for e in store.get_all_edges()
+                if e.kind == "CALLS" and e.source_qualified.endswith("Shapes.rect")
+            ]
+            assert call.target_qualified == "area"
+            assert sorted(call.extra["ambiguous_targets"]) == overloads
+            assert (call.confidence, call.confidence_tier) == (0.4, "AMBIGUOUS")
+            assert call.target_resolution == "unresolved"
+        for overload in overloads:
+            result = query_graph("callers_of", overload, str(tmp_path))
+            assert result["status"] == "ok"
+            assert result["results"] == []
+        callees = query_graph(
+            "callees_of", f"{(tmp_path / 'Shapes.java').as_posix()}::Shapes.rect",
+            str(tmp_path),
+        )
+        [row] = callees["results"]
+        assert row["resolution"] == "ambiguous"
+        assert len(row["candidates"]) == 2
+
+    def test_a_test_calling_a_duplicate_is_not_claimed_by_either(self, tmp_path):
+        target = "/repo/app.py"
+        test_file = "/repo/test_app.py"
+        with GraphStore(tmp_path / "graph.db") as store:
+            store.store_file_nodes_edges(target, [
+                NodeInfo(kind="Function", name="render", file_path=target,
+                         line_start=1, line_end=2, language="python"),
+                NodeInfo(kind="Function", name="render", file_path=target,
+                         line_start=4, line_end=5, language="python", params="(x)"),
+            ], [])
+            identities = {n.qualified_name for n in store.get_nodes_by_file(target)}
+            store.store_file_nodes_edges(test_file, [
+                NodeInfo(kind="Test", name="test_render", file_path=test_file,
+                         line_start=1, line_end=2, language="python", is_test=True),
+            ], [
+                EdgeInfo(kind="CALLS", source=f"{test_file}::test_render",
+                         target=f"{target}::render", file_path=test_file, line=2),
+                EdgeInfo(kind="TESTED_BY", source=f"{target}::render",
+                         target=f"{test_file}::test_render", file_path=test_file, line=2),
+            ])
+            for identity in identities:
+                assert store.get_edges_by_source(identity) == []
+                assert store.get_edges_by_target(identity) == []
+            [mirror] = [e for e in store.get_all_edges() if e.kind == "TESTED_BY"]
+            assert mirror.source_qualified == "render"
+            assert set(mirror.extra["ambiguous_targets"]) == identities
+
+    def test_settle_pass_fixes_store_order_and_restores_a_lone_survivor(self, tmp_path):
+        """A caller stored before the duplicates binds to the bare name; the
+        settle pass makes it ambiguous. When one definition is left again, the
+        edge binds to it, though the caller's file was never re-parsed."""
+        target = "/repo/app.py"
+        caller = "/repo/main.py"
+
+        def render(line, params):
+            return NodeInfo(kind="Function", name="render", file_path=target,
+                            line_start=line, line_end=line + 1, language="python",
+                            params=params)
+
+        with GraphStore(tmp_path / "graph.db") as store:
+            store.store_file_nodes_edges(target, [render(1, "()")], [])
+            store.store_file_nodes_edges(caller, [
+                NodeInfo(kind="Function", name="main", file_path=caller,
+                         line_start=1, line_end=2, language="python"),
+            ], [EdgeInfo(kind="CALLS", source=f"{caller}::main",
+                         target=f"{target}::render", file_path=caller, line=2)])
+            store.refresh_target_resolution()
+            assert len(store.get_edges_by_target(f"{target}::render")) == 1
+
+            store.store_file_nodes_edges(target, [render(1, "()"), render(4, "(x)")], [])
+            store.refresh_target_resolution()
+            assert store.get_edges_by_target(f"{target}::render") == []
+            [call] = store.get_edges_by_source(f"{caller}::main")
+            assert call.target_qualified == "render"
+            assert len(call.extra["ambiguous_targets"]) == 2
+
+            store.store_file_nodes_edges(target, [render(4, "(x)")], [])
+            store.refresh_target_resolution()
+            [survivor] = store.get_nodes_by_file(target)
+            [call] = store.get_edges_by_source(f"{caller}::main")
+            assert call.target_qualified == survivor.qualified_name
+            assert "ambiguous_targets" not in call.extra
+            assert "collision_endpoint" not in call.extra
+            assert (call.confidence, call.confidence_tier) == (1.0, "EXTRACTED")
+            # Settled once; another pass changes nothing.
+            assert store._settle_collision_endpoints() == 0
+
+    def test_recursion_inside_the_first_duplicate_keeps_its_binding(self, tmp_path):
+        path = "/repo/app.py"
+        base = f"{path}::render"
+        with GraphStore(tmp_path / "graph.db") as store:
+            store.store_file_nodes_edges(path, [
+                NodeInfo(kind="Function", name="render", file_path=path,
+                         line_start=1, line_end=3, language="python"),
+                NodeInfo(kind="Function", name="render", file_path=path,
+                         line_start=5, line_end=7, language="python", params="(x)"),
+            ], [EdgeInfo(kind="CALLS", source=base, target=base, file_path=path, line=2)])
+            store.refresh_target_resolution()
+            [loop] = store.get_edges_by_target(base)
+            assert loop.source_qualified == base
+            assert "ambiguous_targets" not in loop.extra

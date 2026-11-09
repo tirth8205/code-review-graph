@@ -25,9 +25,19 @@ remove them from `.claude/settings.json` by hand (`install` writes a backup to
 `.claude/settings.json.bak` first), then run `install` again.
 
 The generated config uses two events: `PostToolUse` (runs
-`code-review-graph update --skip-flows` after Edit/Write) and `SessionStart`
+`code-review-graph hook-update` after Edit/Write) and `SessionStart`
 (runs `code-review-graph status`). Pre-commit checks live in a git hook, not in
 Claude Code settings.
+
+`hook-update` updates the graph of the repository that holds the edited file,
+not the one the session started in, so it works from a folder of sibling
+repos, an outer repo with nested ones, or a main checkout that edits a linked
+worktree. It updates that repository only if it already has a graph, or if it
+is the repository the session started in (which is built on first edit, as
+before). An edit anywhere else on disk changes no graph. A submodule with no
+graph of its own passes the edit to its superproject. Under `CRG_DATA_DIR`
+every repository points at the same database, so it counts only as the graph
+of the repository it was built for.
 
 #### The git pre-commit hook
 
@@ -241,6 +251,16 @@ doing. That is expected when a commit hook, an editor save hook and an agent
 tool hook all fire at once: one run writes, the others report the overlap and
 exit `75` (`EX_TEMPFAIL`).
 
+- `forget` and `embed` take the same lock and exit `75` the same way, but nothing
+  else does their work, so the message says so: run them again, or pass `--wait`.
+  `forget --dry-run` writes nothing and takes no lock. It reads the graph
+  read-only, so a graph from an older release needs an `update` first.
+- `watch` takes the lock for each write and lets go between them, so a running
+  watcher does not stop a build. If another writer holds the lock, the watcher
+  keeps its changes and tries again a second later, and it can still be stopped
+  while it waits. A `build` or `update` that lands in one of those writes exits
+  `75` as usual.
+
 - The message names the PID that owns the write, so a live holder is
   distinguishable from a leftover lock file. The lock is
   `<data dir>/write.lock` (by default `.code-review-graph/write.lock`), and the
@@ -258,9 +278,10 @@ exit `75` (`EX_TEMPFAIL`).
   it.
 - External writers that do not acquire this lock themselves can use
   `flock -n .code-review-graph/write.lock external-writer` to exclude CRG
-  builds while they work. Invoke `code-review-graph build`, `update` and
-  `postprocess` directly. Wrapping those commands in `flock` makes them
-  contend with the wrapper's lock and exit `75`; adding `--wait` deadlocks.
+  builds while they work. Invoke `code-review-graph build`, `update`,
+  `postprocess`, `forget` and `embed` directly. Wrapping those commands in
+  `flock` makes them contend with the wrapper's lock and exit `75`; adding
+  `--wait` deadlocks.
 - A filesystem that does not support `flock` is not reported as another writer.
   The run logs a warning and goes ahead without the lock, so overlapping runs
   are not skipped there.
@@ -333,7 +354,7 @@ and exits 1, instead of raising a SQLite traceback:
 ```
 Error: the graph database at <path> is unreadable (file is not a database). Run `code-review-graph build` to rebuild it from scratch.
 Error: <path> is a SQLite database but not a code-review-graph graph (it holds invoices). Point --data-dir somewhere else, or delete the file and run `code-review-graph build`.
-Error: the graph database at <path> was written by a newer code-review-graph (schema v99; this build understands v14). Upgrade code-review-graph, or delete the file and run `code-review-graph build`.
+Error: the graph database at <path> was written by a newer code-review-graph (schema v99; this build understands v15). Upgrade code-review-graph, or delete the file and run `code-review-graph build`.
 Error: the graph at <path> was built for a different repository root: none of its 12 file(s), such as /other/repo/lib.py, are under /this/repo. Run `code-review-graph build` here, or point --repo at the root it was built for.
 ```
 
@@ -403,8 +424,9 @@ on first use. Nothing else is needed.
 
 ## Graph seems stale
 
-- With hooks installed, `update --skip-flows` runs after each Edit/Write and
-  the pre-commit hook runs `update` before each commit, and the post-checkout,
+- With hooks installed, `hook-update` updates the edited file's repository
+  after each Edit/Write (see above for which repositories it touches), the
+  pre-commit hook runs `update` before each commit, and the post-checkout,
   post-merge and post-rewrite hooks run it after a branch switch, a merge and
   a rebase (not in linked worktrees; see above).
 - Run `code-review-graph update`, or `/code-review-graph:build-graph` in Claude
@@ -538,8 +560,10 @@ If a tool returns an ImportError, install the relevant group:
   HTTP client and need only their environment variables.
 - `pip install "code-review-graph[communities]"`: igraph-based community
   detection.
-- `pip install "code-review-graph[enrichment]"`: Python call-resolution
-  enrichment through Jedi.
+- `pip install "code-review-graph[enrichment]"`: Python call resolution
+  through Jedi. It is off until you ask for it with `build --enrich`,
+  `update --enrich` or `CRG_ENABLE_ENRICHMENT=1`, because it adds about a
+  second per Python file.
 - `pip install "code-review-graph[eval]"`: evaluation benchmarks (matplotlib,
   PyYAML).
 - `pip install "code-review-graph[wiki]"`: installs the `ollama` client. The

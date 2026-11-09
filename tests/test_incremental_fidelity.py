@@ -227,9 +227,6 @@ def test_comparator_covers_every_derived_table(tmp_path):
         "flows",
         "flow_memberships",
         "nodes_fts",
-        "community_summaries",
-        "flow_snapshots",
-        "risk_index",
         "metadata",
     ):
         assert table in diff["tables"], f"{table} is never compared"
@@ -363,14 +360,6 @@ def test_incremental_update_leaves_no_dangling_flow_memberships(tmp_path):
     assert dangling == 0
 
 
-@pytest.mark.xfail(
-    reason=(
-        "incremental_detect_communities matches nodes.file_path (absolute) "
-        "against incremental_update's changed_files (repo-relative), so it "
-        "always finds zero affected communities and skips"
-    ),
-    strict=False,
-)
 def test_reparsed_nodes_keep_a_community_assignment(tmp_path):
     import sqlite3
 
@@ -397,3 +386,41 @@ def test_reparsed_nodes_keep_a_community_assignment(tmp_path):
     f._commit_all(tree, "neutral edit")
     f._incremental_build(tree, db, base=base)
     assert uncommunitied() == before
+
+
+def test_a_file_added_by_an_update_gets_a_community(tmp_path):
+    """A new file was in no community, so nothing looked "affected" and the
+    update skipped detection, leaving the file's nodes with no community
+    until the next full build. A clean build assigns them; so must an update.
+    (#1058; review of #1122.)
+    """
+    import sqlite3
+
+    from code_review_graph.incremental import get_db_path
+    from code_review_graph.tools.build import build_or_update_graph
+
+    tree = _mock_repo(tmp_path / "repo")
+    first = build_or_update_graph(full_rebuild=True, repo_root=str(tree))
+    assert first["status"] == "ok", first
+
+    (tree / "extra.py").write_text(
+        "def first():\n    return second()\n\n\ndef second():\n    return 2\n",
+        encoding="utf-8",
+    )
+    _git(tree, "add", "-A")
+    _git(tree, "commit", "-q", "--no-verify", "-m", "add a file nothing imports")
+    update = build_or_update_graph(repo_root=str(tree))
+    assert update["status"] == "ok", update
+    assert update["build_type"] == "incremental", update
+
+    conn = sqlite3.connect(str(get_db_path(tree)))
+    try:
+        total, unassigned = conn.execute(
+            "SELECT count(*), sum(community_id IS NULL) FROM nodes "
+            "WHERE kind != 'File' AND file_path LIKE ?",
+            ("%extra.py",),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert total == 2
+    assert unassigned == 0

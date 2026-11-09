@@ -151,3 +151,63 @@ class TestExemptListEdges:
 
         result = self._analyze("uni.py", 1, 30)
         assert len(result["test_gaps"]) == 3
+
+
+class TestMigrationExemption:
+    """Migration ``up`` and ``down`` are not test gaps (#850).
+
+    The names are too common to exempt everywhere, so only a file in a
+    ``migrations`` or ``migrate`` folder inside the repository counts.
+    """
+
+    def setup_method(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmp.close()
+        self.store = GraphStore(self.tmp.name)
+
+    def teardown_method(self):
+        self.store.close()
+        Path(self.tmp.name).unlink(missing_ok=True)
+
+    def _add(self, name: str, path: str, line_start: int) -> None:
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name=name, file_path=path,
+            line_start=line_start, line_end=line_start + 4,
+            language="php", parent_name=None, is_test=False, extra={},
+        ), file_hash="abc")
+        self.store.commit()
+
+    def _gaps(self, path: str, repo_root: str | None = None) -> set[str]:
+        result = analyze_changes(
+            self.store, changed_files=[path],
+            changed_ranges={path: [(1, 30)]}, repo_root=repo_root,
+        )
+        return {g["name"] for g in result["test_gaps"]}
+
+    def test_up_and_down_in_a_laravel_migration_are_not_gaps(self):
+        path = "database/migrations/2024_01_01_000000_create_users_table.php"
+        for i, name in enumerate(["up", "down", "seedDefaults"]):
+            self._add(name, path, i * 10 + 1)
+
+        assert self._gaps(path) == {"seedDefaults"}
+
+    def test_rails_style_migrate_folder_counts_too(self):
+        path = "db/migrate/20240101000000_create_users.rb"
+        self._add("up", path, 1)
+        self._add("down", path, 11)
+
+        assert self._gaps(path) == set()
+
+    def test_up_and_down_outside_a_migration_folder_are_gaps(self):
+        path = "app/Services/Elevator.php"
+        self._add("up", path, 1)
+        self._add("down", path, 11)
+
+        assert self._gaps(path) == {"up", "down"}
+
+    def test_a_folder_above_the_repository_does_not_count(self, tmp_path):
+        root = tmp_path / "migrations" / "repo"
+        path = str(root / "app" / "Elevator.php")
+        self._add("up", path, 1)
+
+        assert self._gaps(path, repo_root=str(root)) == {"up"}

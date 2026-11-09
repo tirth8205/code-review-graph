@@ -97,6 +97,55 @@ Build the code review graph for this project
 빌드 시간은 저장소 크기에 비례합니다. 파일이 약 3,000개인 저장소의 콜드 빌드는 약 40초가 걸렸습니다([측정값](docs/REPRODUCING.md#incremental-update-latency)). 그 뒤로는 훅과 watch 모드가 그래프를 최신으로 유지합니다. 일부 파일의 파싱이 실패하면 결과 상태가 `partial`이 되고 요약에 해당 파일이 나열됩니다. CLI는 stderr에 `Warning:` 줄도 출력하며, 그 파일들은 기존 그래프 행을 유지합니다.
 
 
+### Docker 또는 Podman으로 실행하기
+
+프로젝트 저장소의 루트 디렉터리에서 이미지를 빌드합니다.
+
+```bash
+docker build -t code-review-graph:local .
+```
+
+분석할 저장소의 디렉터리에서 다음 명령을 실행합니다.
+
+```bash
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --env HOME=/tmp \
+  --volume "$PWD:/workspace" \
+  code-review-graph:local build
+```
+
+마운트한 저장소에는 쓰기 권한이 있어야 합니다.
+위 명령은 현재 사용자의 사용자 ID와 그룹 ID를 사용하므로,
+생성된 `.code-review-graph/` 디렉터리의 소유권이 현재 사용자에게 유지됩니다.
+호스트에서 root가 아닌 사용자로 이 명령들을 실행하세요.
+
+Podman에서는 같은 Dockerfile을 빌드하고 사용자 매핑을 유지합니다.
+
+```bash
+podman build -t code-review-graph:local .
+podman run --rm \
+  --userns=keep-id \
+  --env HOME=/tmp \
+  --volume "$PWD:/workspace" \
+  code-review-graph:local build
+```
+
+그래프는 마운트한 저장소의 `.code-review-graph/`에 저장되며,
+`/workspace/app.py`와 같은 컨테이너 내부의 절대 경로를 기록합니다.
+`update`와 `detect-changes`는 동일한 `/workspace` 마운트를 사용하여 Docker 또는 Podman으로 실행하세요.
+이 그래프에 대해 호스트에서 `update`를 실행하면 "built with a different repository root"
+오류가 발생할 수 있습니다. 호스트 명령으로 전환하려면 호스트에서
+`code-review-graph build`를 실행하여 호스트 경로로 그래프를 다시 빌드하세요.
+
+저장된 그래프를 확인하려면 `build`를 `status`로 바꾸세요.
+이미지에는 Git이 포함되어 있으며, 기본적으로 root가 아닌 사용자로 실행됩니다.
+이미지를 빌드하는 동안에는 그래프를 생성하지 않습니다.
+
+이 예제들은 macOS/Linux 셸 문법을 사용합니다.
+macOS에서는 실행하기 전에 Docker 호환 엔진 또는 Podman 가상 머신을 시작하세요.
+Fedora처럼 SELinux가 켜진 호스트에서는 마운트에 `:z`를 추가하세요(`"$PWD:/workspace:z"`). 그렇지 않으면 컨테이너가 저장소에 접근할 수 없습니다.
+
 ## 동작 방식
 
 <p align="center">
@@ -358,6 +407,7 @@ code-review-graph detect-changes --brief         # Risk panel + token savings (r
 code-review-graph detect-changes --brief --base main  # Against the merge base of main and HEAD
 code-review-graph update --brief                 # Refresh graph + same panel
 code-review-graph detect-changes --brief --verify  # Cross-check against tiktoken
+code-review-graph context-history  # Trend of the opt-in savings log (CRG_CONTEXT_HISTORY=1)
 code-review-graph register <path>  # Register repo in the multi-repo registry
 code-review-graph unregister <path|alias>  # Remove repo from the registry
 code-review-graph repos            # List registered repositories
@@ -367,6 +417,7 @@ code-review-graph daemon status    # Daemon status and repos
 code-review-graph eval             # Run evaluation benchmarks
 code-review-graph serve            # Start the MCP server (stdio)
 code-review-graph serve --http     # MCP over Streamable HTTP on localhost:5555
+code-review-graph serve --http --multi-repo  # One HTTP server for every registered repo
 ```
 
 이것은 일부만 고른 목록입니다. `code-review-graph --help`가 모든 명령을 보여 주고, [docs/COMMANDS.md](docs/COMMANDS.md)가 각 플래그를 설명합니다.
@@ -402,6 +453,8 @@ JSON 내보내기는 로컬 그래프 데이터 디렉터리에 기록되며, �
 두 명령 중 아무 쪽에나 `--verify`를 붙이면 숫자를 OpenAI의 `cl100k_base` 토크나이저와 비교합니다(`pip install tiktoken` 필요). 합산 기준 추정값은 실제 토큰과 약 1% 이내로 일치합니다. [`docs/REPRODUCING.md`](docs/REPRODUCING.md#calibration-table)를 보세요.
 
 같은 `context_savings` 메타데이터가 `get_impact_radius`, `get_review_context`, `detect_changes`, `get_architecture_overview` MCP 도구의 JSON 응답에도 붙습니다.
+
+이 추정치를 시간에 따라 보려면 `CRG_CONTEXT_HISTORY=1`을 설정하세요(기본값은 꺼짐). 추정치마다 `graph.db` 옆의 로컬 로그에 한 줄이 추가되며, 토큰 수와 도구 이름만 담깁니다. `code-review-graph context-history`가 날짜별 또는 도구별로 보여 줍니다. [docs/USAGE.md](docs/USAGE.md#context-history)를 참고하세요.
 
 </details>
 
@@ -510,7 +563,7 @@ git 저장소에서는 추적되는 파일만 색인하므로(`git ls-files`) gi
 pip install "code-review-graph[embeddings]"          # Local vector embeddings (sentence-transformers)
 pip install "code-review-graph[google-embeddings]"   # Google Gemini embeddings
 pip install "code-review-graph[communities]"         # Community detection (igraph)
-pip install "code-review-graph[enrichment]"          # Python call-resolution enrichment (Jedi)
+pip install "code-review-graph[enrichment]"          # Python call resolution with Jedi (then build --enrich)
 pip install "code-review-graph[eval]"                # Evaluation benchmarks and SVG export (matplotlib)
 pip install "code-review-graph[wiki]"                # ollama client (not used by the current wiki generator)
 pip install "code-review-graph[all]"                 # All optional dependencies
@@ -532,13 +585,17 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_MAX_IMPACT_DEPTH` | 영향 범위 분석의 탐색 깊이 | `2` |
 | `CRG_MAX_BFS_DEPTH` | 그래프 순회의 최대 깊이 | `15` |
 | `CRG_MAX_CHANGED_FUNCS` | 변경 보고 하나에서 분석하는 변경 함수의 최대 수 | `500` |
+| `CRG_MAX_DELETION_FILES` | diff가 삭제한 함수와 클래스를 알려 주려고 변경 보고 하나에서 이전 버전을 읽는 파일의 최대 수 | `100` |
 | `CRG_MAX_TRANSITIVE_FRONTIER` | 전이적 호출자/피호출자 확장의 최대 프런티어 크기 | `50` |
 | `CRG_CALLER_TEST_ROUTE_DEPTH` | 테스트가 없는 변경 심벌에 대해 테스트된 호출자를 찾으며 들어오는 `CALLS`를 거슬러 올라갈 홉 수. 커버리지가 아니라 참고 정보로 보고됩니다 | `2` |
 | `CRG_CALLER_TEST_ROUTE_MAX_CALLERS` | 그 테스트된 호출자를 찾는 동안 검사할 최대 호출자 수 | `500` |
 | `CRG_TOOL_TIMEOUT` | 읽기 전용 MCP 도구의 제한 시간(초. `0`이면 해제). 쓰기 작업(build / postprocess / embed / wiki / apply-refactor)에는 적용되지 않음 | `0` |
 | `CRG_CHURN_WINDOW_DAYS` | `detect-changes --churn`의 커밋 수를 세는 기간 | `90` |
+| `CRG_CONTEXT_HISTORY` | `1`로 설정하면 각 `context_savings` 추정치를 로컬 로그 `.code-review-graph/context-history.jsonl`에 기록합니다. `code-review-graph context-history`로 확인합니다. 토큰 수와 도구 이름만 남기며 외부로 보내지 않습니다 | - |
 | `CRG_LEIDEN_SEED` | Leiden 커뮤니티 탐지의 시드 | `42` |
 | `CRG_RECURSE_SUBMODULES` | `1`, `true`, `yes`일 때 git 서브모듈 포함 | - |
+| `CRG_FOLLOW_SYMLINKS` | `1`, `true`, `yes`, `on`일 때 심볼릭 링크 폴더(저장소 안팎)를 따라감. `--follow-symlinks`와 같음. [심볼릭 링크 폴더](docs/USAGE.md#symlinked-folders) 참고 | - |
+| `CRG_MAX_FOLLOWED_FILES` | 심볼릭 링크 폴더로 가져오는 파일의 최대 수 | `10000` |
 | `CRG_TOOLS` | 서버로 띄울 때 노출할 MCP 도구의 쉼표 구분 허용 목록 | - |
 | `GOOGLE_API_KEY` | Google Gemini 임베딩의 API 키 | - |
 | `MINIMAX_API_KEY` | MiniMax 임베딩의 API 키 | - |
@@ -556,6 +613,8 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_OPENAI_BATCH_SIZE` | OpenAI 호환 요청의 배치 크기 | `100` |
 | `NO_COLOR` | 터미널의 ANSI 색 끄기 | - |
 | `CRG_SERIAL_PARSE` | `1`로 두면 병렬 파싱 끄기(디버깅용) | - |
+| `CRG_ENABLE_ENRICHMENT` | `1`로 두면 build와 update마다 Jedi로 Python 메서드 호출 해석(`enrichment` 추가 기능 필요, Python 파일당 약 1초 추가). `build --enrich`와 같음 | 꺼짐 |
+| `CRG_DISABLE_ENRICHMENT` | `1`로 두면 요청이 있어도 Jedi를 실행하지 않음 | - |
 
 OpenAI 호환 임베딩(OpenAI, Azure 또는 new-api, LiteLLM, vLLM, LocalAI, OpenAI 모드의 Ollama 같은 자체 게이트웨이)에는 추가 설치가 필요 없습니다. 변수를 설정하고 `embed_graph`에 `provider="openai"`를 넘기세요.
 

@@ -27,7 +27,9 @@ _MAX_GAPS_PER_CATEGORY = 50
 _MINIMAL_HUB_FIELDS = ("name", "kind", "total_degree")
 _MINIMAL_BRIDGE_FIELDS = ("name", "kind", "betweenness")
 _MINIMAL_SURPRISE_FIELDS = ("source", "target", "edge_kind", "surprise_score")
-_MINIMAL_GAP_FIELDS = ("name", "qualified_name", "community_id", "size", "degree")
+_MINIMAL_GAP_FIELDS = (
+    "name", "qualified_name", "community_id", "size", "degree", "load_time",
+)
 
 
 def _project(rows: list[dict[str, Any]], fields: tuple[str, ...]) -> list[dict[str, Any]]:
@@ -144,7 +146,8 @@ def get_knowledge_gaps_func(
 
     Finds: isolated nodes (disconnected), thin communities
     (< 3 members), untested hotspots (high-degree, no tests),
-    and single-file communities.
+    single-file communities, and import cycles (files that
+    import each other).
 
     Args:
         repo_root: Repository root (auto-detected if omitted).
@@ -160,9 +163,9 @@ def get_knowledge_gaps_func(
     """
     _validate_positive_int(max_per_category, "max_per_category")
 
-    store, _root = _get_store(repo_root or None)
+    store, root = _get_store(repo_root or None)
     try:
-        raw = find_knowledge_gaps(store)
+        raw = find_knowledge_gaps(store, repo_root=root)
         # Totals must come from the untruncated lists: the summary counts are
         # the whole point of the tool, and capping them would hide the gap.
         totals = {category: len(rows) for category, rows in raw.items()}

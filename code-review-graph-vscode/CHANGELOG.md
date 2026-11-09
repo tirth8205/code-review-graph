@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- Accepts Python backend schema v15. The extension read none of the tables and
+  indexes that v15 drops.
+
 ## 0.3.0 - 2026-09-18
 
 ### Changed
