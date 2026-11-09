@@ -2129,6 +2129,14 @@ def find_dead_code(
         if node.extra.get("verilog_kind"):
             continue
 
+        # The XSLT processor picks a template with a match from the input
+        # document, named or not, so nothing calling it says nothing about
+        # whether it runs.
+        if node.extra.get("xslt_kind") in ("match_template", "named_template") and (
+            node.extra.get("match")
+        ):
+            continue
+
         # A TS abstract signature is a contract with no body, reached through
         # its implementations, so it cannot be dead on its own (like Python's
         # @abstractmethod, handled below).

@@ -151,8 +151,8 @@ node type tables (`_CLASS_TYPES`, `_FUNCTION_TYPES` and similar in `parser.py`) 
 3. Import resolution to module paths, refined later by the post-build resolvers.
 
 Languages without a grammar can be added through `.code-review-graph/languages.toml`
-(`docs/CUSTOM_LANGUAGES.md`). Some formats (notebooks, Vue and Svelte SFCs, HTML pages, SQL, Ansible,
-Spring configuration) use targeted parsers instead of Tree-sitter.
+(`docs/CUSTOM_LANGUAGES.md`). Some formats (notebooks, Vue and Svelte SFCs, HTML pages, XSLT, SQL,
+Ansible, Spring configuration) use targeted parsers instead of Tree-sitter.
 
 ## Visualisation
 

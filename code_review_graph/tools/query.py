@@ -649,7 +649,10 @@ def query_graph(
         if pattern != "file_summary" and not raw_config_target:
             node = store.get_node(target)
             if not node:
-                abs_target = normalize_file_path(root / target)
+                # Only the path part is a path: the symbol in ``a.xsl::match=/``
+                # must keep the slash that normalising would strip.
+                target_path, separator, symbol = target.partition("::")
+                abs_target = f"{normalize_file_path(root / target_path)}{separator}{symbol}"
                 node = store.get_node(abs_target)
             if not node:
                 exact_candidates: list[GraphNode] = []
