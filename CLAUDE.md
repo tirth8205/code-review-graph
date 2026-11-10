@@ -89,7 +89,7 @@ uv run code-review-graph --help             # full command list
 - Languages: `test_multilang.py`, `test_custom_languages.py`, `test_notebook.py`, plus per-language files such as `test_php_*.py`, `test_spring_*.py`, `test_kotlin_imports.py`, `test_go_embeddings.py`, `test_cpp_*.py`, `test_typescript_node_extensions.py`, `test_tsconfig_resolver.py`, `test_workspace_resolver.py`, `test_hcl_parser.py`, `test_dbt_parser.py`, `test_ansible_parser.py`.
 - Regression modules are named after the behaviour they pin, not the PR that produced them. The originating PR number goes in the module docstring.
 - Watch and daemon: `test_watch_*.py`, `test_daemon*.py`.
-- Install and platforms: `test_skills.py`, `test_cli_install.py`, `test_uninstall.py`, `test_git_hook_worktree.py`, `test_hermes_install.py`, `test_qoder_bundled_skills.py`, `test_installer_ownership.py` (what install may rewrite and what belongs to the user), `test_install_gitignore_block.py` (the opt-in `--gitignore` block), `test_released_shapes.py` (reads the hooks and MCP entries every released tag wrote and requires them to still be recognised; needs tags, skips without them), `test_platform_lifecycle.py` (opt-in marker `platform_lifecycle`).
+- Install and platforms: `test_skills.py`, `test_cli_install.py`, `test_uninstall.py`, `test_git_hook_worktree.py`, `test_hermes_install.py`, `test_qoder_bundled_skills.py`, `test_installer_ownership.py` (what install may rewrite and what belongs to the user), `test_install_gitignore_block.py` (the opt-in `--gitignore` block), `test_install_outputs_are_ignored.py` (what install writes in this checkout is tracked or in the root `.gitignore`), `test_released_shapes.py` (reads the hooks and MCP entries every released tag wrote and requires them to still be recognised; needs tags, skips without them), `test_platform_lifecycle.py` (opt-in marker `platform_lifecycle`).
 - Windows: `test_windows_compat.py`, `test_windows_path_identity.py`.
 - Docs and GitHub Action: `test_documentation.py`, `test_action_render.py`.
 - Distribution gate: `test_packaging.py`, marked `packaging` and **skipped by default**. Builds a wheel and an sdist with `python -m build`, installs each into its own virtual environment, and drives the installed program with the checkout out of reach. Needs network and takes a couple of minutes. Run it before a release with `uv run --python 3.13 python -m pytest tests/test_packaging.py -m packaging`.
@@ -108,26 +108,6 @@ uv run code-review-graph --help             # full command list
 - google-embeddings: constructs the Google provider with the `google-embeddings` and `all` extras.
 - windows-native: a subset of the suite on windows-latest.
 
-<!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:ca08a54f -->
-## Beads Issue Tracker
-
-This project uses **bd (beads)** for issue tracking. Run `bd prime` to see full workflow context and commands.
-
-### Quick Reference
-
-```bash
-bd ready              # Find available work
-bd show <id>          # View issue details
-bd update <id> --claim  # Claim work
-bd close <id>         # Complete work
-```
-
-### Rules
-
-- Use `bd` for ALL task tracking — do NOT use TodoWrite, TaskCreate, or markdown TODO lists
-- Run `bd prime` for detailed command reference and session close protocol
-- Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
-
 ## Branching Model
 
 Three long-lived branches, one direction: feature PR → `staging` (default) → `testing` → `main` → tag → PyPI.
@@ -139,34 +119,6 @@ receive promotion PRs, always merged with a merge commit.
 `tests/test_promotion_is_manual.py` enforces that. Full rules in CONTRIBUTING.md "Branching and
 promotion".
 
-## Session Completion
-
-**When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
-
-**MANDATORY WORKFLOW:**
-
-1. **File issues for remaining work** - Create issues for anything that needs follow-up
-2. **Run quality gates** (if code changed) - Tests, linters, builds
-3. **Update issue status** - Close finished work, update in-progress items
-4. **PUSH TO REMOTE** - This is MANDATORY:
-   ```bash
-   git pull --rebase
-   bd dolt push
-   git push
-   git status  # MUST show "up to date with origin"
-   ```
-5. **Clean up** - Clear stashes, prune remote branches
-6. **Verify** - All changes committed AND pushed
-7. **Hand off** - Provide context for next session
-
-**CRITICAL RULES:**
-- Work is NOT complete until `git push` succeeds
-- NEVER stop before pushing - that leaves work stranded locally
-- NEVER say "ready to push when you are" - YOU must push
-- If push fails, resolve and retry until it succeeds
-<!-- END BEADS INTEGRATION -->
-
-<!-- code-review-graph MCP tools -->
 ## MCP Tools: code-review-graph
 
 **This project has a knowledge graph. Start with the code-review-graph

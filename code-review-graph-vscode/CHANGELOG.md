@@ -1,10 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 - 2026-11-10
 
 ### Changed
-- Accepts Python backend schema v15. The extension read none of the tables and
-  indexes that v15 drops.
+- Accepts Python backend schema v15, shipped by code-review-graph 2.4.0. The
+  extension read none of the tables and indexes that v15 drops. 0.3.0 accepts
+  v13 and answers a v15 database with "Database was created with a newer
+  version". code-review-graph 2.4.0 moves the graph to v15 the first time any
+  command opens it, so install this build alongside it.
 
 ### Fixed
 - The `codeReviewGraph.cliPath` setting no longer talks about a bundled

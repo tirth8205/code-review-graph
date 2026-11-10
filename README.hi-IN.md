@@ -236,7 +236,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: tirth8205/code-review-graph@v2.3.9
+      - uses: tirth8205/code-review-graph@v2.4.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 ```
@@ -603,6 +603,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_MAX_BFS_DEPTH` | ग्राफ़ ट्रैवर्सल की अधिकतम गहराई | `15` |
 | `CRG_MAX_CHANGED_FUNCS` | एक बदलाव रिपोर्ट में विश्लेषित अधिकतम बदले हुए फ़ंक्शन | `500` |
 | `CRG_MAX_DELETION_FILES` | diff से हटाए गए फ़ंक्शन और क्लास बताने के लिए एक बदलाव रिपोर्ट में पुराना संस्करण पढ़ी जाने वाली अधिकतम फ़ाइलें | `100` |
+| `CRG_MAX_CHANGED_YAML_PATHS` | एक बदलाव रिपोर्ट में विश्लेषित अधिकतम बदले हुए YAML पाथ; JSON पाथ पर भी अलग से यही सीमा लागू होती है | `200` |
 | `CRG_MAX_TRANSITIVE_FRONTIER` | जब `tests_for` और `detect-changes` टेस्ट खोजते हैं, तब हर हॉप पर अधिकतम कितने कॉली देखे जाएँ। नाम के क्रम में पहले वाले रखे जाते हैं, इसलिए एक ग्राफ़ हमेशा एक ही उत्तर देता है | `50` |
 | `CRG_CALLER_TEST_ROUTE_DEPTH` | बिना टेस्ट वाले बदले हुए सिंबल का टेस्ट किया गया कॉलर खोजते समय आने वाले `CALLS` पर ऊपर की ओर कितने हॉप चलें। यह केवल सूचना है, कवरेज नहीं | `2` |
 | `CRG_CALLER_TEST_ROUTE_MAX_CALLERS` | उस टेस्ट किए गए कॉलर की खोज में अधिकतम कितने कॉलर देखे जाएँ | `500` |

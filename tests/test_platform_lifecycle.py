@@ -1281,8 +1281,8 @@ def test_platform_list_does_not_drift() -> None:
     cli_surface = _cli_platform_keys()
     expected = set(EXPECTATIONS)
 
-    assert len(installer) == 17, (
-        f"the installer now supports {len(installer)} platforms, not 17: "
+    assert len(installer) == 18, (
+        f"the installer now supports {len(installer)} platforms, not 18: "
         f"{sorted(installer)}"
     )
 

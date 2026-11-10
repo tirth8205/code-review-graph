@@ -45,7 +45,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: tirth8205/code-review-graph@v2.3.9
+      - uses: tirth8205/code-review-graph@v2.4.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 ```
@@ -59,7 +59,7 @@ which run on Node 24. Self-hosted runners must be version `2.327.1` or newer.
 To turn the review into a merge gate:
 
 ```yaml
-      - uses: tirth8205/code-review-graph@v2.3.9
+      - uses: tirth8205/code-review-graph@v2.4.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           fail-on-risk: high
@@ -126,7 +126,7 @@ The `details` input adds more of what the graph knows, under one folded
 `Graph context` heading after the report:
 
 ```yaml
-      - uses: tirth8205/code-review-graph@v2.3.9
+      - uses: tirth8205/code-review-graph@v2.4.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           details: all          # or e.g. "risk,hubs,graph"

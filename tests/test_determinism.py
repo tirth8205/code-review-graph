@@ -234,6 +234,14 @@ class BuildFarm:
             f"stderr:\n{completed.stderr[-4000:]}"
         )
         stats = json.loads(completed.stdout.strip().splitlines()[-1])
+        if order != "asis":
+            # Without this a refactor that moves the build off the patched
+            # inventory function turns every order test into a comparison of
+            # two identical builds: they pass, and a strict xfail flips.
+            assert stats["reordered_calls"] > 0, (
+                f"build {label!r} asked for order {order!r}, but the build "
+                "never read the patched inventory, so it was not reordered"
+            )
         built = BuiltGraph(label=label, db=out_db, root=repo_root, stats=stats)
         self.builds[label] = built
         return built

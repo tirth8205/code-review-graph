@@ -244,14 +244,15 @@ def test_changelog_credits_version_aware_template_only_to_releases_that_ship_it(
     """A released section must not claim a fix its tag does not contain.
 
     v2.3.9 shipped the V1 ``app.on`` template (#1114 reports it failing on
-    2.3.9), so the OpenCode 2.x entry belongs under ``[Unreleased]``.
+    2.3.9), so the OpenCode 2.x entry belongs under ``[2.4.0]``, the first
+    release that ships it.
     """
     if shutil.which("git") is None:
         pytest.skip("git is not available")
     changelog = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     sections = _changelog_sections(changelog)
     marker = "OpenCode installer now detects the installed OpenCode major version"
-    assert marker in sections["Unreleased"]
+    assert marker in sections["2.4.0"]
     for version, body in sections.items():
         if version == "Unreleased" or marker not in body:
             continue
