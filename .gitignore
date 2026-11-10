@@ -90,3 +90,6 @@ scratch/
 # Local tool configuration
 .codex/
 .serena/
+
+# Maintainer-only local agent rules
+CLAUDE.local.md
