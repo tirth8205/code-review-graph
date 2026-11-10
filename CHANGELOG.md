@@ -311,6 +311,11 @@ this section before you upgrade.
     the newest Python installed. Python 3.14 parses the long expression the
     test used to break `ast.parse`, so the test now forces the failure on any
     Python that accepts it. The rest of the suite already passed on 3.14.
+- The release gate's corpus check expects this release's numbers. Its recorded
+  baselines dated from before the new YAML, JSON, HTML and Liquid support, Ruby
+  and Java test finding, and the C# and nested-scope identity changes, so 3 of
+  its 8 repositories reported moves that were on purpose. The time budgets are
+  unchanged.
 - The docs match the code again. `docs/`, the reference `get_docs_section_tool`
   serves, `CONTRIBUTING.md`, `SECURITY.md`, `AGENTS.md`, the Copilot
   instructions, two skills and the VS Code README now cover what the last two
