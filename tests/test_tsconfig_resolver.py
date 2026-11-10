@@ -383,6 +383,41 @@ class TestExtendsAnchoringEdgeCases:
         assert result is not None
         assert Path(result) == target.resolve()
 
+    @pytest.mark.parametrize("extends", [
+        "../../tsconfig.base",
+        "../../tsconfig.base.json",
+        "../../tsconfig.base/",
+    ])
+    def test_suffix_less_extends_with_a_dotted_stem_appends_json(
+        self, tmp_path, extends,
+    ):
+        # tsc tries the path as written, then with ".json" appended, so
+        # "tsconfig.base" finds tsconfig.base.json even though it has a suffix.
+        target = _write_source(tmp_path / "libs" / "shared" / "src" / "index.ts")
+        _write_json(tmp_path / "tsconfig.base.json", {
+            "compilerOptions": {"baseUrl": ".", "paths": _SHARED_ALIAS},
+        })
+        _write_json(tmp_path / "apps" / "api" / "tsconfig.json", {"extends": extends})
+        importer = _write_source(tmp_path / "apps" / "api" / "src" / "main.ts")
+
+        result = TsconfigResolver().resolve_alias("@acme/shared", str(importer))
+        assert result is not None
+        assert Path(result) == target.resolve()
+
+    def test_suffix_less_extends_prefers_the_file_as_written(self, tmp_path):
+        # A config file without an extension wins over the ".json" one, as in tsc.
+        target = _write_source(tmp_path / "libs" / "shared" / "src" / "index.ts")
+        _write_json(tmp_path / "base", {
+            "compilerOptions": {"baseUrl": ".", "paths": _SHARED_ALIAS},
+        })
+        _write_json(tmp_path / "base.json", {"compilerOptions": {"strict": True}})
+        _write_json(tmp_path / "apps" / "api" / "tsconfig.json", {"extends": "../../base"})
+        importer = _write_source(tmp_path / "apps" / "api" / "src" / "main.ts")
+
+        result = TsconfigResolver().resolve_alias("@acme/shared", str(importer))
+        assert result is not None
+        assert Path(result) == target.resolve()
+
     def test_paths_without_base_url_anchor_at_the_middle_config_declaring_them(
         self, tmp_path,
     ):
