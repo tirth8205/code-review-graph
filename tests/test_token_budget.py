@@ -25,6 +25,9 @@ How the numbers are produced
   payload shape (measured: 206,858 tiktoken vs 203,131 len/4 on the same
   812KB response), and every ceiling below carries far more headroom than
   that, so the assertions hold under either counter.
+* Before counting, the fixture repo's absolute path is swapped for the one
+  the Linux CI runner gives it (``_ROOT_STAND_IN``), so a long temp folder
+  does not change the count.
 
 Reading the budget table
 ------------------------
@@ -171,13 +174,47 @@ def _serialize(value: Any) -> str:
         return json.dumps(value, default=str, separators=(",", ":"))
 
 
-def count_tokens(value: Any) -> int:
+# Most answers carry absolute file paths, so where pytest puts the fixture
+# repo changes what a tool seems to cost: the default macOS temp folder under
+# /var/folders, or a long --basetemp, adds hundreds of tokens and fails budgets
+# that hold on CI. So every answer is measured as if the repo lived at the
+# path the Linux CI runner gives it. CI measures exactly what it always did,
+# and every other machine measures the same thing.
+_ROOT_STAND_IN = "/tmp/pytest-of-runner/pytest-0/token-budget-repo0"
+
+
+def _root_spellings(root: str) -> list[str]:
+    """Every way ``root`` can appear in serialized JSON, longest first.
+
+    Longest first, so the resolved ``/private/var/...`` form on macOS is
+    replaced whole rather than leaving ``/private`` in front of the shorter
+    ``/var/...`` form.
+    """
+    path = Path(root)
+    forms = {root, str(path.resolve()), path.as_posix(), path.resolve().as_posix()}
+    # JSON escapes a path the same way it escapes any string: on Windows,
+    # every backslash is doubled.
+    encoded = {json.dumps(form, ensure_ascii=False)[1:-1] for form in forms}
+    return sorted(encoded, key=len, reverse=True)
+
+
+def _measured_text(value: Any, root: str) -> str:
+    """The serialized response with the fixture root put at the stand-in.
+
+    One pass, so a spelling can never match inside a stand-in it just wrote.
+    """
+    pattern = "|".join(re.escape(spelling) for spelling in _root_spellings(root))
+    return re.sub(pattern, lambda _match: _ROOT_STAND_IN, _serialize(value))
+
+
+def count_tokens(value: Any, root: str) -> int:
     """Token cost of a serialized tool response.
 
     Uses tiktoken cl100k_base when available, otherwise the documented
     ``len / 4`` estimate. See the module docstring for why both are safe.
+    ``root`` is the fixture repo; see ``_ROOT_STAND_IN``.
     """
-    text = _serialize(value)
+    text = _measured_text(value, root)
     if _ENCODING is not None:
         return len(_ENCODING.encode(text, disallowed_special=()))
     return len(text) // 4
@@ -665,12 +702,44 @@ def test_budget_table_covers_every_registered_tool():
     )
 
 
+@pytest.mark.parametrize("root", [
+    "/tmp/r",
+    # The macOS default temp folder, then a long --basetemp on top of it.
+    "/private/var/folders/8s/_43pf1p154g3q5qr_16lsrx40000gn/T/pytest-of-someone/"
+    "pytest-123/token-budget-repo0",
+    "/private/var/folders/8s/T/" + "very-long-basetemp-" * 10 + "/token-budget-repo0",
+    # A Windows path, which JSON writes with every backslash doubled.
+    "C:\\Users\\runneradmin\\AppData\\Local\\Temp\\pytest-0\\token-budget-repo0",
+])
+def test_measure_does_not_depend_on_where_the_repo_lives(root):
+    """The temp folder's path is the machine's cost, not the tool's.
+
+    Most answers carry absolute file paths, so before this the budgets held
+    on CI and failed under the default macOS temp folder or a long
+    ``--basetemp``.
+    """
+    sep = "\\" if "\\" in root else "/"
+
+    def answer(at: str) -> dict[str, Any]:
+        return {
+            "root": at,
+            "results": [{"file_path": f"{at}{sep}pkg0{sep}mod{i}.py"} for i in range(50)],
+        }
+
+    assert _measured_text(answer(root), root) == _measured_text(
+        answer(_ROOT_STAND_IN), _ROOT_STAND_IN,
+    )
+    assert count_tokens(answer(root), root) == count_tokens(
+        answer(_ROOT_STAND_IN), _ROOT_STAND_IN,
+    )
+
+
 @pytest.mark.parametrize("name", sorted(BUDGETS))
 def test_default_args_stay_in_budget(name, repo):
     """A tool called the way an agent calls it must be cheap."""
     spec = BUDGETS[name]
     result = _call(name, spec, spec["default"], repo)
-    tokens = count_tokens(result)
+    tokens = count_tokens(result, repo["root"])
     assert tokens <= spec["default_max"], (
         f"{name} returned {tokens} tokens with default arguments, over its "
         f"{spec['default_max']} budget. A result cap was probably removed or "
@@ -683,7 +752,7 @@ def test_worst_case_args_stay_in_budget(name, repo):
     """Maxing every verbosity knob must still hit a hard ceiling."""
     spec = BUDGETS[name]
     result = _call(name, spec, spec["worst"], repo)
-    tokens = count_tokens(result)
+    tokens = count_tokens(result, repo["root"])
     assert tokens <= spec["worst_max"], (
         f"{name} returned {tokens} tokens with maxed arguments, over its "
         f"{spec['worst_max']} ceiling. The hard cap was probably raised or "
@@ -1097,7 +1166,7 @@ class TestTruncationContract:
             repo_root=repo["root"], min_lines=1, limit=HUGE,
             detail_level="minimal",
         )
-        assert count_tokens(minimal) < count_tokens(standard)
+        assert count_tokens(minimal, repo["root"]) < count_tokens(standard, repo["root"])
         assert minimal["total"] == standard["total"]
         assert len(minimal["results"]) == query._MAX_LARGE_FUNCTIONS_MINIMAL
         assert set(minimal["results"][0]) <= {

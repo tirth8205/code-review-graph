@@ -297,6 +297,20 @@ this section before you upgrade.
 
 ### Fixed
 
+- A fresh clone, set up as CONTRIBUTING.md says, now passes and stays clean:
+  - Installing for any platform inside this checkout no longer leaves untracked
+    files. The root `.gitignore` now lists what Cursor, Windsurf, Gemini CLI,
+    Kiro, MiMo, OpenCode, CodeBuddy and Copilot write there, and
+    `tests/test_install_outputs_are_ignored.py` fails if a platform starts
+    writing a new path.
+  - `tests/test_token_budget.py` no longer fails when the temp folder has a
+    long path (the macOS default, or a long `--basetemp`). Answers hold
+    absolute paths, so each one is now measured as if the test repo lived at
+    the path CI gives it. No budget changed.
+  - One parser test failed on Python 3.14, which `uv sync` picks when it is
+    the newest Python installed. Python 3.14 parses the long expression the
+    test used to break `ast.parse`, so the test now forces the failure on any
+    Python that accepts it. The rest of the suite already passed on 3.14.
 - The docs match the code again. `docs/`, the reference `get_docs_section_tool`
   serves, `CONTRIBUTING.md`, `SECURITY.md`, `AGENTS.md`, the Copilot
   instructions, two skills and the VS Code README now cover what the last two
