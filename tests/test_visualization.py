@@ -873,6 +873,61 @@ def test_file_mode_aggregation(large_store, tmp_path):
     assert agg["mode"] == "file"
 
 
+class _CountingList(list):
+    """A list that counts how many times it is walked."""
+
+    def __init__(self, items):
+        super().__init__(items)
+        self.walks = 0
+
+    def __iter__(self):
+        self.walks += 1
+        return super().__iter__()
+
+
+def _file_mode_node(qn, kind, fp, cid):
+    return {
+        "qualified_name": qn, "kind": kind, "file_path": fp,
+        "language": "python", "community_id": cid,
+    }
+
+
+def test_file_mode_keeps_the_first_community_found_in_each_file():
+    """Each file takes the community of its first node that has one."""
+    from code_review_graph.visualization import _aggregate_file
+
+    nodes = [
+        _file_mode_node("a.py", "File", "a.py", None),
+        _file_mode_node("a.py::f1", "Function", "a.py", None),
+        _file_mode_node("a.py::f2", "Function", "a.py", 7),
+        _file_mode_node("a.py::f3", "Function", "a.py", 3),
+        _file_mode_node("b.py", "File", "b.py", 5),
+        _file_mode_node("b.py::g", "Function", "b.py", 2),
+        _file_mode_node("c.py::h", "Function", "c.py", None),
+        _file_mode_node("d.py::k", "Function", "d.py", 0),
+    ]
+    agg = _aggregate_file({"nodes": nodes, "edges": [], "stats": {}})
+    by_file = {n["qualified_name"]: n for n in agg["nodes"]}
+    assert {fp: n["community_id"] for fp, n in by_file.items()} == {
+        "a.py": 7, "b.py": 5, "c.py": None, "d.py": 0,
+    }
+    assert {fp: n["symbol_count"] for fp, n in by_file.items()} == {
+        "a.py": 3, "b.py": 1, "c.py": 1, "d.py": 1,
+    }
+
+
+def test_file_mode_walks_the_nodes_once():
+    """Finding each file's community once scanned every node per file."""
+    from code_review_graph.visualization import _aggregate_file
+
+    nodes = _CountingList(
+        _file_mode_node(f"m{i}.py::f", "Function", f"m{i}.py", i) for i in range(200)
+    )
+    agg = _aggregate_file({"nodes": nodes, "edges": [], "stats": {}})
+    assert len(agg["nodes"]) == 200
+    assert nodes.walks == 1
+
+
 def test_auto_mode_switches_at_threshold(large_store, tmp_path):
     """Auto mode should switch to community when nodes exceed threshold."""
     from code_review_graph.visualization import generate_html

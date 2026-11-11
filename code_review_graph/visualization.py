@@ -26,7 +26,7 @@ from collections import Counter, defaultdict
 from dataclasses import asdict
 from importlib import resources
 from pathlib import Path
-from typing import Iterable, Iterator, Sequence
+from typing import Any, Iterable, Iterator, Sequence
 
 from .graph import GraphNode, GraphStore, _sanitize_name, edge_to_dict, node_to_dict
 from .neighbourhood import (
@@ -695,6 +695,9 @@ def _aggregate_file(data: dict) -> dict:
     file_symbol_count: Counter[str] = Counter()
     qn_to_file: dict[str, str] = {}
     file_languages: dict[str, str] = {}
+    # Each file takes the community of its first node that has one. Found in
+    # this one pass: a scan of every node per file is quadratic.
+    file_community: dict[str, Any] = {}
 
     for n in nodes:
         fp = n.get("file_path", "")
@@ -707,6 +710,8 @@ def _aggregate_file(data: dict) -> dict:
             file_symbol_count.setdefault(fp, 0)
         if n.get("language"):
             file_languages[fp] = n["language"]
+        if n.get("community_id") is not None:
+            file_community.setdefault(fp, n["community_id"])
 
     # Build file nodes
     file_nodes = []
@@ -715,12 +720,6 @@ def _aggregate_file(data: dict) -> dict:
         short = parts[-1] if parts else fp
         parent = parts[-2] if len(parts) >= 2 else ""
         label = f"{parent}/{short}" if parent else short
-        # Recover community_id from the majority of symbols in this file
-        cid = None
-        for n in nodes:
-            if n.get("file_path") == fp and n.get("community_id") is not None:
-                cid = n["community_id"]
-                break
         file_nodes.append({
             "qualified_name": fp,
             "name": label,
@@ -729,7 +728,7 @@ def _aggregate_file(data: dict) -> dict:
             "line_start": None,
             "line_end": None,
             "language": file_languages.get(fp, ""),
-            "community_id": cid,
+            "community_id": file_community.get(fp),
             "symbol_count": count,
         })
 
