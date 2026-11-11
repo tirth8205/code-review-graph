@@ -514,7 +514,7 @@ def test_platforms_that_used_to_be_always_on_are_detected(
     home.mkdir()
     monkeypatch.setattr(Path, "home", lambda: home)
     monkeypatch.setattr(skills.platform, "system", lambda: "Linux")
-    for name in ("CLAUDECODE", "CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME"):
+    for name in ("CLAUDECODE", "CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(skills.shutil, "which", lambda name: None)
     detect = getattr(skills, detector)
@@ -533,6 +533,34 @@ def test_platforms_that_used_to_be_always_on_are_detected(
         monkeypatch.setattr(skills.shutil, "which", lambda name: None)
         monkeypatch.setenv(env, "1")
         assert detect() is True
+
+
+@pytest.mark.parametrize(
+    ("detector", "made"),
+    [
+        ("_claude_code_detected", ".claude.json"),
+        ("_opencode_detected", ".opencode/"),
+        ("_opencode_detected", ".local/share/opencode/"),
+    ],
+)
+def test_more_signs_that_a_tool_is_here(monkeypatch, tmp_path, detector, made):
+    """A file or folder the tool leaves in the home folder counts as found,
+    so install does not skip a tool it is set up beside."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: home)
+    for name in ("CLAUDECODE", "CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(skills.shutil, "which", lambda name: None)
+    detect = getattr(skills, detector)
+    assert detect() is False
+
+    path = home / made
+    if made.endswith("/"):
+        path.mkdir(parents=True)
+    else:
+        path.write_text("{}", encoding="utf-8")
+    assert detect() is True
 
 
 

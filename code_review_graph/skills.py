@@ -147,6 +147,12 @@ def _app_data_dirs(app: str) -> list[Path]:
     return [_xdg_config_home() / app]
 
 
+def _xdg_data_home() -> Path:
+    """Return ``$XDG_DATA_HOME``, or ``~/.local/share`` when it is not set."""
+    xdg = os.environ.get("XDG_DATA_HOME", "").strip()
+    return Path(xdg) if xdg else Path.home() / ".local" / "share"
+
+
 def _claude_code_detected() -> bool:
     """Return whether Claude Code is on this machine, or this runs inside it."""
     if os.environ.get("CLAUDECODE", "").strip():
@@ -154,12 +160,31 @@ def _claude_code_detected() -> bool:
     config_dir = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
     if config_dir and Path(config_dir).expanduser().exists():
         return True
-    return bool(shutil.which("claude")) or (Path.home() / ".claude").exists()
+    home = Path.home()
+    return (
+        bool(shutil.which("claude"))
+        or (home / ".claude").exists()
+        or (home / ".claude.json").exists()
+    )
 
 
 def _opencode_detected() -> bool:
-    """Return whether OpenCode is on PATH or has a user config folder."""
-    return bool(shutil.which("opencode")) or (_xdg_config_home() / "opencode").exists()
+    """Return whether OpenCode is on PATH or has left a folder in the home folder.
+
+    Its install script puts the program in ``~/.opencode/bin``, which a shell
+    started before the install has not added to PATH yet, and OpenCode keeps
+    its config and its data in the XDG folders on every OS.
+    """
+    if shutil.which("opencode"):
+        return True
+    return any(
+        folder.exists()
+        for folder in (
+            Path.home() / ".opencode",
+            _xdg_config_home() / "opencode",
+            _xdg_data_home() / "opencode",
+        )
+    )
 
 
 def _qoder_detected() -> bool:
