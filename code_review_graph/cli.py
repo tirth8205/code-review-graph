@@ -282,12 +282,17 @@ def _confirm_yes_no(
     runs the command knows a question was answered for it.
 
     Ctrl-C counts as "no" unless ``cancel_on_interrupt`` is set, in which case
-    it is raised so the caller can stop altogether.
+    it is raised so the caller can stop altogether. The end of input takes the
+    default like a pipe: on Windows, stdin from ``NUL`` says it is a terminal.
     """
-    if not sys.stdin.isatty():
+
+    def take_default() -> bool:
         answer = "yes" if default_yes else "no"
         print(f"No terminal: taking the default ({answer}). {no_terminal_hint}".rstrip())
         return default_yes
+
+    if not sys.stdin.isatty():
+        return take_default()
     suffix = "[Y/n]" if default_yes else "[y/N]"
     try:
         answer = input(f"{prompt} {suffix} ").strip().lower()
@@ -298,7 +303,7 @@ def _confirm_yes_no(
         return False
     except EOFError:
         print()
-        return False
+        return take_default()
     if not answer:
         return default_yes
     return answer in ("y", "yes")
