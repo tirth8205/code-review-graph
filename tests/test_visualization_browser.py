@@ -595,6 +595,27 @@ def test_escape_closes_the_detail_panel_and_brings_back_the_legend(full_page):
     full_page.assert_no_errors()
 
 
+def test_keyboard_focus_puts_the_tooltip_beside_the_node(full_page):
+    """A focus event has no pointer position, so the node itself is the anchor."""
+    full_page.freeze_layout()
+    node = full_page.node_by_qualified_name(f"src/mod1.py::{UNIQUE_SYMBOL}")
+    node.focus()
+
+    tooltip = full_page.page.locator("#tooltip")
+    assert "visible" in (tooltip.get_attribute("class") or "")
+    style = full_page.page.evaluate(
+        "() => [document.getElementById('tooltip').style.left,"
+        " document.getElementById('tooltip').style.top]"
+    )
+    assert all(v.endswith("px") and "NaN" not in v for v in style), style
+    box = node.bounding_box()
+    tip = tooltip.bounding_box()
+    node_x = box["x"] + box["width"] / 2
+    node_y = box["y"] + box["height"] / 2
+    assert abs(tip["x"] - node_x) < 60 and abs(tip["y"] - node_y) < 60, (tip, box)
+    full_page.assert_no_errors()
+
+
 # ---------------------------------------------------------------------------
 # Aggregated (community) page
 # ---------------------------------------------------------------------------

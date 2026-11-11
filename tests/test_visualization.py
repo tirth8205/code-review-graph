@@ -697,6 +697,15 @@ def test_every_way_to_close_the_detail_panel_brings_back_the_legend(
     assert 'detailPanel.classList.remove("visible")' in close
 
 
+def test_keyboard_focus_places_the_tooltip_by_the_node(store_with_data, tmp_path):
+    """A FocusEvent has no pageX/pageY, so the tooltip used to land at NaN."""
+    script = _full_page_script(store_with_data, tmp_path)
+    focus = _js_block(script, '.on("focus", function(ev, d)')
+    assert "showTooltip(ev" not in focus
+    assert "showTooltip(tooltipAnchor(this), d)" in focus
+    assert "getBoundingClientRect()" in _js_block(script, "function tooltipAnchor(")
+
+
 # ---------------------------------------------------------------------------
 # Phase 9: Visualization Aggregation
 # ---------------------------------------------------------------------------

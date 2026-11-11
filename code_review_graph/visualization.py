@@ -1499,6 +1499,11 @@ function moveTooltip(ev) {
   tooltip.style.left = x + "px"; tooltip.style.top = y + "px";
 }
 function hideTooltip() { tooltip.classList.remove("visible"); }
+// A focus event has no pointer position, so place the tooltip by the node.
+function tooltipAnchor(el) {
+  var r = el.getBoundingClientRect();
+  return { pageX: r.right + window.scrollX, pageY: r.top + r.height / 2 + window.scrollY };
+}
 var svgEl = document.getElementById("graph-svg");
 function getW() { return svgEl.clientWidth || window.innerWidth || 800; }
 function getH() { return svgEl.clientHeight || window.innerHeight || 600; }
@@ -1650,7 +1655,7 @@ function updateNodes() {
         }
       }
     })
-    .on("focus", function(ev, d) { highlightConnected(d, true); showTooltip(ev, d); })
+    .on("focus", function(ev, d) { highlightConnected(d, true); showTooltip(tooltipAnchor(this), d); })
     .on("blur",  function(ev, d) { highlightConnected(d, false); hideTooltip(); });
   nodeSel = enter.merge(nodeSel);
   nodeSel.attr("display", function(d) { return inHiddenCommunity(d) ? "none" : null; });
