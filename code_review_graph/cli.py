@@ -1260,6 +1260,18 @@ def _open_graph_store(db_path: Path, command: str):
     return open_store(db_path, command)
 
 
+def _require_repo_folder(repo_root: Path) -> None:
+    """Stop with one line when ``--repo`` names no folder.
+
+    The write commands used to make the folder, so a typed path left an
+    empty one behind; stopping is the safer answer.
+    """
+    if not repo_root.is_dir():
+        raise CodeReviewGraphError(
+            f"--repo is not a folder: {repo_root}. Check the path and try again."
+        )
+
+
 def _ensure_project_marker(repo_root: Path) -> None:
     """Let a plain directory pass tool validation, without opening graph.db.
 
@@ -3061,6 +3073,9 @@ def _dispatch() -> None:
         get_db_path,
         watch,
     )
+
+    if args.command in ("build", "update", "postprocess") and args.repo:
+        _require_repo_folder(Path(args.repo))
 
     if args.command == "postprocess":
         repo_root = Path(args.repo) if args.repo else find_project_root()
