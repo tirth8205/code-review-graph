@@ -535,6 +535,22 @@ def test_platforms_that_used_to_be_always_on_are_detected(
         assert detect() is True
 
 
+def test_codex_on_path_counts_as_found(monkeypatch, tmp_path):
+    """Codex makes ~/.codex on its first run; its program on PATH is enough."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.setattr(skills.shutil, "which", lambda name: None)
+    detect = skills.PLATFORMS["codex"]["detect"]
+    assert detect() is False
+
+    monkeypatch.setattr(
+        skills.shutil, "which", lambda name: "/usr/bin/codex" if name == "codex" else None
+    )
+    assert detect() is True
+
+
 @pytest.mark.parametrize(
     ("detector", "made"),
     [

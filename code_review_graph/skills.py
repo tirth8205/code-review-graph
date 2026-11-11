@@ -291,8 +291,12 @@ PLATFORMS: dict[str, dict[str, Any]] = {
         "name": "Codex",
         "config_path": lambda root: _codex_home() / "config.toml",
         "key": "mcp_servers",
+        # ``codex`` on PATH counts too: Codex makes its home folder only on its
+        # first run, and install now writes Codex's hooks and skill only when
+        # it finds Codex.
         "detect": lambda: bool(os.environ.get("CODEX_HOME", "").strip())
-        or _codex_home().exists(),
+        or _codex_home().exists()
+        or bool(shutil.which("codex")),
         "format": "toml",
         "needs_type": True,
     },
