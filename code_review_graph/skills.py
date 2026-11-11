@@ -245,10 +245,14 @@ def _dsh_config_path() -> Path:
     return _dsh_home() / "cordis.patch.yml"
 
 
+def _opencode_config_paths(repo_root: Path) -> tuple[Path, Path]:
+    """Return both OpenCode project configs. OpenCode loads each one."""
+    return repo_root / "opencode.jsonc", repo_root / "opencode.json"
+
+
 def _opencode_config_path(repo_root: Path) -> Path:
     """Return OpenCode's existing project config, preferring JSONC."""
-    for name in ("opencode.jsonc", "opencode.json"):
-        path = repo_root / name
+    for path in _opencode_config_paths(repo_root):
         if path.exists():
             return path
     return repo_root / "opencode.jsonc"
@@ -343,6 +347,8 @@ PLATFORMS: dict[str, dict[str, Any]] = {
     "opencode": {
         "name": "OpenCode",
         "config_path": _opencode_config_path,
+        # Every file install may have written. Uninstall cleans each one.
+        "config_paths": _opencode_config_paths,
         "key": "mcp",
         "detect": _opencode_detected,
         "format": "object",
