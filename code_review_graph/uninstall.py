@@ -667,8 +667,70 @@ def remove_steering_hook(repo_root: Path, *, dry_run: bool = False) -> Uninstall
         dry_run=dry_run,
         scoped_commands=_steering_hook_scopes(),
         scoped_owns=(skills._is_steering_hook_command, _steering_hook_scope()),
+        backup=False,
     )
     return report
+
+
+def _without_our_servers(data: dict[str, Any]) -> dict[str, Any]:
+    """``data`` with every server entry named ``code-review-graph`` taken out."""
+    keys = {str(spec["key"]) for spec in skills.PLATFORMS.values()}
+    for spec in skills.PLATFORMS.values():
+        keys.update(str(item) for item in spec.get("legacy_keys", ()))
+    cleaned = dict(data)
+    for key in keys & set(cleaned):
+        container = cleaned[key]
+        if isinstance(container, dict):
+            cleaned[key] = {k: v for k, v in container.items() if k != _ENTRY_NAME}
+        elif isinstance(container, list):
+            cleaned[key] = [
+                entry
+                for entry in container
+                if not (isinstance(entry, dict) and entry.get("name") == _ENTRY_NAME)
+            ]
+    return cleaned
+
+
+def _remove_backup_of_ours(
+    path: Path,
+    owned_commands: set[str],
+    boundary: Path,
+    report: UninstallReport,
+    *,
+    dry_run: bool,
+    scoped_commands: dict[str, tuple[str, Any]] | None,
+    owns: Callable[[str], bool] | None,
+    scoped_owns: tuple[Callable[[str], bool], tuple[str, Any]] | None,
+) -> None:
+    """Remove the ``.bak`` install made of ``path`` when it holds only our content.
+
+    Install backs a settings file up before it merges hooks in. When the file
+    held only what install wrote (hooks from an earlier install, or the server
+    entry it had just added), the backup is a copy of ours and nothing of the
+    user's. A backup with anything else in it is the user's, and stays.
+    """
+    backup = path.with_name(f"{path.name}.bak")
+    if not install_plan.exists(backup) or not _safe_path(
+        backup, boundary, report, describe_skip=False
+    ):
+        return
+    raw = _read_text(backup, report)
+    if raw is None:
+        return
+    try:
+        data = json.loads(skills._strip_jsonc(raw))
+    except (json.JSONDecodeError, RecursionError, ValueError):
+        return
+    if not isinstance(data, dict) or _holds_nothing(data):
+        return
+    cleaned, _paths = _clean_hook_data(
+        data, owned_commands, scoped_commands, owns=owns, scoped_owns=scoped_owns
+    )
+    if _holds_nothing(_without_our_servers(cleaned)):
+        _remove_file(
+            backup, boundary, report, dry_run=dry_run,
+            detail="remove backup holding only code-review-graph settings",
+        )
 
 
 def _remove_hooks(
@@ -681,7 +743,18 @@ def _remove_hooks(
     scoped_commands: dict[str, tuple[str, Any]] | None = None,
     owns: Callable[[str], bool] | None = None,
     scoped_owns: tuple[Callable[[str], bool], tuple[str, Any]] | None = None,
+    backup: bool = True,
 ) -> None:
+    """Take our hooks out of ``path``, and drop its backup if only ours is in it.
+
+    ``backup=False`` leaves the backup alone, for a change smaller than an
+    uninstall.
+    """
+    if backup:
+        _remove_backup_of_ours(
+            path, owned_commands, boundary, report, dry_run=dry_run,
+            scoped_commands=scoped_commands, owns=owns, scoped_owns=scoped_owns,
+        )
     if not install_plan.exists(path) or not _safe_path(path, boundary, report):
         return
     raw = _read_text(path, report)

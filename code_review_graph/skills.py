@@ -3195,8 +3195,9 @@ def _write_merged_settings(
 
     Returns False when the file was left alone instead. A file that already
     holds these settings is not touched, so reinstalling neither rewrites it nor
-    replaces the backup of what the user wrote with our own earlier edit, nor
-    leaves a backup that is the same as the file.
+    leaves a backup that is the same as the file. An existing backup is kept:
+    it is the copy from before the first install, and a later install that
+    changes the file must not replace it with our own earlier edit.
     """
     spliced: str | None = None
     if raw.strip() and not jsonc.has_comments(raw):
@@ -3217,8 +3218,10 @@ def _write_merged_settings(
                 label, path, "has comments this installer cannot keep through the edit",
             )
             return False
-    if raw.strip():
-        backup_path = path.with_name(f"{path.name}.bak")
+    backup_path = path.with_name(f"{path.name}.bak")
+    if raw.strip() and install_plan.lexists(backup_path):
+        logger.info("Kept the existing backup %s", backup_path)
+    elif raw.strip():
         try:
             install_plan.copy_file(path, backup_path)
         except OSError as exc:

@@ -270,7 +270,9 @@ code-review-graph install
 `install` merges its entries into the existing `hooks` block and does not
 delete entries it did not write. If the old flat entries are still there,
 remove them from `.claude/settings.json` by hand (`install` writes a backup to
-`.claude/settings.json.bak` first), then run `install` again.
+`.claude/settings.json.bak` first, and a later `install` keeps that first
+backup), then run `install` again. `uninstall` removes a backup that holds
+only code-review-graph settings.
 
 Comments and trailing commas in the file are fine; they are kept. If the file
 cannot be merged (it is not valid JSON, a `/*` comment never closes, or `hooks`
