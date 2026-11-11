@@ -185,65 +185,6 @@
           "maximum": 10,
           "description": "Maximum depth for blast radius traversal."
         },
-        "codeReviewGraph.graphTheme": {
-          "type": "string",
-          "default": "auto",
-          "enum": [
-            "auto",
-            "light",
-            "dark"
-          ],
-          "description": "Color theme for the graph visualization. 'auto' follows the VS Code theme."
-        },
-        "codeReviewGraph.treeView.showFunctions": {
-          "type": "boolean",
-          "default": true,
-          "description": "Show function nodes in the tree view."
-        },
-        "codeReviewGraph.treeView.showClasses": {
-          "type": "boolean",
-          "default": true,
-          "description": "Show class nodes in the tree view."
-        },
-        "codeReviewGraph.treeView.showFiles": {
-          "type": "boolean",
-          "default": true,
-          "description": "Show file nodes in the tree view."
-        },
-        "codeReviewGraph.treeView.showTypes": {
-          "type": "boolean",
-          "default": true,
-          "description": "Show type nodes in the tree view."
-        },
-        "codeReviewGraph.treeView.showTests": {
-          "type": "boolean",
-          "default": true,
-          "description": "Show test nodes in the tree view."
-        },
-        "codeReviewGraph.graph.defaultEdges": {
-          "type": "array",
-          "default": [
-            "CALLS",
-            "IMPORTS_FROM",
-            "INHERITS",
-            "IMPLEMENTS",
-            "TESTED_BY",
-            "DEPENDS_ON"
-          ],
-          "items": {
-            "type": "string",
-            "enum": [
-              "CALLS",
-              "IMPORTS_FROM",
-              "INHERITS",
-              "IMPLEMENTS",
-              "CONTAINS",
-              "TESTED_BY",
-              "DEPENDS_ON"
-            ]
-          },
-          "description": "Edge types shown by default in the graph visualization."
-        },
         "codeReviewGraph.graph.maxNodes": {
           "type": "number",
           "default": 500,
