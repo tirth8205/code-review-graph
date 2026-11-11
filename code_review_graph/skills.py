@@ -2302,6 +2302,93 @@ def _upgrade_git_hook_block(
     return None
 
 
+# A top-level ``exit`` line: no indent, at most one argument, an optional
+# trailing ``;`` and comment.
+_TOP_LEVEL_EXIT_RE = re.compile(r"exit(?:[ \t]+(?P<arg>[^\s#;]+))?[ \t]*;?[ \t]*(?:#.*)?")
+
+# A line ending in one of these goes on to the next line.
+_SHELL_LINE_CONTINUATIONS = ("\\", "&&", "||", "|")
+
+
+def _is_shell_filler(line: str) -> bool:
+    """Return whether ``line`` is blank or only a comment."""
+    stripped = line.strip()
+    return not stripped or stripped.startswith("#")
+
+
+def _trailing_exit(text: str) -> tuple[int, bool] | None:
+    """Find the top-level ``exit`` a shell hook ends with, if any.
+
+    Returns ``(offset, safe)``: where the ``exit`` line starts, and whether
+    code put just before it leaves the hook's exit status alone. A bare
+    ``exit`` or ``exit $?`` passes on the last command's status, so it is not
+    safe. None when the hook does not end with such a line, or when the
+    ``exit`` belongs to the command on the line before (``check ||`` then
+    ``exit 1``).
+    """
+    lines = text.splitlines(keepends=True)
+    offset = len(text)
+    for index in range(len(lines) - 1, -1, -1):
+        offset -= len(lines[index])
+        if _is_shell_filler(lines[index]):
+            continue
+        match = _TOP_LEVEL_EXIT_RE.fullmatch(lines[index].rstrip("\r\n"))
+        if match is None:
+            return None
+        for before in reversed(lines[:index]):
+            if not _is_shell_filler(before):
+                if before.strip().endswith(_SHELL_LINE_CONTINUATIONS):
+                    return None
+                break
+        arg = match.group("arg")
+        return offset, bool(arg) and "$?" not in arg
+    return None
+
+
+def _add_hook_block(existing: str, block: str) -> str | None:
+    """Return a user's shell hook with ``block`` added where it will run.
+
+    That is the end, or just before a top-level ``exit`` the hook ends with,
+    since the shell stops there. None when the block would change what the
+    hook exits with (see ``_trailing_exit``): the caller leaves it alone.
+    """
+    trailing = _trailing_exit(existing)
+    if trailing is None:
+        return existing.rstrip("\n") + "\n" + block
+    offset, safe = trailing
+    if not safe:
+        return None
+    return existing[:offset] + block + existing[offset:]
+
+
+def _lift_block_above_exit(text: str, begin_marker: str, end_marker: str) -> str:
+    """Move a marked block that sits after a hook's final ``exit`` to just before it.
+
+    Earlier releases appended the block after it, where it never ran. Text
+    the user wrote after the block, or an ``exit`` that is not safe to move
+    past, keeps the block where it is.
+    """
+    span = _git_hook_block_span(text, 0, begin_marker, end_marker)
+    if span is None or text[span[1]:].strip():
+        return text
+    begin, end = span
+    trailing = _trailing_exit(text[:begin])
+    if trailing is None or not trailing[1]:
+        return text
+    offset = trailing[0]
+    return text[:offset] + text[begin:end] + text[offset:begin] + text[end:]
+
+
+def _exit_warning(hook_path: Path, command: str) -> None:
+    logger.warning(
+        "%s ends with an 'exit' that passes on the last command's status, so a "
+        "block added after it would never run; leaving it alone. Call "
+        "'code-review-graph %s' from it before the 'exit'.",
+        hook_path,
+        command,
+    )
+
+
 def _git_hooks_dir(repo_root: Path) -> Path | None:
     """Return the directory git runs hooks from, or None when there is none.
 
@@ -2348,12 +2435,14 @@ def install_git_hook(repo_root: Path) -> Path | None:
 
     Creates ``pre-commit`` if it doesn't exist, or appends to an existing
     one — the hook is appended, not overwritten, preserving any hooks
-    already there. Falls back to the legacy ``.git/hooks`` resolution when
-    git itself is unavailable. Returns None when no hooks directory can be
-    determined. A block written by any past release is upgraded in place, and
-    a hand-edited one is left alone. The installed hook skips automatic checks
-    in linked worktrees, where an implicit update could build a duplicate graph
-    for a different branch; ``CRG_HOOK_WORKTREES=1`` opts a worktree back in.
+    already there. A hook that ends with a top-level ``exit`` gets the block
+    just before that line, where it still runs. Falls back to the legacy
+    ``.git/hooks`` resolution when git itself is unavailable. Returns None
+    when no hooks directory can be determined. A block written by any past
+    release is upgraded in place, and a hand-edited one is left alone. The
+    installed hook skips automatic checks in linked worktrees, where an
+    implicit update could build a duplicate graph for a different branch;
+    ``CRG_HOOK_WORKTREES=1`` opts a worktree back in.
     Detection relies only on ``git rev-parse --absolute-git-dir`` (Git 2.13),
     not on newer options.
     """
@@ -2394,14 +2483,19 @@ def install_git_hook(repo_root: Path) -> Path | None:
                     hook_path,
                 )
                 return hook_path
+            upgraded = _lift_block_above_exit(
+                upgraded, _GIT_HOOK_BEGIN_MARKER, _GIT_HOOK_END_MARKER
+            )
             if upgraded == existing:
                 logger.info("%s already holds the current hook block.", hook_path)
                 return hook_path
             install_plan.write_text(hook_path, upgraded)
         else:
-            install_plan.write_text(
-                hook_path, existing.rstrip("\n") + "\n" + _git_hook_block(program)
-            )
+            added = _add_hook_block(existing, _git_hook_block(program))
+            if added is None:
+                _exit_warning(hook_path, "detect-changes --brief")
+                return hook_path
+            install_plan.write_text(hook_path, added)
     else:
         install_plan.write_text(hook_path, _GIT_HOOK_SHEBANG + _git_hook_block(program))
 
@@ -2520,8 +2614,9 @@ def install_git_sync_hooks(repo_root: Path) -> list[Path]:
 
     Called automatically by ``code-review-graph install`` next to
     :func:`install_git_hook`, and resolves the hooks directory the same way.
-    Each block is appended to an existing hook, never overwriting it, and a
-    block written by an earlier release is replaced in place. A hook whose
+    Each block is appended to an existing hook, never overwriting it (just
+    before a final top-level ``exit``, so it runs), and a block written by an
+    earlier release is replaced in place. A hook whose
     markers are unbalanced was edited by hand and is left alone, and so is a
     hook written in a language other than shell. A failed
     update never fails the git command that triggered it.
@@ -2563,11 +2658,19 @@ def install_git_sync_hooks(repo_root: Path) -> list[Path]:
                     )
                     continue
                 begin, end = span
-                updated = existing[:begin] + block + existing[end:]
+                updated = _lift_block_above_exit(
+                    existing[:begin] + block + existing[end:],
+                    _GIT_SYNC_HOOK_BEGIN_MARKER,
+                    _GIT_SYNC_HOOK_END_MARKER,
+                )
                 if updated != existing:
                     install_plan.write_text(hook_path, updated)
             else:
-                install_plan.write_text(hook_path, existing.rstrip("\n") + "\n" + block)
+                added = _add_hook_block(existing, block)
+                if added is None:
+                    _exit_warning(hook_path, "update --quiet")
+                    continue
+                install_plan.write_text(hook_path, added)
         else:
             install_plan.write_text(hook_path, _GIT_HOOK_SHEBANG + block)
         install_plan.chmod(hook_path, 0o755)  # nosec B103 - a hook must be executable
