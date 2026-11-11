@@ -38,6 +38,25 @@
 - `uninstall` and `uninstall --dry-run` word every planned action as "would
   remove …" and every action they took as "removed …". Most planned actions
   read "would removed …", and a few that were taken read "remove …".
+- `build` and change discovery leave out the files `install` wrote, as listed in
+  `.code-review-graph/install-manifest.json`, until Git tracks them. Your first
+  review now shows your change, not `.mcp.json` and hook scripts. A file you
+  commit counts like any other.
+- `get_minimal_context_tool` no longer says `stale_graph` right after a commit the
+  pre-commit hook updated. When every file changed since the graph's commit has
+  the same content in the graph, the graph counts as current.
+- `next_tool_suggestions` give the names the server registers, which end in
+  `_tool`, such as `build_or_update_graph_tool`. Some answers gave names no
+  client could call.
+- `detect-changes --base` with a revision Git does not know exits 1 with one line
+  saying how to check it. It used to review the working tree and exit 0. The MCP
+  review tools answer `status: error`. In a repository with one commit, or none,
+  the default base prints a plain note and reviews uncommitted and new files,
+  with no Git error text.
+- The review tools review a new file Git does not track as a whole. It used to
+  drop out of the review when another file had changed lines.
+- `detect-changes --brief` lists the top three things to review, each with its
+  file and line, its risk out of 1.00, its callers and its tests.
 
 ## [2.4.0] - 2026-11-10
 

@@ -78,9 +78,9 @@ def get_hub_nodes_func(
             "total": total,
             "truncated": truncated,
             "next_tool_suggestions": [
-                "get_impact_radius -- check blast radius of a hub",
-                "query_graph callers_of -- see what calls a hub",
-                "get_bridge_nodes -- find architectural chokepoints",
+                "get_impact_radius_tool -- check blast radius of a hub",
+                "query_graph_tool callers_of -- see what calls a hub",
+                "get_bridge_nodes_tool -- find architectural chokepoints",
             ],
         }
     finally:
@@ -128,9 +128,9 @@ def get_bridge_nodes_func(
             "total": total,
             "truncated": truncated,
             "next_tool_suggestions": [
-                "get_hub_nodes -- find most connected nodes",
-                "get_impact_radius -- check blast radius",
-                "detect_changes -- see if bridges are affected",
+                "get_hub_nodes_tool -- find most connected nodes",
+                "get_impact_radius_tool -- check blast radius",
+                "detect_changes_tool -- see if bridges are affected",
             ],
         }
     finally:
@@ -189,9 +189,9 @@ def get_knowledge_gaps_func(
             "total_gaps": total,
             "truncated": truncated,
             "next_tool_suggestions": [
-                "refactor dead_code -- find unused symbols",
-                "get_hub_nodes -- find high-impact nodes",
-                "get_suggested_questions -- review prompts",
+                "refactor_tool dead_code -- find unused symbols",
+                "get_hub_nodes_tool -- find high-impact nodes",
+                "get_suggested_questions_tool -- review prompts",
             ],
         }
     finally:
@@ -240,9 +240,9 @@ def get_surprising_connections_func(
             "total": total,
             "truncated": truncated,
             "next_tool_suggestions": [
-                "get_architecture_overview -- community structure",
-                "query_graph callers_of -- trace the coupling",
-                "get_bridge_nodes -- find chokepoints",
+                "get_architecture_overview_tool -- community structure",
+                "query_graph_tool callers_of -- trace the coupling",
+                "get_bridge_nodes_tool -- find chokepoints",
             ],
         }
     finally:
@@ -282,9 +282,9 @@ def get_suggested_questions_func(
                 k: len(v) for k, v in by_priority.items()
             },
             "next_tool_suggestions": [
-                "get_knowledge_gaps -- structural weaknesses",
-                "detect_changes -- risk-scored review",
-                "get_architecture_overview -- community map",
+                "get_knowledge_gaps_tool -- structural weaknesses",
+                "detect_changes_tool -- risk-scored review",
+                "get_architecture_overview_tool -- community map",
             ],
         }
     finally:

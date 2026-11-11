@@ -2427,9 +2427,9 @@ def traverse_graph_func(
             "traversal": traversal,
             "truncated": approx_tokens > token_budget,
             "next_tool_suggestions": [
-                "query_graph callers_of"
+                "query_graph_tool callers_of"
                 " -- focused relationship query",
-                "get_impact_radius"
+                "get_impact_radius_tool"
                 " -- blast radius analysis",
             ],
         }

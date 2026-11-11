@@ -1606,6 +1606,7 @@ def get_staged_and_unstaged(
             logger.warning("git status failed while discovering working-tree files")
             return []
         files: list[str] = []
+        untracked: set[str] = set()
         prefix = _git_worktree_prefix(repo_root)
         prefix_with_separator = f"{prefix}/" if prefix else ""
         records = result.stdout.split(b"\0")
@@ -1616,12 +1617,18 @@ def get_staged_and_unstaged(
                 status = record[:2]
                 path = os.fsdecode(record[3:])
                 if not prefix or path.startswith(prefix_with_separator):
-                    files.append(path[len(prefix_with_separator):] if prefix else path)
+                    path = path[len(prefix_with_separator):] if prefix else path
+                    files.append(path)
+                    if status == b"??":
+                        untracked.add(path)
                 # With porcelain -z, a rename/copy record stores the
                 # destination first and its source in the following record.
                 if b"R" in status or b"C" in status:
                     index += 1
             index += 1
+        if untracked:
+            kept = set(_without_install_files(repo_root, sorted(untracked)))
+            files = [path for path in files if path not in untracked or path in kept]
         return _utf8_paths(files)
     except (OSError, subprocess.TimeoutExpired) as exc:
         if require_vcs:
@@ -1629,9 +1636,111 @@ def get_staged_and_unstaged(
         return []
 
 
+#: The base every review tool and ``detect-changes`` uses when none is given.
+DEFAULT_REVIEW_BASE = "HEAD~1"
+
+ONE_COMMIT_NOTE = (
+    "this repository has one commit; reviewing uncommitted and new files instead."
+)
+NO_COMMIT_NOTE = (
+    "this repository has no commits yet; reviewing uncommitted and new files instead."
+)
+
+
+def _git_commit_known(repo_root: Path, ref: str, timeout: float) -> bool | None:
+    """Return whether Git knows *ref* as a commit, or None when it cannot say.
+
+    ``rev-parse --verify --quiet`` exits 1 for an unknown name and 128 when
+    the folder is not a repository at all. Only the first is an answer.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+            capture_output=True,
+            cwd=str(repo_root),
+            timeout=timeout,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise _vcs_unavailable("git", exc, timeout=timeout) from exc
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    return None
+
+
+def _empty_tree(repo_root: Path, timeout: float) -> str:
+    """Return the id of the empty tree in this repository's hash format."""
+    try:
+        result = subprocess.run(
+            ["git", "hash-object", "-t", "tree", "--stdin"],
+            capture_output=True,
+            input=b"",
+            cwd=str(repo_root),
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise _vcs_unavailable("git", exc, timeout=timeout) from exc
+    tree = result.stdout.decode("ascii", "replace").strip()
+    if result.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40,64}", tree):
+        raise ChangeDiscoveryError(
+            "could not determine the changes: git could not name an empty tree "
+            f"(rc={result.returncode})."
+        )
+    return tree
+
+
+def _usable_review_base(
+    repo_root: Path,
+    base: str,
+    resolved_base: str,
+    timeout: float,
+    notes: list[str] | None,
+) -> str:
+    """Check a Git review base before it is diffed against.
+
+    A base Git does not know used to fall through to ``git status``, so a
+    typo in ``--base`` reviewed the working tree and exited 0. A base the
+    caller chose is now an error that says what to do. The default
+    ``HEAD~1`` is different: in a repository with one commit, or none, it
+    can never resolve, so the review covers uncommitted and new files and
+    *notes* says so in plain words.
+    """
+    if detect_vcs(repo_root) != "git":
+        return resolved_base
+    unknown = ChangeDiscoveryError(
+        f"base {base!r} is not a known revision. Check it with "
+        "`git branch -a`, or run `git fetch origin <branch>` in a "
+        "shallow clone."
+    )
+    sides = [side for side in re.split(r"\.{2,3}", resolved_base) if side]
+    if not sides or any(side.startswith("-") for side in sides):
+        raise unknown
+    for side in sides:
+        known = _git_commit_known(repo_root, side, timeout)
+        if known is None:
+            # Not a repository Git can read; the diff reports that itself.
+            return resolved_base
+        if known:
+            continue
+        if base != DEFAULT_REVIEW_BASE:
+            raise unknown
+        if _git_commit_known(repo_root, "HEAD", timeout):
+            if notes is not None:
+                notes.append(ONE_COMMIT_NOTE)
+            return "HEAD"
+        if notes is not None:
+            notes.append(NO_COMMIT_NOTE)
+        return _empty_tree(repo_root, timeout)
+    return resolved_base
+
+
 def discover_review_changes(
     repo_root: Path,
-    base: str = "HEAD~1",
+    base: str = DEFAULT_REVIEW_BASE,
+    *,
+    notes: list[str] | None = None,
 ) -> tuple[list[str], str]:
     """Discover the files under review, on the short discovery budget.
 
@@ -1667,19 +1776,29 @@ def discover_review_changes(
     bug; confidently reviewing nothing is a worse one. The budget above bounds
     the walk instead, and reports it when it does.
 
+    Args:
+        repo_root: Repository root directory.
+        base: The ref to review against. The default, ``HEAD~1``, cannot
+            resolve in a repository with one commit or none; the review then
+            covers uncommitted and new files instead.
+        notes: When given, plain sentences for the user are appended to it,
+            such as the one saying the default base was replaced.
+
     Returns:
         ``(changed_files, resolved_base)``. The resolved base is returned
         because callers need the same ref afterwards, for diff hunks and risk
         scoring, and resolving it twice would spend the budget twice.
 
     Raises:
-        ChangeDiscoveryError: git could not be run, or overran the discovery
-            budget. Never raised for a repository that simply has no changes.
+        ChangeDiscoveryError: git could not be run, overran the discovery
+            budget, or does not know a base the caller chose. Never raised
+            for a repository that simply has no changes.
     """
     budget = discovery_timeout()
     resolved_base = resolve_review_base(
         repo_root, base, timeout=budget, require_vcs=True,
     )
+    resolved_base = _usable_review_base(repo_root, base, resolved_base, budget, notes)
     changed = get_changed_files(
         repo_root, resolved_base, timeout=budget, require_vcs=True,
     )
@@ -1688,6 +1807,78 @@ def discover_review_changes(
             repo_root, timeout=budget, require_vcs=True,
         )
     return changed, resolved_base
+
+
+#: More files than this between the graph's commit and HEAD is answered
+#: "not current" without reading them: an update is the cheaper answer.
+_FRESHNESS_FILE_LIMIT = 200
+
+
+def graph_holds_commits(
+    repo_root: Path,
+    store: GraphStore,
+    built_at: str,
+    *,
+    timeout: float | None = None,
+) -> bool:
+    """Return True when the graph already holds every file changed since *built_at*.
+
+    The pre-commit hook updates the graph before Git makes the commit, so the
+    graph records the parent commit while already holding the committed
+    files. Comparing commit ids alone then calls the graph stale after every
+    hooked commit. This looks at the files instead: each file that differs
+    between *built_at* and ``HEAD`` must have the same SHA-256 in the graph
+    as on disk, a deleted file must be gone from the graph, and a file the
+    graph does not hold must be one a build would leave out too.
+
+    Any doubt -- git failing, too many files, a file that cannot be read --
+    answers False, which keeps the old "update first" advice.
+    """
+    if timeout is None:
+        timeout = discovery_timeout()
+    if not built_at or built_at.startswith("-") or not _SAFE_GIT_REF.fullmatch(built_at):
+        return False
+    repo_root = _canonical_repo_root(repo_root)
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--relative", "--name-status", "-z", built_at, "HEAD", "--", "."],
+            capture_output=True,
+            cwd=str(repo_root),
+            timeout=timeout,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        logger.debug("git diff failed while checking graph freshness", exc_info=True)
+        return False
+    if result.returncode != 0:
+        return False
+    changed = _decode_name_status_paths(result.stdout)
+    if len(changed) > _FRESHNESS_FILE_LIMIT:
+        return False
+
+    stored_hashes = store.get_file_hashes()
+    parser: CodeParser | None = None
+    ignore_patterns: list[str] | None = None
+    for rel_path in changed:
+        full_path = repo_root / rel_path
+        stored_hash = stored_hashes.get(normalize_file_path(full_path))
+        if stored_hash is not None:
+            try:
+                current = hashlib.sha256(full_path.read_bytes()).hexdigest()
+            except OSError:
+                return False
+            if current != stored_hash:
+                return False
+            continue
+        if not full_path.exists():
+            continue
+        if parser is None:
+            parser = _get_code_parser_cls()(repo_root)
+            ignore_patterns = _load_ignore_patterns(repo_root)
+        if _keep_candidate(repo_root, rel_path, ignore_patterns or [], parser):
+            # A file a build would hold, and the graph does not.
+            return False
+    return True
 
 
 def get_all_tracked_files(
@@ -1735,13 +1926,64 @@ def get_all_tracked_files(
         return []
 
 
+#: Where ``install`` lists the files it wrote inside the repository, as
+#: ``{"version": 1, "files": ["<repo-relative POSIX path>", ...]}``.
+INSTALL_MANIFEST = PurePosixPath(".code-review-graph", "install-manifest.json")
+
+
+def install_manifest_paths(repo_root: Path) -> frozenset[str]:
+    """Return the repository paths ``install`` says it wrote.
+
+    Build and change discovery leave these out while Git does not track
+    them, so an install's own ``.mcp.json``, hook scripts and instruction
+    files neither enter the graph nor fill the first review. Once the user
+    commits one, Git tracks it and it is treated like any other file.
+
+    No manifest, or one this release cannot read, means nothing is left out.
+    """
+    path = Path(repo_root) / INSTALL_MANIFEST
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return frozenset()
+    except OSError as exc:
+        logger.warning("Could not read %s: %s", path, exc)
+        return frozenset()
+    try:
+        data = json.loads(raw)
+    except ValueError as exc:
+        logger.warning("Ignoring %s: not valid JSON (%s)", path, exc)
+        return frozenset()
+    files = data.get("files") if isinstance(data, dict) else None
+    if not isinstance(files, list) or data.get("version") != 1:
+        logger.warning("Ignoring %s: not a version 1 install manifest", path)
+        return frozenset()
+    return frozenset(
+        str(PurePosixPath(entry)) for entry in files if isinstance(entry, str) and entry
+    )
+
+
+def _without_install_files(repo_root: Path, untracked: list[str]) -> list[str]:
+    """Drop the files ``install`` wrote from a list Git calls untracked."""
+    if not untracked:
+        return untracked
+    installed = install_manifest_paths(repo_root)
+    if not installed:
+        return untracked
+    return [path for path in untracked if PurePosixPath(path).as_posix() not in installed]
+
+
 def _get_untracked_files(
     repo_root: Path,
     *,
     timeout: float | None = None,
     require_vcs: bool = False,
 ) -> list[str]:
-    """Return Git's untracked, non-ignored files using NUL-delimited paths."""
+    """Return Git's untracked, non-ignored files using NUL-delimited paths.
+
+    Files the install manifest lists are left out: see
+    :func:`install_manifest_paths`.
+    """
     if timeout is None:
         timeout = _GIT_TIMEOUT
     try:
@@ -1760,7 +2002,10 @@ def _get_untracked_files(
                     f"(rc={result.returncode})"
                 )
             return []
-        return _utf8_paths(os.fsdecode(path) for path in result.stdout.split(b"\0") if path)
+        return _without_install_files(
+            repo_root,
+            _utf8_paths(os.fsdecode(path) for path in result.stdout.split(b"\0") if path),
+        )
     except (OSError, subprocess.TimeoutExpired) as exc:
         if require_vcs:
             raise _vcs_unavailable("git", exc, timeout=timeout) from exc
@@ -1846,10 +2091,14 @@ def _inventory_candidates(
     if not candidates:
         # Fallback: walk directory. ``rglob`` never descends into a symlinked
         # folder; the link itself is kept so it can be followed when asked.
+        # No VCS tracks anything here, so the files ``install`` wrote are
+        # left out just as Git's untracked ones are.
+        installed = install_manifest_paths(repo_root)
         candidates = [
             str(p.relative_to(repo_root))
             for p in repo_root.rglob("*")
-            if p.is_file() or p.is_symlink()
+            if (p.is_file() or p.is_symlink())
+            and p.relative_to(repo_root).as_posix() not in installed
         ]
     return candidates
 
