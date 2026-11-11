@@ -96,7 +96,20 @@ def _resolved_store(repo_root: Path, tmp_path: Path) -> GraphStore:
     store.commit()
     store.resolve_bare_call_targets()
     store.resolve_bare_tested_by_sources()
+    _BUILT.append(store)
     return store
+
+
+# Stores the helper above built for the running test. The helper hands its
+# store to the test, so the module closes it once the test is done.
+_BUILT: list[GraphStore] = []
+
+
+@pytest.fixture(autouse=True)
+def _close_built_stores():
+    yield
+    while _BUILT:
+        _BUILT.pop().close()
 
 
 def _edges(store: GraphStore, kind: str, file_path: Path) -> list:

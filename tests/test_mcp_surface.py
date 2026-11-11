@@ -47,6 +47,7 @@ or editor config.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import importlib.metadata
 import json
@@ -1374,7 +1375,8 @@ async def test_returned_node_names_are_sanitised(unbuilt: Fixture) -> None:
     fixture.build()
 
     # Rewrite the busiest node so the hostile name reaches the ranked tools.
-    with sqlite3.connect(fixture.db_path) as conn:
+    # Commit on leaving the block, then close.
+    with contextlib.closing(sqlite3.connect(fixture.db_path)) as conn, conn:
         row = conn.execute(
             "SELECT id, file_path, qualified_name FROM nodes WHERE name = ?",
             ("helper_0_0_0",),

@@ -15,6 +15,7 @@ any implementation.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 
 import pytest
 
@@ -102,7 +103,7 @@ CALL_EDGES = [
 
 
 @pytest.fixture
-def chain_store(tmp_path) -> GraphStore:
+def chain_store(tmp_path) -> Iterator[GraphStore]:
     store = GraphStore(tmp_path / "chain.db")
     for file_path, symbols in SYMBOLS.items():
         store.upsert_node(_file(file_path))
@@ -119,7 +120,8 @@ def chain_store(tmp_path) -> GraphStore:
     )
     store.upsert_edge(_edge("IMPORTS_FROM", "src/b.py", "src/c.py", "src/b.py"))
     store.commit()
-    return store
+    yield store
+    store.close()
 
 
 # ---------------------------------------------------------------------------
@@ -664,7 +666,7 @@ def test_any_non_containment_edge_kind_counts_as_a_hop(chain_store):
 
 
 @pytest.fixture
-def wide_store(tmp_path) -> GraphStore:
+def wide_store(tmp_path) -> Iterator[GraphStore]:
     """40 files, 4 symbols each, every symbol calling the one file below it.
 
     Seeding every file (what ``--seed-changed`` does on a large review) gives
@@ -696,7 +698,8 @@ def wide_store(tmp_path) -> GraphStore:
                 )
             )
     store.commit()
-    return store
+    yield store
+    store.close()
 
 
 def _seed_every_file() -> list[str]:

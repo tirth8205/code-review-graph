@@ -19,6 +19,7 @@ split by it.
 
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 from pathlib import Path
 
@@ -488,7 +489,7 @@ def test_build_populates_the_column(tmp_path: Path):
     with GraphStore(db_path) as store:
         full_build(root, store)
 
-    with sqlite3.connect(db_path) as conn:
+    with contextlib.closing(sqlite3.connect(db_path)) as conn:
         unclassified = conn.execute(
             "SELECT COUNT(*) FROM edges "
             "WHERE kind IN ('CALLS', 'REFERENCES') AND target_resolution IS NULL"

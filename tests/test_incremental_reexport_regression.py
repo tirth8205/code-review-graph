@@ -93,7 +93,7 @@ def built(tmp_path):
     store.close()
 
 
-def test_renamed_export_preserves_unchanged_reexport_callers(tmp_path):
+def test_renamed_export_preserves_unchanged_reexport_callers(tmp_path, request):
     subprocess.run(['git', 'init', '-q', str(tmp_path)], check=True)
     files = {
         'fee.ts': 'export function calculateFee(n: number) { return n + 2; }\n',
@@ -109,6 +109,7 @@ def test_renamed_export_preserves_unchanged_reexport_callers(tmp_path):
         (tmp_path / name).write_text(text)
     subprocess.run(['git', '-C', str(tmp_path), 'add', '.'], check=True)
     store = GraphStore(tmp_path / 'incremental.db')
+    request.addfinalizer(store.close)
     assert not full_build(tmp_path, store)['errors']
     for name in ('fee.ts', 'barrel.ts', 'client.ts'):
         (tmp_path/name).write_text(files[name].replace('calculateFee', 'computeFee'))
@@ -119,6 +120,7 @@ def test_renamed_export_preserves_unchanged_reexport_callers(tmp_path):
         e.source_qualified for e in store.get_edges_by_target(target) if e.kind == 'CALLS'
     }
     full = GraphStore(tmp_path / 'full.db')
+    request.addfinalizer(full.close)
     assert not full_build(tmp_path, full)['errors']
     rebuilt = {e.source_qualified for e in full.get_edges_by_target(target) if e.kind == 'CALLS'}
     assert len(rebuilt) == 3
