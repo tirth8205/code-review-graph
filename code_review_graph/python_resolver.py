@@ -154,5 +154,8 @@ def resolve_python_imports(store: GraphStore) -> dict[str, int]:
         "imports_resolved": resolved,
         "imports_ambiguous": ambiguous,
     }
-    logger.info("Python import resolution: %s", result)
+    # Every build runs this; a line of zeros on each one is noise.
+    logger.log(
+        logging.INFO if updates else logging.DEBUG, "Python import resolution: %s", result,
+    )
     return result

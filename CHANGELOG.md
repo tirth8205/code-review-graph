@@ -68,8 +68,8 @@
 - `build` ends with a next step, and warns on stderr when it found no source
   files ("Is this the project root?").
 - A first build logs one line, `Created graph database (schema v15).`,
-  instead of every migration step. The Spring event resolver is quiet when it
-  found nothing, and a missing igraph is now a tip naming
+  instead of every migration step. The Spring event resolver and the Python
+  import resolver are quiet when they found nothing, and a missing igraph is now a tip naming
   `pip install "code-review-graph[communities]"`. Upgrading an existing graph
   to schema 15 logs one line asking for a `build` once.
 - The banner lists every command, in groups, with a start line. `--help`

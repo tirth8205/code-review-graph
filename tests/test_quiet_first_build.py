@@ -18,6 +18,7 @@ from code_review_graph.event_resolver import resolve_spring_events
 from code_review_graph.graph import GraphStore
 from code_review_graph.migrations import LATEST_VERSION
 from code_review_graph.parser import EdgeInfo, NodeInfo
+from code_review_graph.python_resolver import resolve_python_imports
 
 MIGRATIONS_LOGGER = "code_review_graph.migrations"
 
@@ -100,6 +101,46 @@ def test_spring_resolver_that_found_events_still_logs_at_info(
 
     records = [r for r in caplog.records if "Spring event resolver" in r.getMessage()]
     assert [r.levelno for r in records] == [logging.INFO]
+
+
+def _python_file(store: GraphStore, path: str) -> None:
+    store.upsert_node(NodeInfo(
+        kind="File", name=path, file_path=path, line_start=1, line_end=1, language="python",
+    ), file_hash=path)
+
+
+def _python_resolver_levels(caplog: pytest.LogCaptureFixture) -> list[int]:
+    return [
+        r.levelno for r in caplog.records if r.getMessage().startswith("Python import resolution")
+    ]
+
+
+def test_python_resolver_with_nothing_to_resolve_logs_at_debug(tmp_path: Path, caplog) -> None:
+    """Every build ran it, and every build logged its line of zeros at INFO."""
+    caplog.set_level(logging.DEBUG, logger="code_review_graph.python_resolver")
+    with GraphStore(tmp_path / "graph.db") as store:
+        _python_file(store, "app/auth.py")
+        store.commit()
+        assert resolve_python_imports(store)["imports_updated"] == 0
+
+    assert _python_resolver_levels(caplog) == [logging.DEBUG]
+
+
+def test_python_resolver_that_resolved_imports_still_logs_at_info(
+    tmp_path: Path, caplog,
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="code_review_graph.python_resolver")
+    with GraphStore(tmp_path / "graph.db") as store:
+        _python_file(store, "app/auth.py")
+        _python_file(store, "app/views.py")
+        store.upsert_edge(EdgeInfo(
+            kind="IMPORTS_FROM", source="app/views.py", target="app.auth",
+            file_path="app/views.py", line=1,
+        ))
+        store.commit()
+        assert resolve_python_imports(store)["imports_resolved"] == 1
+
+    assert _python_resolver_levels(caplog) == [logging.INFO]
 
 
 def test_missing_igraph_gives_a_tip_with_the_quoted_extra(
