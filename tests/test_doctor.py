@@ -432,7 +432,7 @@ def test_hooks_install_writes_now_check_the_copy_they_name(repo, env, monkeypatc
     report = doctor.diagnose(repo, run=run)
 
     assert [h["where"] for h in report.hooks] == ["git", "Claude Code"]
-    assert [sys.executable, "-m", "code_review_graph", "--version"] in asked
+    assert [sys.executable, "-I", "-m", "code_review_graph", "--version"] in asked
     assert not _with(report, doctor.WARN, "there is none on PATH")
     assert report.healthy, _statuses(report)
 
@@ -546,3 +546,99 @@ def test_cli_exits_one_when_a_check_fails(repo, env, tmp_path, monkeypatch, caps
     assert code == 1
     assert out.rstrip().endswith("1 problem found.")
     assert "Fix: Upgrade the copy at" in out
+
+
+# ---------------------------------------------------------------------------
+# Nothing the repository chose is run
+# ---------------------------------------------------------------------------
+
+
+def _recorder(asked: list[tuple[list[str], object]]):
+    def run(argv, cwd):
+        asked.append((argv, cwd))
+        return doctor._run_quietly(argv, cwd)
+    return run
+
+
+def _ran_inside(asked, repo: Path) -> list[list[str]]:
+    real = Path(os.path.realpath(repo))
+    return [
+        argv for argv, _ in asked
+        if Path(os.path.realpath(argv[0])) == real
+        or real in Path(os.path.realpath(argv[0])).parents
+    ]
+
+
+@pytest.mark.parametrize("command", ["./evil", "bin/code-review-graph", "ABSOLUTE"])
+def test_an_mcp_entry_naming_a_program_in_the_repo_is_not_run(
+    command, repo, env, tmp_path, monkeypatch,
+):
+    marker = tmp_path / "ran"
+    for name in ("evil", "bin/code-review-graph"):
+        _program(repo / Path(name).parent, Path(name).name, f'touch "{marker}"\n')
+    if command == "ABSOLUTE":
+        command = str(repo / "bin" / "code-review-graph")
+    _mcp(repo, command, ["serve"])
+    _set_path(monkeypatch, env, _copy(tmp_path / "bin", __version__).parent)
+    asked: list = []
+
+    report = doctor.diagnose(repo, run=_recorder(asked))
+
+    assert not marker.exists()
+    assert _ran_inside(asked, repo) == []
+    assert _with(report, doctor.WARN, "Version unknown")
+
+
+def test_a_python_in_the_repo_is_not_run_for_a_module_entry(repo, env, tmp_path, monkeypatch):
+    marker = tmp_path / "ran"
+    python = _program(repo / "tools", "python3", f'touch "{marker}"\n')
+    _mcp(repo, str(python), ["-m", "code_review_graph", "serve"])
+    _set_path(monkeypatch, env, _copy(tmp_path / "bin", __version__).parent)
+
+    doctor.diagnose(repo, run=_recorder([]))
+
+    assert not marker.exists()
+
+
+def test_uv_run_never_runs_the_repos_venv(repo, env, tmp_path, monkeypatch):
+    marker = tmp_path / "ran"
+    _program(repo / ".venv" / "bin", "code-review-graph", f'touch "{marker}"\n')
+    _mcp(repo, "uv", ["run", "code-review-graph", "serve"])
+    _set_path(monkeypatch, env, _copy(tmp_path / "bin", __version__).parent)
+
+    doctor.diagnose(repo, run=_recorder([]))
+
+    assert not marker.exists()
+
+
+def test_a_hook_naming_a_program_in_the_repo_is_not_run(repo, env, tmp_path, monkeypatch):
+    marker = tmp_path / "ran"
+    evil = _program(repo / "scripts", "code-review-graph", f'touch "{marker}"\n')
+    hooks = Path(_git(repo, "rev-parse", "--absolute-git-dir")) / "hooks"
+    hooks.mkdir(exist_ok=True)
+    (hooks / "pre-commit").write_text(
+        "#!/bin/sh\n# Installed by code-review-graph.\n"
+        f'"{evil}" update --quiet || true\n',
+        encoding="utf-8",
+    )
+    _set_path(monkeypatch, env, _copy(tmp_path / "bin", __version__).parent)
+    asked: list = []
+
+    doctor.diagnose(repo, run=_recorder(asked))
+
+    assert not marker.exists()
+    assert _ran_inside(asked, repo) == []
+
+
+def test_version_probes_run_outside_the_repo(repo, env, tmp_path, monkeypatch):
+    """A python -m probe started in the repo would import a package it ships."""
+    _mcp(repo, sys.executable, ["-m", "code_review_graph", "serve"])
+    _set_path(monkeypatch, env, _copy(tmp_path / "bin", __version__).parent)
+    asked: list = []
+
+    doctor.diagnose(repo, run=_recorder(asked))
+
+    probes = [(argv, cwd) for argv, cwd in asked if "--version" in argv]
+    assert probes
+    assert all(cwd is None for _, cwd in probes)
+    assert all("-I" in argv for argv, _ in probes if "-m" in argv)

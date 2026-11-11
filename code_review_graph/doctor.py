@@ -27,6 +27,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -147,7 +148,10 @@ def _run_quietly(argv: list[str], cwd: Path | None) -> str | None:
             text=True,
             encoding="utf-8",
             errors="replace",
-            cwd=str(cwd) if cwd else None,
+            # A version probe passes no cwd and runs outside the repository: a
+            # ``python -m`` started there would import a package the repository
+            # ships under that name. Git calls pass the repository.
+            cwd=str(cwd) if cwd else tempfile.gettempdir(),
             env=env,
             stdin=subprocess.DEVNULL,
             timeout=_PROBE_TIMEOUT_SECONDS,
@@ -346,8 +350,42 @@ class _Resolved:
     upgrade: str = _UPGRADE_ANY
 
 
-def resolve_mcp_entry(tokens: list[str], cwd: Path, prober: _Prober) -> _Resolved:
-    """Find the version an MCP command line runs, without a download."""
+def _program_doctor_may_run(exe: str, root: Path) -> str | None:
+    """Return the program to ask for its version, or None when doctor must not run it.
+
+    MCP configs and hook files are part of the repository, so whoever wrote the
+    repository chose the commands in them. Doctor runs only a bare name it finds
+    on PATH, or an absolute path, and never a program inside the repository.
+    """
+    if os.path.isabs(exe):
+        found: str | None = exe
+    elif os.sep in exe or "/" in exe or (os.altsep and os.altsep in exe):
+        return None
+    else:
+        found = shutil.which(exe)
+    if found is None or not os.path.isfile(found):
+        return None
+    real, repo = Path(os.path.realpath(found)), Path(os.path.realpath(root))
+    if real == repo or repo in real.parents:
+        # The copy running doctor, often a .venv inside the project, is
+        # already trusted: the user started it.
+        own = {Path(os.path.realpath(sys.executable))}
+        own.add(Path(os.path.realpath(Path(sys.executable).parent / Path(found).name)))
+        return found if real in own else None
+    return found
+
+
+_NOT_RUN = (
+    "doctor does not run a program inside the repository or named by a relative "
+    "path, because the repository chose it"
+)
+
+
+def resolve_mcp_entry(tokens: list[str], root: Path, prober: _Prober) -> _Resolved:
+    """Find the version an MCP command line runs, without a download.
+
+    Nothing the repository ships is run: see ``_program_doctor_may_run``.
+    """
     launcher, rest = _launcher(tokens[0]), tokens[1:]
 
     if launcher == "uvx" or (launcher == "uv" and rest[:2] == ["tool", "run"]):
@@ -372,23 +410,7 @@ def resolve_mcp_entry(tokens: list[str], cwd: Path, prober: _Prober) -> _Resolve
         ))
 
     if launcher == "uv" and rest[:1] == ["run"]:
-        project = cwd
-        for index, word in enumerate(rest):
-            if word == "--project" and index + 1 < len(rest):
-                project = (cwd / rest[index + 1]).resolve()
-        venv_exe = project / ".venv" / ("Scripts" if os.name == "nt" else "bin") / (
-            "code-review-graph.exe" if os.name == "nt" else "code-review-graph"
-        )
-        version = (
-            prober.version([str(venv_exe), "--version"], cwd)
-            if venv_exe.is_file() else None
-        )
-        if version:
-            return _Resolved(
-                version, "the project's .venv folder",
-                "update code-review-graph in the project, for example: "
-                "uv lock --upgrade-package code-review-graph",
-            )
+        # The project's .venv is part of the repository, so it is not run.
         return _Resolved(None, (
             "uv run uses the project's own copy. To see it, run: "
             "uv run code-review-graph --version"
@@ -402,7 +424,9 @@ def resolve_mcp_entry(tokens: list[str], cwd: Path, prober: _Prober) -> _Resolve
 
     if _PYTHON_RE.match(launcher) and rest[:2] == ["-m", "code_review_graph"]:
         python = tokens[0]
-        version = prober.version([python, "-m", "code_review_graph", "--version"], cwd)
+        if _program_doctor_may_run(python, root) is None:
+            return _Resolved(None, _NOT_RUN)
+        version = prober.version([python, "-I", "-m", "code_review_graph", "--version"])
         if version:
             return _Resolved(
                 version, f"the copy installed for {python}",
@@ -412,15 +436,17 @@ def resolve_mcp_entry(tokens: list[str], cwd: Path, prober: _Prober) -> _Resolve
 
     if launcher == "code-review-graph":
         exe = tokens[0]
-        if not os.path.isabs(exe):
-            found = shutil.which(exe)
-            if found is None:
-                return _Resolved(None, (
-                    "there is no code-review-graph on PATH here, and the AI "
-                    "tool's PATH may differ"
-                ))
-            exe = found
-        version = prober.version([exe, "--version"], cwd)
+        if not os.path.isabs(exe) and os.sep not in exe and "/" not in exe \
+                and shutil.which(exe) is None:
+            return _Resolved(None, (
+                "there is no code-review-graph on PATH here, and the AI "
+                "tool's PATH may differ"
+            ))
+        allowed = _program_doctor_may_run(exe, root)
+        if allowed is None:
+            return _Resolved(None, _NOT_RUN)
+        exe = allowed
+        version = prober.version([exe, "--version"])
         if version:
             return _Resolved(version, f"the copy at {exe}", _upgrade_for(exe))
         return _Resolved(None, f"{exe} did not answer --version")
@@ -447,9 +473,7 @@ def check_mcp_entries(
         if tokens is None:
             findings.append(Finding(WARN, f"{label}: no command doctor can read."))
             continue
-        cwd_value = entry.get("cwd")
-        cwd = Path(cwd_value) if isinstance(cwd_value, str) and cwd_value else root
-        found = resolve_mcp_entry(tokens, cwd, prober)
+        found = resolve_mcp_entry(tokens, root, prober)
         command = " ".join(tokens)
         entries.append(McpEntry(relative, names, command, found.version, found.source))
         if found.version is None:
@@ -749,11 +773,17 @@ def check_hooks(
     if "uvx" in runners:
         findings.extend(_check_uvx_hooks(prober, path_copies))
     for runner in sorted(r for r in runners if r not in ("PATH", "uvx")):
+        if _program_doctor_may_run(runner, root) is None:
+            findings.append(Finding(
+                WARN, f"The hooks run {runner}. Version unknown: {_NOT_RUN}.",
+                "Run code-review-graph install again to rewrite the hooks.",
+            ))
+            continue
         argv = (
-            [runner, "-m", "code_review_graph", "--version"]
+            [runner, "-I", "-m", "code_review_graph", "--version"]
             if _PYTHON_RE.match(_launcher(runner)) else [runner, "--version"]
         )
-        version = prober.version(argv, root)
+        version = prober.version(argv)
         if version is None:
             findings.append(Finding(
                 FAIL, f"The hooks run {runner}, which did not answer --version.",
