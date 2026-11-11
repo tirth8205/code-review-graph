@@ -4187,6 +4187,14 @@ import { promisify } from "node:util"
 
 const execFileAsync = promisify(execFile)
 
+// Say in OpenCode's log why a command failed. No CLI at all is not a failure.
+function logFailure(args: string[], error: unknown): void {
+  const failure = error as { code?: unknown; stderr?: unknown; message?: unknown } | null
+  if (failure?.code === "ENOENT") return
+  const detail = String(failure?.stderr || failure?.message || error).trim()
+  console.error(`[code-review-graph] ${args[0]} failed: ${detail}`)
+}
+
 async function runQuiet(args: string[], cwd: string, timeoutMs: number): Promise<string> {
   try {
     const { stdout } = await execFileAsync("code-review-graph", args, {
@@ -4194,7 +4202,8 @@ async function runQuiet(args: string[], cwd: string, timeoutMs: number): Promise
       timeout: timeoutMs,
     })
     return String(stdout ?? "").trim()
-  } catch {
+  } catch (error) {
+    logFailure(args, error)
     return ""
   }
 }
@@ -4302,7 +4311,16 @@ import { promisify } from "node:util"
 
 const execFileAsync = promisify(execFile)
 
-// Run code-review-graph quietly, swallowing errors. Never blocks the session.
+// Say in OpenCode's log why a command failed. No CLI at all is not a failure.
+function logFailure(args: string[], error: unknown): void {
+  const failure = error as { code?: unknown; stderr?: unknown; message?: unknown } | null
+  if (failure?.code === "ENOENT") return
+  const detail = String(failure?.stderr || failure?.message || error).trim()
+  console.error(`[code-review-graph] ${args[0]} failed: ${detail}`)
+}
+
+// Run code-review-graph quietly. A failure is logged, never thrown, so it
+// never blocks the session.
 async function runQuiet(args: string[], cwd: string, timeoutMs: number): Promise<string> {
   try {
     const { stdout } = await execFileAsync("code-review-graph", args, {
@@ -4310,7 +4328,8 @@ async function runQuiet(args: string[], cwd: string, timeoutMs: number): Promise
       timeout: timeoutMs,
     })
     return String(stdout ?? "").trim()
-  } catch {
+  } catch (error) {
+    logFailure(args, error)
     return ""
   }
 }
@@ -4404,7 +4423,8 @@ async function runQuiet(args: string[], cwd: string, timeoutMs: number): Promise
       timeout: timeoutMs,
     })
     return String(stdout ?? "").trim()
-  } catch {
+  } catch (error) {
+    logFailure(args, error)
     return ""
   }
 }
@@ -4425,7 +4445,10 @@ async function runQuiet(args: string[], cwd: string, timeoutMs: number): Promise
       return String(stdout ?? "").trim()
     } catch (error) {
       // Try the next copy only when this one is not there at all.
-      if ((error as { code?: unknown } | null)?.code !== "ENOENT") return ""
+      if ((error as { code?: unknown } | null)?.code !== "ENOENT") {
+        logFailure(args, error)
+        return ""
+      }
     }
   }
   return ""

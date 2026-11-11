@@ -629,7 +629,9 @@ and it was empty. A CI review gate can rely on that distinction. A `--base` Git
 does not know also exits 1; see *`Error: base 'X' is not a known revision`*
 above. `build` and
 `update` are unaffected — they re-parse the working tree and reconcile by
-content hash, so they still succeed without git.
+content hash, so they still succeed without git. Outside a Git repository,
+`update` with no `--repo` updates the current folder when it holds a
+`.code-review-graph` graph, and stops with an error otherwise.
 
 If only the line-level diff is unreadable while the changed-file list is not,
 the analysis degrades to whole-file scoring and says so rather than failing:

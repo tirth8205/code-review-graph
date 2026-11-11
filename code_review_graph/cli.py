@@ -3121,6 +3121,12 @@ def _dispatch() -> None:
     if args.command in ("update", "detect-changes"):
         # update and detect-changes require git for diffing
         repo_root = Path(args.repo) if args.repo else find_repo_root()
+        if not repo_root and args.command == "update":
+            # A project with a graph but no Git is updated in place, as with
+            # --repo. A folder with no graph is not built here.
+            project = find_project_root()
+            if (project / ".code-review-graph").is_dir():
+                repo_root = project
         if not repo_root:
             logging.error(
                 "Not in a git repository. '%s' requires git for diffing.",
