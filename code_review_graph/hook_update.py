@@ -146,21 +146,24 @@ def _existing_dir(path: Path) -> Path | None:
     return None
 
 
-def _repo_for_file(path: Path, session_repo: Path | None) -> Path | None:
+def _repo_for_file(
+    path: Path, session_repo: Path | None, existing_only: bool = False
+) -> Path | None:
     """Pick the graph to update for an edit to ``path``.
 
     The repository that holds the file is the answer when it already has a
     graph, or when it is the session's own repository, which is updated (and
-    built on first use) exactly as before. Any other repository is left alone,
-    so an edit somewhere else on disk cannot start a build there. A submodule
-    with no graph of its own hands the edit to its superproject, whose graph
-    can hold the submodule's files.
+    built on first use) exactly as before, unless ``existing_only`` says to
+    build nothing. Any other repository is left alone, so an edit somewhere
+    else on disk cannot start a build there. A submodule with no graph of its
+    own hands the edit to its superproject, whose graph can hold the
+    submodule's files.
     """
     start = _existing_dir(path.parent)
     repo = _toplevel(start) if start is not None else None
     seen: set[Path] = set()
     while repo is not None and repo not in seen:
-        if repo == session_repo or _has_graph(repo):
+        if (repo == session_repo and not existing_only) or _has_graph(repo):
             return repo
         seen.add(repo)
         repo = _superproject(repo)
@@ -184,22 +187,27 @@ def _hook_repo() -> Path | None:
     return _session_repo(_read_payload())
 
 
-def _update_target(payload: Any) -> Path | None:
+def _update_target(payload: Any, existing_only: bool = False) -> Path | None:
     """The repository an edit hook should update, or None to do nothing."""
     session_repo = _session_repo(payload)
     edited = _payload_file(payload, _payload_cwd(payload))
     if edited is None:
+        if existing_only and session_repo is not None and not _has_graph(session_repo):
+            return None
         return session_repo
-    return _repo_for_file(edited, session_repo)
+    return _repo_for_file(edited, session_repo, existing_only)
 
 
-def run_update_hook() -> None:
+def run_update_hook(existing_only: bool = False) -> None:
     """Update the graph of the repository that holds the edited file.
 
     Without a file path in the payload (a shell command, for example) the
-    repository named by a valid payload ``cwd`` is updated, as before.
+    repository named by a valid payload ``cwd`` is updated, as before. With
+    ``existing_only`` a repository with no graph is left alone rather than
+    built: the Codex hook asks for that, as Codex builds a graph only when the
+    user asks for one.
     """
-    repo_root = _update_target(_read_payload())
+    repo_root = _update_target(_read_payload(), existing_only)
     if repo_root is None:
         return
     _update_repo(repo_root)

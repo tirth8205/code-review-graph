@@ -161,6 +161,7 @@ code-review-graph eval --benchmark search_quality --embed [--embed-provider loca
 # Hook entry points (the hooks install writes run these; they read the hook event JSON on stdin).
 # --help and the command list leave them out, but they still run.
 code-review-graph hook-update                  # Update the graph of the repo that holds the edited file
+code-review-graph hook-update --existing-only  # The same, but never build a new graph (the Codex hook)
 code-review-graph hook-status                  # Graph status for the event's cwd
 code-review-graph enrich                       # Graph context for a search or read (the --steering hook)
 

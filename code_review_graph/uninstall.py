@@ -549,6 +549,8 @@ def _legacy_codex_hook_commands() -> set[str]:
     path_copy = _commands(
         skills.generate_codex_hooks_config(Path("."), program=skills._PATH_HOOK_PROGRAM)
     )
+    # Its edit hook ran plain ``hook-update``, before ``--existing-only``.
+    path_copy.add(skills._codex_hook_command("hook-update", skills._PATH_HOOK_PROGRAM))
     return {update, status, stdin_guard + update, stdin_guard + status} | path_copy
 
 

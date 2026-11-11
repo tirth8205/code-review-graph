@@ -2103,6 +2103,12 @@ def generate_steering_hooks_config(program: _HookProgram | None = None) -> dict[
     }
 
 
+# Codex builds a graph only when the user asks (see its skill), so its edit
+# hook updates one that exists and builds none. Up to 2.4.0 it ran plain
+# ``hook-update``, which built one on first use.
+_CODEX_UPDATE_SUBCOMMAND = "hook-update --existing-only"
+
+
 def generate_codex_hooks_config(
     repo_root: Path, program: _HookProgram | None = None
 ) -> dict[str, Any]:
@@ -2119,7 +2125,9 @@ def generate_codex_hooks_config(
                     "hooks": [
                         {
                             "type": "command",
-                            "command": _codex_hook_command("hook-update", program),
+                            "command": _codex_hook_command(
+                                _CODEX_UPDATE_SUBCOMMAND, program
+                            ),
                             "timeout": 30,
                             "statusMessage": "Updating code-review-graph",
                         },
@@ -2776,7 +2784,7 @@ _GENERATED_HOOK_COMMAND_RE = re.compile(
     r"(?:\s*\|\|\s*(?:true|echo\s+'Not a git repo, skipping'))?"
     # The Codex hook that forwards the event JSON to a payload-scoped subcommand.
     r"|cat\s*\|\s*\{\s*if\s+command\s+-v\s+code-review-graph\s*>/dev/null\s+2>&1;\s*"
-    r"then\s+code-review-graph\s+hook-(?:update|status);\s*"
+    r"then\s+code-review-graph\s+hook-(?:update(?:\s+--existing-only)?|status);\s*"
     r"else\s+cat\s*>/dev/null;\s*fi;\s*\}"
     # The project edit hook that forwards the event JSON to ``hook-update``.
     r"|command\s+-v\s+code-review-graph\s*>/dev/null\s+2>&1\s*&&\s*"
@@ -2830,7 +2838,7 @@ _PINNED_PROJECT_HOOK_COMMAND_RES = tuple(
 )
 _PINNED_CODEX_HOOK_COMMAND_RES = tuple(
     _pinned_shape(_codex_hook_command(subcommand, _PINNED_SENTINEL))
-    for subcommand in ("hook-update", "hook-status")
+    for subcommand in (_CODEX_UPDATE_SUBCOMMAND, "hook-update", "hook-status")
 )
 _PINNED_STEERING_HOOK_COMMAND_RE = _pinned_shape(
     f"{_codex_hook_command('enrich', _PINNED_SENTINEL)} || true"

@@ -303,10 +303,11 @@ not the one the session started in, so it works from a folder of sibling
 repos, an outer repo with nested ones, or a main checkout that edits a linked
 worktree. It updates that repository only if it already has a graph, or if it
 is the repository the session started in (which is built on first edit, as
-before). An edit anywhere else on disk changes no graph. A submodule with no
-graph of its own passes the edit to its superproject. Under `CRG_DATA_DIR`
-every repository points at the same database, so it counts only as the graph
-of the repository it was built for.
+before). The Codex hook runs `hook-update --existing-only`, which builds no
+new graph, since Codex builds one only when you ask. An edit anywhere else on
+disk changes no graph. A submodule with no graph of its own passes the edit to
+its superproject. Under `CRG_DATA_DIR` every repository points at the same
+database, so it counts only as the graph of the repository it was built for.
 
 ### The git pre-commit hook
 

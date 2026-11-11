@@ -2347,10 +2347,15 @@ def build_parser() -> argparse.ArgumentParser:
         description="Hook command: add graph context to a Claude Code "
                     "PreToolUse event read from stdin.",
     )
-    sub.add_parser(
+    hook_update_cmd = sub.add_parser(
         "hook-update",
         description="Hook command: update the graph of the repository that "
                     "holds the edited file named in the event read from stdin.",
+    )
+    hook_update_cmd.add_argument(
+        "--existing-only",
+        action="store_true",
+        help="Update only a graph that exists; never build a new one.",
     )
     sub.add_parser(
         "hook-status",
@@ -2738,9 +2743,12 @@ def _dispatch() -> None:
         return
 
     if args.command in {"hook-update", "hook-status"}:
-        from .hook_update import run_status_hook, run_update_hook
+        from . import hook_update
 
-        (run_update_hook if args.command == "hook-update" else run_status_hook)()
+        if args.command == "hook-update":
+            hook_update.run_update_hook(existing_only=args.existing_only)
+        else:
+            hook_update.run_status_hook()
         return
 
     if args.command in _GRAPH_TOOL_COMMANDS:
