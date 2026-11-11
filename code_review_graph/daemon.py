@@ -33,7 +33,7 @@ else:
     except ImportError:
         tomllib = None  # type: ignore[assignment]
 
-from .constants import crg_home, env_float
+from .constants import crg_home, env_float, release_os_memory
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +106,91 @@ _HEALTH_CHECK_INTERVAL = 30
 _RESTART_BACKOFF_BASE = env_float("CRG_RESTART_BACKOFF", 30.0)
 _RESTART_BACKOFF_MAX = env_float("CRG_RESTART_BACKOFF_MAX", 900.0)
 _RESTART_HEALTHY_SECONDS = env_float("CRG_RESTART_HEALTHY_AFTER", 600.0)
+
+_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+
+
+class _WindowsJob:
+    """Own watcher processes so Windows cannot orphan them on daemon exit."""
+
+    def __init__(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        ctypes_api: Any = ctypes
+        self._ctypes: Any = ctypes_api
+        self._kernel32 = ctypes_api.WinDLL("kernel32", use_last_error=True)
+        kernel32 = self._kernel32
+        kernel32.CreateJobObjectW.argtypes = (wintypes.LPVOID, wintypes.LPCWSTR)
+        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel32.SetInformationJobObject.argtypes = (
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+        )
+        kernel32.SetInformationJobObject.restype = wintypes.BOOL
+        kernel32.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
+        kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        class IoCounters(ctypes.Structure):
+            _fields_ = [(f"value_{index}", ctypes.c_ulonglong) for index in range(6)]
+
+        class BasicLimitInformation(ctypes.Structure):
+            _fields_ = [
+                ("per_process_user_time_limit", ctypes.c_longlong),
+                ("per_job_user_time_limit", ctypes.c_longlong),
+                ("limit_flags", wintypes.DWORD),
+                ("minimum_working_set_size", ctypes.c_size_t),
+                ("maximum_working_set_size", ctypes.c_size_t),
+                ("active_process_limit", wintypes.DWORD),
+                ("affinity", ctypes.c_size_t),
+                ("priority_class", wintypes.DWORD),
+                ("scheduling_class", wintypes.DWORD),
+            ]
+
+        class ExtendedLimitInformation(ctypes.Structure):
+            _fields_ = [
+                ("basic_limit_information", BasicLimitInformation),
+                ("io_info", IoCounters),
+                ("process_memory_limit", ctypes.c_size_t),
+                ("job_memory_limit", ctypes.c_size_t),
+                ("peak_process_memory_used", ctypes.c_size_t),
+                ("peak_job_memory_used", ctypes.c_size_t),
+            ]
+
+        self._handle = kernel32.CreateJobObjectW(None, None)
+        if not self._handle:
+            raise ctypes_api.WinError(ctypes_api.get_last_error())
+
+        limits = ExtendedLimitInformation()
+        limits.basic_limit_information.limit_flags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not kernel32.SetInformationJobObject(
+            self._handle,
+            _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+            ctypes.byref(limits),
+            ctypes.sizeof(limits),
+        ):
+            error = ctypes_api.get_last_error()
+            kernel32.CloseHandle(self._handle)
+            raise ctypes_api.WinError(error)
+
+    def assign(self, proc: subprocess.Popen[bytes]) -> None:
+        """Assign *proc* to this job before it can outlive the daemon."""
+        process_handle = getattr(proc, "_handle", None)
+        if process_handle is None:
+            raise RuntimeError("Windows subprocess has no process handle")
+        if not self._kernel32.AssignProcessToJobObject(self._handle, process_handle):
+            raise self._ctypes.WinError(self._ctypes.get_last_error())
+
+    def close(self) -> None:
+        """Release the job; kill-on-close handles abnormal daemon exits."""
+        if self._handle:
+            self._kernel32.CloseHandle(self._handle)
+            self._handle = None
 
 # ---------------------------------------------------------------------------
 # Dataclasses
@@ -813,19 +898,54 @@ def reap_orphaned_watchers(
 ) -> list[dict[str, Any]]:
     """Terminate every orphaned watcher and forget the state that named them.
 
+    Only called with no daemon running, so every watcher the state names is
+    finished by the end of this, including those already dead. Their health
+    files go too. A watcher killed outright cannot clear its own, which is every
+    watcher on Windows: ``stop`` ends the daemon with ``TerminateProcess`` and the
+    Job Object takes the children with it, so no shutdown code runs. A file left
+    behind reads as a stalled watcher forever.
+
     Returns the entries that were signalled, so the caller can report them.
     """
+    state = load_state(state_path)
     orphans = find_orphaned_watchers(state_path)
     for orphan in orphans:
         pid = int(orphan["pid"])
         logger.info(
             "Reaping orphaned watcher for '%s' (PID %d)", orphan["alias"], pid
         )
-        clear_watch_health(orphan["path"])
         _signal_until_dead(pid, timeout=timeout)
-    if orphans:
+    # After the signals: a watcher still running could publish again.
+    for entry in state.values():
+        if isinstance(entry, dict) and entry.get("path"):
+            _clear_health_left_by(str(entry["path"]), entry.get("pid"))
+    if state:
         clear_state(state_path)
     return orphans
+
+
+def _clear_health_left_by(repo_path: str, pid: Any) -> None:
+    """Drop the health file our watcher on *repo_path* left, not a replacement's.
+
+    Health files are keyed by repository, so a watcher started by hand after
+    ours died publishes to the same file. Deleting it would let the next
+    ``start`` miss that watcher and launch a second writer on the same database.
+    """
+    health = read_watch_health(repo_path)
+    publisher = health.get("pid") if isinstance(health, dict) else None
+    if (
+        isinstance(publisher, int)
+        and publisher != pid
+        and _is_pid_alive(publisher)
+        and is_our_watcher(publisher, repo_path)
+    ):
+        logger.info(
+            "Keeping the health file for '%s': live watcher PID %d publishes it",
+            repo_path,
+            publisher,
+        )
+        return
+    clear_watch_health(repo_path)
 
 
 def _signal_until_dead(pid: int, *, timeout: float = 5.0) -> bool:
@@ -911,9 +1031,8 @@ def clear_watch_health(repo_root: str | Path) -> None:
 def watcher_status(alive: bool, health: dict[str, Any] | None) -> str:
     """Summarise one watcher: ``dead``, ``stalled``, ``partial``, ``unknown``, ``ok``.
 
-    ``partial`` means the watcher ran out of watch budget and fell back to a
-    coarser recursive watch — still watching everything, but no longer
-    filtering ignored trees.
+    ``partial`` means the watcher has reduced coverage: either an OS watch
+    registration failed, or the watch budget forced a coarser recursive watch.
     """
     if not alive:
         return "dead"
@@ -1076,6 +1195,9 @@ class WatchDaemon:
         self._health_stop: threading.Event = threading.Event()
         self._lock: threading.Lock = threading.Lock()
         self._restarts: dict[str, dict[str, float]] = {}
+        self._windows_job: _WindowsJob | None = (
+            _WindowsJob() if sys.platform == "win32" else None
+        )
 
     # ------------------------------------------------------------------
     # Public interface
@@ -1120,19 +1242,23 @@ class WatchDaemon:
 
     def stop(self) -> None:
         """Tear down the daemon: stop watchers, terminate children."""
-        self.stop_config_watcher()
-        self.stop_health_checker()
+        try:
+            self.stop_config_watcher()
+            self.stop_health_checker()
 
-        with self._lock:
-            for alias, proc in list(self._children.items()):
-                repo = self._current_repos.get(alias)
-                self._terminate_child(alias, proc, repo.path if repo else None)
-            self._children.clear()
+            with self._lock:
+                for alias, proc in list(self._children.items()):
+                    repo = self._current_repos.get(alias)
+                    self._terminate_child(alias, proc, repo.path if repo else None)
+                self._children.clear()
 
-        self._current_repos.clear()
-        self._clear_state()
-        clear_pid()
-        logger.info("Daemon stopped")
+            self._current_repos.clear()
+            self._clear_state()
+            clear_pid()
+            logger.info("Daemon stopped")
+        finally:
+            if self._windows_job is not None:
+                self._windows_job.close()
 
     def reconcile(self, new_config: DaemonConfig | None = None) -> None:
         """Reconcile running watchers with the (possibly updated) config.
@@ -1569,6 +1695,7 @@ class WatchDaemon:
             ]
 
         log_fd = open(log_path, "ab")  # noqa: SIM115
+        proc: subprocess.Popen[bytes] | None = None
         try:
             proc = subprocess.Popen(
                 cmd,
@@ -1577,8 +1704,47 @@ class WatchDaemon:
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,
             )
+            if self._windows_job is not None:
+                self._windows_job.assign(proc)
         except Exception:
-            log_fd.close()
+            try:
+                if proc is not None and proc.poll() is None:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        try:
+                            proc.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            logger.warning("Watcher '%s' remained alive after SIGKILL", repo.alias)
+            except OSError:
+                try:
+                    if proc is not None and proc.poll() is None:
+                        proc.kill()
+                        try:
+                            proc.wait(timeout=5)
+                        except (subprocess.TimeoutExpired, OSError):
+                            logger.warning(
+                                "Watcher '%s' did not stop after forced cleanup",
+                                repo.alias,
+                                exc_info=True,
+                            )
+                except OSError:
+                    logger.warning(
+                        "Failed to kill watcher '%s' during startup cleanup",
+                        repo.alias,
+                        exc_info=True,
+                    )
+            finally:
+                try:
+                    log_fd.close()
+                except OSError:
+                    logger.warning(
+                        "Failed to close log file for watcher '%s'",
+                        repo.alias,
+                        exc_info=True,
+                    )
             logger.exception("Failed to start watcher for '%s'", repo.alias)
             return
 
@@ -1652,3 +1818,4 @@ class WatchDaemon:
                 result.returncode,
                 result.stderr.strip(),
             )
+        release_os_memory()

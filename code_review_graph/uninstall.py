@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
 
-from . import jsonc, skills
+from . import install_gitignore, install_plan, jsonc, skills
 
 _tomllib: Any = importlib.import_module(
     "tomllib" if sys.version_info >= (3, 11) else "tomli"
@@ -120,7 +120,10 @@ def _record_remove(report: UninstallReport, path: Path, detail: str, dry_run: bo
 
 def _read_text(path: Path, report: UninstallReport) -> str | None:
     try:
-        return path.read_text(encoding="utf-8")
+        # Through the install plan, so ``install --no-steering`` sees the
+        # hooks it planned a moment before (#173). Without a plan this is
+        # a plain read.
+        return install_plan.read_text(path, encoding="utf-8")
     except (OSError, UnicodeError) as exc:
         report.errors.append(f"{path}: read failed ({exc})")
         return None
@@ -136,6 +139,11 @@ def _write_text(
 ) -> None:
     if dry_run:
         _record_edit(report, path, detail, True)
+        return
+    if install_plan.active() is not None:
+        # ``install --no-steering``: held with the rest of install's writes.
+        install_plan.write_bytes(path, text.encode("utf-8"))
+        _record_edit(report, path, detail, False)
         return
     temporary: Path | None = None
     try:
@@ -304,6 +312,50 @@ def _remove_toml_entry(
     )
 
 
+def _remove_dsh_patch_entry(
+    path: Path,
+    boundary: Path,
+    report: UninstallReport,
+    *,
+    dry_run: bool,
+) -> None:
+    """Cut the code-review-graph ``insert`` operation out of a DSH patch layer.
+
+    Only that operation's lines go; comments, ``!!js`` values and every other
+    operation stay byte-for-byte. A row someone merged into an ``insert`` of
+    their own is reported, not edited.
+    """
+    from . import dsh
+
+    if not path.exists() or not _safe_path(path, boundary, report):
+        return
+    raw = _read_text(path, report)
+    if raw is None:
+        return
+    try:
+        document, found = dsh.find_owned(raw)
+        if not found:
+            return
+        op_index = dsh.removable(document, found)
+        if op_index is None:
+            report.skipped_paths.append(
+                f"{path} (the {_ENTRY_NAME} row shares an insert with other rows; "
+                "left unchanged, remove it by hand)"
+            )
+            return
+        rewritten = dsh.without_row(raw, op_index)
+    except dsh.PatchError as exc:
+        report.skipped_paths.append(f"{path} ({exc}; left unchanged)")
+        return
+    _write_text(
+        path,
+        rewritten,
+        report,
+        detail=f"removed the {dsh.ENTRY_ID} insert",
+        dry_run=dry_run,
+    )
+
+
 def _remove_yaml_entry(
     path: Path,
     key: str,
@@ -419,9 +471,9 @@ def _commands(value: Any) -> set[str]:
 
 
 def _legacy_repo_hook_commands(repo_root: Path) -> set[str]:
-    """Exact project hook commands written by the source #491-era installer."""
+    """Exact project hook commands earlier releases wrote and install no longer does."""
     repo_arg = json.dumps(repo_root.resolve().as_posix())
-    return {
+    pinned = {
         (
             "git rev-parse --git-dir >/dev/null 2>&1"
             " && code-review-graph update --skip-flows"
@@ -434,28 +486,64 @@ def _legacy_repo_hook_commands(repo_root: Path) -> set[str]:
             " || echo 'Not a git repo, skipping'"
         ),
     }
+    # v2.3.4 - v2.3.6 drained stdin in front of the pinned commands.
+    drained = {"cat >/dev/null || true; " + command for command in pinned}
+    # v2.3.7 - v2.3.9 resolved the repository from the session's directory,
+    # which #311 replaced with the edited file's repository.
+    from_cwd = (
+        "cat >/dev/null || true; "
+        "command -v code-review-graph >/dev/null 2>&1 || exit 0; "
+        "git rev-parse --git-dir >/dev/null 2>&1"
+        " && code-review-graph update --skip-flows"
+        ' --repo "$(git rev-parse --show-toplevel 2>/dev/null)"'
+        " || true"
+    )
+    return pinned | drained | {from_cwd}
 
 
 def _legacy_codex_hook_commands() -> set[str]:
-    """Exact user hook commands written before the current stdin guard."""
-    return {
-        (
-            "git rev-parse --git-dir >/dev/null 2>&1"
-            " && code-review-graph update --skip-flows"
-            " || true"
-        ),
-        (
-            "git rev-parse --git-dir >/dev/null 2>&1"
-            " && code-review-graph status"
-            " || echo 'Not a git repo, skipping'"
-        ),
-    }
+    """Exact user hook commands from before the payload-scoped subcommands."""
+    update = (
+        "git rev-parse --git-dir >/dev/null 2>&1"
+        " && code-review-graph update --skip-flows"
+        " || true"
+    )
+    status = (
+        "git rev-parse --git-dir >/dev/null 2>&1"
+        " && code-review-graph status"
+        " || echo 'Not a git repo, skipping'"
+    )
+    stdin_guard = "cat >/dev/null || true; "
+    return {update, status, stdin_guard + update, stdin_guard + status}
+
+
+def _steering_hook_scopes() -> dict[str, tuple[str, Any]]:
+    """Map the steering hook's command to the one event and matcher it is written under.
+
+    Install writes it there and only there, so a copy anywhere else is the user's.
+    """
+    scopes: dict[str, tuple[str, Any]] = {}
+    for event, groups in skills.generate_steering_hooks_config()["hooks"].items():
+        for group in groups:
+            for hook in group["hooks"]:
+                scopes[hook["command"]] = (event, group.get("matcher"))
+    return scopes
 
 
 def _clean_hook_data(
     data: dict[str, Any],
     owned_commands: set[str],
+    scoped_commands: dict[str, tuple[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], list[tuple[str | int, ...]]]:
+    """Drop owned hooks: ``owned_commands`` anywhere, ``scoped_commands`` only
+    under their own ``(event, matcher)``."""
+    scoped = scoped_commands or {}
+
+    def owned(command: Any, event: str, matcher: Any) -> bool:
+        if not isinstance(command, str):
+            return False
+        return command in owned_commands or scoped.get(command) == (event, matcher)
+
     expected = copy.deepcopy(data)
     hooks_obj = data.get("hooks")
     if not isinstance(hooks_obj, dict):
@@ -472,8 +560,7 @@ def _clean_hook_data(
             if not isinstance(entry, dict):
                 new_entries.append(copy.deepcopy(entry))
                 continue
-            direct_command = entry.get("command")
-            if isinstance(direct_command, str) and direct_command in owned_commands:
+            if owned(entry.get("command"), event, entry.get("matcher")):
                 entry_paths.append(("hooks", event, entry_index))
                 continue
 
@@ -485,7 +572,7 @@ def _clean_hook_data(
             nested_paths: list[tuple[str | int, ...]] = []
             for nested_index, hook in enumerate(nested):
                 command = hook.get("command") if isinstance(hook, dict) else None
-                if isinstance(command, str) and command in owned_commands:
+                if owned(command, event, entry.get("matcher")):
                     nested_paths.append(("hooks", event, entry_index, "hooks", nested_index))
                 else:
                     kept_nested.append(copy.deepcopy(hook))
@@ -511,6 +598,20 @@ def _clean_hook_data(
     return expected, paths
 
 
+def remove_steering_hook(repo_root: Path, *, dry_run: bool = False) -> UninstallReport:
+    """Remove only the opt-in steering hook from the project's Claude Code settings."""
+    report = UninstallReport()
+    _remove_hooks(
+        repo_root / ".claude" / "settings.json",
+        set(),
+        repo_root,
+        report,
+        dry_run=dry_run,
+        scoped_commands=_steering_hook_scopes(),
+    )
+    return report
+
+
 def _remove_hooks(
     path: Path,
     owned_commands: set[str],
@@ -518,8 +619,9 @@ def _remove_hooks(
     report: UninstallReport,
     *,
     dry_run: bool,
+    scoped_commands: dict[str, tuple[str, Any]] | None = None,
 ) -> None:
-    if not path.exists() or not _safe_path(path, boundary, report):
+    if not install_plan.exists(path) or not _safe_path(path, boundary, report):
         return
     raw = _read_text(path, report)
     if raw is None:
@@ -527,7 +629,7 @@ def _remove_hooks(
     data = _parse_jsonc(path, raw, report)
     if data is None:
         return
-    expected, paths = _clean_hook_data(data, owned_commands)
+    expected, paths = _clean_hook_data(data, owned_commands, scoped_commands)
     if not paths:
         return
     try:
@@ -699,7 +801,7 @@ def _remove_instruction(
         )
 
 
-def _resolve_git_hook(repo_root: Path) -> Path:
+def _resolve_git_hook(repo_root: Path, name: str = "pre-commit") -> Path:
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--git-path", "hooks"],
@@ -713,8 +815,8 @@ def _resolve_git_hook(repo_root: Path) -> Path:
     except (OSError, subprocess.TimeoutExpired):
         result = None
     if result is not None and result.returncode == 0 and result.stdout.strip():
-        return repo_root / result.stdout.strip() / "pre-commit"
-    return repo_root / ".git" / "hooks" / "pre-commit"
+        return repo_root / result.stdout.strip() / name
+    return repo_root / ".git" / "hooks" / name
 
 
 def _strip_git_hook_blocks(raw: str) -> tuple[str, bool]:
@@ -796,6 +898,19 @@ def _remove_git_hook(
             "every known installed block and was kept"
         )
 
+    _rewrite_or_remove_hook(path, new_text, repo_root, report, detail=detail, dry_run=dry_run)
+
+
+def _rewrite_or_remove_hook(
+    path: Path,
+    new_text: str,
+    repo_root: Path,
+    report: UninstallReport,
+    *,
+    detail: str,
+    dry_run: bool,
+) -> None:
+    """Write back what is left of a hook, or delete it when only a shebang remains."""
     meaningful = [
         line
         for line in new_text.splitlines()
@@ -819,6 +934,42 @@ def _remove_git_hook(
         )
 
 
+def _remove_git_sync_hooks(
+    repo_root: Path,
+    report: UninstallReport,
+    *,
+    dry_run: bool,
+) -> None:
+    """Cut the marked sync block out of post-checkout, post-merge and post-rewrite."""
+    begin_marker = skills._GIT_SYNC_HOOK_BEGIN_MARKER
+    end_marker = skills._GIT_SYNC_HOOK_END_MARKER
+    for name in skills._GIT_SYNC_HOOK_NAMES:
+        path = _resolve_git_hook(repo_root, name)
+        if not path.exists() or not _safe_path(path, repo_root, report):
+            continue
+        raw = _read_text(path, report)
+        if raw is None or begin_marker not in raw:
+            continue
+        if not skills._git_hook_markers_balanced(raw, begin_marker, end_marker):
+            report.skipped_paths.append(
+                f"{path} (a code-review-graph begin marker has no matching end marker; "
+                "left unchanged)"
+            )
+            continue
+        text = raw
+        while (span := skills._git_hook_block_span(text, 0, begin_marker, end_marker)):
+            begin, end = span
+            text = text[:begin] + text[end:]
+        _rewrite_or_remove_hook(
+            path,
+            text,
+            repo_root,
+            report,
+            detail="removed code-review-graph hook block",
+            dry_run=dry_run,
+        )
+
+
 def _remove_gitignore(
     repo_root: Path,
     report: UninstallReport,
@@ -828,12 +979,22 @@ def _remove_gitignore(
     path = repo_root / ".gitignore"
     if not path.exists() or not _safe_path(path, repo_root, report):
         return
-    raw = _read_text(path, report)
-    if raw is None:
+    try:
+        # Bytes, not text mode, so CRLF line endings come back unchanged.
+        raw = path.read_bytes().decode("utf-8")
+    except (OSError, UnicodeError) as exc:
+        report.errors.append(f"{path}: read failed ({exc})")
         return
-    lines = raw.splitlines(keepends=True)
+    # The block ``install --gitignore`` writes (#471). Only its own lines go.
+    without_block, block_state = install_gitignore.remove_block(raw)
+    if block_state == "edited":
+        report.skipped_paths.append(
+            f"{path} (code-review-graph install files block was edited by hand; "
+            "left unchanged)"
+        )
+    lines = without_block.splitlines(keepends=True)
     rewritten: list[str] = []
-    changed = False
+    changed = block_state == "removed"
     index = 0
     while index < len(lines):
         if (
@@ -867,7 +1028,12 @@ def _remove_gitignore(
         )
 
 
-def _scope_for_config(path: Path, repo_root: Path, home: Path) -> tuple[str, Path] | None:
+def _scope_for_config(
+    path: Path,
+    repo_root: Path,
+    home: Path,
+    extra_user_boundaries: Sequence[Path] = (),
+) -> tuple[str, Path] | None:
     if _is_lexical_child(path, repo_root):
         return "repo", repo_root
     if _is_lexical_child(path, home):
@@ -879,6 +1045,13 @@ def _scope_for_config(path: Path, repo_root: Path, home: Path) -> tuple[str, Pat
     hermes_home = _absolute(skills._hermes_home())
     if _is_lexical_child(path, hermes_home):
         return "user", hermes_home
+    # ``DSH_HOME`` can move DeepSeek Harness' patch layer out of home the same way.
+    dsh_home = _absolute(skills._dsh_home())
+    if _is_lexical_child(path, dsh_home):
+        return "user", dsh_home
+    for boundary in extra_user_boundaries:
+        if _is_lexical_child(path, boundary):
+            return "user", boundary
     return None
 
 
@@ -892,11 +1065,24 @@ def _process_platform_configs(
     platforms: frozenset[str] | None = None,
 ) -> None:
     seen: set[tuple[Path, str, str]] = set()
+    active_codex_home: Path | None = None
+    if platforms is None or "codex" in platforms:
+        from .codex_skill import codex_home
+
+        active_codex_home = codex_home()
+    else:
+        active_codex_home = None
     for platform_name, spec in skills.PLATFORMS.items():
         if platforms is not None and platform_name not in platforms:
             continue
         try:
-            path = _absolute(spec["config_path"](repo_root))
+            # ``config_paths`` lists every file install may have written for a
+            # platform with more than one (MiMo Code reads two); each is swept.
+            all_paths = spec.get("config_paths")
+            candidates = (
+                all_paths(repo_root) if all_paths else (spec["config_path"](repo_root),)
+            )
+            paths = list(dict.fromkeys(_absolute(candidate) for candidate in candidates))
             key = str(spec["key"])
             format_name = str(spec["format"])
         except (KeyError, OSError, TypeError, ValueError) as exc:
@@ -904,44 +1090,52 @@ def _process_platform_configs(
                 f"{platform_name} config (invalid platform specification: {exc})"
             )
             continue
-        destination = _scope_for_config(path, repo_root, home)
-        if destination is None:
-            if path.exists():
-                report.skipped_paths.append(
-                    f"{path} ({platform_name} config is outside home/repo boundary)"
-                )
-            continue
-        config_scope, boundary = destination
-        if config_scope != scope:
-            continue
-        legacy_keys = tuple(str(item) for item in spec.get("legacy_keys", ()))
-        for entry_key in (key, *legacy_keys):
-            identity = (path, entry_key, format_name)
-            if identity in seen:
+        for path in paths:
+            destination = _scope_for_config(
+                path,
+                repo_root,
+                home,
+                (active_codex_home,) if platform_name == "codex" and active_codex_home else (),
+            )
+            if destination is None:
+                if path.exists():
+                    report.skipped_paths.append(
+                        f"{path} ({platform_name} config is outside home/repo boundary)"
+                    )
                 continue
-            seen.add(identity)
-            if format_name == "toml":
-                _remove_toml_entry(
-                    path, entry_key, boundary, report, dry_run=dry_run
-                )
-            elif format_name == "yaml":
-                _remove_yaml_entry(
-                    path, entry_key, boundary, report, dry_run=dry_run
-                )
-            elif format_name in {"object", "array"}:
-                _remove_mcp_entry(
-                    path,
-                    key=entry_key,
-                    format_name=format_name,
-                    boundary=boundary,
-                    report=report,
-                    dry_run=dry_run,
-                )
-            else:
-                report.skipped_paths.append(
-                    f"{path} ({platform_name} has unsupported config format "
-                    f"{format_name!r})"
-                )
+            config_scope, boundary = destination
+            if config_scope != scope:
+                continue
+            legacy_keys = tuple(str(item) for item in spec.get("legacy_keys", ()))
+            for entry_key in (key, *legacy_keys):
+                identity = (path, entry_key, format_name)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                if format_name == "toml":
+                    _remove_toml_entry(
+                        path, entry_key, boundary, report, dry_run=dry_run
+                    )
+                elif format_name == "yaml":
+                    _remove_yaml_entry(
+                        path, entry_key, boundary, report, dry_run=dry_run
+                    )
+                elif format_name == "dsh-patch":
+                    _remove_dsh_patch_entry(path, boundary, report, dry_run=dry_run)
+                elif format_name in {"object", "array"}:
+                    _remove_mcp_entry(
+                        path,
+                        key=entry_key,
+                        format_name=format_name,
+                        boundary=boundary,
+                        report=report,
+                        dry_run=dry_run,
+                    )
+                else:
+                    report.skipped_paths.append(
+                        f"{path} ({platform_name} has unsupported config format "
+                        f"{format_name!r})"
+                    )
 
 
 def _generated_skill_slugs() -> list[str]:
@@ -1053,6 +1247,7 @@ def _process_repo(
         repo_root,
         report,
         dry_run=dry_run,
+        scoped_commands=_steering_hook_scopes(),
     )
     _remove_hooks(
         repo_root / ".qoder" / "settings.json",
@@ -1120,6 +1315,7 @@ def _process_repo(
         )
 
     _remove_git_hook(repo_root, report, dry_run=dry_run)
+    _remove_git_sync_hooks(repo_root, report, dry_run=dry_run)
     _remove_gitignore(repo_root, report, dry_run=dry_run)
 
 
@@ -1153,14 +1349,34 @@ def _process_user(
     else:
         _remove_tree(user_data, home, report, dry_run=dry_run)
 
+    from .codex_skill import codex_home, codex_skill_dir, owned_skill_files
+
+    active_codex_home = codex_home()
+    # ``_process_platform_configs`` already handles the active CODEX_HOME via
+    # the live platform registry. Keep hook/skill cleanup in the same directory
+    # and use that directory itself as the deletion boundary.
     _remove_hooks(
-        home / ".codex" / "hooks.json",
+        active_codex_home / "hooks.json",
         _commands(skills.generate_codex_hooks_config(reference_repo))
         | _legacy_codex_hook_commands(),
-        home,
+        active_codex_home,
         report,
         dry_run=dry_run,
     )
+    skill_dir = codex_skill_dir()
+    for owned_path in owned_skill_files(skill_dir):
+        _remove_skill_file(
+            owned_path,
+            active_codex_home,
+            report,
+            dry_run=dry_run,
+        )
+    if not dry_run:
+        # install creates the skills root, so an empty one is ours to remove.
+        try:
+            skill_dir.parent.rmdir()
+        except OSError:
+            pass
     _remove_hooks(
         home / ".cursor" / "hooks.json",
         _commands(skills.generate_cursor_hooks_config()),

@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import os
 import signal
+import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -250,8 +254,12 @@ class TestConfigParsing:
         config_file.write_text("[daemon]\n", encoding="utf-8")
 
         add_repo_to_config(str(repo_a), alias="taken", config_path=config_file)
+        original_config = config_file.read_text(encoding="utf-8")
+
         with pytest.raises(ValueError, match="already in use"):
             add_repo_to_config(str(repo_b), alias="taken", config_path=config_file)
+
+        assert config_file.read_text(encoding="utf-8") == original_config
 
     def test_remove_repo_by_path(self, sample_config_file):
         """Removes a repo by its path."""
@@ -533,6 +541,9 @@ class TestWatchDaemon:
         save_config(config, config_file)
 
         daemon = WatchDaemon(config=config, config_path=config_file)
+        if daemon._windows_job is not None:
+            daemon._windows_job.close()
+            daemon._windows_job = None
 
         return {
             "daemon": daemon,
@@ -581,6 +592,155 @@ class TestWatchDaemon:
             assert "beta" in daemon._children
         finally:
             daemon.stop()
+
+    @patch("code_review_graph.daemon.subprocess.Popen")
+    @patch("code_review_graph.registry.Registry")
+    def test_start_assigns_children_to_windows_job(self, mock_registry_cls, mock_popen, daemon_env):
+        """Windows watcher children are attached before they are tracked."""
+        mock_proc = MagicMock()
+        mock_proc.pid = 12345
+        mock_proc.poll.return_value = None
+        mock_popen.return_value = mock_proc
+
+        daemon = daemon_env["daemon"]
+        job = MagicMock()
+        daemon._windows_job = job
+
+        daemon.start()
+        try:
+            assert job.assign.call_count == 2
+            assert [call.args[0] for call in job.assign.call_args_list] == [
+                mock_proc,
+                mock_proc,
+            ]
+        finally:
+            daemon.stop()
+
+    @patch("code_review_graph.daemon.subprocess.Popen")
+    def test_start_watcher_assignment_failure_terminates_alive_process(
+        self, mock_popen, daemon_env
+    ):
+        """A live watcher is terminated when Windows Job assignment fails."""
+        mock_proc = MagicMock()
+        mock_proc.pid = 12345
+        mock_proc.poll.return_value = None
+        mock_popen.return_value = mock_proc
+
+        daemon = daemon_env["daemon"]
+        daemon._windows_job = MagicMock()
+        daemon._windows_job.assign.side_effect = OSError("job assignment failed")
+
+        daemon._start_watcher(daemon_env["config"].repos[0])
+
+        mock_proc.terminate.assert_called_once_with()
+        mock_proc.wait.assert_called_once_with(timeout=5)
+        assert "alpha" not in daemon._children
+
+    @patch("code_review_graph.daemon.subprocess.Popen")
+    def test_health_loop_continues_after_assignment_cleanup_os_errors(self, mock_popen, daemon_env):
+        """Cleanup errors do not stop later health checks or leak the log handle."""
+        mock_proc = MagicMock()
+        mock_proc.pid = 12345
+        mock_proc.poll.return_value = None
+        mock_proc.terminate.side_effect = PermissionError("access denied")
+        mock_proc.kill.side_effect = OSError("kill failed")
+        mock_popen.return_value = mock_proc
+
+        daemon = daemon_env["daemon"]
+        repo = daemon_env["config"].repos[0]
+        daemon._current_repos = {repo.alias: repo}
+        daemon._windows_job = MagicMock()
+        daemon._windows_job.assign.side_effect = OSError("job assignment failed")
+        daemon._health_stop = MagicMock()
+        daemon._health_stop.is_set.side_effect = [False, False, False, False, False, True]
+        log_fd = MagicMock()
+
+        with (
+            patch("builtins.open", return_value=log_fd),
+            patch.object(daemon, "_save_state"),
+            patch.object(daemon, "_check_health", wraps=daemon._check_health) as check_health,
+        ):
+            daemon._health_loop()
+
+        mock_proc.terminate.assert_called_once_with()
+        mock_proc.kill.assert_called_once_with()
+        log_fd.close.assert_called_once_with()
+        assert check_health.call_count == 2
+        assert "alpha" not in daemon._children
+
+    @patch("code_review_graph.daemon.subprocess.Popen")
+    def test_start_watcher_assignment_failure_kills_after_terminate_timeout(
+        self, mock_popen, daemon_env
+    ):
+        """A watcher is killed when graceful cleanup times out."""
+        mock_proc = MagicMock()
+        mock_proc.pid = 12345
+        mock_proc.poll.return_value = None
+        mock_proc.wait.side_effect = [
+            subprocess.TimeoutExpired(cmd="watcher", timeout=5),
+            None,
+        ]
+        mock_popen.return_value = mock_proc
+
+        daemon = daemon_env["daemon"]
+        daemon._windows_job = MagicMock()
+        daemon._windows_job.assign.side_effect = OSError("job assignment failed")
+
+        daemon._start_watcher(daemon_env["config"].repos[0])
+
+        mock_proc.terminate.assert_called_once_with()
+        mock_proc.kill.assert_called_once_with()
+        assert mock_proc.wait.call_count == 2
+        assert all(call.kwargs == {"timeout": 5} for call in mock_proc.wait.call_args_list)
+        assert "alpha" not in daemon._children
+
+    @patch("code_review_graph.daemon.subprocess.Popen")
+    def test_start_watcher_assignment_failure_does_not_terminate_dead_process(
+        self, mock_popen, daemon_env
+    ):
+        """A watcher that already exited is not terminated after assignment failure."""
+        mock_proc = MagicMock()
+        mock_proc.pid = 12345
+        mock_proc.poll.return_value = 1
+        mock_popen.return_value = mock_proc
+
+        daemon = daemon_env["daemon"]
+        daemon._windows_job = MagicMock()
+        daemon._windows_job.assign.side_effect = OSError("job assignment failed")
+
+        daemon._start_watcher(daemon_env["config"].repos[0])
+
+        mock_proc.terminate.assert_not_called()
+        assert "alpha" not in daemon._children
+
+    @patch("code_review_graph.daemon.subprocess.Popen")
+    def test_start_watcher_assignment_failure_handles_kill_wait_timeout(
+        self, mock_popen, daemon_env, caplog
+    ):
+        """A second cleanup timeout after kill does not escape watcher startup."""
+        mock_proc = MagicMock()
+        mock_proc.pid = 12345
+        mock_proc.poll.return_value = None
+        mock_proc.wait.side_effect = [
+            subprocess.TimeoutExpired(cmd="watcher", timeout=5),
+            subprocess.TimeoutExpired(cmd="watcher", timeout=5),
+        ]
+        mock_popen.return_value = mock_proc
+
+        daemon = daemon_env["daemon"]
+        daemon._windows_job = MagicMock()
+        daemon._windows_job.assign.side_effect = OSError("job assignment failed")
+        log_fd = MagicMock()
+
+        with patch("builtins.open", return_value=log_fd):
+            daemon._start_watcher(daemon_env["config"].repos[0])
+
+        mock_proc.terminate.assert_called_once_with()
+        mock_proc.kill.assert_called_once_with()
+        assert mock_proc.wait.call_count == 2
+        assert "alpha" not in daemon._children
+        log_fd.close.assert_called_once_with()
+        assert "remained alive after SIGKILL" in caplog.text
 
     @patch("code_review_graph.daemon.subprocess.Popen")
     @patch("code_review_graph.registry.Registry")
@@ -733,8 +893,8 @@ class TestWatchDaemon:
             mock_alpha.terminate.assert_not_called()
             mock_beta.terminate.assert_not_called()
 
-    def test_reconcile_update_path(self, daemon_env, tmp_path):
-        """Same alias but different path = register, build if needed, terminate + new child."""
+    @staticmethod
+    def _prepare_reconcile_path_change(daemon_env, tmp_path):
         daemon = daemon_env["daemon"]
         config = daemon_env["config"]
         daemon._state_path = daemon_env["tmp_path"] / "daemon-state.json"
@@ -742,13 +902,15 @@ class TestWatchDaemon:
         mock_alpha = MagicMock()
         mock_alpha.pid = 100
         mock_alpha.poll.return_value = None
+
         mock_beta = MagicMock()
         mock_beta.pid = 200
         mock_beta.poll.return_value = None
+
         daemon._current_repos = {r.alias: r for r in config.repos}
         daemon._children = {"alpha": mock_alpha, "beta": mock_beta}
 
-        # Create a new repo directory for alpha with a different path (no graph.db)
+        # A new repo directory for alpha with a different path (no graph.db).
         new_repo = tmp_path / "repo-a-v2"
         new_repo.mkdir()
         (new_repo / ".git").mkdir()
@@ -761,6 +923,14 @@ class TestWatchDaemon:
                 WatchRepo(path=str(new_repo), alias="alpha"),
                 config.repos[1],
             ],
+        )
+
+        return daemon, mock_alpha, new_repo, updated_config
+
+    def test_reconcile_update_path(self, daemon_env, tmp_path):
+        """Same alias but different path = register, build if needed, terminate + new child."""
+        daemon, mock_alpha, new_repo, updated_config = (
+            self._prepare_reconcile_path_change(daemon_env, tmp_path)
         )
 
         with (
@@ -778,7 +948,9 @@ class TestWatchDaemon:
             daemon.reconcile(updated_config)
 
             # alpha should be registered at the new path
-            mock_registry.register.assert_called_once_with(str(new_repo), alias="alpha")
+            mock_registry.register.assert_called_once_with(
+                str(new_repo), alias="alpha"
+            )
 
             # alpha should be built (new path has no graph.db)
             assert mock_run.call_count == 1
@@ -861,6 +1033,18 @@ class TestWatchDaemon:
         mock_beta.terminate.assert_called_once()
         assert len(daemon._children) == 0
         assert len(daemon._current_repos) == 0
+
+    def test_stop_closes_windows_job_when_child_termination_fails(self, daemon_env):
+        """Job Object cleanup runs even when child termination raises."""
+        daemon = daemon_env["daemon"]
+        daemon._windows_job = MagicMock()
+        daemon._terminate_child = MagicMock(side_effect=RuntimeError("cleanup failure"))
+        daemon._children = {"alpha": MagicMock()}
+
+        with pytest.raises(RuntimeError, match="cleanup failure"):
+            daemon.stop()
+
+        daemon._windows_job.close.assert_called_once_with()
 
     @patch("code_review_graph.daemon.subprocess.Popen")
     @patch("code_review_graph.registry.Registry")
@@ -1371,6 +1555,211 @@ class TestDaemonCLI:
             assert printed_lines == ["line3", "line4", "line5"]
 
 
+class TestStopClearsWatcherHealth:
+    """A watcher killed outright cannot clear its own health file. See: #925, #1160
+
+    That is every watcher on Windows, where ``crg-daemon stop`` ends the daemon
+    with ``TerminateProcess`` and the Job Object takes the children with it, so
+    none of the shutdown code runs. These use real processes so that the
+    ``windows-native`` CI job drives the real Windows paths: a plain sleeping
+    child has no signal handler, so killing one runs no cleanup anywhere.
+    """
+
+    @staticmethod
+    def _dead_pid() -> int:
+        proc = subprocess.Popen([sys.executable, "-c", ""])
+        proc.wait(timeout=30)
+        return proc.pid
+
+    @staticmethod
+    def _publish_health(repo: Path, pid: int) -> Path:
+        """What a watch child publishes: its own PID and a fresh heartbeat."""
+        from code_review_graph.daemon import watch_health_path
+
+        path = watch_health_path(repo)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"pid": pid, "updated_at": time.time(), "observer_alive": True}),
+            encoding="utf-8",
+        )
+        return path
+
+    def _left_behind_by(self, tmp_path: Path, pid: int) -> tuple[Path, Path]:
+        """A state file and a frozen health file for one watcher."""
+        from code_review_graph.daemon import default_state_path
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        state = default_state_path()
+        state.parent.mkdir(parents=True, exist_ok=True)
+        state.write_text(
+            json.dumps({"repo": {"pid": pid, "path": str(repo)}}), encoding="utf-8",
+        )
+        return self._publish_health(repo, pid), state
+
+    def test_stop_clears_health_when_the_daemon_is_killed_outright(self, tmp_path, capsys):
+        from code_review_graph.daemon import write_pid
+        from code_review_graph.daemon_cli import _handle_stop
+
+        health, state = self._left_behind_by(tmp_path, self._dead_pid())
+        daemon = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        try:
+            write_pid(daemon.pid)
+            # Reap concurrently: an unreaped zombie reads as alive on POSIX.
+            reaper = threading.Thread(target=daemon.wait, daemon=True)
+            reaper.start()
+            with patch("code_review_graph.daemon.is_daemon_running", return_value=True):
+                _handle_stop(MagicMock())
+            reaper.join(timeout=30)
+        finally:
+            if daemon.poll() is None:
+                daemon.kill()
+                daemon.wait()
+
+        assert not health.exists()
+        assert not state.exists()
+        assert "Daemon stopped." in capsys.readouterr().out
+
+    def test_stop_clears_health_when_the_daemon_is_already_gone(self, tmp_path, capsys):
+        from code_review_graph.daemon import write_pid
+        from code_review_graph.daemon_cli import _handle_stop
+
+        health, state = self._left_behind_by(tmp_path, self._dead_pid())
+        write_pid(self._dead_pid())
+        with patch("code_review_graph.daemon.is_daemon_running", return_value=True):
+            _handle_stop(MagicMock())
+
+        assert not health.exists()
+        assert not state.exists()
+        assert "already gone" in capsys.readouterr().out
+
+    def test_stop_stops_a_live_watcher_when_the_daemon_is_already_gone(self, tmp_path, capsys):
+        from code_review_graph.daemon import write_pid
+        from code_review_graph.daemon_cli import _handle_stop
+
+        watcher = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        try:
+            reaper = threading.Thread(target=watcher.wait, daemon=True)
+            reaper.start()
+            health, _state = self._left_behind_by(tmp_path, watcher.pid)
+            write_pid(self._dead_pid())
+            with (
+                patch("code_review_graph.daemon.is_daemon_running", return_value=True),
+                patch("code_review_graph.daemon.is_our_watcher", return_value=True),
+            ):
+                _handle_stop(MagicMock())
+            reaper.join(timeout=30)
+            assert watcher.poll() is not None
+        finally:
+            if watcher.poll() is None:
+                watcher.kill()
+                watcher.wait()
+
+        assert not health.exists()
+        assert "outlived the daemon" in capsys.readouterr().out
+
+    def test_stop_with_no_daemon_clears_what_a_dead_one_left(self, tmp_path, capsys):
+        from code_review_graph.daemon_cli import _handle_stop
+
+        health, state = self._left_behind_by(tmp_path, self._dead_pid())
+
+        with pytest.raises(SystemExit) as caught:
+            _handle_stop(MagicMock())
+
+        assert caught.value.code == 1
+        assert "not running" in capsys.readouterr().out
+        assert not health.exists()
+        assert not state.exists()
+
+    def test_health_is_cleared_after_the_watcher_stops_not_before(self, tmp_path):
+        """A heartbeat published on the way down must not survive the reap."""
+        from code_review_graph import daemon as daemon_module
+
+        repo = tmp_path / "repo"
+        health, _state = self._left_behind_by(tmp_path, os.getpid())
+
+        def last_heartbeat(_pid, *, timeout):
+            self._publish_health(repo, os.getpid())
+            return True
+
+        with (
+            patch.object(daemon_module, "is_our_watcher", return_value=True),
+            patch.object(daemon_module, "_signal_until_dead", side_effect=last_heartbeat),
+        ):
+            reaped = daemon_module.reap_orphaned_watchers()
+
+        assert [orphan["pid"] for orphan in reaped] == [os.getpid()]
+        assert not health.exists()
+
+    def test_a_stranger_on_a_recycled_pid_is_left_alone_but_the_file_goes(self, tmp_path):
+        """The recorded PID now names someone else, so our watcher is gone."""
+        from code_review_graph import daemon as daemon_module
+
+        health, state = self._left_behind_by(tmp_path, os.getpid())
+
+        with (
+            patch.object(daemon_module, "is_our_watcher", return_value=False),
+            patch.object(daemon_module, "_signal_until_dead") as signalled,
+        ):
+            reaped = daemon_module.reap_orphaned_watchers()
+
+        assert reaped == []
+        signalled.assert_not_called()
+        assert not health.exists()
+        assert not state.exists()
+
+    def test_health_of_a_watcher_the_daemon_never_ran_is_left_alone(self, tmp_path):
+        """``code-review-graph watch`` run by hand publishes health too."""
+        from code_review_graph import daemon as daemon_module
+
+        hand_run = tmp_path / "hand-run"
+        hand_run.mkdir()
+        other = self._publish_health(hand_run, os.getpid())
+        self._left_behind_by(tmp_path, self._dead_pid())
+
+        daemon_module.reap_orphaned_watchers()
+
+        assert other.exists()
+
+    def test_a_live_replacement_on_the_same_repo_keeps_its_health(self, tmp_path):
+        """A watcher started by hand after ours died publishes to the same file.
+
+        Deleting it would let the next ``start`` miss that watcher and launch a
+        second writer on the same database.
+        """
+        from code_review_graph import daemon as daemon_module
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        replacement = subprocess.Popen(
+            [
+                sys.executable, "-c", "import time; time.sleep(60)",
+                "code-review-graph", "watch", "--repo", str(repo),
+            ]
+        )
+        try:
+            reaper = threading.Thread(target=replacement.wait, daemon=True)
+            reaper.start()
+            state = daemon_module.default_state_path()
+            state.parent.mkdir(parents=True, exist_ok=True)
+            state.write_text(
+                json.dumps({"repo": {"pid": self._dead_pid(), "path": str(repo)}}),
+                encoding="utf-8",
+            )
+            health = self._publish_health(repo, replacement.pid)
+
+            reaped = daemon_module.reap_orphaned_watchers()
+
+            assert reaped == []
+            assert replacement.poll() is None
+            assert health.exists()
+            assert not state.exists()
+        finally:
+            if replacement.poll() is None:
+                replacement.kill()
+            replacement.wait()
+
+
 class TestPerUserStateLocation:
     """Daemon state must follow $CRG_HOME, not a frozen Path.home()."""
 
@@ -1440,3 +1829,71 @@ class TestPerUserStateLocation:
         from code_review_graph.daemon import CONFIG_PATH
 
         assert CONFIG_PATH == tmp_path / "state" / "watch.toml"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows Job Object integration")
+def test_windows_job_close_terminates_watcher():
+    """Closing the daemon job terminates a watcher it owns."""
+    from code_review_graph.daemon import _WindowsJob
+
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"]
+    )
+    job = _WindowsJob()
+    try:
+        job.assign(process)
+        job.close()
+        process.wait(timeout=10)
+        assert process.returncode is not None
+    finally:
+        job.close()
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows Job Object integration")
+def test_windows_job_close_terminates_watcher_children(tmp_path):
+    """Closing a job terminates an assigned parent and children it creates."""
+    from code_review_graph.daemon import _WindowsJob, pid_alive
+
+    start_file = tmp_path / "start"
+    child_file = tmp_path / "children"
+    child_code = "import time; time.sleep(60)"
+    parent_code = (
+        "import os, pathlib, subprocess, sys, time\n"
+        f"start = pathlib.Path({str(start_file)!r})\n"
+        f"children = pathlib.Path({str(child_file)!r})\n"
+        "while not start.exists():\n    time.sleep(0.01)\n"
+        f"procs = [subprocess.Popen([sys.executable, '-c', {child_code!r}]) for _ in range(2)]\n"
+        "partial = children.with_suffix('.tmp')\n"
+        "partial.write_text('\\n'.join(str(proc.pid) for proc in procs))\n"
+        "os.replace(partial, children)\n"
+        "time.sleep(60)"
+    )
+    compile(parent_code, "<parent>", "exec")
+    process = subprocess.Popen([sys.executable, "-c", parent_code])
+    job = _WindowsJob()
+    child_pids: list[int] = []
+    try:
+        job.assign(process)
+        start_file.touch()
+        deadline = time.monotonic() + 10
+        while not child_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        child_pids = [int(pid) for pid in child_file.read_text().splitlines()]
+        assert len(child_pids) == 2
+
+        job.close()
+        process.wait(timeout=10)
+        assert process.returncode is not None
+
+        deadline = time.monotonic() + 10
+        while any(pid_alive(pid) for pid in child_pids) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert all(not pid_alive(pid) for pid in child_pids)
+    finally:
+        job.close()
+        if process.poll() is None:
+            process.kill()
+            process.wait()

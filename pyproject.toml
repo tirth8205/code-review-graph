@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "code-review-graph"
-version = "2.3.9"
+version = "2.4.0"
 description = "Local-first knowledge graph for token-efficient code review through MCP and CLI"
 readme = {file = "README.md", content-type = "text/markdown"}
 license = "MIT"
@@ -25,19 +25,25 @@ classifiers = [
     "Topic :: Software Development :: Quality Assurance",
 ]
 dependencies = [
-    "mcp>=1.0.0,<3",
+    # The floors are the oldest direct versions exercised by CI; see
+    # .github/workflows/ci.yml and .github/requirements-minimum.txt.
+    "mcp>=1.29.0,<3",
     # fastmcp >=3.2.4 is required for Message-based prompts and includes the
-    # CVE-2025-62800/62801/66416 fixes; <4 prevents the next major release
-    # from breaking the server the way fastmcp 3.0 did. See: #488
-    "fastmcp>=3.2.4,<4",
+    # CVE-2025-62800/62801/66416 fixes. 4.x is tested: it brings the mcp SDK
+    # 2.x, which also serves the 2026-07-28 protocol (server/discover, #919).
+    # <5 stops the next major release from breaking the server the way
+    # fastmcp 3.0 did. See: #488, #970
+    "fastmcp>=3.2.4,<5",
     # main.py imports anyio directly: the MCP tool offload has to use the
     # same thread limiter FastMCP dispatches sync tool bodies through, not
     # asyncio's smaller default executor. A direct import gets a direct
     # dependency rather than relying on fastmcp to keep pulling it in.
-    "anyio>=4.0,<5",
-    "tree-sitter>=0.23.0,<1",
-    "tree-sitter-language-pack>=0.3.0,<1",
-    "pyyaml>=6.0,<7",
+    "anyio>=4.8.0,<5",
+    "tree-sitter>=0.26.0,<1",
+    "tree-sitter-language-pack>=0.13.0,<1",
+    # 6.0.2 is the first release with wheels for every supported Python; 6.0
+    # fails to build from source on Python 3.12 and newer.
+    "pyyaml>=6.0.2,<7",
     "networkx>=3.2,<4",
     "watchdog>=4.0.0,<7",
     "tomli>=2.0.0,<3; python_version < '3.11'",
@@ -85,7 +91,10 @@ enrichment = [
 ]
 dev = [
     "mypy>=1.10,<3",
-    "pytest>=8.0,<9",
+    # Optional at runtime (the "embeddings" extra pulls it in), but
+    # EmbeddingStore.search() has a numpy path the test job has to exercise.
+    "numpy>=1.26,<3",
+    "pytest>=8.0,<10",
     "pytest-asyncio>=0.23,<2",
     "pytest-cov>=4.0,<8",
     "ruff>=0.3.0,<1",

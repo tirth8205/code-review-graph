@@ -91,7 +91,7 @@ class PlatformExpectation:
     scope: str  # "repo", "home" or "hermes"
     relative_config: str
     server_key: str
-    fmt: str  # object | array | toml | yaml
+    fmt: str  # object | array | toml | yaml | dsh-patch
     entry_type: str | None  # expected value of the entry's "type" field
     expects_cwd: bool
     extra_fields: dict[str, Any] = field(default_factory=dict)
@@ -161,6 +161,16 @@ EXPECTATIONS: dict[str, PlatformExpectation] = {
         key="opencode",
         scope="repo",
         relative_config="opencode.jsonc",
+        server_key="mcp",
+        fmt="object",
+        entry_type="local",
+        expects_cwd=False,
+        command_is_list=True,
+    ),
+    "mimo": PlatformExpectation(
+        key="mimo",
+        scope="repo",
+        relative_config=".mimocode/mimocode.json",
         server_key="mcp",
         fmt="object",
         entry_type="local",
@@ -249,6 +259,17 @@ EXPECTATIONS: dict[str, PlatformExpectation] = {
         entry_type="stdio",
         expects_cwd=True,
     ),
+    # One ``insert`` operation in DSH's home patch layer; the sandbox points
+    # DSH_HOME at ``<home>/.dsh``.
+    "dsh": PlatformExpectation(
+        key="dsh",
+        scope="home",
+        relative_config=".dsh/cordis.patch.yml",
+        server_key="insert",
+        fmt="dsh-patch",
+        entry_type=None,
+        expects_cwd=False,
+    ),
 }
 
 PLATFORM_KEYS = sorted(EXPECTATIONS)
@@ -263,6 +284,7 @@ EXPECTED_INSTRUCTION_FILES: dict[str, tuple[str, ...]] = {
     "zed": (),
     "continue": (),
     "opencode": ("AGENTS.md",),
+    "mimo": ("AGENTS.md",),
     "antigravity": ("AGENTS.md", "GEMINI.md"),
     "gemini-cli": ("GEMINI.md",),
     "qwen": (),
@@ -272,12 +294,20 @@ EXPECTED_INSTRUCTION_FILES: dict[str, tuple[str, ...]] = {
     "copilot-cli": (".github/instructions/code-review-graph.instructions.md",),
     "hermes": ("AGENTS.md",),
     "codebuddy": ("CODEBUDDY.md",),
+    "dsh": ("AGENTS.md",),
 }
 
 # Files a single-platform install is expected to create for hooks and skills,
 # relative to the repo root ("repo:") or the throwaway home ("home:").
 EXPECTED_EXTRA_ARTIFACTS: dict[str, tuple[str, ...]] = {
-    "codex": ("home:.codex/hooks.json", "repo:.git/hooks/pre-commit"),
+    "codex": (
+        "home:.codex/hooks.json",
+        "home:.codex/skills/code-review-graph/SKILL.md",
+        "home:.codex/skills/code-review-graph/agents/openai.yaml",
+        "home:.codex/skills/code-review-graph/scripts/crg_readonly.py",
+        "home:.codex/skills/code-review-graph/.code-review-graph-managed.json",
+        "repo:.git/hooks/pre-commit",
+    ),
     "claude": (
         "repo:.claude/settings.json",
         "repo:.claude/skills/explore-codebase/SKILL.md",
@@ -288,6 +318,7 @@ EXPECTED_EXTRA_ARTIFACTS: dict[str, tuple[str, ...]] = {
     "zed": (),
     "continue": (),
     "opencode": ("home:.config/opencode/plugins/crg-plugin.ts",),
+    "mimo": (),
     "antigravity": (),
     "gemini-cli": (
         "repo:.gemini/skills/explore-codebase/SKILL.md",
@@ -307,6 +338,7 @@ EXPECTED_EXTRA_ARTIFACTS: dict[str, tuple[str, ...]] = {
         "repo:.codebuddy/settings.json",
         "repo:.codebuddy/skills/explore-codebase/SKILL.md",
     ),
+    "dsh": (),
 }
 
 
@@ -326,6 +358,8 @@ HOME_SUBDIRS = (
     ".kiro",
     ".copilot",
     ".config/opencode",
+    ".config/mimocode",
+    ".dsh",
     str(Path(_zed_relative()).parent),
 )
 
@@ -371,6 +405,7 @@ def sandbox(tmp_path_factory, monkeypatch) -> Sandbox:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
     monkeypatch.setenv("CRG_HOME", str(home / ".code-review-graph"))
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("DSH_HOME", str(home / ".dsh"))
     monkeypatch.setattr(Path, "home", lambda: home)
 
     return Sandbox(repo=repo, home=home, hermes_home=hermes_home)
@@ -404,11 +439,35 @@ def run_uninstall(sandbox: Sandbox, **kwargs: Any) -> uninstall.UninstallReport:
 # ---------------------------------------------------------------------------
 
 
+def _dsh_rows(raw: str) -> list[dict[str, Any]]:
+    """Every row of every ``insert`` operation in a DSH patch layer."""
+    from code_review_graph import dsh
+
+    return [
+        row
+        for operation in (dsh.load(raw) or [])
+        if isinstance(operation, dict)
+        for row in operation.get("insert") or []
+        if isinstance(row, dict)
+    ]
+
+
+def _dsh_server(raw: str, name: str) -> dict[str, Any] | None:
+    """The MCP client config DSH starts for ``serverName`` *name*."""
+    for row in _dsh_rows(raw):
+        config = row.get("config")
+        if isinstance(config, dict) and config.get("serverName") == name:
+            return {k: v for k, v in config.items() if k not in ("serverName", "transport")}
+    return None
+
+
 def read_entry(path: Path, expect: PlatformExpectation) -> dict[str, Any] | None:
     """Return the code-review-graph entry from a config, or None if absent."""
     if not path.exists():
         return None
     raw = path.read_text(encoding="utf-8")
+    if expect.fmt == "dsh-patch":
+        return _dsh_server(raw, ENTRY_NAME)
     if expect.fmt == "toml":
         import tomllib
 
@@ -436,6 +495,11 @@ def count_entries(path: Path, expect: PlatformExpectation) -> int:
     if not path.exists():
         return 0
     raw = path.read_text(encoding="utf-8")
+    if expect.fmt == "dsh-patch":
+        return sum(
+            1 for row in _dsh_rows(raw)
+            if (row.get("config") or {}).get("serverName") == ENTRY_NAME
+        )
     if expect.fmt == "toml":
         return len(re.findall(rf"^\[{re.escape(expect.server_key)}\.{ENTRY_NAME}\]", raw, re.M))
     if expect.fmt == "yaml":
@@ -454,6 +518,18 @@ def count_entries(path: Path, expect: PlatformExpectation) -> int:
 def read_foreign(path: Path, expect: PlatformExpectation) -> tuple[Any, Any]:
     """Return ``(unrelated top-level setting, unrelated MCP server entry)``."""
     raw = path.read_text(encoding="utf-8")
+    if expect.fmt == "dsh-patch":
+        from code_review_graph import dsh
+
+        setting = next(
+            (
+                operation["config"]["value"]
+                for operation in dsh.load(raw) or []
+                if isinstance(operation, dict) and operation.get("id") == FOREIGN_SETTING
+            ),
+            None,
+        )
+        return setting, _dsh_server(raw, FOREIGN_SERVER)
     if expect.fmt == "toml":
         import tomllib
 
@@ -480,6 +556,23 @@ FOREIGN_ENTRY = {"command": "other-tool", "args": ["--serve"]}
 def write_preexisting_config(path: Path, expect: PlatformExpectation) -> None:
     """Seed a user's own config: an unrelated setting and another MCP server."""
     path.parent.mkdir(parents=True, exist_ok=True)
+    if expect.fmt == "dsh-patch":
+        path.write_text(
+            "# a user's own DSH patches\n"
+            f"- id: {FOREIGN_SETTING}\n"
+            f"  config: {{value: {FOREIGN_VALUE}}}\n"
+            "- insert:\n"
+            f"    - id: mcp-{FOREIGN_SERVER}\n"
+            "      name: '@deepseek-ai/dsh-mcp-client'\n"
+            "      config:\n"
+            f"        serverName: {FOREIGN_SERVER}\n"
+            "        transport: stdio\n"
+            "        command: other-tool\n"
+            "        args: ['--serve']\n"
+            "        cwd: !!js process.cwd()\n",
+            encoding="utf-8",
+        )
+        return
     if expect.fmt == "toml":
         path.write_text(
             f'{FOREIGN_SETTING} = "{FOREIGN_VALUE}"\n\n'
@@ -518,6 +611,19 @@ def write_stale_config(path: Path, expect: PlatformExpectation) -> None:
     than kept.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
+    if expect.fmt == "dsh-patch":
+        path.write_text(
+            "- insert:\n"
+            "    - id: mcp-code-review-graph\n"
+            "      name: '@deepseek-ai/dsh-mcp-client'\n"
+            "      config:\n"
+            "        serverName: code-review-graph\n"
+            "        transport: stdio\n"
+            f"        command: {STALE_ABSOLUTE}\n"
+            "        args: [-m, code_review_graph, serve]\n",
+            encoding="utf-8",
+        )
+        return
     if expect.fmt == "toml":
         path.write_text(
             f"[{expect.server_key}.{ENTRY_NAME}]\n"
@@ -775,12 +881,6 @@ def test_step3_preexisting_user_config_survives(sandbox: Sandbox, key: str) -> N
 
 
 CONTENT_LEFTOVER_XFAIL = {
-    "qoder": (
-        "uninstall._process_repo removes .qoder/skills/<name>/SKILL.md only for "
-        "names found in the TARGET repo's own skills/ directory, while install "
-        "copies them out of the installed package, so every Qoder skill file "
-        "survives uninstall in a repo that has no skills/ directory of its own"
-    ),
     "gemini-cli": (
         "install_gemini_cli_hooks copies .gemini/settings.json to "
         "settings.json.bak, and uninstall never removes the backup, so a full "
@@ -880,6 +980,37 @@ def test_step4b_uninstall_leaves_no_file_still_holding_our_content(
     assert not live, f"{key}: uninstall left live code-review-graph content in {live}"
 
     _record("step4b_content_leftovers", key, len(created))
+
+
+def test_step4b_qoder_uninstall_removes_every_skill_file_install_wrote(
+    sandbox: Sandbox,
+) -> None:
+    """Every ``.qoder/skills`` file install wrote is gone after uninstall.
+
+    Step 4b only flags a leftover that still contains the string
+    ``code-review-graph``, and most bundled ``SKILL.md`` files never say it,
+    so an uninstall that dropped some of the bundled names would still pass
+    there. This compares by path against what install actually wrote, in a
+    repository with no ``skills/`` directory of its own (#909).
+    """
+    skills_root = sandbox.repo / ".qoder" / "skills"
+    assert not (sandbox.repo / "skills").exists()
+    before = snapshot(sandbox)
+    run_install(sandbox, "qoder")
+    written = sorted(
+        path for path in set(snapshot(sandbox)) - set(before) if skills_root in path.parents
+    )
+    installed = {path.relative_to(skills_root).parts[0] for path in written}
+    assert installed == set(skills.bundled_skill_names()), (
+        f"qoder: install wrote {sorted(installed)}, bundled are {skills.bundled_skill_names()}"
+    )
+
+    report = run_uninstall(sandbox)
+    after = snapshot(sandbox)
+
+    left = [str(path) for path in written if path in after]
+    assert not left, f"qoder: uninstall left skill files behind: {left}"
+    assert not report.errors, f"qoder: uninstall reported errors {report.errors}"
 
 
 @pytest.mark.parametrize(
@@ -1150,8 +1281,8 @@ def test_platform_list_does_not_drift() -> None:
     cli_surface = _cli_platform_keys()
     expected = set(EXPECTATIONS)
 
-    assert len(installer) == 16, (
-        f"the installer now supports {len(installer)} platforms, not 16: "
+    assert len(installer) == 18, (
+        f"the installer now supports {len(installer)} platforms, not 18: "
         f"{sorted(installer)}"
     )
 
@@ -1179,7 +1310,7 @@ def test_platform_list_does_not_drift() -> None:
 
     # The uninstall sweep iterates skills.PLATFORMS, so drift can only appear as
     # a format it cannot handle. Name any such platform explicitly.
-    handled_formats = {"toml", "yaml", "object", "array"}
+    handled_formats = {"toml", "yaml", "object", "array", "dsh-patch"}
     unsweepable = sorted(
         name
         for name, spec in skills.PLATFORMS.items()
@@ -1199,10 +1330,13 @@ def test_every_platform_has_a_reachable_config_path(sandbox: Sandbox) -> None:
     """
     offenders = []
     for name, spec in skills.PLATFORMS.items():
-        path = Path(os.path.abspath(spec["config_path"](sandbox.repo)))
-        scope = uninstall._scope_for_config(path, sandbox.repo, sandbox.home)
-        if scope is None:
-            offenders.append(f"{name} -> {path}")
+        paths = [spec["config_path"](sandbox.repo)]
+        paths.extend(spec.get("config_paths", lambda root: ())(sandbox.repo))
+        for candidate in paths:
+            path = Path(os.path.abspath(candidate))
+            scope = uninstall._scope_for_config(path, sandbox.repo, sandbox.home)
+            if scope is None:
+                offenders.append(f"{name} -> {path}")
     assert not offenders, f"configs outside every uninstall boundary: {offenders}"
 
 

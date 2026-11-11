@@ -191,24 +191,6 @@ def _snapshot(store: GraphStore, repo: Path) -> dict:
         "LEFT JOIN communities p ON p.id = c.parent_id "
         "ORDER BY c.name, c.level"
     ).fetchall()
-    community_summaries = store._conn.execute(
-        "SELECT c.name AS community_name, cs.name, cs.purpose, "
-        "cs.key_symbols, cs.risk, cs.size, cs.dominant_language "
-        "FROM community_summaries cs "
-        "JOIN communities c ON c.id = cs.community_id "
-        "ORDER BY c.name, cs.name"
-    ).fetchall()
-    flow_snapshots = store._conn.execute(
-        "SELECT f.name AS flow_name, fs.name, fs.entry_point, "
-        "fs.critical_path, fs.criticality, fs.node_count, fs.file_count "
-        "FROM flow_snapshots fs JOIN flows f ON f.id = fs.flow_id "
-        "ORDER BY f.name, fs.name"
-    ).fetchall()
-    risk_index = store._conn.execute(
-        "SELECT qualified_name, risk_score, caller_count, test_coverage, "
-        "security_relevant FROM risk_index "
-        "ORDER BY qualified_name"
-    ).fetchall()
     embeddings = store._conn.execute(
         "SELECT qualified_name, vector, text_hash, provider "
         "FROM embeddings ORDER BY qualified_name"
@@ -220,15 +202,6 @@ def _snapshot(store: GraphStore, repo: Path) -> dict:
         "flows": flows,
         "communities": [
             tuple(norm(value) for value in row) for row in communities
-        ],
-        "community_summaries": [
-            tuple(norm(value) for value in row) for row in community_summaries
-        ],
-        "flow_snapshots": [
-            tuple(norm(value) for value in row) for row in flow_snapshots
-        ],
-        "risk_index": [
-            tuple(norm(value) for value in row) for row in risk_index
         ],
         "embeddings": [
             tuple(norm(value) for value in row) for row in embeddings

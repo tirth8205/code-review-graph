@@ -66,7 +66,7 @@ The graph database is stored locally at `.code-review-graph/graph.db` and update
 
 | Setting | Default | Description |
 |---|---|---|
-| `codeReviewGraph.cliPath` | `""` | Path to the CLI binary. Leave empty to use the bundled version or one found on `PATH`. |
+| `codeReviewGraph.cliPath` | `""` | Path to the CLI binary. Leave empty to run `code-review-graph` from your `PATH`. The extension does not include the CLI. |
 | `codeReviewGraph.autoUpdate` | `true` | Auto-update the graph on file save. |
 | `codeReviewGraph.blastRadiusDepth` | `2` | Max traversal depth for blast radius (1--10). |
 | `codeReviewGraph.graphTheme` | `"auto"` | Graph color theme: `auto`, `light`, or `dark`. |

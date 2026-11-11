@@ -13,7 +13,7 @@ Usage::
 
 ``--order`` controls the order ``full_build`` receives the file inventory in:
 
-``asis``      the inventory exactly as ``collect_all_files`` returned it
+``asis``      the inventory exactly as ``_collect_files`` returned it
 ``reversed``  the same files, reversed
 ``rotate``    the same files, rotated by half their length
 
@@ -32,6 +32,10 @@ import sqlite3
 import sys
 from pathlib import Path
 
+# How many times the reordered inventory was handed out. Reported on stdout so
+# the harness can tell a reordered build from one the patch never reached.
+_REORDERED_CALLS = 0
+
 
 def _apply_order(order: str) -> None:
     """Patch the file inventory so ``full_build`` sees a different order.
@@ -45,20 +49,26 @@ def _apply_order(order: str) -> None:
 
     from code_review_graph import incremental
 
-    original = incremental.collect_all_files
+    # ``full_build`` reads the inventory through ``_collect_files``, which
+    # ``collect_all_files`` also wraps, so patching it reaches every caller.
+    original = incremental._collect_files
 
-    def reordered(*args: object, **kwargs: object) -> list[str]:
-        files = list(original(*args, **kwargs))  # type: ignore[arg-type]
+    def reordered(*args: object, **kwargs: object) -> tuple:
+        global _REORDERED_CALLS
+        files, *rest = original(*args, **kwargs)  # type: ignore[arg-type]
         if not files:
             raise SystemExit("file inventory was empty; nothing to reorder")
+        _REORDERED_CALLS += 1
         if order == "reversed":
-            return files[::-1]
-        if order == "rotate":
+            files = files[::-1]
+        elif order == "rotate":
             half = len(files) // 2
-            return files[half:] + files[:half]
-        raise SystemExit(f"unknown order: {order}")
+            files = files[half:] + files[:half]
+        else:
+            raise SystemExit(f"unknown order: {order}")
+        return (files, *rest)
 
-    incremental.collect_all_files = reordered  # type: ignore[assignment]
+    incremental._collect_files = reordered  # type: ignore[assignment]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -113,6 +123,7 @@ def main(argv: list[str] | None = None) -> int:
         "status": result.get("status"),
         "warnings": result.get("warnings", []),
         "errors": [e.get("file") for e in result.get("errors", [])],
+        "reordered_calls": _REORDERED_CALLS,
     }))
     return 0
 

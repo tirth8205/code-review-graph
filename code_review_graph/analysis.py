@@ -1,14 +1,27 @@
-"""Graph analysis: hub detection, bridge nodes, knowledge gaps,
+"""Graph analysis: hub detection, bridge nodes, knowledge gaps, import cycles,
 surprise scoring, suggested questions."""
 
 from __future__ import annotations
 
 import logging
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
+from pathlib import Path
 
-from .graph import GraphStore, _sanitize_name
+from .constants import (
+    IMPORT_CONTEXT_DEFERRED,
+    IMPORT_CONTEXT_KEY,
+    IMPORT_CONTEXT_PARENT_PACKAGE,
+    IMPORT_CONTEXT_TYPE_ONLY,
+)
+from .graph import GraphEdge, GraphStore, _sanitize_name
+from .parser import normalize_file_path
 
 logger = logging.getLogger(__name__)
+
+# How much of one import cycle is spelled out. A cycle can hold hundreds of files
+# and each row carries paths, so the rest is told as a count.
+_MAX_CYCLE_FILES = 10
+_MAX_CYCLE_HOPS = 10
 
 
 def find_hub_nodes(store: GraphStore, top_n: int = 10) -> list[dict]:
@@ -109,10 +122,131 @@ def find_bridge_nodes(
         key=lambda x: float(x.get("betweenness", 0)),  # type: ignore[arg-type,return-value]
         reverse=True,
     )
+    del nxg, bc
+    store.shrink_memory(clear_nx_cache=True)
     return results[:top_n]
 
 
-def find_knowledge_gaps(store: GraphStore) -> dict[str, list[dict]]:
+def _shortest_loop(adjacency: dict[str, set[str]], start: str) -> list[str]:
+    """Return the fewest files that lead from *start* back to itself."""
+    came_from: dict[str, str] = {}
+    queue = deque([start])
+    while queue:
+        current = queue.popleft()
+        for neighbour in sorted(adjacency.get(current, ())):
+            if neighbour == start:
+                loop = [current]
+                while loop[-1] != start:
+                    loop.append(came_from[loop[-1]])
+                return loop[::-1]
+            if neighbour not in came_from:
+                came_from[neighbour] = current
+                queue.append(neighbour)
+    return [start]
+
+
+def find_import_cycles(
+    store: GraphStore,
+    edges: list[GraphEdge] | None = None,
+    repo_root: Path | None = None,
+) -> list[dict]:
+    """Find groups of files that import each other, worst first.
+
+    Only imports that run count: one under ``if TYPE_CHECKING`` or written
+    ``import type`` never does. Only imports that name a file count too, so Go
+    packages, which the compiler already keeps free of cycles, and C# namespaces
+    are not followed.
+
+    Returns list of dicts with: name (one loop, written out), size (files in the
+    group), load_time (the loop can fail as the files load; False means every
+    loop has an import that runs late), files, loop_length, and cycle (that
+    loop's imports with their lines). Paths are relative to *repo_root* when it
+    is given. Long lists are cut: size and loop_length keep the real counts.
+    """
+    import networkx as nx
+
+    files = set(store.get_all_files())
+    all_imports: dict[tuple[str, str], int] = {}
+    load_imports: dict[tuple[str, str], int] = {}
+    for edge in store.get_all_edges() if edges is None else edges:
+        source, target = edge.source_qualified, edge.target_qualified
+        if (
+            edge.kind != "IMPORTS_FROM"
+            or source == target
+            or source not in files
+            or target not in files
+        ):
+            continue
+        context = edge.extra.get(IMPORT_CONTEXT_KEY)
+        if context in (IMPORT_CONTEXT_TYPE_ONLY, IMPORT_CONTEXT_PARENT_PACKAGE):
+            continue
+        pair = (source, target)
+        all_imports[pair] = min(all_imports.get(pair, edge.line), edge.line)
+        if context != IMPORT_CONTEXT_DEFERRED:
+            load_imports[pair] = min(load_imports.get(pair, edge.line), edge.line)
+
+    groups = [
+        group
+        for group in nx.strongly_connected_components(nx.DiGraph(list(all_imports)))
+        if len(group) > 1
+    ]
+    if not groups:
+        return []
+    load_groups = sorted(
+        (
+            group
+            for group in nx.strongly_connected_components(nx.DiGraph(list(load_imports)))
+            if len(group) > 1
+        ),
+        key=lambda group: (-len(group), min(group)),
+    )
+
+    prefix = f"{normalize_file_path(repo_root)}/" if repo_root else ""
+
+    def short(path: str) -> str:
+        """Drop the repository's own folder: it would repeat in every row."""
+        return _sanitize_name(path.removeprefix(prefix))
+
+    def adjacency(imports: dict[tuple[str, str], int]) -> dict[str, set[str]]:
+        result: dict[str, set[str]] = defaultdict(set)
+        for source, target in imports:
+            result[source].add(target)
+        return result
+
+    all_adjacency = adjacency(all_imports)
+    load_adjacency = adjacency(load_imports)
+
+    cycles: list[dict] = []
+    for group in groups:
+        # A loop that runs at load is the one that can fail, so show it first.
+        load_group = next((g for g in load_groups if g <= group), None)
+        if load_group is not None:
+            loop = _shortest_loop(load_adjacency, min(load_group))
+        else:
+            loop = _shortest_loop(all_adjacency, min(group))
+        hops = list(zip(loop, loop[1:] + loop[:1]))
+        cycles.append({
+            "name": _sanitize_name(" -> ".join(short(path) for path in [*loop, loop[0]])),
+            "size": len(group),
+            "load_time": load_group is not None,
+            "files": [short(path) for path in sorted(group)[:_MAX_CYCLE_FILES]],
+            "loop_length": len(loop),
+            "cycle": [
+                {
+                    "file": short(source),
+                    "line": load_imports.get((source, target), all_imports[(source, target)]),
+                    "imports": short(target),
+                }
+                for source, target in hops[:_MAX_CYCLE_HOPS]
+            ],
+        })
+    cycles.sort(key=lambda c: (not c["load_time"], -c["size"], c["name"]))
+    return cycles
+
+
+def find_knowledge_gaps(
+    store: GraphStore, repo_root: Path | None = None,
+) -> dict[str, list[dict]]:
     """Identify structural weaknesses in the codebase graph.
 
     Returns dict with categories:
@@ -120,6 +254,7 @@ def find_knowledge_gaps(store: GraphStore) -> dict[str, list[dict]]:
     - thin_communities: fewer than 3 members
     - untested_hotspots: high-degree nodes with no TESTED_BY edges
     - single_file_communities: entire community in one file
+    - import_cycles: files that import each other (see find_import_cycles)
     """
     edges = store.get_all_edges()
     nodes = store.get_all_nodes(exclude_files=True)
@@ -207,6 +342,7 @@ def find_knowledge_gaps(store: GraphStore) -> dict[str, list[dict]]:
         "thin_communities": thin,
         "untested_hotspots": untested_hotspots[:20],
         "single_file_communities": single_file,
+        "import_cycles": find_import_cycles(store, edges, repo_root),
     }
 
 

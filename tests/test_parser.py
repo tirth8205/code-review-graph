@@ -1,11 +1,19 @@
 """Tests for the Tree-sitter parser module."""
 
+import ast
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from code_review_graph.graph import GraphStore
 from code_review_graph.incremental import full_build
-from code_review_graph.parser import CodeParser
+from code_review_graph.parser import (
+    CodeParser,
+    _clear_parser_probe_cache,
+    _python_type_checking_aliases,
+    _PythonUnreachableCallVisitor,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -22,6 +30,388 @@ class TestCodeParser:
 
     def test_detect_language_unknown(self):
         assert self.parser.detect_language(Path("foo.txt")) is None
+
+    def test_parse_robot_and_resource_files(self, tmp_path):
+        robot = tmp_path / "sample.robot"
+        robot.write_text(
+            "*** Settings ***\n"
+            "Resource    keywords.resource\n"
+            "Library     OperatingSystem\n\n"
+            "*** Test Cases ***\n"
+            "A passing test\n"
+            "    Log    hello\n"
+            "    Prepare environment\n\n"
+            "*** Keywords ***\n"
+            "Prepare environment\n"
+            "    Create directory    ${OUTPUT}\n",
+            encoding="utf-8",
+        )
+        resource = tmp_path / "keywords.resource"
+        resource.write_text(
+            "*** Keywords ***\n"
+            "Prepare environment\n"
+            "    Log    ready\n",
+            encoding="utf-8",
+        )
+
+        assert self.parser.detect_language(robot) == "robot"
+        assert self.parser.detect_language(resource) == "robot"
+        nodes, edges = self.parser.parse_file(robot)
+        assert {node.name for node in nodes} >= {
+            str(robot), "A passing test", "Prepare environment",
+        }
+        assert any(node.kind == "Test" and node.name == "A passing test" for node in nodes)
+        assert any(
+            edge.kind == "IMPORTS_FROM" and edge.target == resource.as_posix()
+            for edge in edges
+        )
+        assert any(
+            edge.kind == "CALLS"
+            and edge.source.endswith("::A passing test")
+            and edge.target == f"{robot.as_posix()}::Prepare environment"
+            for edge in edges
+        )
+
+    def test_robot_keyword_matching_ignores_case_spaces_and_underscores(self, tmp_path):
+        robot = tmp_path / "keywords.robot"
+        robot.write_text(
+            "*** Test Cases ***\n"
+            "Normalize keyword names\n"
+            "    Prepare environment\n"
+            "    prepare_environment\n"
+            "    PREPARE ENVIRONMENT\n"
+            "*** Keywords ***\n"
+            "Prepare environment\n"
+            "    Log    ready\n",
+            encoding="utf-8",
+        )
+
+        nodes, edges = self.parser.parse_file(robot)
+
+        keyword = next(node for node in nodes if node.kind == "Function")
+        calls = [edge for edge in edges if edge.kind == "CALLS"]
+        keyword_calls = [edge for edge in calls if edge.target.endswith("::Prepare environment")]
+        assert len(keyword_calls) == 3
+        assert all(edge.source.endswith("::Normalize keyword names") for edge in keyword_calls)
+        assert any(edge.target == "Log" for edge in calls)
+        assert keyword.name == "Prepare environment"
+
+    def test_robot_control_flow_and_variable_assignment(self, tmp_path):
+        robot = tmp_path / "control.robot"
+        robot.write_text(
+            "*** Test Cases ***\n"
+            "Control flow\n"
+            "    ${result}= Prepare environment\n"
+            "    ${first}    ${result}=    Prepare environment\n"
+            "    IF    ${result}\n"
+            "        FOR    ${item}    IN    one    two\n"
+            "            Prepare environment\n"
+            "        END\n"
+            "    ELSE IF    ${other}\n"
+            "        Prepare environment\n"
+            "    ELSE\n"
+            "        Prepare environment\n"
+            "    END\n"
+            "    IF wrapper\n"
+            "    TRY\n"
+            "        Prepare environment\n"
+            "    EXCEPT\n"
+            "        Prepare environment\n"
+            "    ELSE\n"
+            "        Prepare environment\n"
+            "    FINALLY\n"
+            "        Prepare environment\n"
+            "    END\n"
+            "    IF    ${flag}    Prepare environment\n"
+            "    IF    ${flag}    Prepare environment    ELSE    Prepare environment\n"
+            "*** Keywords ***\n"
+            "Prepare environment\n"
+            "IF wrapper\n"
+            "    Log    wrapper\n",
+            encoding="utf-8",
+        )
+
+        _, edges = self.parser.parse_file(robot)
+
+        calls = [edge for edge in edges if edge.kind == "CALLS"]
+        expected_keyword = f"{robot.as_posix()}::Prepare environment"
+        test_calls = [edge for edge in calls if edge.source.endswith("::Control flow")]
+        assert len(test_calls) == 13
+        assert sum(edge.target == expected_keyword for edge in test_calls) == 12
+        assert any(edge.target == f"{robot.as_posix()}::IF wrapper" for edge in test_calls)
+        assert not any(
+            edge.target
+            in {"IF", "FOR", "TRY", "END", "ELSE", "ELSE IF", "EXCEPT", "FINALLY", "${result}="}
+            for edge in calls
+        )
+
+    def test_robot_pipe_rows_define_tests_with_clean_names(self, tmp_path):
+        robot = tmp_path / "pipe.robot"
+        robot.write_text(
+            "| *** Settings *** |\n"
+            "| Resource | keywords.resource |\n"
+            "| *** Test Cases *** |\n"
+            "| Valid Login |\n"
+            "|             | Open Page |\n"
+            "|             | ${x}= | Read Value | a|b |\n"
+            "| |\n"
+            "| T2 |\n"
+            "| *** Keywords *** |\n"
+            "| Open Page |\n"
+            "|           | Log | ready |\n",
+            encoding="utf-8",
+        )
+
+        nodes, edges = self.parser.parse_file(robot)
+
+        names = {node.kind: [] for node in nodes}
+        for node in nodes:
+            names[node.kind].append(node.name)
+        assert names["Test"] == ["Valid Login", "T2"]
+        assert names["Function"] == ["Open Page"]
+        calls = {
+            (edge.source.rsplit("::", 1)[-1], edge.target.rsplit("::", 1)[-1])
+            for edge in edges
+            if edge.kind == "CALLS"
+        }
+        assert calls == {
+            ("Valid Login", "Open Page"),
+            ("Valid Login", "Read Value"),
+            ("Open Page", "Log"),
+        }
+        assert any(
+            edge.kind == "IMPORTS_FROM" and edge.target.endswith("/keywords.resource")
+            for edge in edges
+        )
+
+    def _robot_calls(self, tmp_path, source: bytes) -> list[tuple[str, str]]:
+        robot = tmp_path / "suite.robot"
+        robot.write_bytes(source)
+        _, edges = self.parser.parse_file(robot)
+        return [
+            (edge.source.rsplit("::", 1)[-1], edge.target.rsplit("::", 1)[-1])
+            for edge in edges
+            if edge.kind == "CALLS"
+        ]
+
+    @pytest.mark.parametrize(
+        "row",
+        [
+            "${x}=    Kw",
+            "${x} =    Kw",
+            "${x}= Kw",
+            "${x}    Kw",
+            "${a}    ${b}    Kw",
+            "${a}    ${b}=    Kw",
+            "@{items}=    Kw",
+        ],
+    )
+    def test_robot_every_assignment_form_keeps_the_keyword(self, tmp_path, row):
+        source = f"*** Test Cases ***\nT\n    {row}\n*** Keywords ***\nKw\n".encode()
+
+        assert self._robot_calls(tmp_path, source) == [("T", "Kw")]
+
+    def test_robot_setup_teardown_and_template_are_calls(self, tmp_path):
+        calls = self._robot_calls(
+            tmp_path,
+            b"*** Settings ***\n"
+            b"Suite Setup    Kw One\n"
+            b"Test Teardown    NONE\n"
+            b"Library    Collections\n"
+            b"*** Test Cases ***\n"
+            b"T\n"
+            b"    [Setup]    Kw Two\n"
+            b"    [Teardown]    NONE\n"
+            b"    [Template]    Kw Three\n"
+            b"    [Tags]    smoke\n"
+            b"*** Keywords ***\n"
+            b"K\n"
+            b"    [Teardown]    Kw Four\n"
+            b"Kw One\nKw Two\nKw Three\nKw Four\n",
+        )
+
+        assert set(calls) == {
+            ((tmp_path / "suite.robot").as_posix(), "Kw One"),
+            ("T", "Kw Two"),
+            ("T", "Kw Three"),
+            ("K", "Kw Four"),
+        }
+
+    def test_robot_a_test_mirror_comes_only_from_a_test(self, tmp_path):
+        robot = tmp_path / "suite.robot"
+        robot.write_text(
+            "*** Settings ***\nSuite Setup    Kw\n"
+            "*** Test Cases ***\nT\n    Kw\n"
+            "*** Keywords ***\nKw\n",
+            encoding="utf-8",
+        )
+
+        _, edges = self.parser.parse_file(robot)
+
+        mirrors = [edge.target.rsplit("::", 1)[-1] for edge in edges if edge.kind == "TESTED_BY"]
+        assert mirrors == ["T"]
+
+    def test_robot_bdd_words_are_not_part_of_the_keyword(self, tmp_path):
+        calls = self._robot_calls(
+            tmp_path,
+            b"*** Test Cases ***\n"
+            b"T\n"
+            b"    Given Prepare Env\n"
+            b"    when prepare_env\n"
+            b"    Then External Kw\n"
+            b"*** Keywords ***\n"
+            b"Prepare Env\n",
+        )
+
+        assert calls == [("T", "Prepare Env"), ("T", "Prepare Env"), ("T", "External Kw")]
+
+    def test_robot_control_words_are_never_calls(self, tmp_path):
+        calls = self._robot_calls(
+            tmp_path,
+            b"*** Keywords ***\n"
+            b"K\n"
+            b"    FOR    ${i}    IN    a\n"
+            b"        CONTINUE\n"
+            b"        BREAK\n"
+            b"    END\n"
+            b"    WHILE\n"
+            b"        One\n"
+            b"    END\n"
+            b"    GROUP    name\n"
+            b"        Two\n"
+            b"    END\n"
+            b"    VAR    ${x}    1\n"
+            b"    IF    ${a}    RETURN\n"
+            b"    IF    ${a}    Three    ELSE IF    ${b}    Four    ELSE    Five\n"
+            b"    RETURN    1\n",
+        )
+
+        assert [target for _, target in calls] == ["One", "Two", "Three", "Four", "Five"]
+
+    def test_robot_keywords_may_be_named_like_lower_case_control_words(self, tmp_path):
+        calls = self._robot_calls(
+            tmp_path,
+            b"*** Test Cases ***\nT\n    End\n    If    x\n*** Keywords ***\nEnd\nIf\n",
+        )
+
+        assert [target for _, target in calls] == ["End", "If"]
+
+    @pytest.mark.parametrize(
+        ("settings", "tests", "keywords"),
+        [
+            ("*** Settings ***", "*** Test Cases ***", "*** Keywords ***"),
+            ("*** Setting ***", "*** Test Case ***", "*** Keyword ***"),
+            ("* Settings *", "* Test Cases *", "* Keywords *"),
+            ("*** settings ***", "*** test cases ***", "*** keywords ***"),
+        ],
+    )
+    def test_robot_section_header_spellings(self, tmp_path, settings, tests, keywords):
+        robot = tmp_path / "suite.robot"
+        robot.write_text(
+            f"{settings}\nLibrary    X\n{tests}\nT\n    Kw\n{keywords}\nKw\n",
+            encoding="utf-8",
+        )
+
+        nodes, edges = self.parser.parse_file(robot)
+
+        assert {(node.kind, node.name) for node in nodes if node.kind != "File"} == {
+            ("Test", "T"), ("Function", "Kw"),
+        }
+        assert any(edge.kind == "IMPORTS_FROM" and edge.target == "X" for edge in edges)
+
+    def test_robot_bom_and_crlf_do_not_hide_the_first_section(self, tmp_path):
+        calls = self._robot_calls(
+            tmp_path,
+            b"\xef\xbb\xbf*** Test Cases ***\r\nT\r\n    Kw\r\n*** Keywords ***\r\nKw\r\n",
+        )
+
+        assert calls == [("T", "Kw")]
+
+    def test_robot_continuation_row_at_column_zero_is_not_a_definition(self, tmp_path):
+        robot = tmp_path / "suite.robot"
+        robot.write_text(
+            "*** Test Cases ***\nT\n    Kw    a\n...    b\n*** Keywords ***\nKw\n",
+            encoding="utf-8",
+        )
+
+        nodes, _ = self.parser.parse_file(robot)
+
+        assert [node.name for node in nodes if node.kind == "Test"] == ["T"]
+
+    def test_robot_resource_paths(self, tmp_path):
+        folder = tmp_path / "sub"
+        folder.mkdir()
+        robot = folder / "suite.robot"
+        robot.write_text(
+            "*** Settings ***\n"
+            "Resource    ../shared/a.resource\n"
+            "Resource    ${CURDIR}/b.resource\n"
+            "Resource    ${ROOT}/c.resource\n",
+            encoding="utf-8",
+        )
+
+        _, edges = self.parser.parse_file(robot)
+
+        assert [edge.target for edge in edges if edge.kind == "IMPORTS_FROM"] == [
+            (tmp_path / "shared" / "a.resource").as_posix(),
+            (folder / "b.resource").as_posix(),
+            "${ROOT}/c.resource",
+        ]
+
+    def test_robot_test_and_keyword_with_same_name_coexist(self, tmp_path):
+        robot = tmp_path / "shared.robot"
+        robot.write_text(
+            "*** Test Cases ***\n"
+            "Shared\n"
+            "    Log    Test case\n"
+            "*** Keywords ***\n"
+            "Shared\n"
+            "    Log    Keyword\n",
+            encoding="utf-8",
+        )
+
+        nodes, edges = self.parser.parse_file(robot)
+        with GraphStore(tmp_path / "graph.db") as store:
+            for node in nodes:
+                store.upsert_node(node)
+            for edge in edges:
+                store.upsert_edge(edge)
+            store.commit()
+            persisted = store.get_nodes_by_file(robot.as_posix())
+            contains = list(store.iter_edges_by_source(robot.as_posix()))
+
+        shared = [node for node in persisted if node.name == "Shared"]
+        assert {node.kind for node in shared} == {"Test", "Function"}
+        assert len({node.qualified_name for node in shared}) == 2
+        assert {node.line_start for node in shared} == {2, 5}
+        assert {edge.target_qualified for edge in contains if edge.kind == "CONTAINS"} == {
+            node.qualified_name for node in shared
+        }
+
+    def test_robot_resource_import_is_found_by_importers_query(self, tmp_path):
+        from code_review_graph.tools.query import query_graph
+
+        (tmp_path / ".git").mkdir()
+        (tmp_path / ".code-review-graph").mkdir()
+        robot = tmp_path / "suite.robot"
+        robot.write_text(
+            "*** Settings ***\n"
+            "Resource    keywords.resource\n"
+            "*** Test Cases ***\n"
+            "A test\n"
+            "    Log    hello\n",
+            encoding="utf-8",
+        )
+        resource = tmp_path / "keywords.resource"
+        resource.write_text("*** Keywords ***\nA keyword\n    Log    ready\n", encoding="utf-8")
+
+        with GraphStore(tmp_path / ".code-review-graph" / "graph.db") as store:
+            built = full_build(tmp_path, store)
+            assert built["errors"] == []
+
+        result = query_graph("importers_of", str(resource), repo_root=str(tmp_path))
+        assert result.get("status") == "ok"
+        assert any(item["file"] == robot.as_posix() for item in result.get("results", []))
 
     # --- Shebang detection for extension-less Unix scripts (#237) ---
 
@@ -414,7 +804,10 @@ class Plain:
             module_scope_calls = [e for e in calls if e.source == tmp.as_posix()]
             assert any(
                 "helper" in e.target for e in module_scope_calls
-            ), f"Expected module-scope CALLS edge to helper(); got: {[(e.source, e.target) for e in calls]}"
+            ), (
+                "Expected module-scope CALLS edge to helper(); "
+                f"got: {[(e.source, e.target) for e in calls]}"
+            )
         finally:
             tmp.unlink()
 
@@ -446,7 +839,10 @@ class Plain:
             calls = [e for e in edges if e.kind == "CALLS"]
             assert any(
                 "do_work" in e.target and e.source == tmp.as_posix() for e in calls
-            ), f"Expected notebook CALLS edge to do_work(); got: {[(e.source, e.target) for e in calls]}"
+            ), (
+                "Expected notebook CALLS edge to do_work(); "
+                f"got: {[(e.source, e.target) for e in calls]}"
+            )
         finally:
             tmp.unlink()
 
@@ -1484,6 +1880,31 @@ class Plain:
         # Total: exactly 5 live edges
         assert len(calls) == 5
 
+    def test_rust_dead_guard_if_false_omits_dead_edges(self):
+        """CALLS edges inside ``if false`` blocks in Rust are never emitted.
+
+        Rust's if is an ``if_expression`` and its false literal is a
+        ``boolean_literal``, neither of which the Go/TS walk matches, so
+        without a Rust case every such call is kept. The else branch and
+        ``if true`` stay live.
+        """
+        _nodes, edges = self.parser.parse_file(
+            FIXTURES / "sample_dead_guard.rs",
+        )
+        calls = [e for e in edges if e.kind == "CALLS"]
+
+        def hits(name):
+            return [e for e in calls if e.target.split("::")[-1] == name]
+
+        assert len(hits("live_helper")) == 1
+        assert hits("dead_false_call") == []
+        assert hits("dead_in_consequence") == []
+        assert len(hits("live_in_else")) == 1
+        assert len(hits("live_final_else")) == 1
+        assert len(hits("some_condition")) == 1
+        assert len(hits("live_in_if_true")) == 1
+        assert len(calls) == 5
+
     def test_dead_guard_covers_declarations_nested_in_dead_branch(self):
         """A function or class declared inside a dead branch is never
         evaluated, so calls in its body are dead. This matches what the
@@ -1772,6 +2193,155 @@ class TestDeadGuardHelpers:
         call = self._find_call(root, b"g")
         assert _is_in_static_dead_guard(call) is False
 
+    # --- _is_in_rust_dead_guard ---
+
+    def test_rust_if_false_dead(self):
+        from code_review_graph.parser import _is_in_rust_dead_guard
+
+        root, _ = self._parse("rust", b"fn f() { if false { g(); } }")
+        call = self._find_call(root, b"g")
+        assert _is_in_rust_dead_guard(call) is True
+
+    def test_rust_else_branch_live(self):
+        from code_review_graph.parser import _is_in_rust_dead_guard
+
+        root, _ = self._parse(
+            "rust", b"fn f() { if false { a(); } else { b(); } }"
+        )
+        call_b = self._find_call(root, b"b")
+        assert _is_in_rust_dead_guard(call_b) is False
+
+    def test_rust_if_true_live(self):
+        from code_review_graph.parser import _is_in_rust_dead_guard
+
+        root, _ = self._parse("rust", b"fn f() { if true { g(); } }")
+        call = self._find_call(root, b"g")
+        assert _is_in_rust_dead_guard(call) is False
+
+    def test_rust_no_guard_live(self):
+        from code_review_graph.parser import _is_in_rust_dead_guard
+
+        root, _ = self._parse("rust", b"fn f() { g(); }")
+        call = self._find_call(root, b"g")
+        assert _is_in_rust_dead_guard(call) is False
+
+    def test_rust_compound_condition_live(self):
+        """Only a literal ``false`` is dead: ``false && false`` is left alone."""
+        from code_review_graph.parser import _is_in_rust_dead_guard
+
+        root, _ = self._parse(
+            "rust", b"fn f() { if false && false { g(); } }"
+        )
+        call = self._find_call(root, b"g")
+        assert _is_in_rust_dead_guard(call) is False
+
+    def test_rust_value_position_if_false_dead(self):
+        """A ``let`` binding's ``if`` is the same node shape as a statement."""
+        from code_review_graph.parser import _is_in_rust_dead_guard
+
+        root, _ = self._parse(
+            "rust", b"fn f() { let x = if false { g() } else { 1 }; }"
+        )
+        call = self._find_call(root, b"g")
+        assert _is_in_rust_dead_guard(call) is True
+
+    def test_rust_impl_inside_if_false_keeps_method_calls(self):
+        """A method declared inside ``if false`` still runs when it is called.
+
+        Rust impl blocks are non-local: an ``impl`` written inside a branch
+        still applies to the type, so ``S::run()`` outside the branch reaches
+        the method. The guard around the declaration says nothing about calls
+        in the body, and dropping them reports live targets as dead code.
+        """
+        from code_review_graph.parser import _is_in_rust_dead_guard
+
+        root, _ = self._parse(
+            "rust",
+            b"struct S;\n"
+            b"fn main() {\n"
+            b"    if false {\n"
+            b"        impl S { fn run() { live(); } }\n"
+            b"    }\n"
+            b"    S::run();\n"
+            b"}\n",
+        )
+        call = self._find_call(root, b"live")
+        assert call is not None
+        assert _is_in_rust_dead_guard(call) is False
+
+    def test_rust_impl_associated_const_kept(self):
+        """An impl const is non-local too: its initialiser is reachable.
+
+        There is no ``function_item`` between the call and the guard here, so
+        a boundary placed on the function would still drop this live edge.
+        """
+        from code_review_graph.parser import _is_in_rust_dead_guard
+
+        root, _ = self._parse(
+            "rust",
+            b"struct S;\n"
+            b"fn main() {\n"
+            b"    if false { impl S { const X: i32 = g(); } }\n"
+            b"    let _ = S::X;\n"
+            b"}\n",
+        )
+        call = self._find_call(root, b"g")
+        assert call is not None
+        assert _is_in_rust_dead_guard(call) is False
+
+    def test_rust_block_scoped_item_under_guard_stays_dead(self):
+        """A local fn, mod or trait in a dead branch stays unreachable."""
+        from code_review_graph.parser import _is_in_rust_dead_guard
+
+        cases = {
+            "local fn": b"fn f() { if false { fn inner() { g(); } } }",
+            "mod": b"fn f() { if false { mod m { fn n() { g(); } } } }",
+            "trait": b"fn f() { if false { trait T { fn d() { g(); } } } }",
+        }
+        for label, source in cases.items():
+            root, _ = self._parse("rust", source)
+            call = self._find_call(root, b"g")
+            assert call is not None, label
+            assert _is_in_rust_dead_guard(call) is True, label
+
+    def test_rust_parenthesized_false_dead(self):
+        """``if (false)`` is the same branch with the literal parenthesised."""
+        from code_review_graph.parser import _is_in_rust_dead_guard
+
+        root, _ = self._parse("rust", b"fn f() { if (false) { g(); } }")
+        call = self._find_call(root, b"g")
+        assert call is not None
+        assert _is_in_rust_dead_guard(call) is True
+
+    def test_rust_guard_inside_method_body_still_dead(self):
+        """Ending the walk at a function boundary keeps the guards inside it."""
+        from code_review_graph.parser import _is_in_rust_dead_guard
+
+        root, _ = self._parse(
+            "rust", b"impl S { fn run() { if false { g(); } } }"
+        )
+        call = self._find_call(root, b"g")
+        assert call is not None
+        assert _is_in_rust_dead_guard(call) is True
+
+    def test_rust_dead_guard_keeps_impl_method_edges(self):
+        """``parse_file`` emits the callee of a method declared under a guard.
+
+        Both edges matter: the method is called from outside the dead branch,
+        which is why its body is live rather than merely present.
+        """
+        self.parser = CodeParser()
+        _nodes, edges = self.parser.parse_file(
+            FIXTURES / "sample_dead_guard_impl.rs",
+        )
+        pairs = {
+            (e.source.split("::")[-1], e.target.split("::")[-1])
+            for e in edges
+            if e.kind == "CALLS"
+        }
+        assert ("main", "S.run") in pairs
+        assert ("S.run", "live_helper") in pairs
+
     # --- _extract_calls integration ---
 
     def test_extract_calls_skips_dead_go(self):
@@ -1807,6 +2377,19 @@ class TestDeadGuardHelpers:
         dead = [
             e for e in edges
             if e.kind == "CALLS" and e.target.split("::")[-1] == "dead_in_if0"
+        ]
+        assert dead == []
+
+    def test_extract_calls_skips_dead_rust(self):
+        """_extract_calls returns True (skip) for a dead Rust call."""
+        self.parser = CodeParser()
+        nodes, edges = self.parser.parse_file(
+            FIXTURES / "sample_dead_guard.rs",
+        )
+        dead = [
+            e for e in edges
+            if e.kind == "CALLS"
+            and e.target.split("::")[-1] == "dead_false_call"
         ]
         assert dead == []
 
@@ -1930,7 +2513,6 @@ class TestValueReferences:
         """REFERENCES edges should have resolved (qualified) targets for local funcs."""
         nodes, edges = self.parser.parse_file(FIXTURES / "sample_map_dispatch.ts")
         refs = [e for e in edges if e.kind == "REFERENCES"]
-        file_path = (FIXTURES / "sample_map_dispatch.ts").as_posix()
         # At least some targets should be fully qualified
         qualified_refs = [e for e in refs if "::" in e.target]
         assert len(qualified_refs) > 0
@@ -2654,3 +3236,268 @@ class TestTypeScriptTypeDeclarations:
                 and e.target == f"{types.resolve().as_posix()}::Finding"
                 for e in edges
             )
+
+
+class TestJsGeneratorFunctions:
+    """Generator functions in JS/TS are Function nodes like any other function.
+
+    ``function* gen() {}`` parses as ``generator_function_declaration`` and
+    ``const gen = function* () {}`` as ``generator_function``. Neither node type
+    was listed, so a generator produced no node and its calls were attributed
+    to the enclosing file instead.
+    """
+
+    def setup_method(self):
+        self.parser = CodeParser()
+
+    @pytest.mark.parametrize("filename", ["gen.js", "gen.ts", "gen.tsx"])
+    def test_generator_declaration_is_a_function(self, filename):
+        path = Path("/test") / filename
+        nodes, edges = self.parser.parse_bytes(
+            path,
+            b"export function* ids(start) {\n"
+            b"  yield nextId(start);\n"
+            b"}\n",
+        )
+        fns = [n for n in nodes if n.kind == "Function"]
+        assert [f.name for f in fns] == ["ids"]
+        assert (fns[0].line_start, fns[0].line_end) == (1, 3)
+        qn = f"{path.as_posix()}::ids"
+        assert any(
+            e.kind == "CONTAINS" and e.source == path.as_posix() and e.target == qn
+            for e in edges
+        )
+        calls = [e for e in edges if e.kind == "CALLS" and e.target == "nextId"]
+        assert [e.source for e in calls] == [qn]
+
+    def test_async_generator_declaration_is_a_function(self):
+        nodes, _ = self.parser.parse_bytes(
+            Path("/test/stream.js"),
+            b"async function* pages() {\n"
+            b"  yield await fetchPage();\n"
+            b"}\n",
+        )
+        assert {n.name for n in nodes if n.kind == "Function"} == {"pages"}
+
+    @pytest.mark.parametrize("filename", ["gen.js", "gen.ts"])
+    def test_generator_expressions_assigned_to_names_are_functions(self, filename):
+        path = Path("/test") / filename
+        nodes, edges = self.parser.parse_bytes(
+            path,
+            b"const walk = function* (tree) {\n"
+            b"  yield visit(tree);\n"
+            b"};\n"
+            b"app.items = function* () {\n"
+            b"  yield load();\n"
+            b"};\n",
+        )
+        fns = {n.name for n in nodes if n.kind == "Function"}
+        assert fns == {"walk", "app.items"}
+        sources = {e.target: e.source for e in edges if e.kind == "CALLS"}
+        assert sources["visit"] == f"{path.as_posix()}::walk"
+        assert sources["load"] == f"{path.as_posix()}::app.items"
+
+    @pytest.mark.parametrize("value", [b"function* () { yield visit(); }", b"() => visit()"])
+    @pytest.mark.parametrize("function_first", [True, False])
+    def test_values_beside_a_function_keep_their_calls(self, value, function_first):
+        """A declaration that mixes a function and a value keeps the value's calls."""
+        parts = [b"walk = " + value, b"result = setup()"]
+        if not function_first:
+            parts.reverse()
+        path = Path("/test/gen.js")
+        nodes, edges = self.parser.parse_bytes(path, b"const " + b", ".join(parts) + b";\n")
+        assert {n.name for n in nodes if n.kind == "Function"} == {"walk"}
+        sources = {e.target: e.source for e in edges if e.kind == "CALLS"}
+        assert sources["visit"] == f"{path.as_posix()}::walk"
+        assert sources["setup"] == path.as_posix()
+
+
+class TestTypeScriptAbstractClasses:
+    """TS/TSX ``abstract class`` declarations are graph nodes, like concrete ones.
+
+    Tree-sitter gives an abstract class its own node type,
+    ``abstract_class_declaration``, and ``_CLASS_TYPES`` listed only
+    ``class_declaration``. An abstract base therefore contributed no Class node
+    and no Function nodes for its concrete methods, so shared behaviour hosted on
+    a base class was invisible to the graph even though every subclass was
+    indexed. See: #1031
+    """
+
+    def setup_method(self):
+        self.parser = CodeParser()
+
+    BASE_SOURCE = (
+        "export abstract class BaseService {\n"
+        "  abstract fetch(id: string): string;\n\n"
+        "  describe(): string {\n"
+        "    return 'base';\n"
+        "  }\n"
+        "}\n"
+    )
+
+    IMPL_SOURCE = (
+        "import { BaseService } from './base';\n\n"
+        "export class RealService extends BaseService {\n"
+        "  fetch(id: string): string {\n"
+        "    return id;\n"
+        "  }\n"
+        "}\n"
+    )
+
+    def _project(self, root: Path) -> tuple[Path, Path]:
+        base = root / "base.ts"
+        base.write_text(self.BASE_SOURCE, encoding="utf-8")
+        impl = root / "impl.ts"
+        impl.write_text(self.IMPL_SOURCE, encoding="utf-8")
+        return base, impl
+
+    def test_abstract_class_becomes_a_node(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base, _ = self._project(Path(tmp_dir))
+
+            nodes, _ = self.parser.parse_file(base)
+
+            classes = {n.name for n in nodes if n.kind == "Class"}
+            assert "BaseService" in classes
+
+    def test_concrete_method_of_an_abstract_class_is_contained_by_it(self):
+        """The class node is what gives its methods a parent, so a missing
+        abstract class also loses the methods hanging off it."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base, _ = self._project(Path(tmp_dir))
+
+            nodes, edges = self.parser.parse_file(base)
+
+            describe = [
+                n for n in nodes if n.kind == "Function" and n.name == "describe"
+            ]
+            assert len(describe) == 1
+            assert any(
+                e.kind == "CONTAINS"
+                and e.source == f"{base.as_posix()}::BaseService"
+                and e.target == f"{base.as_posix()}::BaseService.describe"
+                for e in edges
+            )
+
+    def test_abstract_class_in_tsx_becomes_a_node(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            panel = Path(tmp_dir) / "panel.tsx"
+            panel.write_text(
+                "export abstract class BasePanel {\n"
+                "  abstract title(): string;\n"
+                "}\n",
+                encoding="utf-8",
+            )
+
+            nodes, _ = self.parser.parse_file(panel)
+
+            assert "BasePanel" in {n.name for n in nodes if n.kind == "Class"}
+
+    def test_abstract_base_is_reachable_in_a_built_graph(self):
+        """Blast radius: the base and its concrete method are addressable by
+        qualified name once the whole project is built, not just the subclass."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            base, impl = self._project(root)
+            base_qn = f"{base.resolve().as_posix()}::BaseService"
+            impl_qn = f"{impl.resolve().as_posix()}::RealService"
+
+            with GraphStore(root / "graph.db") as store:
+                built = full_build(root, store)
+                assert built["errors"] == []
+
+                assert store.get_node(base_qn) is not None
+                assert store.get_node(f"{base_qn}.describe") is not None
+                assert store.get_node(impl_qn) is not None
+
+    def test_abstract_method_is_a_node_and_catches_this_calls(self):
+        """``this.step()`` in the base must land on a real node, not a phantom."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            for name in ("base.ts", "panel.tsx"):
+                path = Path(tmp_dir) / name
+                path.write_text(
+                    "export abstract class Base {\n"
+                    "  abstract step(): void;\n"
+                    "  run() { this.step(); }\n"
+                    "}\n",
+                    encoding="utf-8",
+                )
+
+                nodes, edges = self.parser.parse_file(path)
+
+                step = [n for n in nodes if n.name == "step"]
+                assert [n.kind for n in step] == ["Function"]
+                assert step[0].parent_name == "Base"
+                assert step[0].extra["abstract"] is True
+                assert any(
+                    e.kind == "CALLS"
+                    and e.source == f"{path.as_posix()}::Base.run"
+                    and e.target == f"{path.as_posix()}::Base.step"
+                    for e in edges
+                )
+
+    def test_subclass_method_called_through_abstract_base_is_not_dead(self):
+        """Indexing the base bound ``this.step()`` to it, so the override check
+        has to find the abstract declaration or the override reads as unused."""
+        from code_review_graph.refactor import find_dead_code
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir).resolve()
+            (root / "shapes.ts").write_text(
+                "export abstract class Middle {\n"
+                "  abstract step(): void;\n"
+                "  abstract unused(): void;\n"
+                "  run() { this.step(); }\n"
+                "}\n"
+                "export class Leaf extends Middle {\n"
+                "  step() {}\n"
+                "  unused() {}\n"
+                "  orphan() {}\n"
+                "}\n",
+                encoding="utf-8",
+            )
+
+            with GraphStore(root / "graph.db") as store:
+                assert full_build(root, store)["errors"] == []
+                dead = {d["qualified_name"] for d in find_dead_code(store, root=root)}
+
+            shapes = f"{(root / 'shapes.ts').as_posix()}"
+            assert f"{shapes}::Leaf.step" not in dead
+            # A signature has no body to delete; its implementations stay reportable.
+            assert f"{shapes}::Middle.unused" not in dead
+            assert f"{shapes}::Leaf.orphan" in dead
+class TestParserCacheAndUnreachableVisitorDirect:
+    def test_clear_caches_and_unreachable_visitor_direct(self):
+        parser = CodeParser()
+        parser.clear_caches(release_memory=False)
+        _clear_parser_probe_cache()
+
+        src = (
+            "from typing import TYPE_CHECKING\n"
+            "import typing as t\n"
+            "if TYPE_CHECKING:\n"
+            "    dead_call()\n"
+            "class C:\n"
+            "    def f(self):\n"
+            "        for x in [1]:\n"
+            "            with ctx():\n"
+            "                try:\n"
+            "                    live_call()\n"
+            "                except Exception:\n"
+            "                    err_call()\n"
+        )
+        tree = ast.parse(src)
+        tc_names, tc_mods = _python_type_checking_aliases(tree)
+        assert "TYPE_CHECKING" in tc_names
+        assert "t" in tc_mods
+
+        visitor = _PythonUnreachableCallVisitor(tc_names, tc_mods)
+        visitor.visit_Module(tree)
+        if_node = next(n for n in tree.body if isinstance(n, ast.If))
+        cls_node = next(n for n in tree.body if isinstance(n, ast.ClassDef))
+        fn_node = next(n for n in cls_node.body if isinstance(n, ast.FunctionDef))
+        visitor.visit_If(if_node)
+        visitor.visit_ClassDef(cls_node)
+        visitor._visit_function(fn_node)
+        visitor._visit_statements(tree.body, dead=False)
+        assert (4, 4) in visitor.positions

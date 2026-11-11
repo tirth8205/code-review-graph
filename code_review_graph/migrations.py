@@ -99,7 +99,7 @@ def _set_schema_version(conn: sqlite3.Connection, version: int) -> None:
 
 _KNOWN_TABLES = frozenset({
     "nodes", "edges", "metadata", "communities", "flows", "flow_memberships", "nodes_fts",
-    "community_summaries", "flow_snapshots", "risk_index", "nodes_fts_state",
+    "nodes_fts_state",
 })
 
 
@@ -577,6 +577,76 @@ def _migrate_v13(conn: sqlite3.Connection) -> None:
     logger.info("Migration v13: indexed nodes.docstring and nodes.name_tokens")
 
 
+def _migrate_v14(conn: sqlite3.Connection) -> None:
+    """v14: invalidate indexed Ruby files so the next update re-keys them.
+
+    Ruby class identities changed. A class declared inside any namespace now
+    carries that namespace in ``parent_name``, and its methods qualify against
+    the class's own key, so ``Auth::User#to_s`` moves from ``user.rb::User.to_s``
+    to ``user.rb::Auth.User.to_s``. Both the compact spelling
+    (``class Auth::User``) and the nested one are affected.
+
+    Without this, an incremental ``update`` keeps the old rows for every Ruby
+    file whose content has not changed and writes the new shape only for files
+    that happen to be touched, leaving one database holding both. Nothing
+    reports an error in that state: ``children_of`` simply answers from
+    whichever shape a file was last indexed under, so the damage is silent.
+
+    The fix is to clear ``file_hash`` on the Ruby File nodes rather than to
+    delete any row. ``get_file_hashes`` reads that column to decide what has
+    changed, so an empty hash can never match the file on disk and the next
+    update re-parses it and replaces its rows through the normal path.
+
+    Deleting the rows here would work too, and is the obvious reading of
+    "force a reparse", but it breaks the invariant that opening a database
+    only migrates it: ``test_opening_loses_no_nodes_or_edges`` requires the
+    node and edge counts to be identical after open, because nothing has been
+    re-parsed yet. Invalidating the hash defers the change to the update that
+    does the parsing, which is where the upgrade path already tolerates churn.
+
+    Rewriting the identities in place is not an option either: the namespace
+    the new key needs was never recorded, so a rewrite would have to guess it.
+    """
+    updated = conn.execute(
+        "UPDATE nodes SET file_hash = '' "
+        "WHERE kind = 'File' AND language = 'ruby' "
+        "AND file_hash IS NOT NULL AND file_hash != ''",
+    ).rowcount
+    logger.info(
+        "Migration v14: invalidated %d Ruby file(s) for re-keying on next update",
+        updated,
+    )
+
+
+def _migrate_v15(conn: sqlite3.Connection) -> None:
+    """v15: drop three tables nothing reads and three indexes others cover.
+
+    ``community_summaries``, ``flow_snapshots`` and ``risk_index`` were rewritten
+    on every full postprocess and read by nothing, and their rows kept pointing
+    at deleted nodes.
+
+    ``idx_nodes_qualified`` repeats the UNIQUE index on ``nodes.qualified_name``.
+    ``idx_edges_source`` and ``idx_edges_target`` are the leading columns of
+    ``idx_edges_source_kind`` and ``idx_edges_target_kind``, which serve the same
+    lookups.
+
+    Dropping puts the pages on the free list, where later writes reuse them. The
+    file itself only shrinks on VACUUM, left out on purpose: it rewrites the whole
+    database while the opener waits and needs twice the disk space. ``IF EXISTS``
+    lets a migration cut off half way finish on the next open.
+    """
+    for statement in (
+        "DROP TABLE IF EXISTS community_summaries",
+        "DROP TABLE IF EXISTS flow_snapshots",
+        "DROP TABLE IF EXISTS risk_index",
+        "DROP INDEX IF EXISTS idx_nodes_qualified",
+        "DROP INDEX IF EXISTS idx_edges_source",
+        "DROP INDEX IF EXISTS idx_edges_target",
+    ):
+        conn.execute(statement)
+    logger.info("Migration v15: dropped unread tables and covered indexes")
+
+
 # ---------------------------------------------------------------------------
 # Migration registry
 # ---------------------------------------------------------------------------
@@ -594,6 +664,8 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     11: _migrate_v11,
     12: _migrate_v12,
     13: _migrate_v13,
+    14: _migrate_v14,
+    15: _migrate_v15,
 }
 
 LATEST_VERSION = max(MIGRATIONS.keys())

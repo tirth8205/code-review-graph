@@ -21,15 +21,24 @@ import json
 import logging
 import re
 import sqlite3
+from bisect import bisect_left
 from collections import Counter, defaultdict
 from dataclasses import asdict
 from importlib import resources
 from pathlib import Path
-from typing import Sequence
+from typing import Iterable, Iterator, Sequence
 
-from .graph import GraphStore, edge_to_dict, node_to_dict
-from .neighbourhood import DEFAULT_DEPTH, DEFAULT_MAX_NODES, NeighbourhoodSpec
+from .graph import GraphNode, GraphStore, _sanitize_name, edge_to_dict, node_to_dict
+from .neighbourhood import (
+    DEFAULT_DEPTH,
+    DEFAULT_MAX_NODES,
+    STRUCTURAL_EDGE_KINDS,
+    NeighbourhoodSpec,
+    _parent_files,
+    resolve_seeds,
+)
 from .neighbourhood import extract as extract_neighbourhood
+from .parser import normalize_file_path
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +86,13 @@ def _write_d3_asset(directory: Path) -> Path | None:
         logger.warning("Bundled D3 asset unavailable (%s); page will use the CDN fallback.", exc)
         return None
     digest = base64.b64encode(hashlib.sha384(data).digest()).decode()
+    if f"sha384-{digest}" != D3_SRI_HASH and b"\r\n" in data:
+        # Git checkouts created before .gitattributes may have converted LF to CRLF.
+        # Accept only a normalization that still verifies against the original SRI.
+        normalized = data.replace(b"\r\n", b"\n")
+        normalized_digest = base64.b64encode(hashlib.sha384(normalized).digest()).decode()
+        if f"sha384-{normalized_digest}" == D3_SRI_HASH:
+            data, digest = normalized, normalized_digest
     if f"sha384-{digest}" != D3_SRI_HASH:
         logger.error(
             "Bundled D3 asset does not match the pinned SRI hash; refusing to write %s. "
@@ -102,49 +118,81 @@ def _write_d3_asset(directory: Path) -> Path | None:
 DEFAULT_MAX_FULL_NODES = 3000
 DEFAULT_MAX_FULL_EDGES = 3 * DEFAULT_MAX_FULL_NODES
 
+# A neighbourhood past this many nodes, and past a quarter of the graph, is
+# cheaper to read in one pass than in batches around each hop.
+_SEEDED_READ_FALLBACK_NODES = 5000
+
+
+class _NameIndex(dict[str, list[str]]):
+    """Short names to qualified names, which can search one name's candidates.
+
+    A name every file defines has thousands of candidates. Checking each one in
+    turn for every edge that uses the name took most of a large export's time.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._sorted: dict[str, list[str]] = {}
+
+    def only_under_prefix(self, key: str, prefix: str) -> str | None:
+        """Return the candidate for *key* starting with *prefix*, if exactly one does."""
+        ranked = self._sorted.get(key)
+        if ranked is None:
+            ranked = self._sorted[key] = sorted(self[key])
+        # Strings sharing a prefix sit together in sorted order, the shortest first.
+        start = bisect_left(ranked, prefix)
+        if start == len(ranked) or not ranked[start].startswith(prefix):
+            return None
+        if start + 1 < len(ranked) and ranked[start + 1].startswith(prefix):
+            return None
+        return ranked[start]
+
 
 def _build_name_index(
     nodes: list[dict], seen_qn: set[str]
-) -> dict[str, list[str]]:
+) -> _NameIndex:
     """Build a mapping from short/module-style names to qualified names.
 
     Returns ``{short_name: [qualified_name, ...]}``.
     """
-    index: dict[str, list[str]] = {}
-
-    def _add(key: str, qn: str) -> None:
-        index.setdefault(key, []).append(qn)
-
+    index = _NameIndex()
     for n in nodes:
         qn = n["qualified_name"]
-        _add(n["name"], qn)
-        # Index by "file::name" suffix (e.g. "cli.py::main")
-        if "::" in qn:
-            _add(qn.rsplit("/", 1)[-1], qn)
-        # Index by module-style path (e.g. "merit.cli" or "merit.cli.main")
-        fp = n.get("file_path", "")
-        if fp:
-            mod = fp.replace("/", ".").replace(".py", "")
-            if n["kind"] == "File":
-                _add(mod, qn)
-                # Index by every path suffix so C/C++ bare includes resolve.
-                # e.g. "/abs/libs/trading/Foo.hpp" is also indexed as
-                # "Foo.hpp", "trading/Foo.hpp", "libs/trading/Foo.hpp", …
-                parts = fp.replace("\\", "/").split("/")
-                for i in range(len(parts)):
-                    suffix = "/".join(parts[i:])
-                    if suffix:
-                        _add(suffix, qn)
-            else:
-                _add(mod + "." + n["name"], qn)
+        for key in _name_index_keys(n):
+            index.setdefault(key, []).append(qn)
     return index
+
+
+def _name_index_keys(n: dict) -> Iterator[str]:
+    """Yield each short or module-style name that can refer to node *n*."""
+    qn = n["qualified_name"]
+    yield n["name"]
+    # Index by "file::name" suffix (e.g. "cli.py::main")
+    if "::" in qn:
+        yield qn.rsplit("/", 1)[-1]
+    # Index by module-style path (e.g. "merit.cli" or "merit.cli.main")
+    fp = n.get("file_path", "")
+    if fp:
+        mod = fp.replace("/", ".").replace(".py", "")
+        if n["kind"] == "File":
+            yield mod
+            # Index by every path suffix so C/C++ bare includes resolve.
+            # e.g. "/abs/libs/trading/Foo.hpp" is also indexed as
+            # "Foo.hpp", "trading/Foo.hpp", "libs/trading/Foo.hpp", …
+            parts = fp.replace("\\", "/").split("/")
+            for i in range(len(parts)):
+                suffix = "/".join(parts[i:])
+                if suffix:
+                    yield suffix
+        else:
+            yield mod + "." + n["name"]
 
 
 def _resolve_target(
     target: str,
     source: str,
     seen_qn: set[str],
-    name_index: dict[str, list[str]],
+    name_index: _NameIndex,
 ) -> str | None:
     """Try to resolve an unqualified edge target to a full qualified name.
 
@@ -163,18 +211,253 @@ def _resolve_target(
 
     # Disambiguate: prefer node in the same file as the source
     src_file = source.split("::")[0] if "::" in source else source
-    same_file = [c for c in candidates if c.startswith(src_file)]
-    if len(same_file) == 1:
-        return same_file[0]
+    same_file = name_index.only_under_prefix(target, src_file)
+    if same_file is not None:
+        return same_file
 
     # Prefer node in the same top-level directory
     src_parts = src_file.rsplit("/", 1)[0] if "/" in src_file else ""
-    same_dir = [c for c in candidates if c.startswith(src_parts)]
-    if len(same_dir) == 1:
-        return same_dir[0]
+    same_dir = name_index.only_under_prefix(target, src_parts)
+    if same_dir is not None:
+        return same_dir
 
     # Ambiguous — pick first match rather than dropping the edge
     return candidates[0]
+
+
+def _node_payload(gnode: GraphNode, community_id: int | None) -> dict:
+    """The record a full read makes for each node in export_graph_data."""
+    d = node_to_dict(gnode)
+    d["params"] = gnode.params
+    d["return_type"] = gnode.return_type
+    d["community_id"] = community_id
+    return d
+
+
+def _export_flows(store: GraphStore) -> list[dict]:
+    # Include flows (graceful fallback if table doesn't exist)
+    try:
+        from code_review_graph.flows import get_flows
+        return get_flows(store, limit=100)
+    except (ImportError, sqlite3.OperationalError) as exc:
+        logger.debug("flows unavailable for export: %s", exc)
+        return []
+
+
+def _export_communities(
+    store: GraphStore,
+    members_by_community: dict[int, list[str]] | None = None,
+) -> list[dict]:
+    # Include communities (graceful fallback if table doesn't exist)
+    try:
+        from code_review_graph.communities import get_communities
+        return get_communities(store, members_by_community=members_by_community)
+    except (ImportError, sqlite3.OperationalError) as exc:
+        logger.debug("communities unavailable for export: %s", exc)
+        return []
+
+
+def _read_node_identities(store: GraphStore) -> list[dict] | None:
+    """Return the fields name resolution needs for every node the export covers.
+
+    ``qualified_name`` is the name the export shows, which ``_sanitize_name`` may
+    have cut, so two nodes can share it; ``stored_name`` is the one in the table.
+    Returns None when a stored path differs from the one a full read looks up.
+    """
+    # A full read looks each edge's file up with forward slashes, so a
+    # backslash path can still show the nodes of the file it names.
+    if store.has_edge_with_backslash_path():
+        return None
+    identities: list[dict] = []
+    listed_files: set[str] = set()
+    for row in store.iter_node_identities():
+        file_path = row["file_path"]
+        if normalize_file_path(file_path) != file_path:
+            return None
+        if row["listed"]:
+            listed_files.add(file_path)
+        identities.append({
+            "id": row["id"],
+            "stored_name": row["qualified_name"],
+            "qualified_name": _sanitize_name(row["qualified_name"]),
+            "name": _sanitize_name(row["name"]),
+            "kind": row["kind"],
+            "file_path": file_path,
+            "community_id": row["community_id"],
+        })
+    # A file holding only virtual nodes is in the inventory only if an edge
+    # names it, which is the rule GraphStore.get_all_files applies.
+    unlisted = {n["file_path"] for n in identities} - listed_files
+    hidden = unlisted - store.get_files_with_edges(unlisted)
+    if hidden:
+        identities = [n for n in identities if n["file_path"] not in hidden]
+    return identities
+
+
+def _count_exported_edges(
+    store: GraphStore, seen_qn: set[str], name_index: _NameIndex,
+) -> int | None:
+    """Count the edges a full export keeps, without loading an edge row.
+
+    An edge is kept when both its ends resolve, and whether one end resolves does
+    not depend on the other. Returns None when a stored end only resolves once
+    sanitised: the targeted read looks ends up by their stored form and would
+    miss that edge, so only a full read gets it right.
+    """
+
+    def resolves(name: str) -> bool:
+        return bool(_resolve_target(name, name, seen_qn, name_index))
+
+    total = 0
+    for target, count in store.iter_edge_end_counts("target_qualified"):
+        exported = _sanitize_name(target)
+        if resolves(exported):
+            if exported != target:
+                return None
+            total += count
+    lost_sources: list[str] = []
+    for source, _count in store.iter_edge_end_counts("source_qualified"):
+        exported = _sanitize_name(source)
+        if not resolves(exported):
+            lost_sources.append(source)
+        elif exported != source:
+            return None
+    return total - sum(
+        resolves(_sanitize_name(target))
+        for target in store.iter_edge_targets_from(lost_sources)
+    )
+
+
+def _read_edges_touching_nodes(
+    store: GraphStore,
+    names: Iterable[str],
+    by_name: dict[str, list[dict]],
+    seen_qn: set[str],
+    name_index: _NameIndex,
+) -> list[dict]:
+    """Return the resolved edges with an end on one of *names*.
+
+    An edge can reach a node through any name that node is indexed under, so all
+    of them are looked up. Those that resolve to a different node are dropped.
+    """
+    wanted = set(names)
+    stored_ends = set(wanted)
+    for name in wanted:
+        for identity in by_name[name]:
+            stored_ends.update(_name_index_keys(identity))
+    found = []
+    for edge in store.get_edges_touching(stored_ends):
+        e = edge_to_dict(edge)
+        src = _resolve_target(e["source"], e["source"], seen_qn, name_index)
+        tgt = _resolve_target(e["target"], e["source"], seen_qn, name_index)
+        if src and tgt and (src in wanted or tgt in wanted):
+            e["source"] = src
+            e["target"] = tgt
+            found.append(e)
+    return found
+
+
+def _export_seeded(store: GraphStore, spec: NeighbourhoodSpec) -> dict | None:
+    """Export a neighbourhood by reading only what surrounds its seeds.
+
+    Gives what cutting a full export down gives, byte for byte, because the same
+    :func:`extract_neighbourhood` runs over a part of the graph it cannot tell
+    from the whole. Resolving names still takes a few columns of every node, and
+    the totals an index scan of the edges; no row of an unrelated edge is loaded.
+
+    Returns None when only a full read gives the right answer.
+    """
+    if spec.path_from is not None:
+        return None  # A route can run through any part of the graph.
+    try:
+        identities = _read_node_identities(store)
+    except sqlite3.OperationalError as exc:
+        logger.debug("node identities unavailable for export: %s", exc)
+        return None
+    if identities is None:
+        return None
+
+    by_name: dict[str, list[dict]] = defaultdict(list)
+    for identity in identities:
+        by_name[identity["qualified_name"]].append(identity)
+    # As in the full read: an edge end is taken as is when it is a stored name.
+    seen_qn = {n["stored_name"] for n in identities}
+    name_index = _build_name_index(identities, seen_qn)
+    total_edges = _count_exported_edges(store, seen_qn, name_index)
+    if total_edges is None:
+        return None
+
+    flows = _export_flows(store)
+    resolved = resolve_seeds(identities, [], flows, spec)
+
+    limit = max(_SEEDED_READ_FALLBACK_NODES, len(identities) // 4)
+    edges_by_id: dict[int, dict] = {}
+    frontier = set(resolved.seeds)
+    reached = set(frontier)
+    for level in range(spec.depth + 1):
+        if len(reached) > limit:
+            return None
+        # The outermost hop is read too: extract ranks nodes by whole-graph degree.
+        found = _read_edges_touching_nodes(store, frontier, by_name, seen_qn, name_index)
+        edges_by_id.update((e["id"], e) for e in found)
+        if level == spec.depth:
+            break
+        following: set[str] = set()
+        for e in found:
+            if e["kind"] in STRUCTURAL_EDGE_KINDS:
+                continue
+            if e["source"] in frontier and e["target"] not in reached:
+                following.add(e["target"])
+            if e["target"] in frontier and e["source"] not in reached:
+                following.add(e["source"])
+        if not following:
+            break
+        reached |= following
+        frontier = following
+
+    # Containers are drawn but are not hops, and an edge between two of them is
+    # drawn too, so theirs are read as well.
+    edges = [edges_by_id[edge_id] for edge_id in sorted(edges_by_id)]
+    parents = set(_parent_files(edges, reached).values())
+    edges_by_id.update(
+        (e["id"], e)
+        for e in _read_edges_touching_nodes(
+            store, parents - reached, by_name, seen_qn, name_index,
+        )
+    )
+
+    wanted = reached | parents
+    gnodes = {
+        g.qualified_name: g
+        for g in store.get_nodes_by_qualified_names(
+            {n["stored_name"] for name in wanted for n in by_name[name]},
+        )
+    }
+    nodes = []
+    community_rows: dict[int, list[tuple[int, str]]] = defaultdict(list)
+    for identity in identities:
+        gnode = gnodes.get(identity["stored_name"])
+        if gnode is None or identity["qualified_name"] not in wanted:
+            continue
+        nodes.append(_node_payload(gnode, identity["community_id"]))
+        if identity["community_id"] is not None:
+            community_rows[identity["community_id"]].append(
+                (identity["id"], identity["qualified_name"]),
+            )
+
+    data = {
+        "nodes": nodes,
+        "edges": [edges_by_id[edge_id] for edge_id in sorted(edges_by_id)],
+        "stats": asdict(store.get_stats()),
+        "flows": flows,
+        "communities": _export_communities(
+            store,
+            {cid: [qn for _, qn in sorted(rows)] for cid, rows in community_rows.items()},
+        ),
+    }
+    return extract_neighbourhood(
+        data, spec, resolved=resolved, totals=(len(identities), total_edges),
+    )
 
 
 def export_graph_data(
@@ -200,7 +483,9 @@ def export_graph_data(
     of the payload rather than dimmed, plus a ``"neighbourhood"`` block
     describing the seeds, per-node hop labels and (for a path query) the
     highlighted path.  See :mod:`code_review_graph.neighbourhood` for the hop
-    semantics — ``CONTAINS`` is structural and never counts as a hop.
+    semantics — ``CONTAINS`` is structural and never counts as a hop.  A seeded
+    export reads only what surrounds the seed, except for a path query, which can
+    run through any part of the graph.
 
     Args:
         store: The GraphStore to read graph data from.
@@ -232,6 +517,11 @@ def export_graph_data(
         render_depth=render_depth,
         max_nodes=max_nodes,
     ).validate()
+    if spec.is_active:
+        seeded = _export_seeded(store, spec)
+        if seeded is not None:
+            return seeded
+
     nodes = []
     seen_qn: set[str] = set()
 
@@ -266,28 +556,12 @@ def export_graph_data(
 
     stats = store.get_stats()
 
-    # Include flows (graceful fallback if table doesn't exist)
-    try:
-        from code_review_graph.flows import get_flows
-        flows = get_flows(store, limit=100)
-    except (ImportError, sqlite3.OperationalError) as exc:
-        logger.debug("flows unavailable for export: %s", exc)
-        flows = []
-
-    # Include communities (graceful fallback if table doesn't exist)
-    try:
-        from code_review_graph.communities import get_communities
-        communities = get_communities(store)
-    except (ImportError, sqlite3.OperationalError) as exc:
-        logger.debug("communities unavailable for export: %s", exc)
-        communities = []
-
     data = {
         "nodes": nodes,
         "edges": edges,
         "stats": asdict(stats),
-        "flows": flows,
-        "communities": communities,
+        "flows": _export_flows(store),
+        "communities": _export_communities(store),
     }
     if spec.is_active:
         return extract_neighbourhood(data, spec)
@@ -737,7 +1011,8 @@ __SIDECAR_SCRIPT__
   .legend-item { display: flex; align-items: center; gap: 10px; padding: 2px 0; cursor: default; }
   .legend-item[data-edge-kind] { cursor: pointer; user-select: none; }
   .legend-item[data-edge-kind].dimmed { opacity: 0.3; }
-  .legend-item svg { flex-shrink: 0; }
+  /* The page-wide svg rule would stretch these icons to the legend's width. */
+  .legend-item svg { flex-shrink: 0; width: 16px; height: 16px; }
   .legend-line { width: 24px; height: 0; flex-shrink: 0; border-top-width: 2px; }
   .l-calls    { border-top: 2px solid #3fb950; }
   .l-imports  { border-top: 2px dashed #f0883e; }
@@ -987,6 +1262,8 @@ __SIDECAR_SCRIPT__
     <div class="legend-item"><svg width="16" height="16" viewBox="-8 -8 16 16" aria-hidden="true"><polygon points="0,-6 6,5 -6,5" fill="#3fb950"/></svg> Function</div>
     <div class="legend-item"><svg width="16" height="16" viewBox="-8 -8 16 16" aria-hidden="true"><polygon points="0,-6 6,0 0,6 -6,0" fill="#d2a8ff"/></svg> Test</div>
     <div class="legend-item"><svg width="16" height="16" viewBox="-8 -8 16 16" aria-hidden="true"><path d="M-2,-6v4h-4v4h4v4h4v-4h4v-4h-4v-4z" fill="#8b949e"/></svg> Type</div>
+    <div class="legend-item"><svg width="16" height="16" viewBox="-8 -8 16 16" aria-hidden="true"><circle r="5" fill="#39c5cf"/></svg> YAML Path</div>
+    <div class="legend-item"><svg width="16" height="16" viewBox="-8 -8 16 16" aria-hidden="true"><circle r="5" fill="#a371f7"/></svg> JSON Path</div>
   </div>
   <h3>Edges</h3>
   <div class="legend-section">
@@ -997,6 +1274,7 @@ __SIDECAR_SCRIPT__
     <button class="legend-item legend-edge" data-edge-kind="IMPLEMENTS" aria-pressed="true"><span class="legend-line" style="border-top:2px dashed #f9e2af"></span> Implements</button>
     <button class="legend-item legend-edge" data-edge-kind="TESTED_BY" aria-pressed="true"><span class="legend-line" style="border-top:2px dotted #f38ba8"></span> Tested By</button>
     <button class="legend-item legend-edge" data-edge-kind="DEPENDS_ON" aria-pressed="true"><span class="legend-line" style="border-top:2px dashed #fab387"></span> Depends On</button>
+    <button class="legend-item legend-edge" data-edge-kind="REFERENCES" aria-pressed="true"><span class="legend-line" style="border-top:2px dotted #39c5cf"></span> References</button>
   </div>
 </nav>
 <div id="filter-panel">
@@ -1006,6 +1284,9 @@ __SIDECAR_SCRIPT__
   <label class="filter-item"><input type="checkbox" data-kind="Function" checked> Function</label>
   <label class="filter-item"><input type="checkbox" data-kind="Test" checked> Test</label>
   <label class="filter-item"><input type="checkbox" data-kind="Type" checked> Type</label>
+  <label class="filter-item"><input type="checkbox" data-kind="YamlPath" checked> YAML Path</label>
+  <label class="filter-item"><input type="checkbox" data-kind="DocSection" checked> Doc Section</label>
+  <label class="filter-item"><input type="checkbox" data-kind="JsonPath" checked> JSON Path</label>
 </div>
 <div id="controls">
   <input id="search" type="text" placeholder="Search nodes&#8230;" autocomplete="off" spellcheck="false" aria-label="Search graph nodes by name" aria-controls="search-results" aria-expanded="false">
@@ -1065,11 +1346,11 @@ __SIDECAR_SCRIPT__
 <script>
 "use strict";
 var graphData = __GRAPH_DATA__;
-var KIND_COLOR  = { File:"#58a6ff", Class:"#f0883e", Function:"#3fb950", Test:"#d2a8ff", Type:"#8b949e" };
-var KIND_RADIUS = { File:18, Class:12, Function:6, Test:6, Type:5 };
-var KIND_AREA   = { File:1018, Class:452, Function:113, Test:113, Type:79 };
-var KIND_SHAPE  = { File:d3.symbolCircle, Class:d3.symbolSquare, Function:d3.symbolTriangle, Test:d3.symbolDiamond, Type:d3.symbolCross };
-var EDGE_COLOR  = { CALLS:"#3fb950", IMPORTS_FROM:"#f0883e", INHERITS:"#d2a8ff", CONTAINS:"rgba(139,148,158,0.15)", IMPLEMENTS:"#f9e2af", TESTED_BY:"#f38ba8", DEPENDS_ON:"#fab387" };
+var KIND_COLOR  = { File:"#58a6ff", Class:"#f0883e", Function:"#3fb950", Test:"#d2a8ff", Type:"#8b949e", YamlPath:"#39c5cf", DocSection:"#e3b341", JsonPath:"#a371f7" };
+var KIND_RADIUS = { File:18, Class:12, Function:6, Test:6, Type:5, YamlPath:5, DocSection:5, JsonPath:5 };
+var KIND_AREA   = { File:1018, Class:452, Function:113, Test:113, Type:79, YamlPath:79, DocSection:79, JsonPath:79 };
+var KIND_SHAPE  = { File:d3.symbolCircle, Class:d3.symbolSquare, Function:d3.symbolTriangle, Test:d3.symbolDiamond, Type:d3.symbolCross, YamlPath:d3.symbolWye, DocSection:d3.symbolStar, JsonPath:d3.symbolWye };
+var EDGE_COLOR  = { CALLS:"#3fb950", IMPORTS_FROM:"#f0883e", INHERITS:"#d2a8ff", CONTAINS:"rgba(139,148,158,0.15)", IMPLEMENTS:"#f9e2af", TESTED_BY:"#f38ba8", DEPENDS_ON:"#fab387", REFERENCES:"#39c5cf" };
 var communityColorScale = d3.scaleOrdinal(d3.schemeTableau10);
 var communityColoringOn = false;
 function escH(s) { return !s ? "" : s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;").replace(/`/g,"&#96;"); }
@@ -2125,12 +2406,14 @@ function escH(s) { return !s ? "" : s.replace(/&/g,"&amp;").replace(/</g,"&lt;")
 
 var KIND_COLOR = {
   Community: "#1f6feb", File: "#58a6ff", Class: "#f0883e",
-  Function: "#3fb950", Test: "#d2a8ff", Type: "#8b949e"
+  Function: "#3fb950", Test: "#d2a8ff", Type: "#8b949e", YamlPath: "#39c5cf",
+  DocSection: "#e3b341", JsonPath: "#a371f7"
 };
 var EDGE_COLOR = {
   CROSS_COMMUNITY: "#58a6ff", DEPENDS_ON: "#f0883e",
   CALLS: "#3fb950", IMPORTS_FROM: "#f0883e",
-  INHERITS: "#d2a8ff", CONTAINS: "rgba(139,148,158,0.15)"
+  INHERITS: "#d2a8ff", CONTAINS: "rgba(139,148,158,0.15)",
+  REFERENCES: "#39c5cf"
 };
 var EDGE_CFG = {
   CROSS_COMMUNITY: { dash: null, width: 2, opacity: 0.6, marker: "" },
@@ -2139,6 +2422,7 @@ var EDGE_CFG = {
   CALLS:           { dash: null, width: 1.5, opacity: 0.7, marker: "url(#arrow-calls)" },
   IMPORTS_FROM:    { dash: "6,3", width: 1.5, opacity: 0.65, marker: "url(#arrow-imports)" },
   INHERITS:        { dash: "3,4", width: 2, opacity: 0.7, marker: "url(#arrow-inherits)" },
+  REFERENCES:      { dash: "2,3", width: 1.5, opacity: 0.7, marker: "" },
 };
 function eStyle(d) { return EDGE_CFG[d.kind] || { dash: null, width: 1, opacity: 0.3, marker: "" }; }
 function eColor(d) { return EDGE_COLOR[d.kind] || "#484f58"; }

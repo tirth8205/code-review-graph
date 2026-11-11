@@ -3,7 +3,7 @@
 The graph is one SQLite database, `.code-review-graph/graph.db`, opened in WAL mode.
 The base tables and indexes come from `_SCHEMA_SQL` in `code_review_graph/graph.py`.
 Everything else is added by the versioned migrations in `code_review_graph/migrations.py`.
-The current schema version is 13, the highest key in `MIGRATIONS`. A database
+The current schema version is 15, the highest key in `MIGRATIONS`. A database
 below that is migrated on open, in order, by every migration above its own
 version.
 
@@ -50,6 +50,10 @@ A function, method or constructor.
 | signature | Signature text computed by post-processing and indexed by `nodes_fts` (added in v2) |
 | is_test | 1 for test functions |
 
+An XSLT template or `xsl:function` is a Function node too, named by its `name` or written as
+`match=para mode=toc`. `extra.dynamic_apply_count` counts the `xsl:apply-templates` in it
+that gave no edge, because neither a `select` step nor a `mode` narrows the choice.
+
 ### Test
 Same columns as Function, with `kind = 'Test'` and `is_test = 1`. A function is a test when
 any of these hold (`_is_test_function` in `parser.py`):
@@ -62,14 +66,19 @@ any of these hold (`_is_test_function` in `parser.py`):
 - It carries a test annotation: JUnit `@Test`, `@ParameterizedTest`, `@RepeatedTest`,
   `@TestFactory`, or Rust `#[test]`, `#[tokio::test]`, `#[async_std::test]`, `#[rstest]`,
   `#[proptest]`.
+- It is a Ruby block in a test file, such as `it "adds" do`, `describe`, `test "..." do`,
+  `before` or `let`.
 
 ### Type
 A type alias, interface, enum or similar construct where the language parser emits one.
 Columns as for Class.
 
 ### Endpoint
-A synthesised routed entry point, emitted for Spring request mappings and WebFlux functional
-routes. Linked to the handling method by a `HANDLES` edge.
+A synthesised routed entry point, emitted for Spring request mappings, WebFlux functional
+routes, and static Laravel routes in `routes/*.php`. Metadata includes `http_method`, `route`,
+and `handler`. Controller routes link to the handling method by a `HANDLES` edge. Laravel
+closures have an Endpoint without that edge; resource routes are not expanded yet, and a prefix
+set outside the routes file (`bootstrap/app.php`, `RouteServiceProvider`) is not seen.
 
 ### Scheduler
 A synthesised node for a `@Scheduled` method. Linked to the method it fires by a `TRIGGERS`
@@ -85,16 +94,81 @@ A synthesised node for a Spring application event, created after the build by
 `event_resolver.py` from `PUBLISHES` and `HANDLES` edges. Its `file_path` is the placeholder
 `event` and `extra` carries `{"event_type": ..., "virtual": true}`.
 
+### YamlPath
+A path-addressable mapping key or sequence shape parsed from generic `.yml` / `.yaml` files. Repeated sequence entries are aggregated under `[*]` paths with bounded occurrence/range samples, allowing similarly shaped files to be compared without one graph node per list item. Scalar values are deliberately discarded.
+
+The persisted `extra` JSON is the internal source of truth. Query and change-analysis responses expose its safe public subset under one nested `yaml` object:
+
+| Property | Type | Description |
+|----------|------|-------------|
+| schema_path | string | Aggregated structural path, such as `$.services[*].metadata.tier` |
+| example_path | string | One concrete occurrence used as a navigation example |
+| value_type / value_types | string / string[] | Structural or scalar YAML tag types; never scalar values |
+| document_index | int | Zero-based YAML document index |
+| occurrence_count | int | Number of occurrences represented by this node |
+| line_samples | int[] | Bounded occurrence-line samples |
+| duplicate_key / duplicate_group_count | bool / int | Mapping-scoped duplicate-key diagnostics |
+| is_alias / anchor_definition / yaml_merge | bool | Alias, anchor, and merge relationship metadata |
+
+`CONTAINS` connects files and nested paths. Alias nodes use `REFERENCES` with canonical qualified endpoints. Generic YAML `File` responses use the same `yaml` object for document, duplicate-key, unsupported-key, truncation, and `values_indexed: false` metadata.
+
+### DocSection
+A `div`, `section` or `article` with an `id` in an HTML page (`.html`, `.htm`). Its name is the
+anchor, such as `#cover`, and its lines are the element's. `extra` holds `html_id`, `html_tag`,
+`html_id_occurrences` (a page can repeat an id; the first element is the one kept) and, when the
+block has one, its first heading under `docstring`. Search finds a section by its anchor and that
+heading. The body text is not indexed. `CONTAINS` connects the file to each section.
+
+### Variable and Output
+Nodes from Liquid templates (`.liquid`). An `assign` gives a `Variable` node named by the
+variable, and each `{{ ... }}` gives an `Output` node named `output:` plus what it prints. Names
+hold no line number, so a name used twice is one node, and `extra.lines` lists every line.
+`CONTAINS` connects the file to each one. Search finds `Output` nodes only with `kind="Output"`.
+
+### JsonPath
+A key or array shape parsed from a `.json` file, in the same value-free shape as `YamlPath`: array items share one `[*]` path, an object with more than 200 keys is a table whose keys share one `.*` path, and values never enter the graph. Comments and trailing commas are accepted. Responses expose the same fields as `YamlPath`, without `document_index` or the YAML alias fields, under a nested `json` object.
+
+Some JSON files keep only their `File` node, and its `json` object says why:
+
+| Property | Files |
+|----------|-------|
+| locale_file | Translation files, by the same rule as YAML: a `locale`, `locales`, `i18n`, `l10n` or `translations` folder and a language code in the file or folder name |
+| data_file | Test files and files under `docs`, `examples`, `samples`, `demo`, `data`, `fixtures`, `mocks`, `snapshots` or `testdata` folders |
+| truncated | Files over 256 KB. A file cut at 1,000 paths or 32 levels keeps the paths before the cut and carries the same mark |
+
+Lock files (`package-lock.json`, `npm-shrinkwrap.json`, `*.lock.json`, `project.assets.json`) and `*.min.json` are ignored by default. Search ranks JSON files and paths below code unless the query asks for them with `kind="JsonPath"`, a `$` path or a `.json` file name.
+
 ## Edge Types
 
 Every edge has `source_qualified`, `target_qualified`, `file_path` (where the relationship
 was seen), `line`, `extra` (JSON), `confidence`, `confidence_tier` and, for
 `CALLS` and `REFERENCES`, `target_resolution`.
 
+For `CALLS`, `REFERENCES` and `TESTED_BY`, the tier says how the endpoint meant to
+name a node was bound, and is set after every resolver has run:
+
+| Tier | Score | Means |
+|---|---|---|
+| `EXTRACTED` | 1.0 | The source names a symbol and the node exists |
+| `INFERRED` | 0.8, or the resolver's own score | A resolver chose the node from other evidence |
+| `AMBIGUOUS` | 0.4 | Several nodes fit; `extra.ambiguous_targets` lists them |
+| `UNRESOLVED` | 0.2 | No node has this name, so it may be external or simply unknown |
+
+No edge keeps `<path>::<symbol>` when no node has that name. The endpoint goes back to the
+plain name, and `extra.claimed_endpoint` keeps the qualified form, so the edge returns to it
+if that node appears. Until then, a name match on that edge counts only for a method of the
+class the qualified form named.
+
+A call to a method a class inherits goes to the ancestor that declares it. When the parser
+wrote `<path>::Leaf.handle` and only `Alpha` declares `handle`, the target becomes
+`Alpha.handle` and `extra.inherited_endpoint` keeps `<path>::Leaf.handle`, so every pass
+checks the move again. When the bare-name resolver binds a call this way, `extra.inherited_through`
+names the class the call went through. Both are `INFERRED`.
+
 | Kind | Source -> target | Notes |
 |---|---|---|
-| CALLS | caller -> called function | Target may be a bare name until a resolver qualifies it; `target_resolution` records which |
-| IMPORTS_FROM | importing file -> imported module, file or package directory | `file_path` equals the source. `extra.import_scope` marks a DIRECTORY target: `package` (a Go import names a directory of files) or `tree` (a Ruby `require_all` names everything below one). The read path expands a directory to its members; see `import_scope_ancestors` in `graph.py` |
+| CALLS | caller -> called function | Target may be a bare name until a resolver qualifies it; `target_resolution` records which. Spring AOP advice gets a call to each method its pointcut matches, with `extra.pointcut_kind` and `extra.advice_kind` (`aop_resolver.py`) |
+| IMPORTS_FROM | importing file -> imported module, file or package directory | `file_path` equals the source. `extra.import_scope` marks a DIRECTORY target: `package` (a Go import names a directory of files) or `tree` (a Ruby `require_all` names everything below one). The read path expands a directory to its members; see `import_scope_ancestors` in `graph.py`. `extra.import_context` marks an import that does not run as the file loads: `type_only` (never runs), `deferred` (runs late, inside a function) or `parent_package` (Python `from . import sibling`: the edge to the file's own package). An HTML `<script src>`, a Liquid `render` or `include` and an XSLT `xsl:import` or `xsl:include` are imports too |
 | INHERITS | child class -> parent class | |
 | IMPLEMENTS | implementing class -> interface | |
 | CONTAINS | file -> class or function; class -> method | Structural containment |
@@ -106,7 +180,7 @@ was seen), `line`, `extra` (JSON), `confidence`, `confidence_tier` and, for
 | PRODUCES | Kafka producer -> `kafka:<topic>` | Spring Kafka enrichment |
 | TEMPORAL_STUB | class -> declared Temporal workflow or activity interface of a stub field | Used by `temporal_resolver.py` to resolve calls made through the stub |
 | DEPENDS_ON_CONFIG | `@ConfigurationProperties` class -> `ConfigProperty` | Spring enrichment |
-| HANDLES | `Endpoint` -> controller method; `@EventListener` method -> event | Spring enrichment |
+| HANDLES | handler -> `Endpoint`; listener -> event | Spring and Laravel enrichment |
 | TRIGGERS | `Scheduler` -> `@Scheduled` method | Spring enrichment |
 | PUBLISHES | method -> Spring application event | Spring enrichment |
 
@@ -115,10 +189,15 @@ was seen), `line`, `extra` (JSON), `confidence`, `confidence_tier` and, for
 ## Qualified Name Format
 
 ```text
-/absolute/path/to/file.py                                  # File
-/absolute/path/to/file.py::function_name                   # top-level function
-/absolute/path/to/file.py::ClassName.method_name           # method
-/absolute/path/to/file.py::OuterClass.InnerClass.method    # nested class method
+/absolute/path/to/file.py                                      # File
+/absolute/path/to/file.py::function_name                       # top-level function
+/absolute/path/to/file.py::ClassName.method_name               # method
+/absolute/path/to/file.py::OuterClass.InnerClass.method        # nested class method
+/absolute/path/to/Handlers.cs::App.Report.ExportHandler.Run    # C#: namespace, then types
+/absolute/path/to/card.liquid::output:product.title            # Liquid output
+/absolute/path/to/file.yml::yaml:0:$.services[*].metadata.tier # aggregated YAML path in document 0
+/absolute/path/to/file.yml::yaml:0:alias:$.service["<<"]@12    # alias or anchor identity
+/absolute/path/to/package.json::json:$.scripts.build            # JSON path
 ```
 
 `nodes.symbol` stores the part after the first `::` (or the whole name when there is none)
@@ -163,7 +242,7 @@ CREATE TABLE edges (
     line INTEGER DEFAULT 0,
     extra TEXT DEFAULT '{}',
     confidence REAL DEFAULT 1.0,              -- v9
-    confidence_tier TEXT DEFAULT 'EXTRACTED', -- v9
+    confidence_tier TEXT DEFAULT 'EXTRACTED', -- v9; see "Edge Types"
     target_resolution TEXT,                   -- v11; 'direct' | 'unresolved' | NULL
     updated_at REAL NOT NULL
 );
@@ -219,40 +298,6 @@ CREATE VIRTUAL TABLE nodes_fts USING fts5(
     tokenize='porter unicode61'
 );
 
--- v6
-CREATE TABLE community_summaries (
-    community_id INTEGER PRIMARY KEY,
-    name TEXT NOT NULL,
-    purpose TEXT DEFAULT '',
-    key_symbols TEXT DEFAULT '[]',
-    risk TEXT DEFAULT 'unknown',
-    size INTEGER DEFAULT 0,
-    dominant_language TEXT DEFAULT '',
-    FOREIGN KEY (community_id) REFERENCES communities(id)
-);
-
-CREATE TABLE flow_snapshots (
-    flow_id INTEGER PRIMARY KEY,
-    name TEXT NOT NULL,
-    entry_point TEXT NOT NULL,
-    critical_path TEXT DEFAULT '[]',
-    criticality REAL DEFAULT 0.0,
-    node_count INTEGER DEFAULT 0,
-    file_count INTEGER DEFAULT 0,
-    FOREIGN KEY (flow_id) REFERENCES flows(id)
-);
-
-CREATE TABLE risk_index (
-    node_id INTEGER PRIMARY KEY,
-    qualified_name TEXT NOT NULL,
-    risk_score REAL DEFAULT 0.0,
-    caller_count INTEGER DEFAULT 0,
-    test_coverage TEXT DEFAULT 'unknown',
-    security_relevant INTEGER DEFAULT 0,
-    last_computed TEXT DEFAULT '',
-    FOREIGN KEY (node_id) REFERENCES nodes(id)
-);
-
 -- v12, widened by v13 to mirror every nodes_fts column
 CREATE TABLE nodes_fts_state (
     node_id INTEGER PRIMARY KEY,
@@ -295,13 +340,14 @@ CREATE TABLE embeddings (
 
 | Key | Set by |
 |---|---|
-| `schema_version` | `migrations.py`; `13` on a current database |
+| `schema_version` | `migrations.py`; `15` on a current database |
 | `fts_state_synced` | `search.rebuild_fts_index`; mirror-shape version |
 | `last_updated` | Full and incremental builds |
 | `last_build_type` | Full and incremental builds |
 | `git_head_sha`, `git_branch` | Builds in a git checkout |
 | `svn_branch`, `svn_revision` | Builds in an SVN working copy |
 | `postprocess_level` | Post-processing |
+| `community_detector` | Community detection: `leiden`, `file`, or both joined by `+` |
 
 ### Indexes
 
@@ -309,9 +355,7 @@ CREATE TABLE embeddings (
 |---|---|---|
 | `idx_nodes_file` | `nodes(file_path)` | base |
 | `idx_nodes_kind` | `nodes(kind)` | base |
-| `idx_nodes_qualified` | `nodes(qualified_name)` | base |
-| `idx_edges_source` | `edges(source_qualified)` | base |
-| `idx_edges_target` | `edges(target_qualified)` | base |
+| `idx_nodes_name` | `nodes(name)` | base |
 | `idx_edges_kind` | `edges(kind)` | base |
 | `idx_edges_file` | `edges(file_path)` | base |
 | `idx_edges_target_kind` | `edges(target_qualified, kind)` | base, v7 |
@@ -322,10 +366,10 @@ CREATE TABLE embeddings (
 | `idx_nodes_community` | `nodes(community_id)` | v4 |
 | `idx_communities_parent` | `communities(parent_id)` | v4 |
 | `idx_communities_cohesion` | `communities(cohesion DESC)` | v4 |
-| `idx_risk_index_score` | `risk_index(risk_score DESC)` | v6 |
 | `idx_edges_composite` | `edges(kind, source_qualified, target_qualified, file_path, line)` | v8 |
 | `idx_nodes_symbol` | `nodes(symbol)` | v10 |
 | `idx_edges_kind_target_resolution` | `edges(kind, target_resolution)` | v11 |
+| `idx_nodes_fts_state_file` | `nodes_fts_state(file_path)` | v12 |
 
 ### Migrations
 
@@ -345,3 +389,5 @@ Each migration runs in its own transaction and updates `schema_version` on succe
 | 11 | `edges.target_resolution`, back-filled for `CALLS`/`REFERENCES`, and `idx_edges_kind_target_resolution` |
 | 12 | `nodes_fts_state`, the mirror of the FTS index, and `idx_nodes_fts_state_file` |
 | 13 | `nodes.docstring`, `nodes.name_tokens`, both back-filled; `nodes_fts` and `nodes_fts_state` widened to carry them |
+| 14 | No schema change: `file_hash` cleared on Ruby `File` nodes so the next update re-parses them under the new namespaced class identities |
+| 15 | Dropped `community_summaries`, `flow_snapshots` and `risk_index` with `idx_risk_index_score`, as nothing read them; dropped `idx_nodes_qualified`, `idx_edges_source` and `idx_edges_target`, as other indexes cover them. The file keeps its size until `VACUUM`; later writes reuse the freed pages |

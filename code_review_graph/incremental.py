@@ -18,16 +18,48 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 import uuid
+from collections import deque
+from functools import partial
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, NamedTuple, Optional
+from typing import TYPE_CHECKING, Any, Callable, Iterable, NamedTuple, Optional
 
+from . import install_plan
 from .build_state import advance_to_postprocess_pending
 from .constants import GIT_TIMEOUT as _GIT_TIMEOUT
-from .constants import discovery_timeout, env_float, env_int
+from .constants import (
+    discovery_timeout,
+    env_float,
+    env_int,
+    normalize_file_path,
+    read_only_requested,
+)
+from .csharp_resolver import restore_csharp_references
 from .errors import ChangeDiscoveryError, GraphRootMismatchError, GraphStoreError
 from .graph import GraphStore
-from .parser import CodeParser, normalize_file_path
+from .locking import WriteLock, write_lock_path
+
+if TYPE_CHECKING:
+    from .parser import CodeParser
+
+
+def _get_code_parser_cls():
+    cls = globals().get("CodeParser")
+    if cls is None:
+        from .parser import CodeParser
+
+        globals()["CodeParser"] = CodeParser
+        return CodeParser
+    return cls
+
+
+def __getattr__(name: str):
+    if name == "CodeParser":
+        from .parser import CodeParser
+        globals()["CodeParser"] = CodeParser
+        return CodeParser
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 _MAX_PARSE_WORKERS = env_int("CRG_PARSE_WORKERS", min(os.cpu_count() or 4, 8))
 
@@ -44,6 +76,44 @@ _MCP_STDIO_ACTIVE = False
 _PARSE_WORKER_STATE = threading.local()
 
 
+def _windows_console_handle(fileno: int) -> bool:
+    """Return True when ``fileno`` is a real Windows console.
+
+    On Windows, ``isatty()`` is True for any character device, including the
+    ``NUL`` device that ``subprocess`` uses for ``stdin=DEVNULL`` and that
+    Node uses for ``stdio: "ignore"``. Only a console handle accepts
+    ``GetConsoleMode``, so that call tells the two apart.
+    """
+    if sys.platform != "win32":
+        return False
+    # Any failure means "not shown to be a console", which picks threads: a
+    # slower build at worst, never a crash. A Python built without ctypes, or
+    # a handle too large for ctypes to pass as a C int, must not stop a build.
+    try:
+        import ctypes
+        import msvcrt
+    except ImportError:
+        return False
+    try:
+        handle = msvcrt.get_osfhandle(fileno)
+        mode = ctypes.c_uint32()
+        return bool(ctypes.windll.kernel32.GetConsoleMode(handle, ctypes.byref(mode)))
+    except (AttributeError, OSError, ValueError, ctypes.ArgumentError):
+        return False
+
+
+def _stdin_is_interactive() -> bool:
+    """Return True only when stdin is an interactive terminal."""
+    try:
+        if not sys.stdin.isatty():
+            return False
+        if sys.platform == "win32":
+            return _windows_console_handle(sys.stdin.fileno())
+    except (AttributeError, OSError, ValueError):
+        return False
+    return True
+
+
 def _select_executor_kind() -> str:
     """Return 'process' or 'thread' for parallel parsing.
 
@@ -52,7 +122,10 @@ def _select_executor_kind() -> str:
     platform, where ``ProcessPoolExecutor`` workers can inherit the transport
     pipe/socket and prevent EOF shutdown. The older Windows non-TTY fallback
     remains for direct integrations that predate the explicit transport flag
-    (issues #46, #136, PR #615).
+    (issues #46, #136, PR #615). On Windows, stdin redirected from the
+    ``NUL`` device counts as non-interactive even though ``isatty()`` is
+    True for it, because a caller that kills such a run leaves its pool
+    workers behind as orphans.
 
     Override explicitly with ``CRG_PARSE_EXECUTOR={process,thread}``.
 
@@ -66,7 +139,7 @@ def _select_executor_kind() -> str:
         return explicit
     if _MCP_STDIO_ACTIVE:
         return "thread"
-    if sys.platform == "win32" and not sys.stdin.isatty():
+    if sys.platform == "win32" and not _stdin_is_interactive():
         return "thread"
     return "process"
 
@@ -79,9 +152,79 @@ def _make_executor(max_workers: int):
 
 logger = logging.getLogger(__name__)
 
+# How many files a complete graph of this repository holds. Parseable files can
+# yield no rows (generic YAML), so the inventory alone cannot say a graph is
+# partial. Zero means nothing has confirmed it yet.
+VERIFIED_FILE_COUNT_KEY = "verified_file_count"
 CPP_IDENTITY_VERSION = "1"
 _CPP_IDENTITY_METADATA_KEY = "cpp_identity_version"
+CSHARP_IDENTITY_VERSION = "5"  # Namespace/call context, static and generic-arity evidence.
+_CSHARP_IDENTITY_METADATA_KEY = "csharp_identity_version"
+_CSHARP_PENDING_METADATA_KEY = "csharp_identity_pending_files"
+# Nested class members take the full scope chain (#934). A graph built before
+# holds leaf-scoped identities for them, and an importer re-parsed with
+# unchanged bytes keeps its node rows, so its new edges would name nodes that
+# do not exist. Files with nested classes reparse once instead.
+NESTED_SCOPE_IDENTITY_VERSION = "1"
+_NESTED_SCOPE_METADATA_KEY = "nested_scope_identity_version"
+_NESTED_SCOPE_PENDING_KEY = "nested_scope_identity_pending_files"
+# Python, C++ and Julia keep their own nested spellings; Ruby already took the
+# chain (#1087) and C# has its own gate above.
+_NESTED_SCOPE_UNCHANGED_LANGUAGES = ("python", "cpp", "julia", "ruby", "csharp")
 _CPP_IDENTITY_PENDING_KEY = "cpp_identity_pending"
+_DEPENDENTS_PENDING_KEY = "dependents_reparse_pending"
+
+
+def _load_pending_paths(store: GraphStore, key: str) -> set[str]:
+    """Repo-relative paths a metadata *key* holds for the next update to retry."""
+    try:
+        files = json.loads(store.get_metadata(key) or "[]")
+    except (TypeError, ValueError):
+        return set()
+    if not isinstance(files, list):
+        return set()
+    return {
+        path for path in files
+        if isinstance(path, str)
+        and path
+        and not Path(path).is_absolute()
+        and ".." not in Path(path).parts
+    }
+
+
+def _nested_scope_files(store: GraphStore, repo_root: Path) -> set[str]:
+    """Files whose nested class members held leaf-scoped identities before #934."""
+    placeholders = ",".join("?" for _ in _NESTED_SCOPE_UNCHANGED_LANGUAGES)
+    rows = store._conn.execute(
+        "SELECT DISTINCT file_path FROM nodes WHERE kind = 'Class' "  # nosec B608
+        f"AND parent_name IS NOT NULL AND language NOT IN ({placeholders})",
+        _NESTED_SCOPE_UNCHANGED_LANGUAGES,
+    )
+    return {
+        Path(row[0]).relative_to(repo_root).as_posix()
+        for row in rows
+        if Path(row[0]).is_relative_to(repo_root)
+    }
+
+
+def _load_dependents_pending(store: GraphStore) -> set[str]:
+    """Importers whose forced re-parse failed, for the next update to retry.
+
+    Their seed's new hash is already stored, so nothing else would find them.
+    """
+    try:
+        files = json.loads(store.get_metadata(_DEPENDENTS_PENDING_KEY) or "[]")
+    except (TypeError, ValueError):
+        return set()
+    if not isinstance(files, list):
+        return set()
+    return {
+        path for path in files
+        if isinstance(path, str)
+        and path
+        and not Path(path).is_absolute()
+        and ".." not in Path(path).parts
+    }
 
 
 def _load_cpp_identity_pending(store: GraphStore) -> set[str] | None:
@@ -153,6 +296,18 @@ def _run_spring_resolver(store: GraphStore) -> Optional[dict]:
         return None
 
 
+def _run_aop_resolver(store: GraphStore) -> Optional[dict]:
+    """Run the Spring AOP advice-to-target call resolver, swallowing any
+    failure so build never fails because of it. Returns stats or None on error.
+    """
+    try:
+        from .aop_resolver import resolve_aop_advice
+        return resolve_aop_advice(store)
+    except Exception as exc:  # noqa: BLE001 - best-effort post-pass
+        logger.warning("AOP resolver failed: %s", exc)
+        return None
+
+
 def _run_spring_event_resolver(store: GraphStore) -> Optional[dict]:
     """Run the Spring application-event resolver without failing a build."""
     try:
@@ -185,13 +340,57 @@ def _run_hcl_resolver(store: GraphStore) -> Optional[dict]:
         return None
 
 
-def _run_scoped_resolver(store: GraphStore) -> Optional[dict]:
+def _run_scoped_resolver(store: GraphStore, repo_root: Path) -> Optional[dict]:
     """Resolve static/scoped ``Class::method`` calls without failing a build."""
     try:
         from .scoped_resolver import resolve_scoped_calls
-        return resolve_scoped_calls(store)
+        return resolve_scoped_calls(store, repo_root)
     except Exception as exc:  # noqa: BLE001 - best-effort post-pass
         logger.warning("Scoped call resolver failed: %s", exc)
+        return None
+
+
+def _enrichment_skip_reason(enrich: Optional[bool]) -> Optional[str]:
+    """Why the Jedi step does not run, or ``None`` when it was asked for.
+
+    Opt-in: Jedi costs about a second per Python file, so having the
+    ``enrichment`` extra installed (``[all]`` pulls it in) is not a request.
+    *enrich* (CLI ``--enrich``) asks for it; ``None`` falls back to
+    ``CRG_ENABLE_ENRICHMENT=1``. ``CRG_DISABLE_ENRICHMENT=1`` overrides both.
+    """
+    if os.environ.get("CRG_DISABLE_ENRICHMENT", "") == "1":
+        return "disabled via CRG_DISABLE_ENRICHMENT"
+    if enrich is None:
+        enrich = os.environ.get("CRG_ENABLE_ENRICHMENT", "") == "1"
+    return None if enrich else "not requested"
+
+
+def _run_jedi_enrichment(
+    store: GraphStore,
+    repo_root: Path,
+    files: Optional[list[str]] = None,
+    enrich: Optional[bool] = None,
+) -> Optional[dict]:
+    """Run post-build Jedi call-resolution enrichment (optional extra).
+
+    Resolves ``receiver.method()`` calls on lowercase receivers with Jedi.
+    Runs only when asked for (see :func:`_enrichment_skip_reason`); otherwise
+    Jedi is not even imported and the graph is exactly what it would be
+    without this step. Best-effort like the other resolvers: skipped when
+    the ``[enrichment]`` extra (jedi) is not installed and never fails a
+    build.
+
+    *files* limits the scan to those files (see ``enrich_jedi_calls``);
+    ``None`` scans every Python file.
+    """
+    reason = _enrichment_skip_reason(enrich)
+    if reason is not None:
+        return {"skipped": True, "reason": reason}
+    try:
+        from .jedi_resolver import enrich_jedi_calls
+        return enrich_jedi_calls(store, repo_root, files=files)
+    except Exception as exc:  # noqa: BLE001 - best-effort post-pass
+        logger.warning("Jedi enrichment failed: %s", exc)
         return None
 
 
@@ -256,6 +455,15 @@ DEFAULT_IGNORE_PATTERNS = [
     "*.map",
     "*.lock",
     "package-lock.json",
+    "**/package-lock.json",
+    "npm-shrinkwrap.json",
+    "**/npm-shrinkwrap.json",
+    "*.lock.json",
+    "project.assets.json",
+    "**/project.assets.json",
+    "*.min.json",
+    "pnpm-lock.yaml",
+    "**/pnpm-lock.yaml",
     "yarn.lock",
     "*.db",
     "*.sqlite",
@@ -270,6 +478,14 @@ DEFAULT_IGNORE_PATTERNS = [
 # being parsed and watched, so the root anchoring from #91/#92 still protects
 # everyone whose nested ``build/`` or ``dist/`` holds real sources.  See: #811.
 NESTED_OUTPUT_DIR_MARKERS: dict[str, frozenset[str]] = {
+    "vendor": frozenset({
+        "composer.json",
+        "go.mod",
+        "go.work",
+        "Gemfile",
+        "Rakefile",
+        "Cargo.toml",
+    }),
     "target": frozenset({"pom.xml", "Cargo.toml", "build.sbt"}),
     "build": frozenset({
         "build.gradle",
@@ -295,7 +511,9 @@ _MODULE_SCAN_MAX_DIRS = env_int("CRG_MODULE_SCAN_MAX_DIRS", 2000)
 _MAX_NESTED_OUTPUT_PATTERNS = 200
 _NESTED_IGNORE_TTL_SECONDS = env_float("CRG_NESTED_IGNORE_TTL", 300.0)
 
-_nested_ignore_cache: dict[tuple[str, tuple[str, ...]], tuple[float, list[str]]] = {}
+_nested_ignore_cache: dict[
+    tuple[str, tuple[str, ...], tuple[str, ...]], tuple[float, list[str]]
+] = {}
 _nested_ignore_lock = threading.Lock()
 
 
@@ -353,12 +571,31 @@ def find_repo_root(
 
 
 def detect_vcs(root: Path) -> str:
-    """Return ``'git'``, ``'svn'``, or ``'none'`` based on VCS markers at *root*."""
-    if (root / ".git").exists():
-        return "git"
-    if (root / ".svn").exists():
-        return "svn"
+    """Return the nearest Git or SVN working copy containing *root*."""
+    current = root
+    while True:
+        if (current / ".git").exists():
+            return "git"
+        if (current / ".svn").exists():
+            return "svn"
+        if current == current.parent:
+            break
+        current = current.parent
     return "none"
+
+
+def _git_worktree_prefix(repo_root: Path) -> str:
+    """Return the path from the Git root to a requested subproject root."""
+    requested_root = Path(repo_root).expanduser().resolve()
+    current = requested_root
+    while True:
+        if (current / ".git").exists():
+            if current == requested_root:
+                return ""
+            return requested_root.relative_to(current).as_posix()
+        if current == current.parent:
+            return ""
+        current = current.parent
 
 
 def find_project_root(
@@ -443,6 +680,9 @@ def get_data_dir(repo_root: Path, *, create: bool = True) -> Path:
     2. CRG_DATA_DIR environment variable (global override)
     3. Default: <repo>/.code-review-graph/
 
+    A missing registered directory is ignored when a local graph.db already
+    exists, so an expired temporary relocation cannot strand that graph.
+
     By default, ``<repo_root>/.code-review-graph``. If the
     ``CRG_DATA_DIR`` environment variable is set, it is used verbatim
     instead — letting you keep graphs outside the working tree (useful
@@ -463,9 +703,17 @@ def get_data_dir(repo_root: Path, *, create: bool = True) -> Path:
             registry_data_dir = Registry().get_data_dir_for_repo(str(repo_root))
             if registry_data_dir:
                 data_dir = Path(registry_data_dir).resolve()
-                if create:
-                    _create_data_dir(data_dir)
-                return data_dir
+                local_dir = repo_root / ".code-review-graph"
+                if not data_dir.exists() and (local_dir / "graph.db").is_file():
+                    logger.warning(
+                        "Registered graph directory %s is missing; falling back to "
+                        "normal resolution (local graph: %s).",
+                        data_dir, local_dir,
+                    )
+                else:
+                    if create:
+                        _create_data_dir(data_dir)
+                    return data_dir
     except Exception as exc:
         # If registry lookup fails, log and fall through to other methods
         logger.debug("Registry lookup failed for %s: %s", repo_root, exc)
@@ -492,11 +740,30 @@ def get_db_path(repo_root: Path, *, read_only: bool = False) -> Path:
     ``read_only=True`` to resolve the current path without creating a data
     directory, migrating a legacy database, or deleting side-files.
     """
-    crg_dir = get_data_dir(repo_root, create=not read_only)
+    forced_read_only = read_only_requested()
+    no_writes = read_only or forced_read_only
+    crg_dir = get_data_dir(repo_root, create=not no_writes)
     new_db = crg_dir / "graph.db"
 
-    if read_only:
+    if no_writes:
+        legacy_db = repo_root / ".code-review-graph.db"
+        default_dir = repo_root / ".code-review-graph"
+        if (
+            forced_read_only
+            and not new_db.exists()
+            and legacy_db.is_file()
+            and crg_dir.resolve() == default_dir.resolve()
+        ):
+            return legacy_db
         return new_db
+
+    _prepare_db_path(repo_root, new_db)
+    return new_db
+
+
+def _prepare_db_path(repo_root: Path, new_db: Path) -> None:
+    """Prepare an already resolved database path, under the writer's lock."""
+    _create_data_dir(new_db.parent)
 
     # Migrate legacy database if present (only meaningful when the
     # legacy file sits at the repo root — if CRG_DATA_DIR is set we
@@ -511,8 +778,6 @@ def get_db_path(repo_root: Path, *, read_only: bool = False) -> Path:
         if side.exists():
             side.unlink()
 
-    return new_db
-
 
 def ensure_repo_gitignore_excludes_crg(repo_root: Path) -> str:
     """Ensure repo-level .gitignore excludes ``.code-review-graph/``.
@@ -523,7 +788,11 @@ def ensure_repo_gitignore_excludes_crg(repo_root: Path) -> str:
     - ``already-present``: no changes were needed
     """
     gitignore_path = repo_root / ".gitignore"
-    existing = gitignore_path.read_text(encoding="utf-8") if gitignore_path.exists() else ""
+    existing = (
+        install_plan.read_text(gitignore_path, encoding="utf-8")
+        if install_plan.exists(gitignore_path)
+        else ""
+    )
 
     for raw_line in existing.splitlines():
         line = raw_line.strip()
@@ -534,7 +803,7 @@ def ensure_repo_gitignore_excludes_crg(repo_root: Path) -> str:
 
     block = "# Added by code-review-graph\n.code-review-graph/\n"
     prefix = "\n" if existing and not existing.endswith("\n") else ""
-    gitignore_path.write_text(existing + prefix + block, encoding="utf-8")
+    install_plan.write_text(gitignore_path, existing + prefix + block)
 
     if existing:
         return "updated"
@@ -547,8 +816,17 @@ def _load_ignore_patterns(repo_root: Path) -> list[str]:
     A line starting with ``!`` keeps a path out of the automatic nested
     build-output detection (see :data:`NESTED_OUTPUT_DIR_MARKERS`); it does not
     negate the explicit patterns, which keep their existing meaning.
+    The default vendor exclusion applies to Composer, Go, Ruby and Cargo projects
+    identified by root manifests. Nested manifests exclude their sibling
+    vendor/ directory; other repositories can explicitly ignore vendor/.
     """
-    patterns = list(DEFAULT_IGNORE_PATTERNS)
+    vendor_dependencies = any(
+        (repo_root / manifest).is_file() for manifest in NESTED_OUTPUT_DIR_MARKERS["vendor"]
+    ) or any(path.is_file() for path in repo_root.glob("*.gemspec"))
+    patterns = [
+        pattern for pattern in DEFAULT_IGNORE_PATTERNS
+        if pattern != "**/vendor/**" or vendor_dependencies
+    ]
     keep: list[str] = []
     ignore_file = repo_root / ".code-review-graphignore"
     if ignore_file.exists():
@@ -663,7 +941,10 @@ def _scan_nested_output_dirs(
             for output_dir, markers in NESTED_OUTPUT_DIR_MARKERS.items():
                 # A watch can start before the first build creates its output.
                 # Reserve that path now, without rescanning on each file event.
-                if file_names & markers and output_dir not in file_names:
+                has_marker = bool(file_names & markers) or (
+                    output_dir == "vendor" and any(name.endswith(".gemspec") for name in file_names)
+                )
+                if has_marker and output_dir not in file_names:
                     relative = (directory / output_dir).relative_to(repo_root).as_posix()
                     patterns.append(f"/{relative}/**")
                     flagged.add(output_dir)
@@ -701,7 +982,9 @@ def _nested_output_ignore_patterns(
     """
     if os.environ.get("CRG_NESTED_OUTPUT_SCAN", "1").strip().lower() in ("0", "false", "no"):
         return []
-    key = (str(repo_root), keep)
+    # The base patterns decide which trees the scan skips, so a scan made under
+    # other patterns (a root manifest since removed, say) cannot be reused.
+    key = (str(repo_root), keep, tuple(base_patterns))
     now = time.monotonic()
     with _nested_ignore_lock:
         cached = _nested_ignore_cache.get(key)
@@ -1047,6 +1330,9 @@ def get_changed_files(
 ) -> list[str]:
     """Get list of changed files via git diff or svn status.
 
+    Git results also include untracked, non-ignored files so newly created
+    source files reach incremental indexing before they are staged.
+
     For SVN working copies the *base* parameter is ignored; modified/added/
     deleted files are detected from ``svn status``.  Pass an SVN revision
     range (e.g. ``"r100:HEAD"``) as *base* to compare against a specific
@@ -1093,7 +1379,7 @@ def get_changed_files(
         # --name-status (not --name-only): renames/copies must report BOTH
         # paths, or the old path never reaches the purge loop (issue #684).
         result = subprocess.run(
-            ["git", "diff", "--name-status", "-z", base, "--"],
+            ["git", "diff", "--relative", "--name-status", "-z", base, "--", "."],
             capture_output=True,
             cwd=str(repo_root),
             timeout=timeout,
@@ -1104,18 +1390,34 @@ def get_changed_files(
                 raise ChangeDiscoveryError(
                     f"git diff failed while discovering changed files (rc={result.returncode})"
                 )
-            # Fallback: try diff against empty tree (initial commit)
-            result = subprocess.run(
-                ["git", "diff", "--name-status", "-z", "--cached"],
-                capture_output=True,
-                cwd=str(repo_root),
+            # An unresolved base (for example HEAD~1 in a one-commit repo)
+            # cannot describe working-tree edits. Fall back to status so both
+            # staged and unstaged tracked changes, plus untracked files, survive.
+            return get_staged_and_unstaged(
+                repo_root,
                 timeout=timeout,
-                stdin=subprocess.DEVNULL,
+                require_vcs=require_vcs,
             )
         if result.returncode != 0:
             logger.warning("git diff failed while discovering changed files")
             return []
-        return _decode_name_status_paths(result.stdout)
+        changed = _decode_name_status_paths(result.stdout)
+        if not changed:
+            # An empty commit diff can coexist with tracked worktree edits
+            # restored to the base contents. Preserve those edits before
+            # merging untracked paths, which would otherwise make this list
+            # look non-empty to discover_review_changes and skip its fallback.
+            return get_staged_and_unstaged(
+                repo_root,
+                timeout=timeout,
+                require_vcs=require_vcs or strict,
+            )
+        untracked = _get_untracked_files(
+            repo_root,
+            timeout=timeout,
+            require_vcs=require_vcs or strict,
+        )
+        return list(dict.fromkeys([*changed, *untracked]))
     except (OSError, subprocess.TimeoutExpired) as exc:
         if strict:
             raise ChangeDiscoveryError("git change discovery failed") from exc
@@ -1127,6 +1429,7 @@ def get_changed_files(
 def _find_content_mismatches(
     repo_root: Path,
     store: "GraphStore",
+    only: set[str] | None = None,
 ) -> tuple[list[str], dict[str, str], set[str]]:
     """Find indexed files whose bytes differ from the graph's last parsed hash.
 
@@ -1146,6 +1449,8 @@ def _find_content_mismatches(
     text_files: set[str] = set()
 
     for stored_path, stored_hash in store.get_file_hashes().items():
+        if only is not None and stored_path not in only:
+            continue
         path = Path(stored_path)
         if not path.is_absolute():
             path = repo_root / path
@@ -1232,6 +1537,23 @@ def _get_svn_changed_files(
         return []
 
 
+def _utf8_paths(paths: Iterable[str]) -> list[str]:
+    """Drop names that are not valid UTF-8: SQLite raises on any lookup of one.
+
+    ``os.fsdecode`` keeps such a name as surrogate escapes, and these lists go
+    straight into graph queries from ``update`` and the review tools.
+    """
+    kept = []
+    for path in paths:
+        try:
+            path.encode("utf-8")
+        except UnicodeEncodeError:
+            logger.debug("Skipping path that is not UTF-8: %r", path[:120])
+            continue
+        kept.append(path)
+    return kept
+
+
 def get_staged_and_unstaged(
     repo_root: Path,
     *,
@@ -1272,6 +1594,8 @@ def get_staged_and_unstaged(
                 "--porcelain=v1",
                 "-z",
                 "--untracked-files=all",
+                "--",
+                ".",
             ],
             capture_output=True,
             cwd=str(repo_root),
@@ -1282,19 +1606,23 @@ def get_staged_and_unstaged(
             logger.warning("git status failed while discovering working-tree files")
             return []
         files: list[str] = []
+        prefix = _git_worktree_prefix(repo_root)
+        prefix_with_separator = f"{prefix}/" if prefix else ""
         records = result.stdout.split(b"\0")
         index = 0
         while index < len(records):
             record = records[index]
             if len(record) > 3:
                 status = record[:2]
-                files.append(os.fsdecode(record[3:]))
+                path = os.fsdecode(record[3:])
+                if not prefix or path.startswith(prefix_with_separator):
+                    files.append(path[len(prefix_with_separator):] if prefix else path)
                 # With porcelain -z, a rename/copy record stores the
                 # destination first and its source in the following record.
                 if b"R" in status or b"C" in status:
                     index += 1
             index += 1
-        return files
+        return _utf8_paths(files)
     except (OSError, subprocess.TimeoutExpired) as exc:
         if require_vcs:
             raise _vcs_unavailable("git", exc, timeout=timeout) from exc
@@ -1406,6 +1734,39 @@ def get_all_tracked_files(
     except (FileNotFoundError, subprocess.TimeoutExpired, UnicodeDecodeError):
         return []
 
+
+def _get_untracked_files(
+    repo_root: Path,
+    *,
+    timeout: float | None = None,
+    require_vcs: bool = False,
+) -> list[str]:
+    """Return Git's untracked, non-ignored files using NUL-delimited paths."""
+    if timeout is None:
+        timeout = _GIT_TIMEOUT
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+            capture_output=True,
+            cwd=str(repo_root),
+            timeout=timeout,
+            stdin=subprocess.DEVNULL,
+        )
+        if result.returncode != 0:
+            logger.warning("git ls-files failed while discovering untracked files")
+            if require_vcs:
+                raise ChangeDiscoveryError(
+                    "git ls-files failed while discovering untracked files "
+                    f"(rc={result.returncode})"
+                )
+            return []
+        return _utf8_paths(os.fsdecode(path) for path in result.stdout.split(b"\0") if path)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        if require_vcs:
+            raise _vcs_unavailable("git", exc, timeout=timeout) from exc
+        return []
+
+
 def _get_svn_all_tracked_files(repo_root: Path) -> list[str]:
     """Return SVN-versioned files by walking the working copy.
 
@@ -1434,9 +1795,384 @@ def _get_svn_all_tracked_files(repo_root: Path) -> list[str]:
     return []
 
 
+#: Opt-in switch for following symlinked folders (#269), inside the repository
+#: or outside it. Off unless set to ``1``, ``true``, ``yes`` or ``on``. The CLI flag
+#: ``--follow-symlinks`` / ``--no-follow-symlinks`` overrides it for one run.
+FOLLOW_SYMLINKS_ENV = "CRG_FOLLOW_SYMLINKS"
+
+# Graph files that are in the graph only because a followed symlinked folder
+# reached them, as a JSON list of stored paths. An update compares it with
+# what the links reach now, so a file drops out when its link goes away (or
+# the option is turned off), the same way a full build would leave it out.
+_FOLLOWED_FILES_KEY = "symlink_followed_files"
+# Followed folders outside the repository, real path to in-repo path, so
+# edges the parser resolved to the real path can be pointed back in.
+_FOLLOWED_DIRS_KEY = "symlink_followed_dirs"
+
+
+def follow_symlinks_enabled(explicit: bool | None = None) -> bool:
+    """Return whether symlinked folders are followed.
+
+    *explicit* (the CLI flag) wins when given; otherwise ``CRG_FOLLOW_SYMLINKS``
+    decides. It is read on every call so tests and long-lived processes see
+    the value in force when the work starts.
+    """
+    if explicit is not None:
+        return bool(explicit)
+    return os.environ.get(FOLLOW_SYMLINKS_ENV, "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def _inventory_candidates(
+    repo_root: Path,
+    recurse_submodules: bool | None = None,
+) -> list[str]:
+    """Return the repository-relative paths a build considers, unfiltered.
+
+    Git's tracked files plus its untracked, non-ignored files; SVN's versioned
+    files; or, when neither answers, a walk of the directory. Symlinks are
+    listed as entries of their own (Git never looks inside a symlinked
+    folder), which is how followed folders are found.
+    """
+    # Prefer Git's tracked-file inventory, augmented with untracked files so
+    # a full build and an incremental update see the same source tree.
+    vcs = detect_vcs(repo_root)
+    tracked = get_all_tracked_files(repo_root, recurse_submodules)
+    if vcs == "git":
+        candidates = list(dict.fromkeys([*tracked, *_get_untracked_files(repo_root)]))
+    else:
+        candidates = tracked
+    if not candidates:
+        # Fallback: walk directory. ``rglob`` never descends into a symlinked
+        # folder; the link itself is kept so it can be followed when asked.
+        candidates = [
+            str(p.relative_to(repo_root))
+            for p in repo_root.rglob("*")
+            if p.is_file() or p.is_symlink()
+        ]
+    return candidates
+
+
+def _keep_candidate(
+    repo_root: Path,
+    rel_path: str,
+    ignore_patterns: list[str],
+    parser: CodeParser,
+) -> bool:
+    """Return whether one inventory path is a file the graph should hold."""
+    if _should_ignore(rel_path, ignore_patterns):
+        return False
+    # Skip paths that would exceed OS filename limits (macOS: 255 bytes
+    # per component, ~1024 total; Windows: 260 total).
+    try:
+        # ``os.fsdecode`` preserves undecodable POSIX filename bytes as
+        # surrogate escapes. Graph paths are stored as UTF-8, so reject
+        # those before the component-length checks call ``encode()``.
+        rel_path.encode("utf-8")
+        full_path = repo_root / rel_path
+    except (OSError, UnicodeEncodeError, ValueError):
+        logger.debug("Skipping path that cannot be represented safely")
+        return False
+    if len(str(full_path)) > 1000 or any(len(p.encode()) > 255 for p in full_path.parts):
+        logger.debug("Skipping overlong path: %s", rel_path[:120])
+        return False
+    if not full_path.is_file():
+        return False
+    if full_path.is_symlink():
+        return False
+    if parser.detect_language(full_path) is None:
+        return False
+    if _is_binary(full_path):
+        return False
+    return True
+
+
+_reported_links: set[tuple[str, str]] = set()
+
+
+def _report_once(root: Path, key: str, level: int, message: str, *args: object) -> None:
+    """Log *message* at *level* the first time in this process, then at debug.
+
+    A watcher walks the followed folders again whenever a link changes, and
+    the same line on every walk would bury everything else in the log.
+    """
+    marker = (str(root), key)
+    if marker in _reported_links:
+        level = logging.DEBUG
+    _reported_links.add(marker)
+    logger.log(level, message, *args)
+
+
+def _max_followed_files() -> int:
+    """How many files may be reached through symlinked folders in one walk."""
+    return max(1, env_int("CRG_MAX_FOLLOWED_FILES", 10_000))
+
+
+def _is_junction(entry: os.DirEntry) -> bool:
+    """Whether *entry* is a Windows junction, which can point anywhere.
+
+    ``DirEntry.is_junction`` only exists from Python 3.12; before that a
+    folder whose real path is not its own path is treated the same way.
+    """
+    if os.name != "nt":
+        return False
+    is_junction = getattr(entry, "is_junction", None)
+    if is_junction is not None:
+        return bool(is_junction())
+    return os.path.normcase(os.path.realpath(entry.path)) != os.path.normcase(
+        os.path.abspath(entry.path)
+    )
+
+
+class _FollowedTree(NamedTuple):
+    """What following the symlinked folders found (#269)."""
+
+    #: Files reached, each under a path inside the repository: its real path
+    #: when the file lives inside the repository, else the path through the
+    #: link. Never a path outside the repository.
+    files: list[str]
+    #: The symlinked folders followed, as repository-relative paths.
+    links: list[str]
+    #: Real path of each followed folder outside the repository, mapped to
+    #: the repository-relative path its files are stored under.
+    outside: dict[str, str]
+    #: Followed folders inside the repository, as repository-relative real
+    #: paths. A file made there is in the graph only through a link.
+    inside: list[str]
+
+
+def _walk_symlinked_dirs(
+    repo_root: Path,
+    candidates: Iterable[str],
+    ignore_patterns: list[str],
+) -> _FollowedTree:
+    """Follow the symlinked folders among *candidates* (#269).
+
+    A link to a folder inside the repository lists that folder under its
+    real path, so a file reached by a link and directly has one path. A link
+    to a folder outside the repository lists it under the link's own path:
+    the outside real path is never stored.
+
+    A link is not followed when its own path is ignored, when its target is
+    an ignored folder of the repository, or when it points at a folder that
+    holds it or holds the repository (a cycle). Below a link, an ignore rule
+    applies to the path through the link as well as the stored path. Each real folder is listed
+    at most once, by device and inode, so links that point at each other
+    cannot loop. At most ``CRG_MAX_FOLLOWED_FILES`` new files are taken, and
+    the log says when that cap cuts the walk short. Symlinked files are
+    never followed.
+    """
+    root = Path(repo_root).resolve()
+    listed_names = {normalize_file_path(candidate) for candidate in candidates}
+    limit = _max_followed_files()
+    files: list[str] = []
+    links: list[str] = []
+    outside: dict[str, str] = {}
+    inside_dirs: list[str] = []
+    seen_links: set[str] = set()
+    listed: set[tuple[int, int]] = set()
+    taken = 0
+    # Each link as (path on disk, path through the links that reached it).
+    pending = deque(
+        (path, path)
+        for path in sorted(
+            normalize_file_path(candidate)
+            for candidate in listed_names
+            if os.path.islink(repo_root / candidate)
+        )
+    )
+
+    def _ignored(logical: str, via: str) -> bool:
+        return _should_ignore(logical, ignore_patterns) or (
+            via != logical and _should_ignore(via, ignore_patterns)
+        )
+
+    def _list(directory: Path, logical: str, via: str) -> bool:
+        """List one followed folder; return False once the cap is reached."""
+        nonlocal taken
+        stack = [(directory, logical, via)]
+        while stack:
+            current, current_logical, current_via = stack.pop()
+            try:
+                info = current.stat()
+                if (info.st_dev, info.st_ino) in listed:
+                    continue
+                listed.add((info.st_dev, info.st_ino))
+                with os.scandir(current) as scan:
+                    entries = sorted(scan, key=lambda entry: entry.name)
+            except OSError as exc:
+                logger.debug("Cannot list %s: %s", current, exc)
+                continue
+            folders: list[tuple[Path, str, str]] = []
+            for entry in entries:
+                entry_logical = f"{current_logical}/{entry.name}"
+                entry_via = f"{current_via}/{entry.name}"
+                try:
+                    if entry.is_symlink() or _is_junction(entry):
+                        # A link inside a followed folder gets the same checks.
+                        pending.append((entry_logical, entry_via))
+                    elif entry.is_dir(follow_symlinks=False):
+                        if not _ignored(entry_logical, entry_via):
+                            folders.append((Path(entry.path), entry_logical, entry_via))
+                    elif entry.is_file(follow_symlinks=False):
+                        if _ignored(entry_logical, entry_via):
+                            continue
+                        files.append(entry_logical)
+                        if entry_logical not in listed_names:
+                            taken += 1
+                            if taken >= limit:
+                                return False
+                except OSError:  # pragma: no cover - vanished mid-scan
+                    continue
+            stack.extend(reversed(folders))
+        return True
+
+    capped = False
+    while pending and not capped:
+        link_rel, link_via = pending.popleft()
+        if link_rel in seen_links:
+            continue
+        seen_links.add(link_rel)
+        if _ignored(link_rel, link_via):
+            continue
+        link = root / link_rel
+        target = Path(os.path.realpath(link))
+        try:
+            if not target.is_dir():
+                # A symlinked file, or a broken link: neither is followed.
+                continue
+            info = target.stat()
+        except OSError:
+            continue
+        holder = Path(os.path.realpath(link.parent))
+        if target == holder or target in holder.parents:
+            _report_once(
+                root, link_rel, logging.INFO,
+                "Not following %s: it points at a folder that holds it", link_rel,
+            )
+            continue
+        if target == root or target in root.parents:
+            _report_once(
+                root, link_rel, logging.INFO,
+                "Not following %s: it points at a folder that holds the repository",
+                link_rel,
+            )
+            continue
+        try:
+            # Inside the repository: its files keep their own path.
+            logical = target.relative_to(root).as_posix()
+            inside = True
+        except ValueError:
+            # Outside: its files take the in-repo path of the link.
+            logical = link_rel
+            inside = False
+        if inside and _should_ignore(logical, ignore_patterns):
+            continue
+        links.append(link_rel)
+        if (info.st_dev, info.st_ino) in listed:
+            continue
+        if inside:
+            inside_dirs.append(logical)
+        else:
+            outside[normalize_file_path(target)] = link_rel
+        if not _list(target, logical, link_via):
+            capped = True
+    if capped:
+        _report_once(
+            root, "\0cap", logging.WARNING,
+            "Stopped following symlinked folders after %d files "
+            "(CRG_MAX_FOLLOWED_FILES); files past that point are left out of the graph",
+            limit,
+        )
+    return _FollowedTree(files, links, outside, inside_dirs)
+
+
+def _path_key(rel_path: str) -> str:
+    """Spelling-blind key: case and Unicode form differ on some disks."""
+    return unicodedata.normalize("NFC", rel_path).casefold()
+
+
+def _followed_extra_files(
+    repo_root: Path,
+    candidates: list[str],
+    ignore_patterns: list[str],
+    parser: CodeParser,
+) -> tuple[list[str], _FollowedTree]:
+    """Return the parseable files only symlinked folders reach, and the walk.
+
+    A file the inventory already lists, or one already taken under another
+    spelling or another link, is left out, so each file is stored once.
+    """
+    listed = {normalize_file_path(candidate) for candidate in candidates}
+    by_key: dict[str, list[str]] = {}
+    for candidate in listed:
+        by_key.setdefault(_path_key(candidate), []).append(candidate)
+    tree = _walk_symlinked_dirs(repo_root, candidates, ignore_patterns)
+    extra: list[str] = []
+    taken: set[tuple[int, int]] = set()
+    for rel_path in sorted(set(tree.files)):
+        if rel_path in listed:
+            continue
+        full_path = repo_root / rel_path
+        try:
+            if any(
+                os.path.samefile(full_path, repo_root / other)
+                for other in by_key.get(_path_key(rel_path), [])
+            ):
+                continue
+            info = full_path.stat()
+        except OSError:
+            continue
+        if (info.st_dev, info.st_ino) in taken:
+            continue
+        if not _keep_candidate(repo_root, rel_path, ignore_patterns, parser):
+            continue
+        taken.add((info.st_dev, info.st_ino))
+        extra.append(rel_path)
+    return extra, tree
+
+
+def _followed_tree(repo_root: Path, ignore_patterns: list[str]) -> _FollowedTree:
+    """Walk the symlinked folders of the repository as a build would."""
+    return _walk_symlinked_dirs(repo_root, _inventory_candidates(repo_root), ignore_patterns)
+
+
+def _outermost(paths: Iterable[str]) -> set[str]:
+    """Drop every path that sits inside another one of *paths*."""
+    kept: list[str] = []
+    for path in sorted(set(paths), key=len):
+        if not any(path == other or path.startswith(other.rstrip("/") + "/") for other in kept):
+            kept.append(path)
+    return set(kept)
+
+
+def _collect_files(
+    repo_root: Path,
+    recurse_submodules: bool | None = None,
+    follow_symlinks: bool | None = None,
+) -> tuple[list[str], list[str], dict[str, str]]:
+    """Return ``(files, followed, outside)``: the inventory, the part of it
+    that is there only because a symlinked folder was followed, and the
+    followed folders outside the repository (real path to in-repo path)."""
+    ignore_patterns = _load_ignore_patterns(repo_root)
+    parser = _get_code_parser_cls()(repo_root)
+    candidates = _inventory_candidates(repo_root, recurse_submodules)
+    files = [
+        rel_path
+        for rel_path in candidates
+        if _keep_candidate(repo_root, rel_path, ignore_patterns, parser)
+    ]
+    if not follow_symlinks_enabled(follow_symlinks):
+        return files, [], {}
+    followed, tree = _followed_extra_files(repo_root, candidates, ignore_patterns, parser)
+    return files + followed, followed, tree.outside
+
+
 def collect_all_files(
     repo_root: Path,
     recurse_submodules: bool | None = None,
+    follow_symlinks: bool | None = None,
 ) -> list[str]:
     """Collect all parseable files in the repo, respecting ignore patterns.
 
@@ -1444,43 +2180,202 @@ def collect_all_files(
         repo_root: Repository root directory.
         recurse_submodules: If True, include files from git submodules.
             When *None*, falls back to ``CRG_RECURSE_SUBMODULES`` env var.
+        follow_symlinks: If True, also collect files in symlinked folders,
+            under paths inside the repository. When *None*, falls back to
+            ``CRG_FOLLOW_SYMLINKS``. Default: off.
     """
-    ignore_patterns = _load_ignore_patterns(repo_root)
-    parser = CodeParser(repo_root)
-    files = []
+    return _collect_files(repo_root, recurse_submodules, follow_symlinks)[0]
 
-    # Prefer git ls-files for tracked files
-    tracked = get_all_tracked_files(repo_root, recurse_submodules)
-    if tracked:
-        candidates = tracked
-    else:
-        # Fallback: walk directory
-        candidates = [str(p.relative_to(repo_root)) for p in repo_root.rglob("*") if p.is_file()]
 
-    for rel_path in candidates:
-        if _should_ignore(rel_path, ignore_patterns):
-            continue
-        # Skip paths that would exceed OS filename limits (macOS: 255 bytes
-        # per component, ~1024 total; Windows: 260 total).
-        try:
-            full_path = repo_root / rel_path
-        except (OSError, ValueError):
-            logger.debug("Skipping path that cannot be constructed: %s", rel_path)
-            continue
-        if len(str(full_path)) > 1000 or any(len(p.encode()) > 255 for p in full_path.parts):
-            logger.debug("Skipping overlong path: %s", rel_path[:120])
-            continue
-        if not full_path.is_file():
-            continue
-        if full_path.is_symlink():
-            continue
-        if parser.detect_language(full_path) is None:
-            continue
-        if _is_binary(full_path):
-            continue
-        files.append(rel_path)
+def _load_followed_files(store: GraphStore) -> set[str]:
+    """Stored paths a followed symlinked folder put in the graph."""
+    raw = store.get_metadata(_FOLLOWED_FILES_KEY)
+    if not raw or not isinstance(raw, str):
+        return set()
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        logger.warning("Ignoring unreadable %s metadata", _FOLLOWED_FILES_KEY)
+        return set()
+    if not isinstance(value, list):
+        return set()
+    return {path for path in value if isinstance(path, str)}
 
-    return files
+
+def followed_files(store: GraphStore) -> set[str]:
+    """Stored paths the graph reached through a followed symlinked folder.
+
+    Tools that read a file back pass this to :func:`path_within_repo`, so a
+    file behind a link the user asked to follow is read through its in-repo
+    path while every other path outside the repository is still refused.
+    """
+    return _load_followed_files(store)
+
+
+def _load_followed_dirs(store: GraphStore) -> dict[str, str]:
+    """Followed folders outside the repository: real path to in-repo path."""
+    raw = store.get_metadata(_FOLLOWED_DIRS_KEY)
+    if not raw or not isinstance(raw, str):
+        return {}
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        logger.warning("Ignoring unreadable %s metadata", _FOLLOWED_DIRS_KEY)
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    return {
+        real: logical for real, logical in value.items()
+        if isinstance(real, str) and isinstance(logical, str)
+    }
+
+
+def _store_followed(store: GraphStore, paths: set[str], dirs: dict[str, str]) -> None:
+    """Record what followed symlinked folders put in the graph.
+
+    Nothing is written for a graph that never used the option.
+    """
+    if store.get_metadata(_FOLLOWED_FILES_KEY) is not None or paths:
+        if _load_followed_files(store) != paths or store.get_metadata(_FOLLOWED_FILES_KEY) is None:
+            store.set_metadata(_FOLLOWED_FILES_KEY, json.dumps(sorted(paths)))
+    if store.get_metadata(_FOLLOWED_DIRS_KEY) is not None or dirs:
+        if _load_followed_dirs(store) != dirs or store.get_metadata(_FOLLOWED_DIRS_KEY) is None:
+            store.set_metadata(_FOLLOWED_DIRS_KEY, json.dumps(dirs, sort_keys=True))
+
+
+def _relink_prefixes(repo_root: Path, dirs: dict[str, str]) -> list[tuple[str, str]]:
+    """``(real prefix, in-repo prefix)`` pairs, longest real prefix first."""
+    return sorted(
+        (
+            (real.rstrip("/") + "/", normalize_file_path(Path(repo_root) / logical) + "/")
+            for real, logical in dirs.items()
+        ),
+        key=lambda pair: len(pair[0]),
+        reverse=True,
+    )
+
+
+def _relinked(value: str, prefixes: list[tuple[str, str]]) -> str:
+    for real, logical in prefixes:
+        if value.startswith(real):
+            return logical + value[len(real):]
+        if value == real[:-1]:
+            return logical[:-1]
+    return value
+
+
+def _relink_edges(edges: list, repo_root: Path, dirs: dict[str, str]) -> None:
+    """Point edges at the in-repo path of files behind a followed link.
+
+    Import resolution resolves symlinks, so an import between two files in a
+    linked folder outside the repository would otherwise name the outside
+    real path, which the graph never stores.
+    """
+    if not dirs:
+        return
+    prefixes = _relink_prefixes(repo_root, dirs)
+    for edge in edges:
+        edge.source = _relinked(edge.source, prefixes)
+        edge.target = _relinked(edge.target, prefixes)
+
+
+def _relink_stored_edges(store: GraphStore, repo_root: Path, dirs: dict[str, str]) -> None:
+    """The same, for edges the post-build resolvers wrote."""
+    for real, logical in _relink_prefixes(repo_root, dirs):
+        store.relocate_edge_targets(real, logical)
+
+
+def path_within_repo(
+    repo_root: Path | str,
+    path: Path | str,
+    followed: Iterable[str] = (),
+) -> bool:
+    """Whether *path* may be read (or edited) as part of the repository.
+
+    Its real path must lie inside the repository, or it must be one of the
+    *followed* paths (see :func:`followed_files`): a file the graph reached
+    through a symlinked folder the user asked to follow, read through its
+    in-repo path. Any other path outside the repository is refused, whether
+    it gets there with ``..`` or through a link nobody followed.
+    """
+    root = Path(repo_root).resolve()
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    try:
+        candidate.resolve().relative_to(root)
+        return True
+    except (OSError, RuntimeError, ValueError):
+        pass
+    lexical = Path(os.path.normpath(candidate))
+    try:
+        lexical.relative_to(root)
+    except ValueError:
+        return False
+    return normalize_file_path(lexical) in set(followed)
+
+
+def _outside_or_below_symlink(repo_root: Path, rel_path: str) -> bool:
+    """Whether *rel_path* leaves the repository or goes through a symlink."""
+    candidate = Path(os.path.normpath(repo_root / rel_path))
+    try:
+        relative = candidate.relative_to(repo_root)
+    except ValueError:
+        return True
+    current = repo_root
+    for part in relative.parts[:-1]:
+        current = current / part
+        if os.path.islink(current):
+            return True
+    return False
+
+
+def _followed_files_delta(
+    repo_root: Path,
+    store: GraphStore,
+    follow: bool,
+    ignore_patterns: list[str],
+    parser: CodeParser,
+) -> tuple[list[str], list[str], set[str] | None, dict[str, str]]:
+    """Compare what symlinked folders reach now with what the graph holds.
+
+    Returns ``(new, gone, record, outside)``: repository-relative files a
+    followed folder reaches that the graph does not hold yet; stored paths
+    that were in the graph only through a followed folder and no longer are
+    (the link went, or the option is off), or that sit in a followed folder
+    inside the repository where a build would not take them (the watcher
+    indexes a new file by its own path, before any link rule is applied);
+    the new record, or ``None`` when there is nothing to compare; and the
+    followed folders outside the repository. A graph that never used the
+    option costs nothing.
+    """
+    recorded = _load_followed_files(store)
+    if not follow and not recorded:
+        return [], [], None, {}
+    candidates = _inventory_candidates(repo_root)
+    if not candidates:
+        # No inventory to compare with: leave the graph as it is.
+        return [], [], None, _load_followed_dirs(store)
+    listed = {normalize_file_path(repo_root / candidate) for candidate in candidates}
+    followed: list[str] = []
+    outside: dict[str, str] = {}
+    inside: list[str] = []
+    if follow:
+        followed, tree = _followed_extra_files(repo_root, candidates, ignore_patterns, parser)
+        outside = tree.outside
+        inside = [normalize_file_path(repo_root / folder) + "/" for folder in tree.inside]
+    record = {normalize_file_path(repo_root / rel_path) for rel_path in followed}
+    stored = set(store.get_all_files())
+    new = [
+        rel_path for rel_path in followed
+        if normalize_file_path(repo_root / rel_path) not in stored
+    ]
+    gone = sorted(
+        path for path in stored
+        if path not in record and path not in listed
+        and (path in recorded or any(path.startswith(folder) for folder in inside))
+    )
+    return new, gone, record, outside
 
 
 def _reconcile_stale_files(
@@ -1489,11 +2384,15 @@ def _reconcile_stale_files(
     current_files: list[str] | None = None,
     *,
     known_text: set[str] | None = None,
+    remove: bool = True,
 ) -> list[str]:
     """Remove graph files absent from the current parseable repository inventory.
 
     ``known_text`` holds stored spellings already read and found not binary in
     this update, so they are not read again just to repeat that check.
+
+    When *remove* is False, only identify stale paths so callers can capture
+    flow/community state before the permanent delete (#569).
     """
     stored_files = set(store.get_all_files())
     current_paths: set[str]
@@ -1503,13 +2402,23 @@ def _reconcile_stale_files(
         }
     else:
         ignore_patterns = _load_ignore_patterns(repo_root)
-        parser = CodeParser(repo_root)
+        parser = _get_code_parser_cls()(repo_root)
         current_paths = set()
+        # A stored file below a folder that is now a link (out of the
+        # repository, or not followed) is stale, and is not opened to find
+        # out: the same rule ``incremental_update`` applies to changed files.
+        followed = _load_followed_files(store)
+        linked_parents: dict[str, bool] = {}
         for stored_file in stored_files:
             path = Path(stored_file)
             try:
                 relative = str(path.relative_to(repo_root))
             except ValueError:
+                continue
+            parent = os.path.dirname(relative)
+            if parent not in linked_parents:
+                linked_parents[parent] = _outside_or_below_symlink(repo_root, relative)
+            if linked_parents[parent] and stored_file not in followed:
                 continue
             if (
                 path.is_file()
@@ -1523,7 +2432,8 @@ def _reconcile_stale_files(
             ):
                 current_paths.add(stored_file)
     stale_files = sorted(stored_files - current_paths)
-    if stale_files:
+    if stale_files and remove:
+        restore_csharp_references(store, stale_files)
         store.remove_files_permanently(stale_files, stored_paths=True)
     return stale_files
 
@@ -1627,21 +2537,65 @@ _MAX_DEPENDENT_FILES = 500
 
 
 def _single_hop_dependents(store: GraphStore, file_path: str) -> set[str]:
-    """Find files that directly depend on *file_path* (single hop)."""
-    dependents: set[str] = set()
-    edges = store.get_edges_by_target(file_path)
-    for e in edges:
-        if e.kind == "IMPORTS_FROM":
-            dependents.add(e.file_path)
+    """Find files that directly depend on *file_path* (single hop).
 
-    nodes = store.get_nodes_by_file(file_path)
-    for node in nodes:
-        for e in store.get_edges_by_target(node.qualified_name):
-            if e.kind in ("CALLS", "IMPORTS_FROM", "INHERITS", "IMPLEMENTS"):
-                dependents.add(e.file_path)
+    A file depends on *file_path* when it imports it, or when one of its
+    edges calls, imports, inherits or implements a node defined in it.
+    """
+    return store.get_direct_dependent_files(file_path)
 
-    dependents.discard(file_path)
-    return dependents
+
+# These languages are parsed by bounded fallbacks or config readers, so no
+# grammar package is loaded for them and probing one only costs a subprocess.
+_NO_GRAMMAR_LANGUAGES = frozenset({"rescript", "vbnet", "yaml", "properties"})
+
+
+def _prewarm_parser_probes(parser: Any, rel_paths: list[str]) -> None:
+    """Pre-warm grammar load probes concurrently before spawning worker pool."""
+    try:
+        from . import parser as parser_mod
+    except Exception:
+        return
+    probe_fn = getattr(parser_mod, "_parser_load_probe_succeeds", None)
+    if getattr(probe_fn, "__qualname__", "") != "_parser_load_probe_succeeds":
+        return
+    ext_map = getattr(parser, "_extension_map", None)
+    if not isinstance(ext_map, dict):
+        return
+    grammars: set[str] = set()
+    for rel_path in rel_paths:
+        suffix = Path(rel_path).suffix.lower()
+        lang = ext_map.get(suffix)
+        if not lang:
+            continue
+        if lang == "notebook":
+            grammars.add("python")
+        elif lang in ("vue", "svelte"):
+            grammars.update(("javascript", "typescript", "html"))
+        elif lang == "blade":
+            grammars.update(("php", "html"))
+        elif lang == "c" and suffix == ".h":
+            grammars.update(("c", "cpp"))
+        elif lang in _NO_GRAMMAR_LANGUAGES:
+            continue
+        else:
+            grammars.add(lang)
+    custom = getattr(parser, "_custom_languages", None) or {}
+    grammars = {
+        getattr(custom.get(g), "grammar", None) or g for g in grammars
+    }
+    unprobed = [
+        g for g in grammars if g not in parser_mod._PARSER_PROBE_RESULTS
+    ]
+    if not unprobed:
+        return
+    if len(unprobed) == 1:
+        probe_fn(unprobed[0])
+        return
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=min(len(unprobed), _MAX_PARSE_WORKERS)
+    ) as pool:
+        list(pool.map(probe_fn, unprobed))
 
 
 class DependentList(list):
@@ -1722,7 +2676,7 @@ def _parse_single_file(
         parser = getattr(_PARSE_WORKER_STATE, "parser", None)
         parser_repo_root = getattr(_PARSE_WORKER_STATE, "repo_root", None)
         if parser is None or parser_repo_root != repo_root_str:
-            parser = CodeParser(Path(repo_root_str))
+            parser = _get_code_parser_cls()(Path(repo_root_str))
             _PARSE_WORKER_STATE.parser = parser
             _PARSE_WORKER_STATE.repo_root = repo_root_str
         nodes, edges = parser.parse_bytes(abs_path, raw)
@@ -1745,6 +2699,8 @@ def full_build(
     repo_root: Path,
     store: GraphStore,
     recurse_submodules: bool | None = None,
+    enrich: bool | None = None,
+    follow_symlinks: bool | None = None,
 ) -> dict:
     """Full rebuild of the entire graph.
 
@@ -1753,11 +2709,26 @@ def full_build(
         store: Graph database store.
         recurse_submodules: If True, include files from git submodules.
             When *None*, falls back to ``CRG_RECURSE_SUBMODULES`` env var.
+        enrich: If True, resolve Python method calls with Jedi (the
+            ``enrichment`` extra). When *None*, falls back to
+            ``CRG_ENABLE_ENRICHMENT``. Off by default.
+        follow_symlinks: If True, also index files in symlinked folders,
+            under paths inside the repository. When *None*, falls back to the
+            ``CRG_FOLLOW_SYMLINKS`` env var. Default: off.
     """
     repo_root = _canonical_repo_root(repo_root)
-    parser = CodeParser(repo_root)
-    files = collect_all_files(repo_root, recurse_submodules)
+    parser = _get_code_parser_cls()(repo_root)
+    files, followed, followed_dirs = _collect_files(
+        repo_root, recurse_submodules, follow_symlinks,
+    )
     stale_files = _reconcile_stale_files(repo_root, store, files)
+    # Recorded before parsing: a record ahead of the graph is harmless, one
+    # behind it would let a file outlive the link that brought it in.
+    _store_followed(
+        store,
+        {normalize_file_path(repo_root / rel_path) for rel_path in followed},
+        followed_dirs,
+    )
 
     total_nodes = 0
     total_edges = 0
@@ -1776,6 +2747,7 @@ def full_build(
                 source = full_path.read_bytes()
                 fhash = hashlib.sha256(source).hexdigest()
                 nodes, edges = parser.parse_bytes(full_path, source)
+                _relink_edges(edges, repo_root, followed_dirs)
                 parsed = (nodes, edges, fhash)
             except (OSError, PermissionError) as e:
                 errors.append({"file": rel_path, "error": str(e)})
@@ -1806,6 +2778,7 @@ def full_build(
         # thread for MCP stdio to avoid pipe-handle inheritance deadlocks and
         # orphan workers (issues #46, #136, PR #615). Override via
         # CRG_PARSE_EXECUTOR env.
+        _prewarm_parser_probes(parser, files)
         args_list = [(rel_path, str(repo_root)) for rel_path in files]
         with _make_executor(_MAX_PARSE_WORKERS) as executor:
             for i, (rel_path, nodes, edges, error, fhash) in enumerate(
@@ -1819,6 +2792,7 @@ def full_build(
                         cpp_errors.add(str(rel_path))
                     continue
                 full_path = repo_root / rel_path
+                _relink_edges(edges, repo_root, followed_dirs)
                 store.store_file_nodes_edges(
                     str(full_path),
                     nodes,
@@ -1832,7 +2806,34 @@ def full_build(
 
     store.set_metadata("last_updated", time.strftime("%Y-%m-%dT%H:%M:%S"))
     store.set_metadata("last_build_type", "full")
+    store.set_metadata("intentionally_incomplete", "0")
+    store.set_metadata(
+        VERIFIED_FILE_COUNT_KEY, "0" if errors else str(len(store.get_all_files()))
+    )
     _store_cpp_identity_pending(store, cpp_errors)
+    # A failed file holds no rows, so nothing of the old nested scope remains.
+    store.set_metadata(_NESTED_SCOPE_METADATA_KEY, NESTED_SCOPE_IDENTITY_VERSION)
+    store.set_metadata(_NESTED_SCOPE_PENDING_KEY, "[]")
+    # Record the attempted C# format and retry only failed files. Holding the
+    # entire version gate open for one bad file repeats a full build (#944).
+    store.set_metadata(_CSHARP_IDENTITY_METADATA_KEY, CSHARP_IDENTITY_VERSION)
+    store.set_metadata(_CSHARP_PENDING_METADATA_KEY, json.dumps(sorted(
+        error["file"] for error in errors if error["file"].endswith(".cs")
+    )))
+    # Post-processing cannot redo these, so they run while the marker still
+    # says in progress: a process killed here gets a full rebuild.
+    python_stats = _run_python_resolver(store)
+    rescript_stats = _run_rescript_resolver(store)
+    spring_stats = _run_spring_resolver(store)
+    aop_stats = _run_aop_resolver(store)
+    spring_event_stats = _run_spring_event_resolver(store)
+    temporal_stats = _run_temporal_resolver(store)
+    hcl_stats = _run_hcl_resolver(store)
+    scoped_stats = _run_scoped_resolver(store, repo_root)
+    jedi_stats = _run_jedi_enrichment(store, repo_root, enrich=enrich)
+    _relink_stored_edges(store, repo_root, followed_dirs)
+    _refresh_target_resolution(store)
+    store.set_metadata(_DEPENDENTS_PENDING_KEY, "[]")
     # Storing is over: every file that could be parsed has its rows. Recorded
     # before the anchor and before post-processing, so a process killed from
     # here on leaves a graph that ``postprocess`` can genuinely finish, told
@@ -1843,15 +2844,6 @@ def full_build(
     _store_vcs_metadata(repo_root, store)
     store.commit()
 
-    python_stats = _run_python_resolver(store)
-    rescript_stats = _run_rescript_resolver(store)
-    spring_stats = _run_spring_resolver(store)
-    spring_event_stats = _run_spring_event_resolver(store)
-    temporal_stats = _run_temporal_resolver(store)
-    hcl_stats = _run_hcl_resolver(store)
-    scoped_stats = _run_scoped_resolver(store)
-    _refresh_target_resolution(store)
-
     return {
         "files_parsed": len(files),
         "stale_files_removed": len(stale_files),
@@ -1861,10 +2853,12 @@ def full_build(
         "python_resolution": python_stats,
         "rescript_resolution": rescript_stats,
         "spring_resolution": spring_stats,
+        "aop_resolution": aop_stats,
         "event_resolution": spring_event_stats,
         "temporal_resolution": temporal_stats,
         "hcl_resolution": hcl_stats,
         "scoped_resolution": scoped_stats,
+        "jedi_enrichment": jedi_stats,
     }
 
 
@@ -1892,12 +2886,33 @@ def incremental_update(
     base: str = "HEAD~1",
     changed_files: list[str] | None = None,
     reconcile_stale: bool = True,
+    enrich: bool | None = None,
+    follow_symlinks: bool | None = None,
+    *,
+    reconcile_followed: bool = False,
 ) -> dict:
-    """Incremental update: re-parse changed + dependent files only."""
+    """Incremental update: re-parse changed + dependent files only.
+
+    *enrich* is as for :func:`full_build`.
+
+    *follow_symlinks* matches :func:`full_build`: when on (or when the graph
+    holds files a followed folder brought in), a reconciling update also
+    adds files that symlinked folders now reach and drops the ones they no
+    longer reach, so it agrees with a full build. ``None`` falls back to
+    ``CRG_FOLLOW_SYMLINKS``. *reconcile_followed* does only that part, and
+    re-reads only the followed files: the watcher uses it when a link
+    changes, a file changes in a followed folder outside the repository, or
+    a file is added or removed in a followed folder inside it.
+
+    A path that leaves the repository or goes through a symlink is parsed
+    only when it is a file the followed folders reach; any other such path
+    is treated as gone.
+    """
     repo_root = _canonical_repo_root(repo_root)
+    follow = follow_symlinks_enabled(follow_symlinks)
     if reconcile_stale:
         _assert_graph_matches_root(repo_root, store)
-    parser = CodeParser(repo_root)
+    parser = _get_code_parser_cls()(repo_root)
     ignore_patterns = _load_ignore_patterns(repo_root)
     vcs = detect_vcs(repo_root)
     stored_git_sha = store.get_metadata("git_head_sha") if vcs == "git" else None
@@ -1916,7 +2931,7 @@ def incremental_update(
         logger.info(
             "C++ identity format changed; rebuilding the graph before incremental update",
         )
-        rebuilt = full_build(repo_root, store)
+        rebuilt = full_build(repo_root, store, enrich=enrich, follow_symlinks=follow)
         return {
             "files_updated": rebuilt["files_parsed"],
             "total_nodes": rebuilt["total_nodes"],
@@ -1940,9 +2955,49 @@ def incremental_update(
             base,
             strict=authoritative_git_sync,
         )
+    csharp_upgrade = (
+        store.get_metadata(_CSHARP_IDENTITY_METADATA_KEY) != CSHARP_IDENTITY_VERSION
+        and store.has_nodes_for_language("csharp")
+    )
+    pending_csharp = set(json.loads(store.get_metadata(_CSHARP_PENDING_METADATA_KEY) or "[]"))
+    if csharp_upgrade:
+        pending_csharp.update(
+            str(Path(row[0]).relative_to(repo_root))
+            for row in store._conn.execute(
+                "SELECT DISTINCT file_path FROM nodes WHERE language = 'csharp'",
+            )
+            if Path(row[0]).is_relative_to(repo_root)
+        )
+    nested_upgrade = (
+        store.get_metadata(_NESTED_SCOPE_METADATA_KEY) != NESTED_SCOPE_IDENTITY_VERSION
+    )
+    pending_nested = _load_pending_paths(store, _NESTED_SCOPE_PENDING_KEY)
+    if nested_upgrade:
+        pending_nested |= _nested_scope_files(store, repo_root)
+        if not pending_nested:
+            # Nothing holds the old spelling, so there is nothing to migrate.
+            store.set_metadata(_NESTED_SCOPE_METADATA_KEY, NESTED_SCOPE_IDENTITY_VERSION)
+            nested_upgrade = False
     content_mismatches: list[str] = []
     current_hashes: dict[str, str] = {}
     known_text: set[str] | None = None
+    followed_new: list[str] = []
+    followed_gone: list[str] = []
+    followed_record: set[str] | None = None
+    followed_dirs: dict[str, str] | None = None
+    if reconcile_stale or reconcile_followed:
+        followed_new, followed_gone, followed_record, followed_dirs = _followed_files_delta(
+            repo_root, store, follow, ignore_patterns, parser,
+        )
+        if followed_record is not None:
+            # Written before parsing, as in full_build.
+            _store_followed(store, followed_record, followed_dirs)
+    if reconcile_followed and not reconcile_stale:
+        content_mismatches, current_hashes, _text = _find_content_mismatches(
+            repo_root,
+            store,
+            only=(followed_record or set()) | _load_followed_files(store),
+        )
     if reconcile_stale:
         # The content scan reads every indexed file once; the hashes and the
         # binary check it produces are reused below so nothing is read twice.
@@ -1953,21 +3008,87 @@ def incremental_update(
             repo_root,
             store,
         )
+    if followed_dirs is None:
+        followed_dirs = _load_followed_dirs(store) if follow else {}
+    if not follow:
+        followed_dirs = {}
+    # Paths through a symlink, or out of the repository, that may be parsed.
+    followed_allowed = (
+        followed_record if followed_record is not None
+        else (_load_followed_files(store) if follow else set())
+    )
     changed_files = list(
         dict.fromkeys(
-            [_relative_update_input(repo_root, p) for p in [*changed_files, *content_mismatches]]
+            [
+                _relative_update_input(repo_root, p)
+                for p in [
+                    *changed_files, *content_mismatches,
+                    *sorted(pending_csharp), *sorted(pending_nested), *followed_new,
+                ]
+            ]
         )
     )
+    if followed_gone:
+        gone = set(followed_gone)
+        changed_files = [
+            p for p in changed_files if normalize_file_path(repo_root / p) not in gone
+        ]
+    # Defer permanent stale removal until after flow/community capture (#569).
     stale_files = (
-        _reconcile_stale_files(repo_root, store, known_text=known_text)
+        _reconcile_stale_files(
+            repo_root, store, known_text=known_text, remove=False,
+        )
         if reconcile_stale
         else []
     )
+    if followed_gone:
+        stale_files = sorted(set(stale_files) | set(followed_gone))
+
+    # Authoritative empty syncs (``base`` equals the last-stored HEAD) must
+    # still fall through to the freshness write below — otherwise an empty
+    # commit leaves the graph looking stale (#952 / PR #673 review).
+    if (
+        not changed_files
+        and not stale_files
+        and not identity_pending
+        and not authoritative_git_sync
+    ):
+        return {
+            "files_updated": 0,
+            "total_nodes": 0,
+            "total_edges": 0,
+            "changed_files": [],
+            "dependent_files": [],
+            "stale_files_removed": 0,
+            "flow_entry_point_qns": [],
+            "communities_were_affected": False,
+            "errors": [],
+            "freshness_advanced": False,
+        }
 
     # Find dependent files (files that import from changed files)
-    dependent_files: set[str] = set()
+    dependents_pending = _load_dependents_pending(store)
+    dependent_files: set[str] = set(dependents_pending)
     for rel_path in changed_files:
         full_path = normalize_file_path(repo_root / rel_path)
+        # Duplicate watch notifications do not invalidate dependents. A real
+        # content change does: an unchanged importer's resolved edges can still
+        # refer to the old export identity, so its own hash is not sufficient.
+        # A path with no rows has no stored hash to compare, and may be a large
+        # file the graph never indexes, so it is not read here.
+        existing = store.get_nodes_by_file(full_path)
+        # A nested-scope upgrade renames this file's members, so whoever
+        # resolved a call to the old names must be re-resolved too.
+        if existing and rel_path not in pending_nested:
+            try:
+                current_hash = current_hashes.get(normalize_file_path(rel_path))
+                if current_hash is None:
+                    current_hash = hashlib.sha256((repo_root / rel_path).read_bytes()).hexdigest()
+                    current_hashes[normalize_file_path(rel_path)] = current_hash
+                if existing[0].file_hash == current_hash:
+                    continue
+            except (OSError, PermissionError):
+                pass
         deps = find_dependents(store, full_path)
         for d in deps:
             # Convert back to relative path if needed
@@ -1987,6 +3108,8 @@ def incremental_update(
 
     # Separate deleted/unparseable files from files that need re-parsing
     to_parse: list[str] = []
+    # Importers re-parsed with unchanged bytes, and the hash that was checked.
+    edges_only: dict[str, str] = {}
     for rel_path in all_files:
         if _should_ignore(rel_path, ignore_patterns):
             if rel_path in remaining_identity:
@@ -2005,7 +3128,14 @@ def incremental_update(
                     })
             continue
         abs_path = repo_root / rel_path
-        if not abs_path.is_file():
+        if (
+            abs_path.is_symlink()
+            or not abs_path.is_file()
+            or (
+                _outside_or_below_symlink(repo_root, rel_path)
+                and normalize_file_path(abs_path) not in followed_allowed
+            )
+        ):
             remaining_identity.discard(rel_path)
             if normalize_file_path(abs_path) not in stale_files:
                 missing_paths.add(normalize_file_path(abs_path))
@@ -2024,18 +3154,72 @@ def incremental_update(
         try:
             existing_nodes = store.get_nodes_by_file(str(abs_path))
             if (
-                rel_path not in remaining_identity
+                rel_path not in pending_csharp
+                and rel_path not in pending_nested
+                and rel_path not in remaining_identity
                 and fhash is not None
                 and existing_nodes
                 and existing_nodes[0].file_hash == fhash
             ):
-                continue
+                if rel_path not in dependent_files:
+                    continue
+                edges_only[rel_path] = fhash
         except (OSError, PermissionError):
             pass
         to_parse.append(rel_path)
 
-    # Persist deletions before store_file_nodes_edges() opens its own
-    # explicit transaction — avoids nested transaction errors.
+    # Capture flow/community memberships BEFORE node replacement or permanent
+    # deletion. After nodes are removed/recreated the old IDs are gone, so
+    # postprocess can no longer discover affected flows via membership JOINs
+    # (#569). Include deleted/renamed/stale paths here — not only to_parse.
+    # A failed parse keeps its flow/community state. A successful one remaps it
+    # below; nothing is deleted unless its file is gone, because the hooks run
+    # ``update --skip-flows`` and would never get the flows back.
+    from .communities import (
+        capture_community_assignments,
+        purge_empty_communities,
+        remap_community_assignments,
+    )
+    from .flows import (
+        capture_affected_flow_entry_points,
+        capture_flow_node_ids,
+        clear_flows_for_files,
+        expand_changed_file_paths,
+        purge_orphan_flow_data,
+        remap_flow_node_ids,
+    )
+
+    # Pass raw relative/absolute paths; expand_changed_file_paths owns
+    # variant generation so we do not expand twice per update.
+    lifecycle_inputs = [
+        *[rel_path.replace("\\", "/") for rel_path in to_parse],
+        *missing_paths,
+        *stale_files,
+    ]
+    lifecycle_paths = expand_changed_file_paths(
+        store, lifecycle_inputs, repo_root=repo_root,
+    )
+    community_by_qn = capture_community_assignments(store, lifecycle_paths)
+    cleared_entry_qns: set[str] = set()
+    flow_node_ids: dict[int, str] = {}
+
+    # Stored paths of the files re-parsed here. Re-parsing replaces a file's
+    # edges, so these are the only files the Jedi step needs to scan again.
+    reparsed_paths: list[str] = []
+
+    def store_parsed(rel_path: str, nodes: list, edges: list, fhash: str) -> None:
+        reparsed_paths.append(str(repo_root / rel_path))
+        _relink_edges(edges, repo_root, followed_dirs)
+        # Same bytes, same symbols: keep the node ids that flows and communities
+        # refer to. Only what the file's edges resolve to can have moved.
+        if edges_only.get(rel_path) == fhash:
+            store.store_file_edges(str(repo_root / rel_path), edges)
+            return
+        file_paths = expand_changed_file_paths(store, [rel_path], repo_root=repo_root)
+        cleared_entry_qns.update(capture_affected_flow_entry_points(store, file_paths))
+        flow_node_ids.update(capture_flow_node_ids(store, file_paths))
+        store.store_file_nodes_edges(str(repo_root / rel_path), nodes, edges, fhash)
+
     use_serial = os.environ.get("CRG_SERIAL_PARSE", "") == "1"
     parsed_files = 0
 
@@ -2053,17 +3237,19 @@ def incremental_update(
                 logger.warning("Error parsing %s: %s", rel_path, e)
                 errors.append({"file": rel_path, "error": str(e)})
                 continue
+            # Parse succeeded: note this file's flows, then replace its nodes.
             # Same reasoning as the serial loop in full_build: a failed write
             # is not a failed parse. Letting it propagate stops the update
             # before the freshness anchor is advanced, so the next run still
             # sees this file as changed.
-            store.store_file_nodes_edges(str(abs_path), nodes, edges, fhash)
+            store_parsed(rel_path, nodes, edges, fhash)
             remaining_identity.discard(rel_path)
             parsed_files += 1
             total_nodes += len(nodes)
             total_edges += len(edges)
     else:
         # See full-build comment above for executor kind rationale.
+        _prewarm_parser_probes(parser, to_parse)
         args_list = [(rel_path, str(repo_root)) for rel_path in to_parse]
         with _make_executor(_MAX_PARSE_WORKERS) as executor:
             for rel_path, nodes, edges, error, fhash in executor.map(
@@ -2075,31 +3261,71 @@ def incremental_update(
                     logger.warning("Error parsing %s: %s", rel_path, error)
                     errors.append({"file": rel_path, "error": error})
                     continue
-                store.store_file_nodes_edges(
-                    str(repo_root / rel_path),
-                    nodes,
-                    edges,
-                    fhash,
-                )
+                store_parsed(rel_path, nodes, edges, fhash)
                 remaining_identity.discard(rel_path)
                 parsed_files += 1
                 total_nodes += len(nodes)
                 total_edges += len(edges)
 
-    removed_files = store.remove_files_permanently(sorted(missing_paths)) if missing_paths else 0
-    files_updated = parsed_files + len(stale_files) + removed_files
+    failed_dependents = dependent_files & {error["file"] for error in errors}
+    if failed_dependents != dependents_pending:
+        store.set_metadata(_DEPENDENTS_PENDING_KEY, json.dumps(sorted(failed_dependents)))
+
+    removed_files = 0
+    to_remove = sorted(set(missing_paths) | set(stale_files))
+    if to_remove:
+        remove_paths = expand_changed_file_paths(
+            store, to_remove, repo_root=repo_root,
+        )
+        cleared_entry_qns |= clear_flows_for_files(store, remove_paths)
+        # Return incoming C# calls to their raw references while the deleted
+        # declarations can still be joined, so a recreated type binds again.
+        restore_csharp_references(store, to_remove)
+        removed_files = store.remove_files_permanently(
+            to_remove, stored_paths=True,
+        )
+
+    # Remap surviving community IDs onto replacement nodes, drop orphan flow
+    # rows, and remove community rows that no longer have any members.
+    remap_community_assignments(store, community_by_qn)
+    remap_flow_node_ids(store, flow_node_ids)
+    purge_orphan_flow_data(store)
+    purge_empty_communities(store)
+
+    flow_entry_point_qns = sorted(cleared_entry_qns)
+    communities_were_affected = (
+        (bool(community_by_qn) and (parsed_files > 0 or bool(to_remove)))
+        or bool(missing_paths)
+        or bool(stale_files)
+    )
+
+    files_updated = parsed_files + removed_files
+    if nested_upgrade or pending_nested:
+        failed = {error["file"] for error in errors}
+        store.set_metadata(_NESTED_SCOPE_METADATA_KEY, NESTED_SCOPE_IDENTITY_VERSION)
+        store.set_metadata(
+            _NESTED_SCOPE_PENDING_KEY, json.dumps(sorted(pending_nested & failed)),
+        )
+    if csharp_upgrade or pending_csharp or any(p.endswith(".cs") for p in all_files):
+        store.set_metadata(_CSHARP_IDENTITY_METADATA_KEY, CSHARP_IDENTITY_VERSION)
+        store.set_metadata(_CSHARP_PENDING_METADATA_KEY, json.dumps(sorted(
+            error["file"] for error in errors if error["file"].endswith(".cs")
+        )))
     if identity_pending is not None and remaining_identity != identity_pending:
         _store_cpp_identity_pending(store, remaining_identity)
         store.commit()
 
-    # Only re-run language-specific resolvers when the relevant files changed.
-    python_changed = any(
-        path.endswith(".py")
-        for path in set(all_files) | set(stale_files) | missing_paths
+    has_graph_changes = bool(files_updated or stale_files)
+    candidate_paths = set(all_files) | set(stale_files) | missing_paths
+
+    # Only re-run language-specific resolvers when the graph actually changed
+    # and the relevant language files were involved.
+    python_changed = has_graph_changes and any(
+        path.endswith(".py") for path in candidate_paths
     )
     python_stats = _run_python_resolver(store) if python_changed else None
 
-    rescript_changed = any(
+    rescript_changed = has_graph_changes and any(
         rp.endswith((".res", ".resi")) for rp in all_files
     )
     rescript_stats = (
@@ -2109,20 +3335,35 @@ def incremental_update(
     # Like python_changed above, include stale/missing paths so a deletion
     # that only surfaces through reconciliation still clears derived state
     # (e.g. virtual Spring Event nodes — issue #474).
-    spring_changed = any(
-        path.endswith(".java")
-        for path in set(all_files) | set(stale_files) | missing_paths
+    spring_changed = has_graph_changes and any(
+        path.endswith(".java") for path in candidate_paths
     )
     spring_stats = _run_spring_resolver(store) if spring_changed else None
+    aop_stats = _run_aop_resolver(store) if spring_changed else None
     spring_event_stats = (
         _run_spring_event_resolver(store) if spring_changed else None
     )
     temporal_stats = _run_temporal_resolver(store) if spring_changed else None
-    hcl_changed = any(rp.endswith((".tf", ".hcl")) for rp in all_files)
+    hcl_changed = has_graph_changes and any(
+        rp.endswith((".tf", ".hcl")) for rp in all_files
+    )
     hcl_stats = _run_hcl_resolver(store) if hcl_changed else None
-    scoped_changed = any(rp.endswith((".php", ".rs", ".cs")) for rp in all_files)
-    scoped_stats = _run_scoped_resolver(store) if scoped_changed else None
-    if files_updated or stale_files:
+    # Project-only edits can rebind C# calls without reparsing a source file,
+    # so a project file runs the resolver even when no source was stored.
+    scoped_changed = any(
+        (has_graph_changes and rp.endswith((".php", ".rs", ".cs")))
+        or _is_csharp_project(rp)
+        for rp in candidate_paths
+    )
+    scoped_stats = _run_scoped_resolver(store, repo_root) if scoped_changed else None
+    reparsed_py = [p for p in reparsed_paths if p.endswith(".py")]
+    jedi_stats = (
+        _run_jedi_enrichment(store, repo_root, files=reparsed_py, enrich=enrich)
+        if reparsed_py else None
+    )
+    if files_updated and followed_dirs:
+        _relink_stored_edges(store, repo_root, followed_dirs)
+    if has_graph_changes or scoped_changed:
         _refresh_target_resolution(store)
 
     # Freshness follows what was stored. A file that failed to parse is
@@ -2145,6 +3386,12 @@ def incremental_update(
         freshness_advanced = _store_vcs_metadata(repo_root, store)
         store.commit()
 
+    if parsed_files >= 20 and hasattr(parser, "clear_caches"):
+        parser.clear_caches(include_parsers=True, release_memory=(parsed_files >= 50))
+    _PARSE_WORKER_STATE.__dict__.clear()
+    if hasattr(store, "_invalidate_cache"):
+        store._invalidate_cache()
+
     return {
         "files_updated": files_updated,
         "total_nodes": total_nodes,
@@ -2152,15 +3399,20 @@ def incremental_update(
         "changed_files": list(changed_files),
         "dependent_files": list(dependent_files),
         "stale_files_removed": len(stale_files),
+        "flow_entry_point_qns": flow_entry_point_qns,
+        "communities_were_affected": communities_were_affected,
         "errors": errors,
         "freshness_advanced": freshness_advanced,
         "python_resolution": python_stats,
         "rescript_resolution": rescript_stats,
         "spring_resolution": spring_stats,
+        "aop_resolution": aop_stats,
         "event_resolution": spring_event_stats,
         "temporal_resolution": temporal_stats,
         "hcl_resolution": hcl_stats,
         "scoped_resolution": scoped_stats,
+        "jedi_enrichment": jedi_stats,
+        **({"identity_rebuild": True} if csharp_upgrade else {}),
     }
 
 
@@ -2170,6 +3422,64 @@ def incremental_update(
 
 
 _DEBOUNCE_SECONDS = 1
+
+
+class _WatchDebouncer(threading.Thread):
+    """Batch events until a quiet interval passes, then hand them on.
+
+    The algorithm of watchdog 6.0.0's ``EventDebouncer``, with one change:
+    the wait for a first event checks for queued events and for a stop
+    under the condition lock before it sleeps.  watchdog's waits
+    unconditionally, so an event or a stop that arrives between ``start()``
+    and that first wait is notified to nobody and then slept on.  The
+    observer starts before startup work, so that event can be the only one.
+    """
+
+    def __init__(self, interval: float, callback: Callable[[list[Any]], None]) -> None:
+        super().__init__(name="crg-watch-debouncer", daemon=True)
+        self._interval = interval
+        self._callback = callback
+        self._events: list[Any] = []
+        self._stopping = False
+        self._cond = threading.Condition()
+
+    def handle_event(self, event: Any) -> None:
+        with self._cond:
+            self._events.append(event)
+            self._cond.notify()
+
+    def requeue(self, events: list[Any]) -> None:
+        """Put a batch that could not be written back, ahead of newer events.
+
+        The run loop then waits out one quiet interval and hands it on again,
+        with the condition released, so a stop still gets through meanwhile.
+        """
+        with self._cond:
+            self._events[:0] = events
+            self._cond.notify()
+
+    def stop(self) -> None:
+        """Ask the thread to exit; events still queued are dropped, as in watchdog."""
+        with self._cond:
+            self._stopping = True
+            self._cond.notify()
+
+    def run(self) -> None:
+        with self._cond:
+            while True:
+                while not self._events and not self._stopping:
+                    self._cond.wait()
+                if self._interval:
+                    # Every further event restarts the quiet interval.
+                    while not self._stopping:
+                        if not self._cond.wait(timeout=self._interval):
+                            break
+                if self._stopping:
+                    break
+                events, self._events = self._events, []
+                # Called with the condition held, as watchdog does: events
+                # arriving meanwhile wait in handle_event for the next batch.
+                self._callback(events)
 
 
 def _raise_watch_update_errors(result: dict, context: str) -> None:
@@ -2185,10 +3495,22 @@ def _raise_watch_update_errors(result: dict, context: str) -> None:
 
 
 def _raise_watch_postprocess_warnings(result: object) -> None:
-    """Treat structured post-processing warnings as a failed watch update."""
+    """Treat structured post-processing warnings as a failed watch update.
+
+    One warning is exempt: an explicit embedding refresh that found no index
+    to refresh. The graph update itself succeeded and the post-processing step
+    has already logged the notice, so the watch keeps running. A refresh that
+    fails against an existing index still fails the update.
+    """
     if not isinstance(result, dict):
         return
-    warnings = result.get("warnings") or []
+    from .embeddings import REFRESH_SKIPPED_WARNING
+
+    warnings = [
+        warning
+        for warning in result.get("warnings") or []
+        if warning != REFRESH_SKIPPED_WARNING
+    ]
     if warnings:
         details = "; ".join(str(warning) for warning in warnings)
         raise RuntimeError(f"post-processing reported warnings: {details}")
@@ -2211,6 +3533,7 @@ _WATCH_SPLIT_MIN_DIRS = env_int("CRG_WATCH_SPLIT_MIN_DIRS", 4)
 _WATCH_HEALTH_INTERVAL = env_float("CRG_WATCH_HEALTH_INTERVAL", 10.0)
 _WATCH_STOP_TIMEOUT = 10.0
 _WATCH_TICK_SECONDS = 1.0
+_WATCH_LOCK_POLL_SECONDS = 0.25
 # A failed recursive promotion is retried no more often than this. Each attempt
 # walks the parent subtree and, on Linux, can leave a partly built inotify
 # instance behind, so retrying every tick would consume the quota it waits for.
@@ -2313,20 +3636,34 @@ def _plan_watch_paths(
     so an over-budget plan is retried at a shallower depth before falling back
     to the single recursive root watch.
     """
+    plan, _ = _plan_watch_paths_with_status(
+        repo_root, ignore_patterns, max_depth, max_schedules, split_threshold
+    )
+    return plan
+
+
+def _plan_watch_paths_with_status(
+    repo_root: Path,
+    ignore_patterns: list[str],
+    max_depth: int = _WATCH_PLAN_DEPTH,
+    max_schedules: int = _MAX_WATCH_SCHEDULES,
+    split_threshold: int = _WATCH_SPLIT_MIN_DIRS,
+) -> tuple[list[tuple[Path, bool]], bool]:
+    """Return the watch plan and whether the budget fallback was required."""
     cache: dict[Path, list[Path]] = {}
     for depth in range(max(1, max_depth), 0, -1):
         _, plan = _plan_watch_subtree(
             repo_root, repo_root, ignore_patterns, 0, depth, cache, split_threshold
         )
         if len(plan) <= max(1, max_schedules):
-            return plan
+            return plan, False
     logger.warning(
         "%s needs more than %d watches to skip its ignored trees; "
         "falling back to one recursive watch (raise CRG_MAX_WATCH_SCHEDULES to split it)",
         repo_root,
         max_schedules,
     )
-    return [(repo_root, True)]
+    return [(repo_root, True)], True
 
 
 def _run_time_boxed(operation: Callable[[], Any], description: str, timeout: float = 10.0) -> None:
@@ -2417,9 +3754,15 @@ class _WatchSupervisor:
         self._max_schedules = max(1, max_schedules)
         self._handler: Any = None
         self._watches: dict[str, _WatchEntry] = {}
+        # Followed symlinked folders outside the repository (#269). Kept apart
+        # from the repository plan, which would otherwise release them.
+        self._extra: dict[str, _WatchEntry] = {}
         self._shallow: set[str] = set()
         self._live_threads: dict[int, threading.Thread] = {}
         self._repaired_roots: set[str] = set()
+        self._replan_requested = False
+        self._replan_retry_at = 0.0
+        self._ignored_boundaries: dict[str, bool] = {}
         self._degraded = False
         self._promotion_failed = False
         # Directories the OS refused to watch (inotify ENOSPC, the watch
@@ -2433,6 +3776,7 @@ class _WatchSupervisor:
         # health file, for as long as the daemon lives.  Path -> wall-clock
         # time of the most recent refusal, newest last.
         self._unwatched: dict[str, float] = {}
+        self._refused_to_index: list[str] = []
         self._promotion_retry_at: dict[str, float] = {}
         self._last_health_write = 0.0
         self._last_health_state: tuple[bool, bool, tuple[str, ...]] | None = None
@@ -2456,19 +3800,21 @@ class _WatchSupervisor:
         return sorted(self._unwatched)
 
     def attach(self, observer: Any) -> None:
-        """Bind the observer, once the initial build has earned one."""
+        """Bind the observer that the watches are scheduled on."""
         self._observer = observer
 
     def schedule_initial(self, handler: Any) -> None:
         """Schedule the planned watches for *handler*."""
         self._handler = handler
-        plan = _plan_watch_paths(
+        plan, fallback = _plan_watch_paths_with_status(
             self._repo_root,
             self._ignore_patterns,
             max_schedules=self._max_schedules,
         )
+        self._degraded = fallback
         for path, recursive in plan:
             self._schedule(path, recursive=recursive)
+        self._remember_ignored_boundaries()
         logger.info(
             "Watching %d path(s) under %s; ignored trees are never registered",
             len(self._watches),
@@ -2500,6 +3846,128 @@ class _WatchSupervisor:
             self._shallow.discard(key)
         else:
             self._shallow.add(key)
+
+    def sync_extra_roots(self, roots: set[str]) -> None:
+        """Keep one recursive watch on each followed folder outside the repo.
+
+        Events inside such a folder arrive under its real path; the handler
+        turns them into an update of the files stored under the link.
+        """
+        if self._handler is None:  # pragma: no cover - never scheduled
+            return
+        for key in sorted(self._extra):
+            entry = self._extra[key]
+            if key in roots and entry.identity == _watch_identity(key):
+                continue
+            del self._extra[key]
+            _run_time_boxed(
+                partial(self._observer.unschedule, entry.handle),
+                f"unschedule {key}",
+                timeout=_WATCH_STOP_TIMEOUT,
+            )
+        for key in sorted(roots - set(self._extra)):
+            try:
+                handle = self._observer.schedule(self._handler, key, recursive=True)
+            except OSError as exc:
+                logger.warning(
+                    "Could not watch followed folder %s: %s — changes in it are "
+                    "picked up by the next update",
+                    key, exc,
+                )
+                continue
+            self._extra[key] = _WatchEntry(handle, _watch_identity(key))
+
+    def request_replan(self) -> None:
+        """Reconsider the plan after a directory change seen by watchdog."""
+        self._replan_requested = True
+
+    def _remember_ignored_boundaries(self) -> None:
+        boundaries: dict[str, bool] = {}
+        for parent in self._shallow:
+            for child in _watch_child_dirs(Path(parent)):
+                relative = Path(child).relative_to(self._repo_root).as_posix()
+                if _should_ignore(relative, self._ignore_patterns):
+                    boundaries[str(child)] = (
+                        _ignored_tree_weight(child, _WATCH_SPLIT_MIN_DIRS)
+                        >= _WATCH_SPLIT_MIN_DIRS
+                    )
+        self._ignored_boundaries = boundaries
+
+    def _replan_if_requested(self) -> None:
+        if not self._replan_requested:
+            return
+        if time.monotonic() < self._replan_retry_at:
+            # Still cooling down after a refusal: the old plan stays in place
+            # and health keeps reporting it.
+            self._promotion_failed = True
+            return
+        self._replan_requested = False
+        plan, fallback = _plan_watch_paths_with_status(
+            self._repo_root,
+            self._ignore_patterns,
+            max_schedules=self._max_schedules,
+        )
+        if fallback and self._watches:
+            # Nothing fits the budget. What is installed already covers the
+            # repository, and a root watch would hand every ignored tree back.
+            self._remember_ignored_boundaries()
+            return
+        desired = {str(path): recursive for path, recursive in plan}
+        current = {path: path not in self._shallow for path in self._watches}
+        provisional: list[tuple[str, Any, bool]] = []
+        try:
+            # Keep the current plan installed until every new or replacement
+            # registration succeeds.  A failed registration must not turn a
+            # working parent watch into a coverage gap for its descendants.
+            for planned_path, recursive in plan:
+                key = str(planned_path)
+                if key in current and desired[key] == current[key]:
+                    continue
+                if key in current and desired[key] != current[key]:
+                    continue
+                handle = self._observer.schedule(self._handler, key, recursive=recursive)
+                provisional.append((key, handle, recursive))
+            for planned_path, recursive in plan:
+                key = str(planned_path)
+                if key not in current or desired[key] == current[key]:
+                    continue
+                handle = self._observer.schedule(self._handler, key, recursive=recursive)
+                provisional.append((key, handle, recursive))
+        except OSError as exc:
+            logger.warning(
+                "Could not apply watch replan; keeping existing watches and retrying "
+                "in %.0fs: %s",
+                _PROMOTION_RETRY_SECONDS,
+                exc,
+            )
+            for key, handle, _ in provisional:
+                _run_time_boxed(
+                    partial(self._observer.unschedule, handle),
+                    f"rollback watch registration {key}",
+                    timeout=_WATCH_STOP_TIMEOUT,
+                )
+            # Nothing else asks again on a quiet repository.
+            self._replan_requested = True
+            self._replan_retry_at = time.monotonic() + _PROMOTION_RETRY_SECONDS
+            self._promotion_failed = True
+            return
+
+        for current_path in current:
+            if current_path not in desired or desired[current_path] != current[current_path]:
+                self._release_directory(current_path)
+        for key, handle, recursive in provisional:
+            self._watches[key] = _WatchEntry(handle, _watch_identity(key))
+            if recursive:
+                self._shallow.discard(key)
+            else:
+                self._shallow.add(key)
+        # The plan in place is now exactly the one asked for, and every watch in
+        # it was accepted, so nothing from an earlier plan is still outstanding.
+        self._replan_retry_at = 0.0
+        self._degraded = fallback
+        self._unwatched.clear()
+        self._promotion_retry_at.clear()
+        self._remember_ignored_boundaries()
 
     def rewatch_all(self) -> bool:
         """Re-attempt the whole watch plan after a total loss of coverage.
@@ -2556,6 +4024,18 @@ class _WatchSupervisor:
             present = {
                 name for name, is_dir in _child_directories(Path(parent)) if is_dir
             }
+            for name in sorted(present):
+                candidate_path = Path(parent) / name
+                relative = candidate_path.relative_to(self._repo_root).as_posix()
+                if _should_ignore(relative, self._ignore_patterns):
+                    above_threshold = (
+                        _ignored_tree_weight(candidate_path, _WATCH_SPLIT_MIN_DIRS)
+                        >= _WATCH_SPLIT_MIN_DIRS
+                    )
+                    key = str(candidate_path)
+                    if self._ignored_boundaries.get(key, False) != above_threshold:
+                        self.request_replan()
+                    self._ignored_boundaries[key] = above_threshold
             for child in sorted(self._children_of(parent)):
                 if os.path.basename(child) not in present:
                     self._release_directory(child)
@@ -2582,10 +4062,23 @@ class _WatchSupervisor:
                         previous_patterns,
                     )
                 )
+                refused_before = candidate in self._unwatched
                 if self._adopt_directory(candidate, required=newly_included):
                     adopted.append(candidate)
+                elif candidate in self._unwatched and not refused_before:
+                    self._refused_to_index.append(candidate)
         self._prune_unwatched()
+        self._replan_if_requested()
         return adopted, vanished
+
+    def take_refused_to_index(self) -> list[str]:
+        """Directories newly refused a watch, whose files still need indexing.
+
+        Each is returned once. The watch is retried every tick, and re-reading
+        the tree on every retry would pass for live events in watcher health.
+        """
+        paths, self._refused_to_index = self._refused_to_index, []
+        return paths
 
     def _note_unwatched(self, key: str) -> None:
         """Record a directory the OS refused, newest last, and bound the record."""
@@ -2642,6 +4135,10 @@ class _WatchSupervisor:
             self._schedule(path, recursive=recursive)
             if required and str(path) not in self._watches:
                 raise RuntimeError(f"Cannot watch newly included directory: {path}")
+        if candidate not in self._watches:
+            # Refused, and recorded in _unwatched. The next tick tries again,
+            # so this is not an adoption yet.
+            return False
         logger.info("Watching new directory %s (%d watch(es))", relative, len(plan))
         return True
 
@@ -2860,6 +4357,7 @@ class _WatchSupervisor:
             "watched_paths": len(self._watches),
             "dead_threads": list(dead_threads),
             "degraded": self.degraded,
+            "failed_paths": self.unwatched_paths,
             "phase": phase,
         }
         try:
@@ -2886,26 +4384,81 @@ class _WatchSupervisor:
             pass
 
 
+def _is_csharp_project(relative_path: str) -> bool:
+    """A ``.csproj`` decides C# project ownership, so it rebinds calls (#964)."""
+    return relative_path.lower().endswith(".csproj")
+
+
+def _event_only_touches(event: Any, target: Path) -> bool:
+    """True when every path *event* names is *target*, however it is spelled."""
+    paths = [
+        os.fsdecode(path)
+        for path in (event.src_path, getattr(event, "dest_path", ""))
+        if path
+    ]
+    if not paths or any(os.path.basename(path) != target.name for path in paths):
+        return False
+    wanted = os.path.normcase(os.path.realpath(target))
+    return all(os.path.normcase(os.path.realpath(path)) == wanted for path in paths)
+
+
+def _holds_symlink(directory: Path, relative: str, ignore_patterns: list[str]) -> bool:
+    """Return whether a symlink that is not ignored sits below *directory*."""
+    for current, dirnames, filenames in os.walk(directory):
+        current_rel = Path(relative, os.path.relpath(current, directory)).as_posix()
+        kept = []
+        for name in [*dirnames, *filenames]:
+            entry_rel = f"{current_rel}/{name}"
+            if _should_ignore(entry_rel, ignore_patterns):
+                continue
+            if os.path.islink(os.path.join(current, name)):
+                return True
+            if name in dirnames:
+                kept.append(name)
+        dirnames[:] = kept
+    return False
+
+
 def _create_watch_handler(
     repo_root: Path,
     store: GraphStore,
     on_files_updated: Optional[Callable],
+    on_directory_changed: Optional[Callable[[], None]] = None,
+    follow_symlinks: bool | None = None,
 ):
     """Create the debounced watchdog handler for one repository."""
     from watchdog.events import FileSystemEvent, FileSystemEventHandler
-    from watchdog.utils.event_debouncer import EventDebouncer
 
     ignore_patterns = _load_ignore_patterns(repo_root)
-    parser = CodeParser(repo_root)
+    parser = _get_code_parser_cls()(repo_root)
     lexical_root = Path(os.path.abspath(repo_root))
     resolved_root = lexical_root.resolve()
     manifest_names = set().union(*NESTED_OUTPUT_DIR_MARKERS.values())
+    follow = follow_symlinks_enabled(follow_symlinks)
 
     class WatchBatchProcessor:
         def __init__(self) -> None:
+            # Followed symlinked folders, known before any of them can go:
+            # once a link is deleted nothing on disk says it was one.
+            self.followed_links: set[str] = set()
+            # Followed folders outside the repository. The OS reports their
+            # changes under their real paths, so the supervisor watches them
+            # on top of the repository.
+            self.outside_roots: set[str] = set()
+            # Followed folders inside the repository, by their own path.
+            self.inside_roots: set[str] = set()
+            if follow:
+                self._remember_followed()
             self.failure: BaseException | None = None
             self.last_event_at: float | None = None
             self.events_seen: int = 0
+            # Every graph write this watcher makes holds this lock: event
+            # batches here, and startup reconciliation and post-processing in
+            # watch().  The store's one connection cannot take two writers.
+            self.lock = threading.Lock()
+            # The same again across processes, taken per batch: a watcher lives
+            # for days, and holding this throughout would stop every build.
+            self.write_lock = WriteLock(store.db_path)
 
         def _relative_path(self, path: str, *, apply_ignores: bool = True) -> str | None:
             candidate = Path(os.path.abspath(path))
@@ -2971,6 +4524,7 @@ def _create_watch_handler(
                                 and event.event_type in {"created", "deleted", "moved"}
                             )
                             or Path(relative).name in manifest_names
+                            or Path(relative).name.endswith(".gemspec")
                         )
                     ):
                         invalidate = True
@@ -2987,7 +4541,7 @@ def _create_watch_handler(
                 # Relaxed exclusions need an inventory, even without source events.
                 # Only previously excluded files join this batch's update inputs.
                 newly_included = {
-                    path for path in collect_all_files(repo_root)
+                    path for path in collect_all_files(repo_root, follow_symlinks=follow)
                     if _should_ignore(path, previous)
                     and self._relative_path(str(repo_root / path)) is not None
                 }
@@ -3061,43 +4615,140 @@ def _create_watch_handler(
             else:
                 if source is not None and event.event_type in {"deleted", "moved"}:
                     paths.add(source)
-                elif source is not None and self._parseable_file(source):
+                elif source is not None and (
+                    self._parseable_file(source) or _is_csharp_project(source)
+                ):
                     paths.add(source)
-                if destination is not None and self._parseable_file(destination):
+                if destination is not None and (
+                    self._parseable_file(destination) or _is_csharp_project(destination)
+                ):
                     paths.add(destination)
             return paths
 
+        def _remember_followed(self) -> None:
+            tree = _followed_tree(repo_root, ignore_patterns)
+            self.followed_links = set(tree.links)
+            self.outside_roots = _outermost(tree.outside)
+            self.inside_roots = _outermost(tree.inside)
+
+        def _touches_followed(self, events: list[FileSystemEvent]) -> tuple[bool, bool]:
+            """Whether a batch changes a symlinked folder, and whether it
+            changes a file in a followed folder outside the repository or
+            adds or removes one in a followed folder inside it."""
+            links_changed = False
+            contents_changed = False
+            for event in events:
+                for raw in (event.src_path, getattr(event, "dest_path", "")):
+                    if not raw:
+                        continue
+                    candidate = Path(os.path.abspath(os.fsdecode(raw)))
+                    try:
+                        relative = candidate.relative_to(lexical_root).as_posix()
+                    except ValueError:
+                        spelled = normalize_file_path(candidate)
+                        if any(
+                            spelled == root or spelled.startswith(root.rstrip("/") + "/")
+                            for root in self.outside_roots
+                        ):
+                            contents_changed = True
+                            if os.path.islink(candidate):
+                                links_changed = True
+                        continue
+                    if relative == "." or _should_ignore(relative, ignore_patterns):
+                        continue
+                    if os.path.islink(candidate):
+                        links_changed = True
+                        continue
+                    if event.event_type in {"created", "deleted", "moved"} and any(
+                        relative == root or relative.startswith(root + "/")
+                        for root in self.inside_roots
+                    ):
+                        # The file is in the graph only through the link, so
+                        # the record must hold it for it to go with the link.
+                        contents_changed = True
+                    prefix = relative + "/"
+                    if any(
+                        link == relative or link.startswith(prefix)
+                        for link in self.followed_links
+                    ) or (
+                        event.is_directory
+                        and _holds_symlink(candidate, relative, ignore_patterns)
+                    ):
+                        links_changed = True
+            return links_changed, contents_changed
+
+        def _reconcile_followed(self) -> int:
+            # The files behind a link raise no events under the link's path,
+            # so compare what the links reach now with the graph, the way an
+            # update does: new files are added, gone ones dropped, and only
+            # the followed files are read again. A link inside a followed
+            # folder may have changed too, so the set of links is re-read.
+            result = incremental_update(
+                repo_root, store, changed_files=[], reconcile_stale=False,
+                follow_symlinks=True, reconcile_followed=True,
+            )
+            _raise_watch_update_errors(result, "symlinked folder reconciliation")
+            self._remember_followed()
+            return int(result["files_updated"])
+
         def process(self, events: list[FileSystemEvent]) -> None:
-            # Recorded before the work so a stalled watcher is distinguishable
-            # from a watcher whose repository is simply quiet.
-            self.last_event_at = time.time()
-            self.events_seen += len(events)
-            try:
-                files_updated, newly_included = self._refresh_ignore_patterns(events)
-                changed_files = sorted(
-                    newly_included | {path for event in events for path in self._event_paths(event)}
-                )
-                if changed_files:
-                    result = incremental_update(
-                        repo_root,
-                        store,
-                        changed_files=changed_files,
-                        reconcile_stale=False,
+            with self.lock:
+                if not self.write_lock.acquire():
+                    # Another process is writing this graph. Never wait for it
+                    # here: the debouncer calls this with its condition held,
+                    # so waiting would stop the watcher from shutting down.
+                    logger.debug(
+                        "Watch batch for %s waits on the write lock (PID %s)",
+                        repo_root, self.write_lock.holder_pid(),
                     )
-                    _raise_watch_update_errors(result, "incremental update")
-                    files_updated += result["files_updated"]
-                if files_updated > 0 and on_files_updated is not None:
-                    postprocess_result = on_files_updated(store)
-                    _raise_watch_postprocess_warnings(postprocess_result)
-            except BaseException as exc:
-                self.failure = exc
+                    debouncer.requeue(events)
+                    return
+                # Recorded before the work so a stalled watcher is distinguishable
+                # from a watcher whose repository is simply quiet.
+                self.last_event_at = time.time()
+                self.events_seen += len(events)
+                try:
+                    patterns_before = ignore_patterns
+                    files_updated, newly_included = self._refresh_ignore_patterns(events)
+                    changed_files = sorted(
+                        newly_included
+                        | {path for event in events for path in self._event_paths(event)}
+                    )
+                    if changed_files:
+                        result = incremental_update(
+                            repo_root,
+                            store,
+                            changed_files=changed_files,
+                            reconcile_stale=False,
+                            follow_symlinks=follow,
+                        )
+                        _raise_watch_update_errors(result, "incremental update")
+                        files_updated += result["files_updated"]
+                    if follow:
+                        links_changed, contents_changed = self._touches_followed(events)
+                        links_changed = links_changed or ignore_patterns is not patterns_before
+                        if links_changed or contents_changed:
+                            files_updated += self._reconcile_followed()
+                    if on_files_updated is not None and (
+                        files_updated > 0
+                        # A project file change parses nothing but can rebind
+                        # C# calls in unchanged files; the binder marks flows.
+                        or (changed_files and store.get_metadata("csharp_flows_dirty") == "1")
+                    ):
+                        postprocess_result = on_files_updated(store)
+                        _raise_watch_postprocess_warnings(postprocess_result)
+                except BaseException as exc:
+                    self.failure = exc
+                finally:
+                    self.write_lock.release()
 
         def raise_if_failed(self) -> None:
             if self.failure is not None:
                 raise RuntimeError("watch update failed") from self.failure
 
     processor = WatchBatchProcessor()
-    debouncer = EventDebouncer(_DEBOUNCE_SECONDS, processor.process)
+    debouncer = _WatchDebouncer(_DEBOUNCE_SECONDS, processor.process)
+    write_lock_file = write_lock_path(store.db_path)
 
     class GraphUpdateHandler(FileSystemEventHandler):
         def dispatch(self, event: FileSystemEvent) -> None:
@@ -3105,6 +4756,19 @@ def _create_watch_handler(
                 return
             if event.is_directory and event.event_type == "modified":
                 return
+            if _event_only_touches(event, write_lock_file):
+                # Every batch rewrites the lock file when it takes the lock. A
+                # watch on the whole repository sees that, and acting on it
+                # would take the lock again, once a debounce, for ever.
+                return
+            if (
+                event.is_directory
+                and on_directory_changed is not None
+                and _inside_lexical_root(event.src_path)
+            ):
+                # A followed folder outside the repository is not part of
+                # the repository's watch plan.
+                on_directory_changed()
             debouncer.handle_event(event)
 
         def start(self) -> None:
@@ -3116,6 +4780,10 @@ def _create_watch_handler(
 
         def process(self, events: list[FileSystemEvent]) -> None:
             processor.process(events)
+
+        def serialized(self) -> threading.Lock:
+            """The lock event batches hold while they write to the graph."""
+            return processor.lock
 
         def raise_if_failed(self) -> None:
             processor.raise_if_failed()
@@ -3134,6 +4802,18 @@ def _create_watch_handler(
         def events_seen(self) -> int:
             return processor.events_seen
 
+        @property
+        def outside_roots(self) -> set[str]:
+            """Followed folders outside the repository, to watch as well."""
+            return processor.outside_roots
+
+    def _inside_lexical_root(raw: Any) -> bool:
+        try:
+            Path(os.path.abspath(os.fsdecode(raw))).relative_to(lexical_root)
+        except (TypeError, ValueError):
+            return False
+        return True
+
     return GraphUpdateHandler()
 
 
@@ -3149,10 +4829,35 @@ def _sync_watch_tree(supervisor: _WatchSupervisor, handler: Any) -> None:
     from watchdog.events import DirCreatedEvent, DirDeletedEvent
 
     adopted, vanished = supervisor.sync_watches(ignore_patterns=handler.ignore_patterns)
-    for path in adopted:
+    outside_roots = getattr(handler, "outside_roots", None)
+    if isinstance(outside_roots, (set, frozenset)):
+        supervisor.sync_extra_roots(set(outside_roots))
+    for path in [*adopted, *supervisor.take_refused_to_index()]:
         handler.dispatch(DirCreatedEvent(path))
     for path in vanished:
         handler.dispatch(DirDeletedEvent(path))
+
+
+def _wait_for_watch_write_lock(
+    lock: WriteLock,
+    supervisor: _WatchSupervisor,
+    stop_event: threading.Event | None,
+) -> bool:
+    """Take the write lock for startup, waiting out whoever holds it.
+
+    A watcher started during a build has work to do once the build ends, so it
+    waits rather than stands down, and the daemon does not see it die. It polls:
+    a blocking lock could not notice *stop_event* and would hold up an MCP
+    server's shutdown, and the heartbeat has to keep going or a healthy watcher
+    reads as stalled. Returns False if told to stop first.
+    """
+    while not lock.acquire():
+        supervisor.report_health(observer_alive=True, phase="initial-build")
+        if stop_event is None:
+            time.sleep(_WATCH_LOCK_POLL_SECONDS)
+        elif stop_event.wait(_WATCH_LOCK_POLL_SECONDS):
+            return False
+    return True
 
 
 def _install_sigterm_interrupt() -> Callable[[], None]:
@@ -3184,6 +4889,7 @@ def watch(
     store: GraphStore,
     on_files_updated: Optional[Callable] = None,
     stop_event: threading.Event | None = None,
+    follow_symlinks: bool | None = None,
 ) -> None:
     """Watch for file changes and auto-update the graph.
 
@@ -3199,10 +4905,13 @@ def watch(
         store: Graph database to update.
         on_files_updated: Optional callback invoked after each debounced
             batch of file updates completes.  Receives the store as its
-            only argument.  Used by the CLI to run post-processing
+            only argument.  Used by the CLI and MCP auto-watch to run post-processing
             (FTS, flows, communities) after watch updates.
         stop_event: Optional event that ends the loop cleanly, for callers
             that run ``watch`` on a thread they need to shut down.
+        follow_symlinks: Follow symlinked folders inside the repository, as
+            :func:`full_build` does. When *None*, falls back to the
+            ``CRG_FOLLOW_SYMLINKS`` env var. Default: off.
 
     Raises:
         RuntimeError: if a watch update fails, or if the filesystem observer
@@ -3215,6 +4924,12 @@ def watch(
     # comparison below — stored file paths, watch keys, event paths — assumes
     # they are all spelled the same way.
     repo_root = _canonical_repo_root(repo_root)
+    # Refuse a graph built for another root before anything can queue a write
+    # to it.  Startup reconciliation checks this too, but only once the
+    # observer below is running: a batch captured meanwhile waits on the
+    # processing lock, and batches skip the check (reconcile_stale=False), so
+    # it would write to the refused graph as soon as startup let go.
+    _assert_graph_matches_root(repo_root, store)
     supervisor = _WatchSupervisor(
         None,
         repo_root,
@@ -3226,17 +4941,49 @@ def watch(
     # stalled for the whole build.
     supervisor.report_health(observer_alive=True, phase="initial-build", force=True)
 
-    initial = incremental_update(repo_root, store, changed_files=[])
-    _raise_watch_update_errors(initial, "initial watch reconciliation")
-    if initial["files_updated"] > 0 and on_files_updated is not None:
-        postprocess_result = on_files_updated(store)
-        _raise_watch_postprocess_warnings(postprocess_result)
     observer = Observer()
     supervisor.attach(observer)
-    handler = _create_watch_handler(repo_root, store, on_files_updated)
+    handler = _create_watch_handler(
+        repo_root, store, on_files_updated, supervisor.request_replan,
+        follow_symlinks=follow_symlinks,
+    )
     supervisor.schedule_initial(handler)
+    outside_roots = getattr(handler, "outside_roots", None)
+    if isinstance(outside_roots, (set, frozenset)) and outside_roots:
+        supervisor.sync_extra_roots(set(outside_roots))
     handler.start()
-    observer.start()
+    observer_started = False
+    try:
+        # The observer starts before reconciliation reads anything, so a file
+        # saved during startup — post-processing a large graph takes seconds —
+        # is either read by reconciliation or captured as an event.  The batch
+        # lock is taken first: captured events wait in the debouncer and are
+        # written to the graph only after startup, never alongside it.  Nothing
+        # here may dispatch to the handler while holding the lock: the
+        # debouncer holds its own lock while it waits for this one.
+        with handler.serialized():
+            observer.start()
+            observer_started = True
+            write_lock = WriteLock(store.db_path)
+            if _wait_for_watch_write_lock(write_lock, supervisor, stop_event):
+                try:
+                    initial = incremental_update(
+                        repo_root, store, changed_files=[], follow_symlinks=follow_symlinks,
+                    )
+                    _raise_watch_update_errors(initial, "initial watch reconciliation")
+                    if initial["files_updated"] > 0 and on_files_updated is not None:
+                        postprocess_result = on_files_updated(store)
+                        _raise_watch_postprocess_warnings(postprocess_result)
+                finally:
+                    write_lock.release()
+    except BaseException:
+        # Outside the lock, so a batch already waiting can finish; stopping the
+        # debouncer joins it, and no writer outlives this call.
+        _run_time_boxed(observer.stop, "observer stop")
+        if observer_started:
+            observer.join(timeout=_WATCH_STOP_TIMEOUT)
+        handler.stop()
+        raise
     supervisor.report_health(observer_alive=True, force=True)
 
     logger.info("Watching %s for changes... (Ctrl+C to stop)", repo_root)
@@ -3326,10 +5073,17 @@ def start_watch_thread(
     repo_root: Path,
     store: GraphStore,
     daemon: bool = True,
+    *,
+    on_files_updated: Optional[Callable] = None,
+    stop_event: threading.Event | None = None,
 ) -> threading.Thread | None:
     """Start watch mode in a background thread.
 
-    Returns the started thread, or None if watchdog is unavailable.
+    ``on_files_updated`` is forwarded to ``watch`` for post-processing
+    after changed batches, including startup reconciliation.
+
+    Returns the started thread, or None if watchdog is unavailable. Set
+    *stop_event* and join the returned thread before closing its store.
     """
     try:
         import watchdog  # noqa: F401
@@ -3341,7 +5095,13 @@ def start_watch_thread(
         # A thread cannot take the process down, so the one thing it must not
         # do is die quietly: the server would keep serving a frozen graph.
         try:
-            watch(repo_root, store)
+            if stop_event is None:
+                watch(repo_root, store, on_files_updated=on_files_updated)
+            else:
+                watch(
+                    repo_root, store,
+                    on_files_updated=on_files_updated, stop_event=stop_event,
+                )
         except RuntimeError as exc:
             logger.error("Auto-watch for %s stopped: %s", repo_root, exc)
 
