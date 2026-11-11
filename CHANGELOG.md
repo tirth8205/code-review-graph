@@ -6,6 +6,9 @@
   `.code-review-graph/install-manifest.json`, until Git tracks them. Your first
   review now shows your change, not `.mcp.json` and hook scripts. A file you
   commit counts like any other.
+- `next_tool_suggestions` give the names the server registers, which end in
+  `_tool`, such as `build_or_update_graph_tool`. Some answers gave names no
+  client could call.
 
 ## [2.4.0] - 2026-11-10
 
