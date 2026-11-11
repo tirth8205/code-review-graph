@@ -2,6 +2,43 @@
 
 ## [Unreleased]
 
+### Added
+
+- `install` keeps a record of the files it writes inside the repository, in
+  `.code-review-graph/install-manifest.json`. Each install adds to it and
+  never drops a file. `uninstall` drops each file it removes or cleans, and
+  deletes the record when it is empty. `install --dry-run` shows the record
+  like any other file.
+
+### Fixed
+
+- The MCP entry and every hook `install` writes now run the copy of
+  code-review-graph that ran `install`. The MCP entry used `uvx` whenever it
+  was on PATH, and hooks ran the first copy on PATH, so an older copy could
+  answer and refuse a newer graph. `uvx` is now used only when `install` itself
+  runs from `uvx` or a `uv tool` install. A hook whose copy is gone, as on a
+  collaborator's machine, runs the copy on PATH. Run `install` again to update
+  the entry and the hooks.
+- The git pre-commit hook runs `update --quiet`, so a commit shows only the
+  risk summary.
+- `install` (and `install --platform all`) writes MCP entries, skills, hooks
+  and instruction files only for the tools it finds on this machine. Claude
+  Code, OpenCode, Qoder and CodeBuddy Code used to count as found everywhere,
+  and Gemini CLI skills and hooks, Codex hooks and all nine instruction files
+  were written whatever was found. `install` now lists the tools it did not
+  find; add one anyway with `install --platform NAME`.
+- `install` writes each git hook once, so each one is reported once, and
+  shows paths relative to the repository or with `~`. Outside Git it says once,
+  not four times, that there is no hooks folder.
+- With no terminal, as when an AI agent runs it, `install` says it took the
+  default answer (yes) to its question about instruction files, and how to
+  skip them; `uninstall` says it took no and how to go ahead. At a terminal,
+  `install` says that Ctrl-C at the question stops it before anything is
+  written.
+- `uninstall` and `uninstall --dry-run` word every planned action as "would
+  remove …" and every action they took as "removed …". Most planned actions
+  read "would removed …", and a few that were taken read "remove …".
+
 ## [2.4.0] - 2026-11-10
 
 Two new platforms, MiMo Code and DeepSeek Harness, so `install` now supports

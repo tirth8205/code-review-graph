@@ -52,7 +52,7 @@ from importlib.metadata import version as pkg_version
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Iterable, TypedDict
 
-from . import install_plan
+from . import install_manifest, install_plan
 from .errors import CodeReviewGraphError, is_lock_error
 
 if TYPE_CHECKING:
@@ -164,6 +164,7 @@ def _print_banner() -> None:
 def _instruction_files_to_modify(
     repo_root: Path,
     target: str,
+    platforms: Iterable[str] | None = None,
 ) -> list[tuple[str, str]]:
     """Return ``(filename, how)`` for each instruction file that ``install``
     would write or modify, given the current state of the repo and the
@@ -171,6 +172,7 @@ def _instruction_files_to_modify(
 
     A file holding a section from an older release is listed as ``update``:
     install replaces that block in place rather than leaving it stale (#314).
+    ``platforms`` narrows ``"all"`` to the platforms ``install`` selected.
     """
     from .skills import (
         _CLAUDE_MD_SECTION,
@@ -179,6 +181,7 @@ def _instruction_files_to_modify(
         _PLATFORM_INSTRUCTION_CUSTOM_SECTIONS,
         _PLATFORM_INSTRUCTION_FILES,
         _upgrade_managed_block,
+        instruction_file_wanted,
     )
 
     targets: list[tuple[str, str]] = []
@@ -193,11 +196,11 @@ def _instruction_files_to_modify(
         elif _upgrade_managed_block(content, section) is not None:
             targets.append((filename, "update"))
 
-    if target in ("claude", "all"):
+    if instruction_file_wanted(("claude",), target, platforms):
         _describe("CLAUDE.md", repo_root / "CLAUDE.md", _CLAUDE_MD_SECTION)
 
     for filename, owners in _PLATFORM_INSTRUCTION_FILES.items():
-        if target != "all" and target not in owners:
+        if not instruction_file_wanted(owners, target, platforms):
             continue
         section = (
             _COPILOT_SECTION
@@ -210,19 +213,27 @@ def _instruction_files_to_modify(
 
 
 def _confirm_yes_no(
-    prompt: str, default_yes: bool = True, *, cancel_on_interrupt: bool = False
+    prompt: str,
+    default_yes: bool = True,
+    *,
+    cancel_on_interrupt: bool = False,
+    no_terminal_hint: str = "",
 ) -> bool:
     """Prompt the user [Y/n] and return True for yes.
 
     Non-interactive environments (no TTY on stdin, e.g. an MCP wrapper
     piping the CLI) return ``default_yes`` without blocking — the
     stdio transport cannot safely read from stdin without corrupting
-    the JSON-RPC stream. See: #173, #174
+    the JSON-RPC stream. See: #173, #174. They say so, with
+    ``no_terminal_hint`` on how to get the other answer, so an agent that
+    runs the command knows a question was answered for it.
 
     Ctrl-C counts as "no" unless ``cancel_on_interrupt`` is set, in which case
     it is raised so the caller can stop altogether.
     """
     if not sys.stdin.isatty():
+        answer = "yes" if default_yes else "no"
+        print(f"No terminal: taking the default ({answer}). {no_terminal_hint}".rstrip())
         return default_yes
     suffix = "[Y/n]" if default_yes else "[y/N]"
     try:
@@ -395,7 +406,7 @@ def _handle_init(args: argparse.Namespace) -> None:
     then writes exactly that plan (#173).
     """
     from .incremental import find_repo_root
-    from .skills import inject_instruction_files
+    from .skills import inject_instruction_files, selected_platforms
 
     repo_root = Path(args.repo) if args.repo else find_repo_root()
     if not repo_root:
@@ -409,6 +420,8 @@ def _handle_init(args: argparse.Namespace) -> None:
     skip_instructions = getattr(args, "no_instructions", False)
     skip_hooks = getattr(args, "no_hooks", False)
     steering = getattr(args, "steering", None)
+    # Worked out once: every step writes only for these platforms.
+    platforms = selected_platforms(repo_root, target)
 
     # --gitignore (#471, off by default): note what exists before anything is
     # planned, so only files this run creates are added to .gitignore.
@@ -422,6 +435,7 @@ def _handle_init(args: argparse.Namespace) -> None:
             with_skills=not getattr(args, "no_skills", False),
             with_hooks=not skip_hooks,
             with_instructions=not skip_instructions,
+            platforms=platforms,
         )
 
     # In a real install the progress messages wait until the files are
@@ -433,9 +447,10 @@ def _handle_init(args: argparse.Namespace) -> None:
         with install_plan.planning() as plan:
             quiet = contextlib.nullcontext() if dry_run else contextlib.redirect_stdout(report)
             with quiet:
-                _plan_mcp_configs(repo_root, target, dry_run)
+                _plan_mcp_configs(repo_root, target, dry_run, platforms)
                 codex_skill_error = _plan_integrations(
-                    args, repo_root, target, say=_say_nothing if dry_run else print
+                    args, repo_root, target, platforms,
+                    say=_say_nothing if dry_run else print,
                 )
                 if steering is not None:
                     _apply_steering_choice(
@@ -449,8 +464,10 @@ def _handle_init(args: argparse.Namespace) -> None:
             outcomes: dict[str, str] = {}
             before_instructions = plan.checkpoint()
             if not skip_instructions:
-                instr_targets = _instruction_files_to_modify(repo_root, target)
-                outcomes = inject_instruction_files(repo_root, target=target)
+                instr_targets = _instruction_files_to_modify(repo_root, target, platforms)
+                outcomes = inject_instruction_files(
+                    repo_root, target=target, platforms=platforms
+                )
             instr_changes = plan.changes_since(before_instructions)
 
             # The --gitignore block lists what the run creates, instruction
@@ -462,6 +479,10 @@ def _handle_init(args: argparse.Namespace) -> None:
                 with contextlib.redirect_stdout(to):
                     print()
                     _report_gitignore_block(repo_root, gitignore_plan, dry_run=dry_run)
+
+            # The record of what install wrote is planned after every other
+            # file, so it lists them all (see install_manifest).
+            install_manifest.plan_record(repo_root, plan)
 
             if dry_run:
                 _print_instruction_conflicts(outcomes)
@@ -485,11 +506,14 @@ def _handle_init(args: argparse.Namespace) -> None:
                 print("Graph instructions will be injected into:")
                 for name, how in instr_targets:
                     print(f"  {name} ({how})")
+                if not auto_yes and sys.stdin.isatty():
+                    print("Ctrl-C now to stop; nothing has been written yet.")
                 try:
                     inject = auto_yes or _confirm_yes_no(
                         "Inject graph instructions into these files?",
                         default_yes=True,
                         cancel_on_interrupt=True,
+                        no_terminal_hint="Use --no-instructions to skip them.",
                     )
                 except KeyboardInterrupt:
                     # Nothing has been written yet, so stopping here leaves no trace.
@@ -504,6 +528,9 @@ def _handle_init(args: argparse.Namespace) -> None:
                     with contextlib.redirect_stdout(gitignore_report):
                         print()
                         _report_gitignore_block(repo_root, gitignore_plan, dry_run=False)
+                # The rollback dropped the record too; it must not list the
+                # instruction files either.
+                install_manifest.plan_record(repo_root, plan)
             with contextlib.redirect_stdout(report):
                 if inject:
                     for label, wording in (
@@ -552,12 +579,16 @@ def _handle_init(args: argparse.Namespace) -> None:
     print("  2. Restart your AI coding tool to pick up the new config")
 
 
-def _plan_mcp_configs(repo_root: Path, target: str, dry_run: bool) -> None:
+def _plan_mcp_configs(
+    repo_root: Path, target: str, dry_run: bool, platforms: Iterable[str] | None = None
+) -> None:
     """Plan the MCP server entry for each platform and say what it does."""
-    from .skills import install_platform_configs
+    from .skills import PLATFORMS, install_platform_configs
 
     print("Installing MCP server config...")
-    configured = install_platform_configs(repo_root, target=target, dry_run=dry_run)
+    configured = install_platform_configs(
+        repo_root, target=target, dry_run=dry_run, platforms=platforms
+    )
     if not configured:
         print("No platforms detected.")
     elif dry_run:
@@ -567,10 +598,20 @@ def _plan_mcp_configs(repo_root: Path, target: str, dry_run: bool) -> None:
         )
     else:
         print(f"\nConfigured {len(configured)} platform(s): {', '.join(configured)}")
+    if target == "all" and platforms is not None:
+        missing = [key for key in PLATFORMS if key not in set(platforms)]
+        if missing:
+            print(f"Not found here, so not set up: {', '.join(missing)}.")
+            print("Add one anyway with: code-review-graph install --platform NAME")
 
 
 def _plan_integrations(
-    args: argparse.Namespace, repo_root: Path, target: str, *, say: Callable[[str], None]
+    args: argparse.Namespace,
+    repo_root: Path,
+    target: str,
+    platforms: Iterable[str] | None = None,
+    *,
+    say: Callable[[str], None],
 ) -> str | None:
     """Plan the .gitignore entry, skills and hooks. Return a Codex skill error, if any.
 
@@ -578,11 +619,12 @@ def _plan_integrations(
     so the graph tools are used proactively; ``--no-skills`` and ``--no-hooks``
     opt out. The legacy ``--skills``/``--hooks``/``--all`` flags are still
     accepted and do nothing. ``say`` prints a message that only reports a
-    write; a warning is printed in both modes.
+    write; a warning is printed in both modes. Skills and hooks are written
+    only for ``platforms``, by default :func:`skills.selected_platforms`.
     """
     from .incremental import ensure_repo_gitignore_excludes_crg
     from .skills import (
-        PLATFORMS,
+        _git_hooks_dir,
         generate_skills,
         install_codebuddy_hooks,
         install_codebuddy_skills,
@@ -597,8 +639,15 @@ def _plan_integrations(
         install_hooks,
         install_opencode_plugin,
         install_qoder_skills,
+        selected_platforms,
     )
 
+    def shown(path: Path) -> str:
+        return install_plan.display_path(path, repo_root)
+
+    chosen = frozenset(
+        selected_platforms(repo_root, target) if platforms is None else platforms
+    )
     gitignore_state = ensure_repo_gitignore_excludes_crg(repo_root)
     if gitignore_state == "created":
         say("Created .gitignore and added .code-review-graph/.")
@@ -611,10 +660,7 @@ def _plan_integrations(
     skip_hooks = getattr(args, "no_hooks", False)
     codex_skill_error: str | None = None
     if not skip_skills:
-        codex_detected = target == "codex" or (
-            target == "all" and PLATFORMS["codex"]["detect"]()
-        )
-        if codex_detected:
+        if "codex" in chosen:
             try:
                 codex_skill_dir = install_codex_skill()
             except OSError as exc:
@@ -627,84 +673,87 @@ def _plan_integrations(
                 if target == "all":
                     print(codex_skill_error, file=sys.stderr)
             else:
-                say(f"Installed Codex skill in {codex_skill_dir}")
+                say(f"Installed Codex skill in {shown(codex_skill_dir)}")
 
-        # Claude Code skills are only relevant for Claude (or full install).
-        if target in ("claude", "all"):
+        if "claude" in chosen:
             skills_dir = generate_skills(repo_root)
-            say(f"Generated Claude Code skills in {skills_dir}")
+            say(f"Generated Claude Code skills in {shown(skills_dir)}")
 
         # Gemini CLI skills are workspace-scoped under .gemini/.
-        if target in ("gemini-cli", "all"):
+        if "gemini-cli" in chosen:
             gemini_skills_dir = install_gemini_cli_skills(repo_root)
-            say(f"Installed Gemini CLI skills in {gemini_skills_dir}")
+            say(f"Installed Gemini CLI skills in {shown(gemini_skills_dir)}")
 
         # CodeBuddy discovers project skills under .codebuddy/skills/.
-        if target in ("codebuddy", "all"):
+        if "codebuddy" in chosen:
             codebuddy_skills_dir = install_codebuddy_skills(repo_root)
-            say(f"Installed CodeBuddy skills in {codebuddy_skills_dir}")
+            say(f"Installed CodeBuddy skills in {shown(codebuddy_skills_dir)}")
 
         # Hermes Agent discovers skills under <HERMES_HOME>/skills/.
-        if target == "hermes" or (target == "all" and PLATFORMS["hermes"]["detect"]()):
+        if "hermes" in chosen:
             hermes_skills_dir = install_hermes_skills(repo_root)
-            say(f"Installed Hermes Agent skills in {hermes_skills_dir}")
+            say(f"Installed Hermes Agent skills in {shown(hermes_skills_dir)}")
 
         # Qoder skills live in the project's .qoder/skills/.
-        if target in ("qoder", "all"):
+        if "qoder" in chosen:
             qoder_skills_dir = install_qoder_skills(repo_root)
             if qoder_skills_dir:
-                say(f"Installed Qoder skills to {qoder_skills_dir}")
+                say(f"Installed Qoder skills in {shown(qoder_skills_dir)}")
 
-    if not skip_hooks and target in ("codebuddy", "all"):
+    if not skip_hooks and "codebuddy" in chosen:
         try:
             codebuddy_settings = install_codebuddy_hooks(repo_root)
             if codebuddy_settings:
-                say(f"Installed CodeBuddy hooks in {codebuddy_settings}")
+                say(f"Installed CodeBuddy hooks in {shown(codebuddy_settings)}")
         except Exception as exc:
             logger.warning("Could not install CodeBuddy hooks: %s", exc)
-    if not skip_hooks and target in ("codex", "all"):
+    if not skip_hooks and "codex" in chosen:
         hooks_path = install_codex_hooks(repo_root)
         if hooks_path:
-            say(f"Installed Codex hooks in {hooks_path}")
-        git_hook = install_git_hook(repo_root)
-        if git_hook:
-            say(f"Installed git pre-commit hook in {git_hook}")
-        for sync_hook in install_git_sync_hooks(repo_root):
-            say(f"Installed git {sync_hook.name} hook in {sync_hook}")
-    if not skip_hooks and target in ("claude", "qoder", "all"):
-        platforms_to_install = [target] if target != "all" else ["claude", "qoder"]
-        for plat in platforms_to_install:
+            say(f"Installed Codex hooks in {shown(hooks_path)}")
+    if not skip_hooks:
+        for plat in ("claude", "qoder"):
+            if plat not in chosen:
+                continue
             settings_path = install_hooks(repo_root, platform=plat)
             if settings_path:
-                say(f"Installed hooks in {settings_path}")
+                say(f"Installed hooks in {shown(settings_path)}")
+    # The git hooks keep the graph fresh for every tool, so they are written
+    # once, and only when git has a hooks folder for this repository (the
+    # lookup warns once when it has none).
+    if (
+        not skip_hooks
+        and target in ("all", "claude", "qoder", "codex")
+        and _git_hooks_dir(repo_root) is not None
+    ):
         git_hook = install_git_hook(repo_root)
         if git_hook:
-            say(f"Installed git pre-commit hook in {git_hook}")
+            say(f"Installed git pre-commit hook in {shown(git_hook)}")
         for sync_hook in install_git_sync_hooks(repo_root):
-            say(f"Installed git {sync_hook.name} hook in {sync_hook}")
+            say(f"Installed git {sync_hook.name} hook in {shown(sync_hook)}")
 
-    # Cursor hooks (user-level, only if ~/.cursor exists — matching MCP detect)
-    if not skip_hooks and target in ("all", "cursor") and PLATFORMS["cursor"]["detect"]():
+    # Cursor hooks are user-level, written like the MCP entry.
+    if not skip_hooks and "cursor" in chosen:
         try:
             hooks_path = install_cursor_hooks()
             if hooks_path:
-                say(f"Installed Cursor hooks in {hooks_path}")
+                say(f"Installed Cursor hooks in {shown(hooks_path)}")
         except Exception as exc:
             logger.warning("Could not install Cursor hooks: %s", exc)
 
-    if not skip_hooks and target in ("gemini-cli", "all"):
+    if not skip_hooks and "gemini-cli" in chosen:
         try:
             gemini_settings = install_gemini_cli_hooks(repo_root)
             if gemini_settings:
-                say(f"Installed Gemini CLI hooks in {gemini_settings}")
+                say(f"Installed Gemini CLI hooks in {shown(gemini_settings)}")
         except Exception as exc:
             logger.warning("Could not install Gemini CLI hooks: %s", exc)
 
-    # OpenCode plugin (user-level, gated by same detect() as MCP config)
-    if not skip_hooks and target in ("all", "opencode") and PLATFORMS["opencode"]["detect"]():
+    # The OpenCode plugin is user-level, written like the MCP entry.
+    if not skip_hooks and "opencode" in chosen:
         try:
             plugin_path = install_opencode_plugin()
-            say(f"Installed OpenCode plugin in {plugin_path}")
+            say(f"Installed OpenCode plugin in {shown(plugin_path)}")
         except Exception as exc:
             logger.warning("Could not install OpenCode plugin: %s", exc)
     return codex_skill_error
@@ -2777,7 +2826,9 @@ def _dispatch() -> None:
             return
         action_word = "unbind" if scoped_platforms else "uninstall"
         if not args.yes and not _confirm_yes_no(
-            f"\nProceed with {action_word}?", default_yes=False
+            f"\nProceed with {action_word}?",
+            default_yes=False,
+            no_terminal_hint="Use --yes to go ahead.",
         ):
             print("Aborted.")
             return

@@ -52,6 +52,7 @@ def sandbox(tmp_path_factory, monkeypatch) -> Sandbox:
         ".codex", ".cursor", ".codeium/windsurf", ".continue", ".gemini/antigravity",
         ".qwen", ".kiro", ".copilot", ".config/opencode",
         "Library/Application Support/Zed", ".config/zed",
+        ".claude", ".qoder", ".codebuddy",
     ):
         (home / relative).mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
@@ -255,6 +256,41 @@ def test_ctrl_c_at_the_question_writes_nothing(sandbox, monkeypatch, capsys):
     assert exc_info.value.code == 130
     assert _snapshot(sandbox) == before
     assert "No files were written" in capsys.readouterr().out
+
+
+def test_with_no_terminal_install_says_it_took_the_default(sandbox, monkeypatch, capsys):
+    """An agent running install must learn that a question was answered for it."""
+
+    class _Pipe(io.StringIO):
+        def isatty(self) -> bool:
+            return False
+
+    monkeypatch.setattr(sys, "stdin", _Pipe())
+
+    cli._handle_init(_args(sandbox, "claude", yes=False))
+
+    out = capsys.readouterr().out
+    assert (
+        "No terminal: taking the default (yes). Use --no-instructions to skip them." in out
+    )
+    assert "Ctrl-C now to stop" not in out
+    assert (sandbox.repo / "CLAUDE.md").is_file()
+
+
+def test_at_a_terminal_install_says_nothing_is_written_yet(sandbox, monkeypatch, capsys):
+    class _Terminal(io.StringIO):
+        def isatty(self) -> bool:
+            return True
+
+    monkeypatch.setattr(sys, "stdin", _Terminal())
+    monkeypatch.setattr("builtins.input", lambda prompt="": "n")
+
+    cli._handle_init(_args(sandbox, "claude", yes=False))
+
+    out = capsys.readouterr().out
+    note = out.index("Ctrl-C now to stop; nothing has been written yet.")
+    assert note > out.index("Graph instructions will be injected into:")
+    assert "No terminal" not in out
 
 
 def test_a_step_that_fails_while_planning_writes_nothing(sandbox, monkeypatch, capsys):

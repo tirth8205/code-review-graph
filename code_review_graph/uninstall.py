@@ -19,9 +19,9 @@ import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
-from . import install_gitignore, install_plan, jsonc, skills
+from . import install_gitignore, install_manifest, install_plan, jsonc, skills
 
 _tomllib: Any = importlib.import_module(
     "tomllib" if sys.version_info >= (3, 11) else "tomli"
@@ -41,6 +41,8 @@ class UninstallReport:
     edited_paths: list[str] = field(default_factory=list)
     skipped_paths: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    # Every file removed or edited, so the install record can drop it.
+    touched: list[Path] = field(default_factory=list, repr=False, compare=False)
 
     @property
     def total_actions(self) -> int:
@@ -108,14 +110,27 @@ def _safe_path(
     return True
 
 
+def _done(detail: str, dry_run: bool) -> str:
+    """Word an action for the report: ``detail`` starts with a verb in its base form.
+
+    A dry run says what it would do ("would remove owned file"); a real run
+    says what it did ("removed owned file").
+    """
+    if dry_run:
+        return f"would {detail}"
+    verb, _, rest = detail.partition(" ")
+    past = f"{verb}d" if verb.endswith("e") else f"{verb}ed"
+    return f"{past} {rest}" if rest else past
+
+
 def _record_edit(report: UninstallReport, path: Path, detail: str, dry_run: bool) -> None:
-    verb = f"would {detail}" if dry_run else detail
-    report.edited_paths.append(f"{path} ({verb})")
+    report.edited_paths.append(f"{path} ({_done(detail, dry_run)})")
+    report.touched.append(path)
 
 
 def _record_remove(report: UninstallReport, path: Path, detail: str, dry_run: bool) -> None:
-    verb = f"would {detail}" if dry_run else detail
-    report.removed_paths.append(f"{path} ({verb})")
+    report.removed_paths.append(f"{path} ({_done(detail, dry_run)})")
+    report.touched.append(path)
 
 
 def _read_text(path: Path, report: UninstallReport) -> str | None:
@@ -261,7 +276,7 @@ def _remove_mcp_entry(
         path,
         rewritten,
         report,
-        detail=f"removed {_ENTRY_NAME!r} from {key!r}",
+        detail=f"remove {_ENTRY_NAME!r} from {key!r}",
         dry_run=dry_run,
     )
 
@@ -307,7 +322,7 @@ def _remove_toml_entry(
         path,
         rewritten,
         report,
-        detail=f"removed [{key}.{_ENTRY_NAME}]",
+        detail=f"remove [{key}.{_ENTRY_NAME}]",
         dry_run=dry_run,
     )
 
@@ -351,7 +366,7 @@ def _remove_dsh_patch_entry(
         path,
         rewritten,
         report,
-        detail=f"removed the {dsh.ENTRY_ID} insert",
+        detail=f"remove the {dsh.ENTRY_ID} insert",
         dry_run=dry_run,
     )
 
@@ -451,7 +466,7 @@ def _remove_yaml_entry(
         path,
         rewritten,
         report,
-        detail=f"removed {key}.{_ENTRY_NAME}",
+        detail=f"remove {key}.{_ENTRY_NAME}",
         dry_run=dry_run,
     )
 
@@ -488,6 +503,11 @@ def _legacy_repo_hook_commands(repo_root: Path) -> set[str]:
     }
     # v2.3.4 - v2.3.6 drained stdin in front of the pinned commands.
     drained = {"cat >/dev/null || true; " + command for command in pinned}
+    # v2.4.0 ran whichever copy PATH found, before hooks named the copy that
+    # ran install.
+    path_copy = _commands(
+        skills.generate_hooks_config(repo_root, program=skills._PATH_HOOK_PROGRAM)
+    )
     # v2.3.7 - v2.3.9 resolved the repository from the session's directory,
     # which #311 replaced with the edited file's repository.
     from_cwd = (
@@ -498,11 +518,11 @@ def _legacy_repo_hook_commands(repo_root: Path) -> set[str]:
         ' --repo "$(git rev-parse --show-toplevel 2>/dev/null)"'
         " || true"
     )
-    return pinned | drained | {from_cwd}
+    return pinned | drained | {from_cwd} | path_copy
 
 
 def _legacy_codex_hook_commands() -> set[str]:
-    """Exact user hook commands from before the payload-scoped subcommands."""
+    """Exact Codex hook commands earlier releases wrote and install no longer does."""
     update = (
         "git rev-parse --git-dir >/dev/null 2>&1"
         " && code-review-graph update --skip-flows"
@@ -514,35 +534,60 @@ def _legacy_codex_hook_commands() -> set[str]:
         " || echo 'Not a git repo, skipping'"
     )
     stdin_guard = "cat >/dev/null || true; "
-    return {update, status, stdin_guard + update, stdin_guard + status}
+    # v2.4.0 forwarded the event JSON to whichever copy PATH found.
+    path_copy = _commands(
+        skills.generate_codex_hooks_config(Path("."), program=skills._PATH_HOOK_PROGRAM)
+    )
+    return {update, status, stdin_guard + update, stdin_guard + status} | path_copy
 
 
 def _steering_hook_scopes() -> dict[str, tuple[str, Any]]:
     """Map the steering hook's command to the one event and matcher it is written under.
 
     Install writes it there and only there, so a copy anywhere else is the user's.
+    Both spellings are listed: the one for the copy running now and the one
+    that runs the copy on PATH, as 2.4.0 wrote it.
     """
     scopes: dict[str, tuple[str, Any]] = {}
-    for event, groups in skills.generate_steering_hooks_config()["hooks"].items():
-        for group in groups:
-            for hook in group["hooks"]:
-                scopes[hook["command"]] = (event, group.get("matcher"))
+    for program in (None, skills._PATH_HOOK_PROGRAM):
+        config = skills.generate_steering_hooks_config(program)
+        for event, groups in config["hooks"].items():
+            for group in groups:
+                for hook in group["hooks"]:
+                    scopes[hook["command"]] = (event, group.get("matcher"))
     return scopes
+
+
+def _steering_hook_scope() -> tuple[str, Any]:
+    """Return the one ``(event, matcher)`` install files the steering hook under."""
+    return next(iter(_steering_hook_scopes().values()))
 
 
 def _clean_hook_data(
     data: dict[str, Any],
     owned_commands: set[str],
     scoped_commands: dict[str, tuple[str, Any]] | None = None,
+    *,
+    owns: Callable[[str], bool] | None = None,
+    scoped_owns: tuple[Callable[[str], bool], tuple[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], list[tuple[str | int, ...]]]:
     """Drop owned hooks: ``owned_commands`` anywhere, ``scoped_commands`` only
-    under their own ``(event, matcher)``."""
+    under their own ``(event, matcher)``.
+
+    ``owns`` and ``scoped_owns`` do the same for a hook that names the copy
+    which ran ``install``, which may not be the copy running now.
+    """
     scoped = scoped_commands or {}
 
     def owned(command: Any, event: str, matcher: Any) -> bool:
         if not isinstance(command, str):
             return False
-        return command in owned_commands or scoped.get(command) == (event, matcher)
+        if command in owned_commands or (owns is not None and owns(command)):
+            return True
+        scope = scoped.get(command)
+        if scope is None and scoped_owns is not None and scoped_owns[0](command):
+            scope = scoped_owns[1]
+        return scope == (event, matcher)
 
     expected = copy.deepcopy(data)
     hooks_obj = data.get("hooks")
@@ -608,6 +653,7 @@ def remove_steering_hook(repo_root: Path, *, dry_run: bool = False) -> Uninstall
         report,
         dry_run=dry_run,
         scoped_commands=_steering_hook_scopes(),
+        scoped_owns=(skills._is_steering_hook_command, _steering_hook_scope()),
     )
     return report
 
@@ -620,6 +666,8 @@ def _remove_hooks(
     *,
     dry_run: bool,
     scoped_commands: dict[str, tuple[str, Any]] | None = None,
+    owns: Callable[[str], bool] | None = None,
+    scoped_owns: tuple[Callable[[str], bool], tuple[str, Any]] | None = None,
 ) -> None:
     if not install_plan.exists(path) or not _safe_path(path, boundary, report):
         return
@@ -629,7 +677,9 @@ def _remove_hooks(
     data = _parse_jsonc(path, raw, report)
     if data is None:
         return
-    expected, paths = _clean_hook_data(data, owned_commands, scoped_commands)
+    expected, paths = _clean_hook_data(
+        data, owned_commands, scoped_commands, owns=owns, scoped_owns=scoped_owns
+    )
     if not paths:
         return
     try:
@@ -645,7 +695,7 @@ def _remove_hooks(
         path,
         rewritten,
         report,
-        detail="removed code-review-graph hook entries",
+        detail="remove code-review-graph hook entries",
         dry_run=dry_run,
     )
 
@@ -656,7 +706,7 @@ def _remove_file(
     report: UninstallReport,
     *,
     dry_run: bool,
-    detail: str = "removed owned file",
+    detail: str = "remove owned file",
 ) -> None:
     if not path.exists() and not path.is_symlink():
         return
@@ -695,7 +745,7 @@ def _remove_tree(
     except OSError as exc:
         report.errors.append(f"{path}: remove failed ({exc})")
         return
-    _record_remove(report, path, "removed owned directory", False)
+    _record_remove(report, path, "remove owned directory", False)
 
 
 def _prune_empty_directory(path: Path, boundary: Path) -> None:
@@ -788,7 +838,7 @@ def _remove_instruction(
             path,
             rewritten,
             report,
-            detail="removed code-review-graph instruction section",
+            detail="remove code-review-graph instruction section",
             dry_run=dry_run,
         )
     else:
@@ -888,14 +938,14 @@ def _remove_git_hook(
             "left unchanged)"
         )
         return
-    detail = "removed code-review-graph hook block"
+    detail = "remove code-review-graph hook block"
     if _GIT_HOOK_MARKER in new_text or skills._GIT_HOOK_BEGIN_MARKER in new_text:
         # One block was generated and another was edited by hand. Take out what
         # this project owns and say so on the edit itself: the file was changed,
         # so listing it as "left unchanged" as well would contradict that.
         detail = (
-            "removed code-review-graph hook block; a further block differs from "
-            "every known installed block and was kept"
+            "remove code-review-graph hook block (a further block, edited by "
+            "hand, stays)"
         )
 
     _rewrite_or_remove_hook(path, new_text, repo_root, report, detail=detail, dry_run=dry_run)
@@ -965,7 +1015,7 @@ def _remove_git_sync_hooks(
             text,
             repo_root,
             report,
-            detail="removed code-review-graph hook block",
+            detail="remove code-review-graph hook block",
             dry_run=dry_run,
         )
 
@@ -1015,7 +1065,7 @@ def _remove_gitignore(
             path,
             new_text,
             report,
-            detail="removed installer-owned ignore block",
+            detail="remove installer-owned ignore block",
             dry_run=dry_run,
         )
     else:
@@ -1206,6 +1256,26 @@ def _process_repo(
     dry_run: bool,
     platforms: frozenset[str] | None = None,
 ) -> None:
+    try:
+        _process_repo_files(
+            repo_root, home, report, keep_data=keep_data, dry_run=dry_run, platforms=platforms
+        )
+    finally:
+        if not dry_run:
+            # A file uninstall removed or cleaned is no longer install's; the
+            # record goes with the data folder when that is removed.
+            install_manifest.forget(repo_root, report.touched)
+
+
+def _process_repo_files(
+    repo_root: Path,
+    home: Path,
+    report: UninstallReport,
+    *,
+    keep_data: bool,
+    dry_run: bool,
+    platforms: frozenset[str] | None = None,
+) -> None:
     _process_platform_configs(
         repo_root, home, report, scope="repo", dry_run=dry_run, platforms=platforms
     )
@@ -1241,6 +1311,7 @@ def _process_repo(
 
     hook_commands = _commands(skills.generate_hooks_config(repo_root))
     hook_commands.update(_legacy_repo_hook_commands(repo_root))
+    pinned = skills._is_pinned_project_hook_command
     _remove_hooks(
         repo_root / ".claude" / "settings.json",
         hook_commands,
@@ -1248,6 +1319,8 @@ def _process_repo(
         report,
         dry_run=dry_run,
         scoped_commands=_steering_hook_scopes(),
+        owns=pinned,
+        scoped_owns=(skills._is_steering_hook_command, _steering_hook_scope()),
     )
     _remove_hooks(
         repo_root / ".qoder" / "settings.json",
@@ -1255,6 +1328,7 @@ def _process_repo(
         repo_root,
         report,
         dry_run=dry_run,
+        owns=pinned,
     )
     _remove_hooks(
         repo_root / ".codebuddy" / "settings.json",
@@ -1262,6 +1336,7 @@ def _process_repo(
         repo_root,
         report,
         dry_run=dry_run,
+        owns=pinned,
     )
 
     gemini_script_names = skills._GEMINI_CLI_HOOK_FILENAMES
@@ -1362,6 +1437,7 @@ def _process_user(
         active_codex_home,
         report,
         dry_run=dry_run,
+        owns=skills._is_pinned_codex_hook_command,
     )
     skill_dir = codex_skill_dir()
     for owned_path in owned_skill_files(skill_dir):

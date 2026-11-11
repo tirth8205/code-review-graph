@@ -28,6 +28,7 @@ from code_review_graph.skills import (
     _in_poetry_project,
     _in_uv_project,
     _opencode_plugin_content,
+    _running_from_uv_tool,
     _strip_jsonc,
     generate_codex_hooks_config,
     generate_cursor_hooks_config,
@@ -235,6 +236,126 @@ class TestGenerateSkills:
         assert len(list(skills_dir.iterdir())) == 4
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="runs the POSIX hook commands")
+class TestHooksRunTheCopyThatRanInstall:
+    """A hook must not reach an older copy that is first on PATH.
+
+    The installing copy is stood in for by a script at a path with a space and
+    a quote in it, so the quoting is tested too.
+    """
+
+    def _copies(self, tmp_path, *, pinned: bool, on_path: bool):
+        log = tmp_path / "calls.log"
+        venv = tmp_path / "it's a venv" / "bin"
+        venv.mkdir(parents=True)
+        python = venv / "python3"
+        if pinned:
+            python.write_text(
+                f'#!/bin/sh\ncat >/dev/null\necho "pinned $*" >> "{log}"\n', encoding="utf-8"
+            )
+            python.chmod(0o755)
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        for tool in ("git", "cat", "head", "python3"):
+            if found := shutil.which(tool):
+                (bin_dir / tool).symlink_to(found)
+        if on_path:
+            stale = bin_dir / "code-review-graph"
+            stale.write_text(
+                f'#!/bin/sh\ncat >/dev/null\necho "path $*" >> "{log}"\n', encoding="utf-8"
+            )
+            stale.chmod(0o755)
+        quoted = skills_module._sh_single_quote(str(python))
+        program = skills_module._HookProgram(
+            f"[ -x {quoted} ]", f"{quoted} -m code_review_graph"
+        )
+        return program, bin_dir, log
+
+    def _run(self, command, bin_dir, cwd):
+        return subprocess.run(
+            ["/bin/sh", "-c", command],
+            input="{}",
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+            env={"PATH": str(bin_dir), "HOME": str(cwd)},
+        )
+
+    @pytest.mark.parametrize(
+        ("pinned", "on_path", "expected"),
+        [
+            pytest.param(True, True, "pinned -m code_review_graph", id="pinned-wins"),
+            pytest.param(False, True, "path", id="falls-back-to-path"),
+            pytest.param(False, False, None, id="neither"),
+        ],
+    )
+    def test_claude_and_codex_hooks(self, tmp_path, pinned, on_path, expected):
+        program, bin_dir, log = self._copies(tmp_path, pinned=pinned, on_path=on_path)
+        work = tmp_path / "work"
+        work.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=work, check=True)
+        claude = generate_hooks_config(work, program)["hooks"]
+        codex = generate_codex_hooks_config(work, program)["hooks"]
+        for command, subcommand in (
+            (claude["PostToolUse"][0]["hooks"][0]["command"], "hook-update"),
+            (claude["SessionStart"][0]["hooks"][0]["command"], "status"),
+            (codex["PostToolUse"][0]["hooks"][0]["command"], "hook-update"),
+            (codex["SessionStart"][0]["hooks"][0]["command"], "hook-status"),
+        ):
+            log.unlink(missing_ok=True)
+            proc = self._run(command, bin_dir, work)
+            assert proc.returncode == 0, proc.stderr
+            assert proc.stderr == ""
+            if expected is None:
+                assert not log.exists()
+            else:
+                assert log.read_text(encoding="utf-8").startswith(f"{expected} {subcommand}")
+
+    def test_gemini_scripts(self, tmp_path, monkeypatch):
+        program, bin_dir, log = self._copies(tmp_path, pinned=True, on_path=True)
+        monkeypatch.setattr(skills_module, "_hook_program", lambda: program)
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        install_gemini_cli_hooks(repo)
+        for script, subcommand in (
+            ("crg-session-start.sh", "status"),
+            ("crg-update.sh", "update --skip-flows"),
+        ):
+            log.unlink(missing_ok=True)
+            proc = subprocess.run(
+                [shutil.which("bash") or "/bin/bash", str(repo / ".gemini" / "hooks" / script)],
+                input="{}",
+                capture_output=True,
+                text=True,
+                cwd=repo,
+                env={"PATH": str(bin_dir), "HOME": str(tmp_path)},
+            )
+            assert proc.returncode == 0, proc.stderr
+            assert log.read_text(encoding="utf-8").startswith(
+                f"pinned -m code_review_graph {subcommand} --repo"
+            )
+
+    def test_cursor_scripts(self, tmp_path, monkeypatch):
+        program, bin_dir, log = self._copies(tmp_path, pinned=True, on_path=True)
+        monkeypatch.setattr(skills_module, "_hook_program", lambda: program)
+        for name, script in _cursor_hook_scripts().items():
+            path = tmp_path / name
+            path.write_text(script, encoding="utf-8")
+            log.unlink(missing_ok=True)
+            proc = subprocess.run(
+                [shutil.which("bash") or "/bin/bash", str(path)],
+                input="{}",
+                capture_output=True,
+                text=True,
+                cwd=tmp_path,
+                env={"PATH": str(bin_dir), "HOME": str(tmp_path)},
+            )
+            assert proc.returncode == 0, proc.stderr
+            assert log.read_text(encoding="utf-8").startswith(
+                "pinned -m code_review_graph "
+            ), name
+
+
 class TestGenerateHooksConfig:
     def test_returns_dict_with_hooks(self):
         config = generate_hooks_config(Path("/repo"))
@@ -397,9 +518,15 @@ class TestShippedHooksFiles:
         assert matchers == ["EnterWorktree", "Edit|Write"]
 
     def test_hooks_json_commands_keep_the_generated_guards(self):
-        """The plugin hooks must guard like the hooks ``install`` writes (#549)."""
+        """The plugin hooks must guard like the hooks ``install`` writes (#549).
+
+        The plugin cannot know which copy a user has, so it runs the one on
+        PATH, as hooks that ``install`` writes do when their own copy is gone.
+        """
         shipped = self._shipped_hooks()
-        generated = generate_hooks_config(Path("."))["hooks"]
+        generated = generate_hooks_config(
+            Path("."), program=skills_module._PATH_HOOK_PROGRAM
+        )["hooks"]
         assert (
             shipped["SessionStart"][0]["hooks"][0]["command"]
             == generated["SessionStart"][0]["hooks"][0]["command"]
@@ -545,7 +672,7 @@ class TestInstallGitHook:
         assert os.access(hook_path, os.X_OK)
         content = hook_path.read_text()
         assert content.startswith("#!/")
-        assert "code-review-graph detect-changes" in content
+        assert "crg_hook_cli detect-changes --brief" in content
 
     def test_appends_to_existing_hook(self, tmp_path):
         repo = self._make_git_repo(tmp_path)
@@ -555,14 +682,14 @@ class TestInstallGitHook:
         install_git_hook(repo)
         content = hook_path.read_text()
         assert "existing-command" in content
-        assert "code-review-graph detect-changes" in content
+        assert "crg_hook_cli detect-changes --brief" in content
 
     def test_idempotent(self, tmp_path):
         repo = self._make_git_repo(tmp_path)
         install_git_hook(repo)
         install_git_hook(repo)
         content = (repo / ".git" / "hooks" / "pre-commit").read_text()
-        assert content.count("code-review-graph detect-changes") == 1
+        assert content.count("crg_hook_cli detect-changes") == 1
 
     def test_no_git_dir_returns_none(self, tmp_path):
         assert install_git_hook(tmp_path) is None
@@ -575,7 +702,7 @@ class TestInstallGitHook:
         expected = repo / ".git" / "hooks" / "pre-commit"
         assert hook_path.resolve() == expected.resolve()
         assert os.access(hook_path, os.X_OK)
-        assert "code-review-graph detect-changes" in hook_path.read_text()
+        assert "crg_hook_cli detect-changes --brief" in hook_path.read_text()
 
     def test_respects_core_hooks_path(self, tmp_path):
         """core.hooksPath (husky-style): the hook must land where git runs it."""
@@ -586,7 +713,7 @@ class TestInstallGitHook:
         expected = repo / ".husky" / "pre-commit"
         assert hook_path.resolve() == expected.resolve()
         assert os.access(hook_path, os.X_OK)
-        assert "code-review-graph detect-changes" in hook_path.read_text()
+        assert "crg_hook_cli detect-changes --brief" in hook_path.read_text()
         # The default location must NOT be used — git would never run it.
         assert not (repo / ".git" / "hooks" / "pre-commit").exists()
 
@@ -607,7 +734,7 @@ class TestInstallGitHook:
             "rev-parse", "--git-path", "hooks", cwd=worktree
         )
         assert hook_path.resolve() == (git_hooks_dir / "pre-commit").resolve()
-        assert "code-review-graph detect-changes" in hook_path.read_text()
+        assert "crg_hook_cli detect-changes --brief" in hook_path.read_text()
 
 
 class TestInstallHooks:
@@ -697,7 +824,7 @@ class TestGenerateCodexHooksConfig:
         inner = entry["hooks"][0]
         assert inner["type"] == "command"
         assert "update" in inner["command"]
-        assert inner["command"].startswith("cat | { if command -v code-review-graph")
+        assert inner["command"].startswith("cat | { if [ -x ")
         assert inner["statusMessage"] == "Updating code-review-graph"
 
     def test_has_session_start(self, tmp_path):
@@ -708,7 +835,7 @@ class TestGenerateCodexHooksConfig:
         inner = entry["hooks"][0]
         assert inner["type"] == "command"
         assert "status" in inner["command"]
-        assert inner["command"].startswith("cat | { if command -v code-review-graph")
+        assert inner["command"].startswith("cat | { if [ -x ")
         assert inner["statusMessage"] == "Checking code-review-graph status"
 
 
@@ -743,15 +870,32 @@ class TestGenerateCodexHooksConfig:
         assert broken_pipe is None, f"hook command raised BrokenPipeError: {stderr}"
         assert proc.returncode == 0, stderr
 
-    def test_commands_do_not_pin_a_specific_repo_path(self, tmp_path):
+    def test_commands_do_not_pin_a_specific_repo_path(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "code_review_graph.skills.sys.executable", "/opt/crg venv/bin/python3"
+        )
+        monkeypatch.setattr(
+            "code_review_graph.skills._detect_cli_launcher",
+            lambda: ["/opt/crg venv/bin/python3", "-m", "code_review_graph"],
+        )
         config = generate_codex_hooks_config(tmp_path / "repo with spaces")
         post_cmd = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
         session_cmd = config["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        exe = "'/opt/crg venv/bin/python3'"
         for command, subcommand in ((post_cmd, "hook-update"), (session_cmd, "hook-status")):
             assert command == (
-                "cat | { if command -v code-review-graph >/dev/null 2>&1; "
+                f"cat | {{ if [ -x {exe} ]; then {exe} -m code_review_graph {subcommand}; "
+                "elif command -v code-review-graph >/dev/null 2>&1; "
                 f"then code-review-graph {subcommand}; else cat >/dev/null; fi; }}"
             )
+
+    def test_the_path_copy_keeps_the_shape_2_4_0_wrote(self, tmp_path):
+        config = generate_codex_hooks_config(tmp_path, program=skills_module._PATH_HOOK_PROGRAM)
+        post_cmd = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+        assert post_cmd == (
+            "cat | { if command -v code-review-graph >/dev/null 2>&1; "
+            "then code-review-graph hook-update; else cat >/dev/null; fi; }"
+        )
 
 
 class TestInstallCodexHooks:
@@ -1398,7 +1542,7 @@ class TestCodeBuddyPlatform:
         assert "code-review-graph" in data["servers"]
         # Claude and CodeBuddy share one exact contract/write. A different
         # contract that happens to share the path must still be processed.
-        assert capsys.readouterr().out.count(f"configured {shared_path}") == 2
+        assert capsys.readouterr().out.count("configured .mcp.json") == 2
 
     def test_all_does_not_credit_shared_alias_when_write_is_unsafe(
         self, tmp_path, capsys
@@ -2097,15 +2241,30 @@ class TestCursorHookScripts:
 
     def test_update_script_runs_update(self):
         scripts = _cursor_hook_scripts()
-        assert "code-review-graph update --skip-flows" in scripts["crg-update.sh"]
+        assert "$(crg update --skip-flows 2>&1)" in scripts["crg-update.sh"]
 
     def test_session_start_script_runs_status(self):
         scripts = _cursor_hook_scripts()
-        assert "code-review-graph status" in scripts["crg-session-start.sh"]
+        assert "$(crg status 2>&1)" in scripts["crg-session-start.sh"]
 
     def test_pre_commit_script_runs_detect_changes(self):
         scripts = _cursor_hook_scripts()
-        assert "code-review-graph detect-changes --brief" in scripts["crg-pre-commit.sh"]
+        assert "$(crg detect-changes --brief 2>&1)" in scripts["crg-pre-commit.sh"]
+
+    def test_scripts_run_the_copy_that_ran_install(self, monkeypatch):
+        """Cursor's hooks are user-wide, so PATH may find another copy."""
+        monkeypatch.setattr(
+            "code_review_graph.skills._detect_cli_launcher",
+            lambda: ["/venvs/crg/bin/python", "-m", "code_review_graph"],
+        )
+        monkeypatch.setattr("code_review_graph.skills.sys.executable", "/venvs/crg/bin/python")
+        for name, content in _cursor_hook_scripts().items():
+            assert (
+                "    if [ -x '/venvs/crg/bin/python' ]; then "
+                "'/venvs/crg/bin/python' -m code_review_graph \"$@\"\n"
+                "    elif command -v code-review-graph >/dev/null 2>&1; "
+                "then code-review-graph \"$@\"\n"
+            ) in content, name
 
 
 class TestInstallCursorHooks:
@@ -2710,6 +2869,7 @@ class TestDetectServeCommand:
         monkeypatch.delenv("VIRTUAL_ENV", raising=False)
         monkeypatch.delenv("UV_PROJECT_ENVIRONMENT", raising=False)
         monkeypatch.setattr("code_review_graph.skills._in_uv_project", lambda: False)
+        monkeypatch.setattr("code_review_graph.skills._running_from_uv_tool", lambda: True)
         # poetry not on PATH → should fall through to uvx
         monkeypatch.setattr(
             "code_review_graph.skills.shutil.which",
@@ -2751,12 +2911,13 @@ class TestDetectServeCommand:
         assert cmd == "uv"
         assert args == ["run", "code-review-graph", "serve"]
 
-    def test_uvx_fallback(self, monkeypatch):
-        """Not in Poetry/uv but uvx available → use uvx (original behaviour)."""
+    def test_uvx_when_install_runs_from_uvx_or_a_uv_tool(self, monkeypatch):
+        """Started by uvx or installed by uv tool, and uvx on PATH → uvx."""
         monkeypatch.delenv("POETRY_ACTIVE", raising=False)
         monkeypatch.delenv("VIRTUAL_ENV", raising=False)
         monkeypatch.delenv("UV_PROJECT_ENVIRONMENT", raising=False)
         monkeypatch.setattr("code_review_graph.skills._in_uv_project", lambda: False)
+        monkeypatch.setattr("code_review_graph.skills._running_from_uv_tool", lambda: True)
         monkeypatch.setattr(
             "code_review_graph.skills.shutil.which",
             lambda x: "/usr/bin/uvx" if x == "uvx" else None,
@@ -2764,6 +2925,67 @@ class TestDetectServeCommand:
         cmd, args = _detect_serve_command()
         assert cmd == "uvx"
         assert args == ["code-review-graph", "serve"]
+
+    def test_uvx_on_path_does_not_replace_the_copy_that_ran_install(self, monkeypatch):
+        """pip in a venv with uvx also on PATH: the entry runs the venv's copy.
+
+        Up to 2.4.0 this wrote ``uvx code-review-graph serve``, which started
+        an older ``uv tool`` copy that refused the newer graph.
+        """
+        monkeypatch.delenv("POETRY_ACTIVE", raising=False)
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        monkeypatch.delenv("UV_PROJECT_ENVIRONMENT", raising=False)
+        monkeypatch.setattr("code_review_graph.skills._in_uv_project", lambda: False)
+        monkeypatch.setattr("code_review_graph.skills._running_from_uv_tool", lambda: False)
+        monkeypatch.setattr(
+            "code_review_graph.skills.shutil.which",
+            lambda x: "/usr/bin/uvx" if x == "uvx" else None,
+        )
+        cmd, args = _detect_serve_command()
+        assert cmd == sys.executable
+        assert args == ["-m", "code_review_graph", "serve"]
+
+    def test_running_from_uv_tool_reads_the_receipt(self, monkeypatch, tmp_path):
+        tool = tmp_path / "tools" / "code-review-graph"
+        tool.mkdir(parents=True)
+        monkeypatch.setattr("code_review_graph.skills.sys.prefix", str(tool))
+        assert _running_from_uv_tool() is False
+        (tool / "uv-receipt.toml").write_text("[tool]\n", encoding="utf-8")
+        assert _running_from_uv_tool() is True
+
+    @pytest.mark.parametrize(
+        ("folder", "expected"),
+        [("archive-v0", True), ("builds-v12", True), ("venvs", False), ("archive", False)],
+    )
+    def test_running_from_uv_tool_knows_uvx_cache_folders(
+        self, monkeypatch, tmp_path, folder, expected
+    ):
+        env = tmp_path / "uv" / folder / "Xk2abc"
+        env.mkdir(parents=True)
+        monkeypatch.setattr("code_review_graph.skills.sys.prefix", str(env))
+        assert _running_from_uv_tool() is expected
+
+    def test_hooks_run_the_interpreter_inside_a_project_env(self, monkeypatch):
+        """``uv run`` in a hook could find another project, so hooks name the interpreter."""
+        monkeypatch.setattr(
+            "code_review_graph.skills._detect_cli_launcher",
+            lambda: ["uv", "run", "code-review-graph"],
+        )
+        monkeypatch.setattr("code_review_graph.skills.sys.executable", "/proj/.venv/bin/python")
+        assert skills_module._hook_launcher() == [
+            "/proj/.venv/bin/python", "-m", "code_review_graph",
+        ]
+        program = skills_module._hook_program()
+        assert program.guard == "[ -x '/proj/.venv/bin/python' ]"
+        assert program.command == "'/proj/.venv/bin/python' -m code_review_graph"
+
+    def test_hooks_run_uvx_when_the_entry_does(self, monkeypatch):
+        monkeypatch.setattr(
+            "code_review_graph.skills._detect_cli_launcher",
+            lambda: ["uvx", "code-review-graph"],
+        )
+        assert skills_module._hook_launcher() == ["uvx", "code-review-graph"]
+        assert skills_module._hook_program() == skills_module._UVX_HOOK_PROGRAM
 
     def test_sys_executable_fallback(self, monkeypatch):
         """Nothing else available → fall back to sys.executable -m."""
@@ -3237,8 +3459,15 @@ class TestInstallSkillsRespectTargetPlatform:
     def test_claude_install_creates_skills(self, tmp_path):
         assert self._run_install(tmp_path, "claude") is True
 
-    def test_all_target_creates_skills(self, tmp_path):
-        assert self._run_install(tmp_path, "all") is True
+    def test_all_target_creates_skills_when_claude_code_is_found(self, tmp_path):
+        with patch.dict(PLATFORMS, {"claude": {**PLATFORMS["claude"], "detect": lambda: True}}):
+            assert self._run_install(tmp_path, "all") is True
+
+    def test_all_target_skips_claude_skills_when_claude_code_is_not_found(self, tmp_path):
+        with patch.dict(
+            PLATFORMS, {"claude": {**PLATFORMS["claude"], "detect": lambda: False}}
+        ):
+            assert self._run_install(tmp_path, "all") is False
 
     def test_codex_install_creates_global_skill(self, tmp_path, monkeypatch):
         codex_home = tmp_path / "codex-home"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -218,3 +219,68 @@ def test_v1_hooks_execute_expected_commands_from_worktree(tmp_path):
     ]
     assert {call["cwd"] for call in report["calls"]} == {str(worktree)}
     assert [call["timeout"] for call in report["calls"]] == [15_000, 60_000, 30_000]
+
+
+_PINNED_DRIVER = r"""
+import { pathToFileURL } from "node:url"
+
+const [pluginPath, directory] = process.argv.slice(2)
+const mod = await import(pathToFileURL(pluginPath).href)
+const hooks = await mod.default({ directory, worktree: directory })
+await hooks.event({ event: { type: "session.created" } })
+"""
+
+
+@pytest.mark.parametrize("major", [1, 2])
+def test_pinned_template_names_the_copy_that_ran_install(major):
+    content = _opencode_plugin_content(major, ["/venv/bin/python", "-m", "code_review_graph"])
+    assert (
+        'const CRG_COMMANDS: string[][] = '
+        '[["/venv/bin/python", "-m", "code_review_graph"], ["code-review-graph"]]'
+    ) in content
+    assert 'execFileAsync("code-review-graph", args' not in content
+    assert "execFileAsync(file, [...prefix, ...args]" in content
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the stand-in copies are POSIX shell scripts")
+@pytest.mark.parametrize("pinned_present", [True, False], ids=["pinned", "gone"])
+def test_pinned_plugin_runs_its_copy_then_the_one_on_path(tmp_path, pinned_present):
+    """The plugin runs the copy that ran install, and PATH's only when that one is gone."""
+    node = _node_with_type_stripping()
+    if node is None:
+        pytest.skip("needs Node >= 22.6 with TypeScript type stripping")
+
+    log = tmp_path / "calls.log"
+    pinned = tmp_path / "venv" / "bin" / "python"
+    pinned.parent.mkdir(parents=True)
+    if pinned_present:
+        pinned.write_text(f'#!/bin/sh\necho "pinned $*" >> "{log}"\n', encoding="utf-8")
+        pinned.chmod(0o755)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    on_path = bin_dir / "code-review-graph"
+    on_path.write_text(f'#!/bin/sh\necho "path $*" >> "{log}"\n', encoding="utf-8")
+    on_path.chmod(0o755)
+
+    plugin = tmp_path / "crg-plugin.ts"
+    plugin.write_text(
+        _opencode_plugin_content(1, [str(pinned), "-m", "code_review_graph"]),
+        encoding="utf-8",
+    )
+    driver = tmp_path / "driver.mjs"
+    driver.write_text(_PINNED_DRIVER, encoding="utf-8")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    proc = subprocess.run(
+        [node, "--experimental-strip-types", "--no-warnings", str(driver), str(plugin),
+         str(repo)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={"PATH": f"{bin_dir}{os.pathsep}/usr/bin{os.pathsep}/bin", "HOME": str(tmp_path)},
+    )
+    assert proc.returncode == 0, proc.stderr
+    expected = "pinned -m code_review_graph status" if pinned_present else "path status"
+    assert log.read_text(encoding="utf-8").splitlines() == [expected]

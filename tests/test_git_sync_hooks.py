@@ -1,9 +1,10 @@
 """Git hooks keep the graph in sync after checkout, merge and rebase.
 
 Every test drives real git commands against a throwaway clone, with a stub
-``code-review-graph`` on PATH that logs each call and whether the file named by
+``code-review-graph`` that logs each call and whether the file named by
 ``CRG_PROBE_FILE`` existed at that moment, so a test can tell an update that
-saw the final working tree from one that ran too early.
+saw the final working tree from one that ran too early. The hooks name the stub
+as the copy that ran ``install``, as they name the real one in use.
 """
 
 import os
@@ -70,9 +71,17 @@ def sync_repo(tmp_path, monkeypatch):
     )
     binary.chmod(0o755)
     monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ["PATH"])
+    pin_copy(monkeypatch, binary)
 
     install_git_sync_hooks(clone)
     return upstream, clone, log
+
+
+def pin_copy(monkeypatch, binary):
+    """Make ``binary`` the copy the hooks run, as the installing copy is."""
+    quoted = skills._sh_single_quote(str(binary))
+    program = skills._HookProgram(f"[ -x {quoted} ]", quoted)
+    monkeypatch.setattr(skills, "_hook_program", lambda: program)
 
 
 def calls(log):
@@ -312,3 +321,31 @@ def test_pre_commit_in_another_language_is_left_alone(tmp_path):
     assert skills.install_git_hook(tmp_path) == hook
 
     assert hook.read_text(encoding="utf-8") == original
+
+
+def test_hooks_run_the_copy_that_ran_install_not_the_one_on_path(tmp_path, monkeypatch):
+    """An older copy first on PATH must not answer for the one install used."""
+    upstream, clone, log = sync_repo(tmp_path, monkeypatch)
+    older = tmp_path / "older-bin"
+    older.mkdir()
+    stale = older / "code-review-graph"
+    stale.write_text('#!/bin/sh\necho stale >> "$CRG_HOOK_LOG"\n')
+    stale.chmod(0o755)
+    monkeypatch.setenv("PATH", str(older) + os.pathsep + os.environ["PATH"])
+
+    commit_file(upstream, "probe.txt")
+    git(clone, "pull")
+    assert calls(log) == [f"update --quiet --repo {clone} probe=present"]
+
+
+def test_hooks_fall_back_to_the_copy_on_path_when_theirs_is_gone(tmp_path, monkeypatch):
+    upstream, clone, log = sync_repo(tmp_path, monkeypatch)
+    pinned = tmp_path / "bin" / "code-review-graph"
+    on_path = tmp_path / "path-bin"
+    on_path.mkdir()
+    pinned.rename(on_path / "code-review-graph")
+    monkeypatch.setenv("PATH", str(on_path) + os.pathsep + os.environ["PATH"])
+
+    commit_file(upstream, "probe.txt")
+    git(clone, "pull")
+    assert calls(log) == [f"update --quiet --repo {clone} probe=present"]
