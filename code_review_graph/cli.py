@@ -213,19 +213,27 @@ def _instruction_files_to_modify(
 
 
 def _confirm_yes_no(
-    prompt: str, default_yes: bool = True, *, cancel_on_interrupt: bool = False
+    prompt: str,
+    default_yes: bool = True,
+    *,
+    cancel_on_interrupt: bool = False,
+    no_terminal_hint: str = "",
 ) -> bool:
     """Prompt the user [Y/n] and return True for yes.
 
     Non-interactive environments (no TTY on stdin, e.g. an MCP wrapper
     piping the CLI) return ``default_yes`` without blocking — the
     stdio transport cannot safely read from stdin without corrupting
-    the JSON-RPC stream. See: #173, #174
+    the JSON-RPC stream. See: #173, #174. They say so, with
+    ``no_terminal_hint`` on how to get the other answer, so an agent that
+    runs the command knows a question was answered for it.
 
     Ctrl-C counts as "no" unless ``cancel_on_interrupt`` is set, in which case
     it is raised so the caller can stop altogether.
     """
     if not sys.stdin.isatty():
+        answer = "yes" if default_yes else "no"
+        print(f"No terminal: taking the default ({answer}). {no_terminal_hint}".rstrip())
         return default_yes
     suffix = "[Y/n]" if default_yes else "[y/N]"
     try:
@@ -494,11 +502,14 @@ def _handle_init(args: argparse.Namespace) -> None:
                 print("Graph instructions will be injected into:")
                 for name, how in instr_targets:
                     print(f"  {name} ({how})")
+                if not auto_yes and sys.stdin.isatty():
+                    print("Ctrl-C now to stop; nothing has been written yet.")
                 try:
                     inject = auto_yes or _confirm_yes_no(
                         "Inject graph instructions into these files?",
                         default_yes=True,
                         cancel_on_interrupt=True,
+                        no_terminal_hint="Use --no-instructions to skip them.",
                     )
                 except KeyboardInterrupt:
                     # Nothing has been written yet, so stopping here leaves no trace.
@@ -2808,7 +2819,9 @@ def _dispatch() -> None:
             return
         action_word = "unbind" if scoped_platforms else "uninstall"
         if not args.yes and not _confirm_yes_no(
-            f"\nProceed with {action_word}?", default_yes=False
+            f"\nProceed with {action_word}?",
+            default_yes=False,
+            no_terminal_hint="Use --yes to go ahead.",
         ):
             print("Aborted.")
             return

@@ -22,6 +22,11 @@
 - `install` writes each git hook once, so each one is reported once, and
   shows paths relative to the repository or with `~`. Outside Git it says once,
   not four times, that there is no hooks folder.
+- With no terminal, as when an AI agent runs it, `install` says it took the
+  default answer (yes) to its question about instruction files, and how to
+  skip them; `uninstall` says it took no and how to go ahead. At a terminal,
+  `install` says that Ctrl-C at the question stops it before anything is
+  written.
 
 ## [2.4.0] - 2026-11-10
 

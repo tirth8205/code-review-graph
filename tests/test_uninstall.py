@@ -1156,6 +1156,31 @@ def test_cli_dry_run_and_confirmation_are_safe(
     assert "code-review-graph" in config.read_text(encoding="utf-8")
 
 
+def test_uninstall_with_no_terminal_says_it_took_the_default(
+    fake_repo: Path, fake_home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import io
+
+    from code_review_graph import cli
+
+    class _Pipe(io.StringIO):
+        def isatty(self) -> bool:
+            return False
+
+    config = fake_repo / ".mcp.json"
+    _write_json(config, {"mcpServers": {"code-review-graph": {}}})
+    with (
+        patch.object(sys, "argv", ["code-review-graph", "uninstall", "--repo", str(fake_repo)]),
+        patch.object(sys, "stdin", _Pipe()),
+    ):
+        cli.main()
+
+    out = capsys.readouterr().out
+    assert "No terminal: taking the default (no). Use --yes to go ahead." in out
+    assert "Aborted." in out
+    assert "code-review-graph" in config.read_text(encoding="utf-8")
+
+
 # ---------------------------------------------------------------------------
 # Platform-scoped unbind (``uninstall --platform``)
 # ---------------------------------------------------------------------------
