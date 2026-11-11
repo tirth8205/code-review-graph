@@ -579,6 +579,9 @@ _SUPER_RECEIVERS = frozenset({"super", "base"})
 _TYPED_RECEIVER_LANGUAGES = frozenset({
     "csharp", "java", "kotlin", "tsx", "typescript",
 })
+#: Languages whose parser records a receiver's name but never its type, so
+#: ``v.map()`` says nothing about which ``map`` it calls.
+_UNTYPED_RECEIVER_LANGUAGES = frozenset({"rust"})
 
 #: The edges whose endpoint is meant to name a node: (kind, column holding that
 #: endpoint, key ``_resolve_bare_endpoints`` manages it through).
@@ -3094,6 +3097,25 @@ class GraphStore:
         return [], None
 
     @staticmethod
+    def _receiver_is_untyped(edge_extra: dict, caller_language: str) -> bool:
+        """Is this a call on another object whose type nothing records?
+
+        Only for languages whose parser records the receiver's name and never
+        its type (Rust). In the typed languages a missing type means the
+        receiver is truly unknown, and ``_own_method_excluded`` covers that.
+        """
+        receiver = edge_extra.get("receiver")
+        return (
+            caller_language in _UNTYPED_RECEIVER_LANGUAGES
+            and isinstance(receiver, str)
+            and bool(receiver)
+            and receiver not in _SELF_RECEIVERS
+            and receiver not in _SUPER_RECEIVERS
+            and "receiver_binding" not in edge_extra
+            and "receiver_type" not in edge_extra
+        )
+
+    @staticmethod
     def _own_method_excluded(
         edge_extra: dict,
         bare_name: str,
@@ -4106,6 +4128,15 @@ class GraphStore:
                     # candidate to it.
                     or receiver_constant
                 ]
+                if self._receiver_is_untyped(edge_extra, caller_language):
+                    # ``v.map(...)`` calls ``map`` on whatever ``v`` is, and
+                    # nothing says what that is. Sharing a file, or an
+                    # import, with ``Match.map`` does not make ``v`` a
+                    # ``Match``.
+                    supported = [
+                        qualified for qualified in supported
+                        if not parent_lookup.get(qualified)
+                    ]
                 own_method = self._own_method_excluded(
                     edge_extra, bare_name, caller_class, caller_language,
                     inheritance,
