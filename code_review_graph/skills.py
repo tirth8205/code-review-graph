@@ -4446,12 +4446,22 @@ def _opencode_plugin_content(
     )
 
 
+def _opencode_plugin_path() -> Path:
+    """Return where OpenCode loads our global plugin from.
+
+    OpenCode keeps its global config in ``$XDG_CONFIG_HOME/opencode``
+    (default ``~/.config/opencode``).
+    """
+    return _xdg_config_home() / "opencode" / "plugins" / "crg-plugin.ts"
+
+
 def install_opencode_plugin(opencode_major: int | None = None) -> Path:
     """Install the OpenCode user-level plugin for code-review-graph.
 
-    Writes ``~/.config/opencode/plugins/crg-plugin.ts``.  Creates the
-    directories if they don't exist.  If the file already exists it is
-    overwritten (the plugin is self-contained and idempotent).
+    Writes ``crg-plugin.ts`` to OpenCode's global plugins folder (see
+    ``_opencode_plugin_path``).  Creates the directories if they don't
+    exist.  If the file already exists it is overwritten (the plugin is
+    self-contained and idempotent).
 
     Returns:
         Path to the plugin file that was written.
@@ -4468,8 +4478,7 @@ def install_opencode_plugin(opencode_major: int | None = None) -> Path:
             "defaulting to the OpenCode 2.x plugin template"
         )
 
-    plugins_dir = Path.home() / ".config" / "opencode" / "plugins"
-    plugin_path = plugins_dir / "crg-plugin.ts"
+    plugin_path = _opencode_plugin_path()
 
     install_plan.write_text(
         plugin_path, _opencode_plugin_content(opencode_major, _hook_launcher())

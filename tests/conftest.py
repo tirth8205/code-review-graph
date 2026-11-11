@@ -63,6 +63,9 @@ def isolated_crg_home(tmp_path_factory, monkeypatch):
     # the developer's real patch layer. Pin it here, exactly as the Hermes
     # variable above.
     monkeypatch.setenv("DSH_HOME", str(tmp_path_factory.mktemp("dsh-home")))
+    # The OpenCode plugin and MiMo config follow ``XDG_CONFIG_HOME`` over a
+    # patched ``Path.home()``, so a developer's own setting must not leak in.
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     # A developer who records their own context history (#813) must not
     # have the suite append lines to every scratch repository it builds.
     monkeypatch.delenv("CRG_CONTEXT_HISTORY", raising=False)

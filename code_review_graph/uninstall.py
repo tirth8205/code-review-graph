@@ -1563,12 +1563,14 @@ def _process_user(
             report,
             dry_run=dry_run,
         )
-    _remove_file(
-        home / ".config" / "opencode" / "plugins" / "crg-plugin.ts",
-        home,
-        report,
-        dry_run=dry_run,
-    )
+    # Where install puts the plugin now, and ``~/.config``, where it put it
+    # before it followed ``$XDG_CONFIG_HOME``.
+    config_home = skills._xdg_config_home()
+    for plugin, boundary in {
+        skills._opencode_plugin_path(): config_home,
+        home / ".config" / "opencode" / "plugins" / "crg-plugin.ts": home,
+    }.items():
+        _remove_file(plugin, boundary, report, dry_run=dry_run)
 
     hermes_skills = skills._hermes_home() / "skills" / "code-review-graph"
     for slug in _generated_skill_slugs():
