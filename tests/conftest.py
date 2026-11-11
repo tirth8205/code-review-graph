@@ -1,10 +1,9 @@
 """Shared test fixtures.
 
-Keeps code-review-graph's own per-user state out of the developer's real
-home directory. Scoped deliberately: the editor-integration installers in
-``skills.py`` write to other user-level locations (``~/.codex``,
-``~/.cursor``, ``~/.config/opencode``) that are outside CRG state and are
-not covered here — those tests patch ``Path.home()`` themselves.
+Keeps code-review-graph's own per-user state, and every user-level config
+the installers in ``skills.py`` write (``~/.codex``, ``~/.cursor``,
+``~/.config/opencode`` and the rest), out of the developer's real home
+directory: each test runs with a temporary home.
 """
 
 from __future__ import annotations
@@ -66,6 +65,24 @@ def isolated_crg_home(tmp_path_factory, monkeypatch):
     # A developer who records their own context history (#813) must not
     # have the suite append lines to every scratch repository it builds.
     monkeypatch.delenv("CRG_CONTEXT_HISTORY", raising=False)
+    # The installers write user-level configs under the home directory
+    # (``~/.codex``, ``~/.continue``, ``~/.qwen`` and more). Point the home
+    # at a temp directory, so a test that forgets to patch ``Path.home()``
+    # writes there and not into the real one (crg-2lp). ``Path.home()``
+    # reads ``HOME`` on POSIX and ``USERPROFILE`` on Windows.
+    user_home = tmp_path_factory.mktemp("user-home")
+    monkeypatch.setenv("HOME", str(user_home))
+    monkeypatch.setenv("USERPROFILE", str(user_home))
+    # These win over the home when set, so clear them: the folders they
+    # name then follow the temp home too.
+    for name in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "MIMOCODE_HOME", "CLAUDE_CONFIG_DIR"):
+        monkeypatch.delenv(name, raising=False)
+    # Git reads its global config from the home as well. Give the temp one
+    # an identity, so a test commit works the same on every machine.
+    (user_home / ".gitconfig").write_text(
+        "[user]\n\tname = CRG Test\n\temail = crg-test@example.com\n",
+        encoding="utf-8",
+    )
     return home
 
 
