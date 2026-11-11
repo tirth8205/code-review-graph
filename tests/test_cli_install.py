@@ -167,7 +167,9 @@ def test_handle_init_mimo_registers_only_the_mimo_platform(monkeypatch, tmp_path
     targets: list[str] = []
     monkeypatch.setattr(
         "code_review_graph.skills.install_platform_configs",
-        lambda repo_root, target, dry_run=False: targets.append(target) or ["MiMo Code"],
+        lambda repo_root, target, dry_run=False, platforms=None: (
+            targets.append(target) or ["MiMo Code"]
+        ),
     )
 
     _handle_init(_args(tmp_path, "mimo"))
@@ -205,7 +207,7 @@ def test_handle_init_codex_skips_claude_skills(monkeypatch, tmp_path, capsys):
     )
     monkeypatch.setattr(
         "code_review_graph.skills.install_platform_configs",
-        lambda repo_root, target, dry_run=False: ["Codex"],
+        lambda repo_root, target, dry_run=False, platforms=None: ["Codex"],
     )
 
     called = {
@@ -255,7 +257,7 @@ def test_handle_init_all_skips_codex_skill_when_not_detected(
     )
     monkeypatch.setattr(
         "code_review_graph.skills.install_platform_configs",
-        lambda repo_root, target, dry_run=False: [],
+        lambda repo_root, target, dry_run=False, platforms=None: [],
     )
     monkeypatch.setitem(
         skills.PLATFORMS,
@@ -290,7 +292,7 @@ def test_handle_init_cursor_installs_cursor_hooks(monkeypatch, tmp_path, capsys)
     )
     monkeypatch.setattr(
         "code_review_graph.skills.install_platform_configs",
-        lambda repo_root, target, dry_run=False: ["Cursor"],
+        lambda repo_root, target, dry_run=False, platforms=None: ["Cursor"],
     )
     monkeypatch.setitem(
         __import__("code_review_graph.skills", fromlist=["PLATFORMS"]).PLATFORMS,
@@ -354,7 +356,7 @@ def test_handle_init_codebuddy_installs_only_codebuddy_native_files(
     )
     monkeypatch.setattr(
         "code_review_graph.skills.install_platform_configs",
-        lambda repo_root, target, dry_run=False: ["CodeBuddy Code"],
+        lambda repo_root, target, dry_run=False, platforms=None: ["CodeBuddy Code"],
     )
 
     called = {
@@ -376,7 +378,9 @@ def test_handle_init_codebuddy_installs_only_codebuddy_native_files(
         called["codebuddy_hooks"] = True
         return repo_root / ".codebuddy" / "settings.json"
 
-    def _inject_instruction_files(repo_root, target="all", *, include_claude_md=True):
+    def _inject_instruction_files(
+        repo_root, target="all", *, include_claude_md=True, platforms=None
+    ):
         called["codebuddy_instructions"] = target == "codebuddy"
         return {"CODEBUDDY.md": "created"}
 
@@ -412,3 +416,117 @@ def test_handle_init_codebuddy_installs_only_codebuddy_native_files(
     }
     assert "Installed CodeBuddy skills" in out
     assert "Installed CodeBuddy hooks" in out
+
+
+# ---------------------------------------------------------------------------
+# --platform all writes only for the tools found here
+# ---------------------------------------------------------------------------
+
+
+def _only_detect(monkeypatch, *found: str) -> None:
+    for key, spec in list(skills.PLATFORMS.items()):
+        monkeypatch.setitem(
+            skills.PLATFORMS, key, {**spec, "detect": lambda found_here=key in found: found_here}
+        )
+
+
+def _files_under(root: Path) -> set[str]:
+    return {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()}
+
+
+def test_install_all_writes_nothing_for_tools_that_are_not_found(
+    monkeypatch, tmp_path, capsys
+):
+    """Only Copilot is here: no Claude, Gemini, Qoder, CodeBuddy, Codex or OpenCode files."""
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.setattr(skills, "_git_hooks_dir", lambda root: None)
+    _only_detect(monkeypatch, "copilot")
+    args = _args(repo, "all")
+    args.no_instructions = False
+
+    _handle_init(args)
+    out = capsys.readouterr().out
+
+    assert _files_under(repo) - {".gitignore"} == {
+        ".vscode/mcp.json",
+        ".github/instructions/code-review-graph.instructions.md",
+    }
+    assert _files_under(home) == set()
+    assert "Configured 1 platform(s): GitHub Copilot" in out
+    assert "Not found here, so not set up: codex, claude, cursor," in out
+    assert "Add one anyway with: code-review-graph install --platform NAME" in out
+
+
+def test_install_names_a_platform_that_was_not_found(monkeypatch, tmp_path):
+    """``--platform`` writes for a tool even when it is not found here."""
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.setattr(skills, "_git_hooks_dir", lambda root: None)
+    _only_detect(monkeypatch)
+
+    _handle_init(_args(repo, "gemini-cli"))
+
+    assert {
+        ".gemini/settings.json",
+        ".gemini/hooks/crg-update.sh",
+        ".gemini/skills/review-changes/SKILL.md",
+    } <= _files_under(repo)
+    assert not (repo / ".claude").exists()
+
+
+def test_install_gitignore_block_lists_only_selected_platforms(monkeypatch, tmp_path):
+    from code_review_graph import install_gitignore
+
+    _only_detect(monkeypatch, "claude")
+    files = install_gitignore.repo_files(
+        tmp_path, "all", with_skills=True, with_hooks=True, with_instructions=True
+    )
+
+    assert ".mcp.json" in files
+    assert "CLAUDE.md" in files
+    assert not [path for path in files if path.startswith((".gemini", ".qoder", ".codebuddy"))]
+    assert "AGENTS.md" not in files
+
+
+@pytest.mark.parametrize(
+    ("detector", "env", "folder", "program"),
+    [
+        ("_claude_code_detected", "CLAUDECODE", ".claude", "claude"),
+        ("_opencode_detected", None, ".config/opencode", "opencode"),
+        ("_qoder_detected", None, ".qoder", "qodercli"),
+        ("_codebuddy_detected", None, ".codebuddy", "codebuddy"),
+    ],
+)
+def test_platforms_that_used_to_be_always_on_are_detected(
+    monkeypatch, tmp_path, detector, env, folder, program
+):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.setattr(skills.platform, "system", lambda: "Linux")
+    for name in ("CLAUDECODE", "CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(skills.shutil, "which", lambda name: None)
+    detect = getattr(skills, detector)
+    assert detect() is False
+
+    (home / folder).mkdir(parents=True)
+    assert detect() is True
+
+    (home / folder).rmdir()
+    monkeypatch.setattr(
+        skills.shutil, "which", lambda name: f"/usr/bin/{name}" if name == program else None
+    )
+    assert detect() is True
+
+    if env:
+        monkeypatch.setattr(skills.shutil, "which", lambda name: None)
+        monkeypatch.setenv(env, "1")
+        assert detect() is True

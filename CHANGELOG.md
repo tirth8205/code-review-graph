@@ -13,6 +13,12 @@
   the entry and the hooks.
 - The git pre-commit hook runs `update --quiet`, so a commit shows only the
   risk summary.
+- `install` (and `install --platform all`) writes MCP entries, skills, hooks
+  and instruction files only for the tools it finds on this machine. Claude
+  Code, OpenCode, Qoder and CodeBuddy Code used to count as found everywhere,
+  and Gemini CLI skills and hooks, Codex hooks and all nine instruction files
+  were written whatever was found. `install` now lists the tools it did not
+  find; add one anyway with `install --platform NAME`.
 
 ## [2.4.0] - 2026-11-10
 

@@ -130,6 +130,57 @@ def _copilot_vscode_detected() -> bool:
     return False
 
 
+def _xdg_config_home() -> Path:
+    """Return ``$XDG_CONFIG_HOME``, or ``~/.config`` when it is not set."""
+    xdg = os.environ.get("XDG_CONFIG_HOME", "").strip()
+    return Path(xdg) if xdg else Path.home() / ".config"
+
+
+def _app_data_dirs(app: str) -> list[Path]:
+    """Return where a desktop app keeps its user data on this OS."""
+    system = platform.system()
+    if system == "Darwin":
+        return [Path.home() / "Library" / "Application Support" / app]
+    if system == "Windows":
+        appdata = os.environ.get("APPDATA", "").strip()
+        return [Path(appdata) / app] if appdata else []
+    return [_xdg_config_home() / app]
+
+
+def _claude_code_detected() -> bool:
+    """Return whether Claude Code is on this machine, or this runs inside it."""
+    if os.environ.get("CLAUDECODE", "").strip():
+        return True
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    if config_dir and Path(config_dir).expanduser().exists():
+        return True
+    return bool(shutil.which("claude")) or (Path.home() / ".claude").exists()
+
+
+def _opencode_detected() -> bool:
+    """Return whether OpenCode is on PATH or has a user config folder."""
+    return bool(shutil.which("opencode")) or (_xdg_config_home() / "opencode").exists()
+
+
+def _qoder_detected() -> bool:
+    """Return whether the Qoder editor or its CLI is on this machine."""
+    if shutil.which("qoder") or shutil.which("qodercli"):
+        return True
+    if (Path.home() / ".qoder").exists():
+        return True
+    if platform.system() == "Darwin" and any(
+        (folder / "Qoder.app").exists()
+        for folder in (Path("/Applications"), Path.home() / "Applications")
+    ):
+        return True
+    return any(folder.exists() for folder in _app_data_dirs("Qoder"))
+
+
+def _codebuddy_detected() -> bool:
+    """Return whether CodeBuddy Code is on PATH or has a user config folder."""
+    return bool(shutil.which("codebuddy")) or (Path.home() / ".codebuddy").exists()
+
+
 def _hermes_home() -> Path:
     """Return the Hermes Agent home directory.
 
@@ -188,8 +239,7 @@ def _mimo_config_home() -> Path:
     mimo_home = os.environ.get("MIMOCODE_HOME", "").strip()
     if mimo_home and os.path.isabs(mimo_home):
         return Path(mimo_home) / "config"
-    xdg = os.environ.get("XDG_CONFIG_HOME", "").strip()
-    return (Path(xdg) if xdg else Path.home() / ".config") / "mimocode"
+    return _xdg_config_home() / "mimocode"
 
 
 def _mimo_config_paths(repo_root: Path) -> tuple[Path, Path]:
@@ -225,7 +275,7 @@ PLATFORMS: dict[str, dict[str, Any]] = {
         "name": "Claude Code",
         "config_path": lambda root: root / ".mcp.json",
         "key": "mcpServers",
-        "detect": lambda: True,
+        "detect": _claude_code_detected,
         "format": "object",
         "needs_type": True,
     },
@@ -265,7 +315,7 @@ PLATFORMS: dict[str, dict[str, Any]] = {
         "name": "OpenCode",
         "config_path": _opencode_config_path,
         "key": "mcp",
-        "detect": lambda: True,
+        "detect": _opencode_detected,
         "format": "object",
         "needs_type": False,
     },
@@ -315,7 +365,7 @@ PLATFORMS: dict[str, dict[str, Any]] = {
         "name": "Qoder",
         "config_path": lambda root: root / ".qoder" / "mcp.json",
         "key": "mcpServers",
-        "detect": lambda: True,
+        "detect": _qoder_detected,
         "format": "object",
         "needs_type": True,
     },
@@ -362,7 +412,7 @@ PLATFORMS: dict[str, dict[str, Any]] = {
         "name": "CodeBuddy Code",
         "config_path": lambda root: root / ".mcp.json",
         "key": "mcpServers",
-        "detect": lambda: True,
+        "detect": _codebuddy_detected,
         "format": "object",
         "needs_type": True,
     },
@@ -1166,10 +1216,22 @@ def platforms_for_target(repo_root: Path, target: str) -> dict[str, dict[str, An
     return {}
 
 
+def selected_platforms(repo_root: Path, target: str) -> frozenset[str]:
+    """Return the platform keys ``install`` writes anything for.
+
+    A named platform is written whether or not it is found here. ``"all"``
+    means the platforms found on this machine (see :func:`platforms_for_target`).
+    Skills, hooks and instruction files follow the same selection as the MCP
+    entries, so nothing is written for a tool that is not there.
+    """
+    return frozenset(platforms_for_target(repo_root, target))
+
+
 def install_platform_configs(
     repo_root: Path,
     target: str = "all",
     dry_run: bool = False,
+    platforms: Iterable[str] | None = None,
 ) -> list[str]:
     """Install MCP config for one or all detected platforms.
 
@@ -1179,17 +1241,21 @@ def install_platform_configs(
         dry_run: If True, print what would be done without writing. Inside an
             active :func:`install_plan.planning` block the would-be writes go
             into that plan, so the caller can show them.
+        platforms: With ``target="all"``, the keys already worked out by
+            :func:`selected_platforms`, so detection runs once per install.
 
     Returns:
         List of platform names that were configured.
     """
     if dry_run and install_plan.active() is None:
         with install_plan.planning():
-            return _install_platform_configs(repo_root, target, dry_run=True)
-    return _install_platform_configs(repo_root, target, dry_run=dry_run)
+            return _install_platform_configs(repo_root, target, True, platforms)
+    return _install_platform_configs(repo_root, target, dry_run, platforms)
 
 
-def _install_platform_configs(repo_root: Path, target: str, dry_run: bool) -> list[str]:
+def _install_platform_configs(
+    repo_root: Path, target: str, dry_run: bool, platforms: Iterable[str] | None = None
+) -> list[str]:
     """Do the work of :func:`install_platform_configs`.
 
     Writes go through :mod:`install_plan`, so under a dry run (always inside a
@@ -1197,7 +1263,11 @@ def _install_platform_configs(repo_root: Path, target: str, dry_run: bool) -> li
     """
     shared_aliases: dict[str, tuple[str, ...]] = {}
     if target == "all":
-        platforms_to_install = platforms_for_target(repo_root, target)
+        if platforms is None:
+            platforms_to_install = platforms_for_target(repo_root, target)
+        else:
+            chosen = set(platforms)
+            platforms_to_install = {k: v for k, v in PLATFORMS.items() if k in chosen}
 
         # Claude Code and CodeBuddy intentionally share the official project
         # .mcp.json/mcpServers contract. Process that exact pair once, but do
@@ -3526,24 +3596,39 @@ def inject_platform_instructions(repo_root: Path, target: str = "all") -> list[s
     return [name for name, outcome in outcomes.items() if outcome in ("created", "updated")]
 
 
+def instruction_file_wanted(
+    owners: Iterable[str], target: str, platforms: Iterable[str] | None = None
+) -> bool:
+    """Return whether an instruction file read by ``owners`` is written for ``target``.
+
+    ``platforms`` narrows ``"all"`` to the platforms ``install`` selected.
+    """
+    if target != "all":
+        return target in owners
+    return platforms is None or not set(owners).isdisjoint(platforms)
+
+
 def inject_instruction_files(
     repo_root: Path,
     target: str = "all",
     *,
     include_claude_md: bool = True,
+    platforms: Iterable[str] | None = None,
 ) -> dict[str, str]:
     """Write every instruction file for ``target`` and report what happened.
 
     Maps each filename to ``"created"``, ``"updated"``, ``"unchanged"`` or
     ``"conflict"``, as documented on ``_inject_instructions``. This is the entry
     point the install command uses so it can tell the user which files it
-    upgraded and which ones need manual attention.
+    upgraded and which ones need manual attention. ``platforms`` narrows
+    ``"all"`` to the platforms ``install`` selected.
     """
+    selected = None if platforms is None else frozenset(platforms)
     outcomes: dict[str, str] = {}
-    if include_claude_md and target in ("claude", "all"):
+    if include_claude_md and instruction_file_wanted(("claude",), target, selected):
         outcomes["CLAUDE.md"] = inject_claude_md(repo_root)
     for filename, owners in _PLATFORM_INSTRUCTION_FILES.items():
-        if target != "all" and target not in owners:
+        if not instruction_file_wanted(owners, target, selected):
             continue
         path = repo_root / filename
         if filename in _PLATFORM_INSTRUCTION_CUSTOM_SECTIONS:
