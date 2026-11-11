@@ -172,6 +172,64 @@ def parse_git_diff_ranges(
     return _parse_unified_diff(result.stdout)
 
 
+#: Paths per ``git ls-files`` call, well under every platform's command limit.
+_LS_FILES_CHUNK = 200
+
+
+def _untracked_among(repo_root: str, rel_paths: list[str]) -> set[str]:
+    """Return the paths in *rel_paths* that Git does not track.
+
+    ``git diff`` never lists a file Git does not track, so a new file has no
+    changed lines however much of it is new. Asking ``ls-files`` about only
+    these paths is cheap. Any failure answers "none", which keeps a review
+    to the lines the diff gave.
+    """
+    if not rel_paths or (Path(repo_root) / ".svn").exists():
+        return set()
+    tracked: set[str] = set()
+    for start in range(0, len(rel_paths), _LS_FILES_CHUNK):
+        chunk = rel_paths[start:start + _LS_FILES_CHUNK]
+        try:
+            result = subprocess.run(
+                ["git", "--literal-pathspecs", "ls-files", "-z", "--", *chunk],
+                capture_output=True,
+                cwd=repo_root,
+                timeout=_GIT_TIMEOUT,
+                stdin=subprocess.DEVNULL,
+            )
+        except (OSError, subprocess.SubprocessError):
+            logger.debug("git ls-files failed while looking for new files", exc_info=True)
+            return set()
+        if result.returncode != 0:
+            return set()
+        tracked.update(os.fsdecode(path) for path in result.stdout.split(b"\0") if path)
+    return {path for path in rel_paths if path not in tracked}
+
+
+def _new_files_without_ranges(
+    repo_root: str,
+    changed_files: list[str],
+    changed_ranges: dict[str, list[tuple[int, int]]],
+) -> list[str]:
+    """The changed files Git does not track, which the diff cannot describe.
+
+    *changed_files* and the keys of *changed_ranges* are the graph's absolute
+    paths. Returns them in the same spelling.
+    """
+    deletions = getattr(changed_ranges, "deletions", {})
+    root = Path(repo_root)
+    by_rel: dict[str, str] = {}
+    for path in changed_files:
+        if path in changed_ranges or path in deletions:
+            continue
+        try:
+            by_rel[Path(path).relative_to(root).as_posix()] = path
+        except ValueError:
+            continue
+    untracked = _untracked_among(repo_root, list(by_rel))
+    return [by_rel[rel] for rel in by_rel if rel in untracked]
+
+
 def parse_svn_diff_ranges(
     repo_root: str,
     rev_range: str | None = None,
@@ -1546,6 +1604,17 @@ def analyze_changes(
         changed_nodes = []
         for fp in changed_files:
             changed_nodes.extend(store.get_nodes_by_file(fp))
+
+    if changed_ranges and repo_root is not None:
+        # A file Git does not track has no lines in the diff, so with other
+        # files' lines in hand a brand-new file used to drop out of the
+        # review. All of it is new, so all of it counts as changed.
+        seen_new = {node.qualified_name for node in changed_nodes}
+        for fp in _new_files_without_ranges(repo_root, changed_files, changed_ranges):
+            for node in store.get_nodes_by_file(fp):
+                if node.qualified_name not in seen_new:
+                    seen_new.add(node.qualified_name)
+                    changed_nodes.append(node)
 
     # RTL declarations are stored as Function nodes for compatibility but
     # are not callable/testable functions.

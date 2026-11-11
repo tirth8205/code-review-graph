@@ -628,7 +628,7 @@ class TestChanges:
             mock_get_store.return_value = (self.store, Path("/fake/repo"))
             detect_changes_func(base="HEAD~1", repo_root="/fake/repo")
 
-        discover.assert_called_once_with(Path("/fake/repo"), "HEAD~1")
+        discover.assert_called_once_with(Path("/fake/repo"), "HEAD~1", notes=[])
         raw_changed.assert_not_called()
 
     @pytest.mark.parametrize("func_name,module", [
@@ -736,7 +736,7 @@ class TestChanges:
             result = detect_changes_func(base="origin/main", repo_root=str(root))
 
         assert result["status"] == "ok"
-        discover.assert_called_once_with(root, "origin/main")
+        discover.assert_called_once_with(root, "origin/main", notes=[])
         # Resolving again outside the chain would spend the discovery budget
         # a second time and could pick a different ref. require_vcs is the
         # chain's own business now; TestDiscoverReviewChanges pins it.

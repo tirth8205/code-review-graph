@@ -3262,8 +3262,11 @@ def _dispatch() -> None:
             # must never render as "there is nothing to review" — a CI job
             # keyed on exit 0 would wave through a pull request nobody read.
             # ChangeDiscoveryError reaches main() and becomes one
-            # `Error: ...` line and exit 1.
-            changed, base = discover_review_changes(repo_root, args.base)
+            # `Error: ...` line and exit 1, a --base Git does not know included.
+            notes: list[str] = []
+            changed, base = discover_review_changes(repo_root, args.base, notes=notes)
+            for note in notes:
+                print(f"Note: {note}", file=sys.stderr)
 
             if not changed:
                 print("No changes detected.")

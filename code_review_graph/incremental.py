@@ -1636,9 +1636,111 @@ def get_staged_and_unstaged(
         return []
 
 
+#: The base every review tool and ``detect-changes`` uses when none is given.
+DEFAULT_REVIEW_BASE = "HEAD~1"
+
+ONE_COMMIT_NOTE = (
+    "this repository has one commit; reviewing uncommitted and new files instead."
+)
+NO_COMMIT_NOTE = (
+    "this repository has no commits yet; reviewing uncommitted and new files instead."
+)
+
+
+def _git_commit_known(repo_root: Path, ref: str, timeout: float) -> bool | None:
+    """Return whether Git knows *ref* as a commit, or None when it cannot say.
+
+    ``rev-parse --verify --quiet`` exits 1 for an unknown name and 128 when
+    the folder is not a repository at all. Only the first is an answer.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+            capture_output=True,
+            cwd=str(repo_root),
+            timeout=timeout,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise _vcs_unavailable("git", exc, timeout=timeout) from exc
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    return None
+
+
+def _empty_tree(repo_root: Path, timeout: float) -> str:
+    """Return the id of the empty tree in this repository's hash format."""
+    try:
+        result = subprocess.run(
+            ["git", "hash-object", "-t", "tree", "--stdin"],
+            capture_output=True,
+            input=b"",
+            cwd=str(repo_root),
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise _vcs_unavailable("git", exc, timeout=timeout) from exc
+    tree = result.stdout.decode("ascii", "replace").strip()
+    if result.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40,64}", tree):
+        raise ChangeDiscoveryError(
+            "could not determine the changes: git could not name an empty tree "
+            f"(rc={result.returncode})."
+        )
+    return tree
+
+
+def _usable_review_base(
+    repo_root: Path,
+    base: str,
+    resolved_base: str,
+    timeout: float,
+    notes: list[str] | None,
+) -> str:
+    """Check a Git review base before it is diffed against.
+
+    A base Git does not know used to fall through to ``git status``, so a
+    typo in ``--base`` reviewed the working tree and exited 0. A base the
+    caller chose is now an error that says what to do. The default
+    ``HEAD~1`` is different: in a repository with one commit, or none, it
+    can never resolve, so the review covers uncommitted and new files and
+    *notes* says so in plain words.
+    """
+    if detect_vcs(repo_root) != "git":
+        return resolved_base
+    unknown = ChangeDiscoveryError(
+        f"base {base!r} is not a known revision. Check it with "
+        "`git branch -a`, or run `git fetch origin <branch>` in a "
+        "shallow clone."
+    )
+    sides = [side for side in re.split(r"\.{2,3}", resolved_base) if side]
+    if not sides or any(side.startswith("-") for side in sides):
+        raise unknown
+    for side in sides:
+        known = _git_commit_known(repo_root, side, timeout)
+        if known is None:
+            # Not a repository Git can read; the diff reports that itself.
+            return resolved_base
+        if known:
+            continue
+        if base != DEFAULT_REVIEW_BASE:
+            raise unknown
+        if _git_commit_known(repo_root, "HEAD", timeout):
+            if notes is not None:
+                notes.append(ONE_COMMIT_NOTE)
+            return "HEAD"
+        if notes is not None:
+            notes.append(NO_COMMIT_NOTE)
+        return _empty_tree(repo_root, timeout)
+    return resolved_base
+
+
 def discover_review_changes(
     repo_root: Path,
-    base: str = "HEAD~1",
+    base: str = DEFAULT_REVIEW_BASE,
+    *,
+    notes: list[str] | None = None,
 ) -> tuple[list[str], str]:
     """Discover the files under review, on the short discovery budget.
 
@@ -1674,19 +1776,29 @@ def discover_review_changes(
     bug; confidently reviewing nothing is a worse one. The budget above bounds
     the walk instead, and reports it when it does.
 
+    Args:
+        repo_root: Repository root directory.
+        base: The ref to review against. The default, ``HEAD~1``, cannot
+            resolve in a repository with one commit or none; the review then
+            covers uncommitted and new files instead.
+        notes: When given, plain sentences for the user are appended to it,
+            such as the one saying the default base was replaced.
+
     Returns:
         ``(changed_files, resolved_base)``. The resolved base is returned
         because callers need the same ref afterwards, for diff hunks and risk
         scoring, and resolving it twice would spend the budget twice.
 
     Raises:
-        ChangeDiscoveryError: git could not be run, or overran the discovery
-            budget. Never raised for a repository that simply has no changes.
+        ChangeDiscoveryError: git could not be run, overran the discovery
+            budget, or does not know a base the caller chose. Never raised
+            for a repository that simply has no changes.
     """
     budget = discovery_timeout()
     resolved_base = resolve_review_base(
         repo_root, base, timeout=budget, require_vcs=True,
     )
+    resolved_base = _usable_review_base(repo_root, base, resolved_base, budget, notes)
     changed = get_changed_files(
         repo_root, resolved_base, timeout=budget, require_vcs=True,
     )
