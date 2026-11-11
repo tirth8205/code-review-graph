@@ -685,6 +685,18 @@ def test_community_filter_drives_label_visibility(store_with_data, tmp_path):
     assert "applyCommunityFilter()" in toggle
 
 
+def test_every_way_to_close_the_detail_panel_brings_back_the_legend(
+    store_with_data, tmp_path,
+):
+    """Opening the panel hides the legend; Escape once forgot to show it again."""
+    script = _full_page_script(store_with_data, tmp_path)
+    close = _js_block(script, "function closeDetailPanel(")
+    assert 'getElementById("legend").style.display = ""' in close
+    # Nothing else closes the panel, so no path can skip the legend.
+    assert script.count('detailPanel.classList.remove("visible")') == 1
+    assert 'detailPanel.classList.remove("visible")' in close
+
+
 # ---------------------------------------------------------------------------
 # Phase 9: Visualization Aggregation
 # ---------------------------------------------------------------------------

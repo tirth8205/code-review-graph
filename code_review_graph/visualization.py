@@ -1627,7 +1627,7 @@ function updateNodes() {
         showDetailPanel(d);
       } else if (ev.key === "Escape") {
         ev.preventDefault();
-        detailPanel.classList.remove("visible");
+        closeDetailPanel(false);
         hideTooltip();
       } else if (["ArrowUp","ArrowDown","ArrowLeft","ArrowRight"].indexOf(ev.key) !== -1) {
         ev.preventDefault();
@@ -1999,16 +1999,17 @@ function clearFlowHighlight() {
 var detailPanel = document.getElementById("detail-panel");
 var dpContent = document.getElementById("dp-content");
 var detailTrigger = null;
+// The one way to close the panel: opening it hides the legend, so closing
+// it must bring the legend back, whatever closed it.
+function closeDetailPanel(returnFocus) {
+  detailPanel.classList.remove("visible");
+  document.getElementById("legend").style.display = "";
+  if (returnFocus && detailTrigger) detailTrigger.focus();
+}
 document.querySelector("#detail-panel .dp-close").addEventListener("click", function() {
-  detailPanel.classList.remove("visible");
-  document.getElementById("legend").style.display = "";
-  if (detailTrigger) detailTrigger.focus();
+  closeDetailPanel(true);
 });
-svg.on("click", function() {
-  detailPanel.classList.remove("visible");
-  document.getElementById("legend").style.display = "";
-  if (detailTrigger) detailTrigger.focus();
-});
+svg.on("click", function() { closeDetailPanel(true); });
 function showDetailPanel(d) {
   detailTrigger = document.activeElement;
   var callers = [], callees = [];
@@ -2165,8 +2166,7 @@ document.addEventListener("keydown", function(ev) {
   var inInput = tag === "input" || tag === "textarea" || tag === "select" || ev.target.isContentEditable;
   if (ev.key === "Escape") {
     if (detailPanel.classList.contains("visible")) {
-      detailPanel.classList.remove("visible");
-      if (detailTrigger) detailTrigger.focus();
+      closeDetailPanel(true);
     } else if (searchResults.style.display === "block") {
       searchResults.style.display = "none";
       searchInput.focus();

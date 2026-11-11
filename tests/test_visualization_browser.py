@@ -571,6 +571,30 @@ def test_showing_a_community_again_brings_back_its_labels(full_page):
     full_page.assert_no_errors()
 
 
+def test_escape_closes_the_detail_panel_and_brings_back_the_legend(full_page):
+    """Escape must undo everything opening the panel did, legend included."""
+    full_page.freeze_layout()
+    node = full_page.node_by_qualified_name("src/mod0.py::mod0_func_3")
+    panel = full_page.page.locator("#detail-panel")
+    legend = full_page.page.locator("#legend")
+
+    node.click()
+    assert panel.is_visible()
+    assert not legend.is_visible()
+    full_page.page.keyboard.press("Escape")
+    assert not panel.is_visible()
+    assert legend.is_visible()
+
+    # Escape on a focused node goes through the node's own handler.
+    node.click()
+    assert not legend.is_visible()
+    node.focus()
+    full_page.page.keyboard.press("Escape")
+    assert not panel.is_visible()
+    assert legend.is_visible()
+    full_page.assert_no_errors()
+
+
 # ---------------------------------------------------------------------------
 # Aggregated (community) page
 # ---------------------------------------------------------------------------
