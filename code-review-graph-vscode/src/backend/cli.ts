@@ -5,8 +5,8 @@ import * as vscode from 'vscode';
 const execFileAsync = promisify(execFile);
 
 const CLI_TIMEOUT_MS = 60_000;
-// Build and update can take many minutes on a large repository, so they
-// run with no time limit (0 means none).
+// Build, update and embed can take many minutes on a large repository, so
+// they run with no time limit (0 means none).
 const NO_TIMEOUT = 0;
 const INSTALL_TIMEOUT_MS = 120_000;
 // How much of the end of watch's stderr to keep for an error message.
@@ -148,7 +148,7 @@ export class CliWrapper {
                 title: 'Code Review Graph: Computing embeddings\u2026',
                 cancellable: false,
             },
-            () => this.exec(['embed'], workspaceRoot),
+            () => this.exec(['embed'], workspaceRoot, NO_TIMEOUT),
         );
     }
 
