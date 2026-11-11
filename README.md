@@ -52,9 +52,19 @@ AI coding tools often re-read large parts of a codebase to review a change. `cod
   <img src="diagrams/diagram1_before_vs_after.png" alt="The Token Problem: reading flask's whole corpus costs 143,594 tokens, a graph answer costs 2,196 (65x fewer)" width="85%" />
 </p>
 
+**What it does**
+
+- **Maps your code.** Functions, classes, imports, calls and tests become one graph.
+- **Shows what a change can break.** The callers, dependents and tests it can reach, with a risk score.
+- **Stays up to date.** Hooks and watch mode parse again only the files that changed.
+- **Works with your AI tools.** One `install` sets up each tool it finds.
+- **Stays on your machine.** One SQLite file, no cloud service; cloud embeddings are opt-in.
+
 ---
 
 ## Quick Start
+
+Requires Python 3.10+.
 
 ```bash
 pip install code-review-graph          # or: pipx install code-review-graph
@@ -62,7 +72,27 @@ code-review-graph install              # detect installed AI coding tools and co
 code-review-graph build                # parse the codebase
 ```
 
+<details>
+<summary><strong>What <code>install</code> changes, and how to preview it first</strong></summary>
+<br>
+
 `install` detects which AI coding tools you have, writes an MCP server entry for each, installs hooks and skills where the platform supports them, and adds graph instructions to the platform's rules file. The MCP entry uses `poetry run` or `uv run` inside a Poetry or uv project environment, `uvx code-review-graph serve` when `uvx` is on PATH, and otherwise the current Python interpreter. Nothing is written until `install` has listed the files it will change and you have answered its question about instruction files; `install --dry-run` shows each change as a diff and writes nothing. Restart the editor or tool afterwards.
+
+The files `install` writes, such as `.claude/` and `.mcp.json`, stay visible to git in case your team commits them. `install --gitignore` adds the ones that run created to a marked block in `.gitignore`; `uninstall` removes the block.
+
+For Codex, the installer also places a global `code-review-graph` Skill under
+`$CODEX_HOME/skills/code-review-graph/` (default:
+`~/.codex/skills/code-review-graph/`). It prefers CRG MCP tools and falls back
+to the bundled read-only CLI when MCP is unavailable; a missing, empty, or
+stale graph never triggers an implicit build or update. WSL and Windows Codex
+runtimes have separate `CODEX_HOME` directories and tool inventories, so
+install and refresh the runtime that will execute the task.
+
+</details>
+
+<details>
+<summary><strong>Every supported platform, and how to set up just one</strong></summary>
+<br>
 
 <p align="center">
   <img src="diagrams/diagram8_supported_platforms.png" alt="One install, every platform: detects Codex, Claude Code, CodeBuddy Code, Cursor, Windsurf, Zed, Continue, OpenCode, MiMo Code, Antigravity, Gemini CLI, Qwen Code, Qoder, Kiro, GitHub Copilot, GitHub Copilot CLI, Hermes Agent and DeepSeek Harness" width="85%" />
@@ -77,15 +107,11 @@ code-review-graph install --platform codebuddy
 
 Config file locations are listed in [docs/USAGE.md](docs/USAGE.md#supported-platforms). Requires Python 3.10+.
 
-The files `install` writes, such as `.claude/` and `.mcp.json`, stay visible to git in case your team commits them. `install --gitignore` adds the ones that run created to a marked block in `.gitignore`; `uninstall` removes the block.
+</details>
 
-For Codex, the installer also places a global `code-review-graph` Skill under
-`$CODEX_HOME/skills/code-review-graph/` (default:
-`~/.codex/skills/code-review-graph/`). It prefers CRG MCP tools and falls back
-to the bundled read-only CLI when MCP is unavailable; a missing, empty, or
-stale graph never triggers an implicit build or update. WSL and Windows Codex
-runtimes have separate `CODEX_HOME` directories and tool inventories, so
-install and refresh the runtime that will execute the task.
+<details>
+<summary><strong>Remove it again with <code>uninstall</code></strong></summary>
+<br>
 
 `uninstall` removes CRG-owned files and entries from a Git or SVN working tree and leaves other MCP servers, hooks, skills and JSONC comments alone. Run it from anywhere inside the tree. Shared config files are replaced atomically, so a failed write leaves the original intact.
 
@@ -98,16 +124,28 @@ code-review-graph uninstall --keep-data  # remove integrations, keep graph datab
 code-review-graph uninstall --keep-user-configs --repo .  # this project only
 ```
 
+</details>
+
+Restart the editor or tool after `install`.
 Then open the project and ask the assistant:
 
 ```
 Build the code review graph for this project
 ```
 
+<details>
+<summary><strong>How long a build takes, and what a partial build means</strong></summary>
+<br>
+
 Build time scales with repository size; a cold build of a ~3,000-file repository took about 40 seconds ([measured](docs/REPRODUCING.md#incremental-update-latency)). After that, hooks and watch mode keep the graph updated. If some files fail to parse, the result has status `partial` and names them in its summary; the CLI also prints a `Warning:` line on stderr, and those files keep their previous graph rows.
 
+</details>
 
 ### Run with Docker or Podman
+
+<details>
+<summary><strong>Build the image, then run it on your repository</strong></summary>
+<br>
 
 Build the image from the repository root:
 
@@ -156,19 +194,31 @@ Docker-compatible engine or Podman machine before running them. On a host with
 SELinux on, such as Fedora, add `:z` to the mount (`"$PWD:/workspace:z"`), or
 the container is refused access to the repository.
 
+</details>
+
 ## How It Works
+
+The repository is parsed into ASTs with Tree-sitter and stored as a graph of nodes (functions, classes, imports) and edges (calls, inheritance, test coverage). At review time the graph is queried for the smallest set of files the assistant needs to read.
+
+<details>
+<summary><strong>Two diagrams: how the assistant uses the graph, and the build pipeline</strong></summary>
+<br>
 
 <p align="center">
   <img src="diagrams/diagram7_mcp_integration_flow.png" alt="How the assistant uses the graph: the user asks for a review, the assistant calls MCP tools, the graph returns blast radius and risk scores, the assistant reads only the affected files" width="80%" />
 </p>
 
-The repository is parsed into ASTs with Tree-sitter and stored as a graph of nodes (functions, classes, imports) and edges (calls, inheritance, test coverage). At review time the graph is queried for the smallest set of files the assistant needs to read.
-
 <p align="center">
   <img src="diagrams/diagram2_architecture_pipeline.png" alt="Architecture pipeline: Repository to Tree-sitter parser to SQLite graph to blast radius to minimal review set" width="100%" />
 </p>
 
+</details>
+
 ### Blast-radius analysis
+
+<details>
+<summary><strong>Every caller, dependent and test a change can affect</strong></summary>
+<br>
 
 When a file changes, the graph traces every caller, dependent and test that could be affected. The assistant reads those files instead of scanning the whole project.
 
@@ -176,7 +226,13 @@ When a file changes, the graph traces every caller, dependent and test that coul
   <img src="diagrams/diagram3_blast_radius.png" alt="Blast radius: a change to login() propagates to callers, dependents, and tests" width="70%" />
 </p>
 
+</details>
+
 ### Incremental updates
+
+<details>
+<summary><strong>Only changed files are parsed again (about 2.5 s for a two-file edit)</strong></summary>
+<br>
 
 Editor hooks, git hooks (pre-commit, post-checkout, post-merge, post-rewrite) and watch mode trigger incremental updates. The update diffs changed files, finds their dependents through the graph's import and call edges, and re-parses only the files whose SHA-256 hash changed. On a ~3,000-file project (django) a two-file edit re-indexes in about 2.5 seconds on the path the hooks use, of which ~1.4 s is process start-up; a no-op update costs only that start-up. See [Incremental update latency](docs/REPRODUCING.md#incremental-update-latency).
 
@@ -184,7 +240,13 @@ Editor hooks, git hooks (pre-commit, post-checkout, post-merge, post-rewrite) an
   <img src="diagrams/diagram4_incremental_update.png" alt="Incremental update flow: a hook or watch update triggers a git diff, dependents are found through graph edges, and only files whose SHA-256 hash changed are re-parsed" width="90%" />
 </p>
 
+</details>
+
 ### Whole codebase or targeted answer?
+
+<details>
+<summary><strong>A slice of the graph shaped to the question, not the whole codebase</strong></summary>
+<br>
 
 Instead of feeding a whole corpus to the model, the graph returns a slice shaped to the question. In the 2026-08-02 capture of this repository at `84bde354`, 208,821 source tokens became ~3,190 tokens per question. The repository has grown a lot since that snapshot, so both numbers are larger today.
 
@@ -192,7 +254,13 @@ Instead of feeding a whole corpus to the model, the graph returns a slice shaped
   <img src="diagrams/diagram6_monorepo_funnel.png" alt="code-review-graph at the 84bde354 snapshot: 208,821 source tokens funnel down to ~3,190 token graph responses, about 65x fewer tokens per question" width="80%" />
 </p>
 
+</details>
+
 ### Language coverage and notebooks
+
+<details>
+<summary><strong>Python, JavaScript, TypeScript, Go, Rust, Java, C/C++, C# and many more, plus notebooks: the full list</strong></summary>
+<br>
 
 <p align="center">
   <img src="diagrams/diagram9_language_coverage.png" alt="Language coverage by category: Web, Backend, Systems, Mobile, Scripting, Shells, Domain, Config and Other, plus Jupyter and Databricks notebooks" width="90%" />
@@ -207,7 +275,13 @@ and controller HANDLES edges, including literal group prefixes.
 
 Java projects get Spring dependency-injection call resolution, request endpoints and WebFlux routes, scheduled triggers, application-event publisher-to-listener edges, Spring AOP advice-to-target edges, and Temporal workflow and activity edges. Each resolver runs after the parse and needs the injected field, published event or workflow stub to be visible in the repository.
 
+</details>
+
 ### Add your own language
+
+<details>
+<summary><strong>Map a file extension to a bundled Tree-sitter grammar in <code>languages.toml</code></strong></summary>
+<br>
 
 If your repository uses a language the parser does not cover, add a `languages.toml` to `.code-review-graph/` that maps file extensions to any grammar bundled in `tree_sitter_language_pack`, plus the node types for functions, classes, imports and calls:
 
@@ -223,7 +297,13 @@ call_node_types = ["call"]
 
 The generic tree-sitter walker does the extraction. Built-in languages cannot be overridden. See [docs/CUSTOM_LANGUAGES.md](docs/CUSTOM_LANGUAGES.md) for the schema, validation rules and a worked example.
 
+</details>
+
 ### Risk-scored PR reviews in CI (GitHub Action)
+
+<details>
+<summary><strong>One pull request comment with risk scores, affected flows and test gaps; see the sample workflow</strong></summary>
+<br>
 
 The same analysis runs as a composite GitHub Action. The graph is built and queried on your CI runner; no source code is sent to an external service. On each pull request the action posts one sticky comment with risk-scored functions, affected execution flows and test gaps, updated in place on every push. The optional `fail-on-risk` input turns it into a merge gate. The optional `details` input adds more graph context, folded away and capped in size: why each top symbol scored what it did, the communities, hubs and cross-boundary links the change touches, its impact radius, its untested hotspots, and where the graph came from.
 
@@ -248,17 +328,25 @@ jobs:
 
 See [docs/GITHUB_ACTION.md](docs/GITHUB_ACTION.md) for inputs, risk levels and caching, or the workflow this repository runs on itself in [`.github/workflows/pr-review.yml`](.github/workflows/pr-review.yml).
 
+</details>
+
 ---
 
 ## Benchmarks
+
+The median per-question token reduction across the 6 repositories is about **63x** (whole-corpus baseline vs graph query). The **358x** maximum is one repository (fastapi, the largest corpus), not the typical result.
+
+<details>
+<summary><strong>The benchmark board, and how the numbers were made</strong></summary>
+<br>
 
 <p align="center">
   <img src="diagrams/diagram5_benchmark_board.png" alt="Benchmarks across 6 repositories: ~63x median per-question token reduction (358x max), 0.69 average impact F1 against graph-derived ground truth" width="85%" />
 </p>
 
-The median per-question token reduction across the 6 repositories is about **63x** (whole-corpus baseline vs graph query). The **358x** maximum is one repository (fastapi, the largest corpus), not the typical result.
-
 All numbers come from the evaluation runner against 6 open-source repositories (13 commits). Every config pins an upstream SHA, Leiden runs with a fixed seed, and embeddings are deterministic on CPU, so two runs on different machines produce the same numbers. The reproduction recipe is in [`docs/REPRODUCING.md`](docs/REPRODUCING.md). A weekly report-only run on the two smallest configs lives in [`.github/workflows/eval.yml`](.github/workflows/eval.yml).
+
+</details>
 
 <details>
 <summary><strong>Token efficiency: ~63x median per-question reduction (range 35x to 358x; whole-corpus vs graph query)</strong></summary>
@@ -332,15 +420,27 @@ From the same 2026-08-02 clean-room build at the pinned SHAs above. Embedding co
 
 ### Limitations
 
+<details>
+<summary><strong>Five known limits: circular recall, small edits, search ranking, flow detection, false positives</strong></summary>
+<br>
+
 - **Impact "recall 1.0" is circular.** The historical ground truth comes from the same graph edges the predictor walks, so it is an upper bound by construction. Co-change numbers are not quoted until the benchmark is re-run with the path fix.
 - **Small single-file changes.** Graph context can exceed a plain file read for trivial edits. The overhead is the structural metadata that makes multi-file analysis possible.
 - **Search ranking.** Keyword search usually finds the right result near the top, but ranking needs work. Express queries can return no hits because of module-pattern naming.
 - **Flow detection.** Entry-point detection is strongest for Python and PHP/Laravel. JavaScript and Go flow detection needs work.
 - **Precision vs recall.** Impact analysis is conservative. It flags files that might be affected, which means false positives in large dependency graphs.
 
+</details>
+
 ---
 
 ## Features
+
+Updates, impact analysis, search, visualisation, CI reviews, refactoring and multi-repo support, all kept on your machine.
+
+<details>
+<summary><strong>The full feature table</strong></summary>
+<br>
 
 | Feature | Details |
 |---------|---------|
@@ -376,9 +476,13 @@ From the same 2026-08-02 clean-room build at the pinned SHAs above. Embedding co
 | **Full-text search** | FTS5 hybrid search combining keyword and vector similarity |
 | **Local storage** | One SQLite file in `.code-review-graph/`; no external database or cloud service |
 
+</details>
+
 ---
 
 ## Usage
+
+Your assistant uses the graph by itself once it is built. Open a part below for skills, commands, MCP tools and settings.
 
 <details>
 <summary><strong>Skills</strong></summary>
@@ -697,6 +801,10 @@ The flag takes precedence over the variable. When neither is set, all tools are 
 
 Answers in [docs/FAQ.md](docs/FAQ.md):
 
+<details>
+<summary><strong>How it compares with LSP, RAG and grep, when not to use it, and more</strong></summary>
+<br>
+
 - [vs LSP / language servers](docs/FAQ.md#how-is-this-different-from-lsp-and-language-servers): one persistent cross-language graph instead of per-language daemons; LSP stays more precise per symbol.
 - [vs RAG / embeddings](docs/FAQ.md#isnt-this-just-rag): structural edges parsed from the AST, not similarity chunks; embeddings are optional and only assist search.
 - [vs grep / agentic search](docs/FAQ.md#why-not-just-grep): grep wins on one-hop lookups; the graph wins on multi-hop questions (impact radius, callers-of-callers, tests-for, affected flows).
@@ -704,11 +812,17 @@ Answers in [docs/FAQ.md](docs/FAQ.md):
 - [Does it phone home?](docs/FAQ.md#does-it-phone-home): no telemetry; cloud embeddings are opt-in.
 - [How do I verify it is working?](docs/FAQ.md#how-do-i-verify-it-is-working): `status`, `detect-changes --brief`, `/mcp`.
 
+</details>
+
 ## Troubleshooting
 
 More cases, including Windows/WSL, are in [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 
 ### `pip` / `pipx` cannot download `hatchling` (or `Errno 9` / `Bad file descriptor` to PyPI)
+
+<details>
+<summary><strong>How to fix it</strong></summary>
+<br>
 
 Installing from a source tree (for example `pipx install .`) needs build dependencies from PyPI. If you see `Could not find a version that satisfies the requirement hatchling` after connection warnings, the Python in that terminal may not be able to open an HTTPS connection to `pypi.org`. This is seen most often in an editor's integrated terminal, and sometimes with a VPN, firewall or proxy.
 
@@ -724,7 +838,13 @@ Installing from a source tree (for example `pipx install .`) needs build depende
 
 To diagnose: `python3 scripts/diagnose_pypi_connectivity.py`. If it prints `FAILED`, the problem is the network environment, not the package name.
 
+</details>
+
 ### Windows: `Invalid JSON: EOF while parsing` or `MCP error -32000: Connection closed`
+
+<details>
+<summary><strong>How to fix it</strong></summary>
+<br>
 
 Do not use a `cmd /c` wrapper in the Claude Code config. Point `~/.claude.json` at the `.exe` directly and set UTF-8 through the config:
 
@@ -736,7 +856,18 @@ Do not use a `cmd /c` wrapper in the Claude Code config. Point `~/.claude.json` 
 }
 ```
 
+</details>
+
 ## Contributing
+
+Pull requests target `staging` (the default branch). Changes are promoted
+`staging` → `testing` → `main`, and releases are tagged from `main`. No
+promotion is automatic: a person reviews and merges each one. See
+[CONTRIBUTING.md](CONTRIBUTING.md#branching-and-promotion) for the full flow.
+
+<details>
+<summary><strong>Set up a development copy and run the tests</strong></summary>
+<br>
 
 ```bash
 git clone https://github.com/tirth8205/code-review-graph.git
@@ -746,12 +877,15 @@ pip install -e ".[dev]"
 pytest
 ```
 
-Pull requests target `staging` (the default branch). Changes are promoted
-`staging` → `testing` → `main`, and releases are tagged from `main`. No
-promotion is automatic: a person reviews and merges each one. See
-[CONTRIBUTING.md](CONTRIBUTING.md#branching-and-promotion) for the full flow.
+</details>
+
+<details>
+<summary><strong>Add a built-in language</strong></summary>
+<br>
 
 To add a built-in language, edit `code_review_graph/parser.py`: add the extension to `EXTENSION_TO_LANGUAGE` and node type mappings to `_CLASS_TYPES`, `_FUNCTION_TYPES`, `_IMPORT_TYPES` and `_CALL_TYPES`. Include a test fixture and open a PR. For a language you only need in one repository, use [`languages.toml`](docs/CUSTOM_LANGUAGES.md) instead.
+
+</details>
 
 ## Licence
 

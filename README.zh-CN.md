@@ -52,9 +52,19 @@ AI 编码工具为了审查一次改动，常常要重新读取代码库的大�
   <img src="diagrams/diagram1_before_vs_after.png" alt="Token 问题：读完 flask 的全部语料需要 143,594 个 token，图给出的回答只需 2,196 个（少 65 倍）" width="85%" />
 </p>
 
+**它能做什么**
+
+- **为你的代码建图。** 函数、类、导入、调用和测试组成一张图谱。
+- **指出一次改动可能弄坏什么。** 它能波及的调用者、依赖方和测试，并附带风险评分。
+- **保持最新。** 钩子和 watch 模式只重新解析变更的文件。
+- **配合你的 AI 工具。** 一次 `install` 就能配置它找到的每个工具。
+- **留在你的机器上。** 一个 SQLite 文件，没有云服务；云端嵌入需要主动开启。
+
 ---
 
 ## 快速开始
+
+需要 Python 3.10+。
 
 ```bash
 pip install code-review-graph          # or: pipx install code-review-graph
@@ -62,7 +72,25 @@ code-review-graph install              # detect installed AI coding tools and co
 code-review-graph build                # parse the codebase
 ```
 
+<details>
+<summary><strong><code>install</code> 会改动什么，以及如何先预览</strong></summary>
+<br>
+
 `install` 会检测你安装了哪些 AI 编码工具，为每个工具写入一条 MCP 服务器配置，在平台支持的地方安装钩子和技能，并把图谱说明加入平台的规则文件。在 Poetry 或 uv 项目环境中，MCP 配置使用 `poetry run` 或 `uv run`；当 PATH 上有 `uvx` 时使用 `uvx code-review-graph serve`；否则使用当前的 Python 解释器。`install` 会先列出要改动的文件，并在你回答它关于说明文件的问题之后才写入任何内容；`install --dry-run` 把每处改动显示为 diff，什么都不写。安装后请重启编辑器或工具。
+
+`install` 写入的文件（例如 `.claude/` 和 `.mcp.json`）对 git 仍然可见，以便你的团队提交它们。`install --gitignore` 会把本次运行新建的文件加入 `.gitignore` 中一个带标记的块；`uninstall` 会移除这个块。
+
+对于 Codex，安装程序还会在 `$CODEX_HOME/skills/code-review-graph/`（默认：
+`~/.codex/skills/code-review-graph/`）放置一个全局的 `code-review-graph` Skill。它优先使用 CRG MCP 工具，
+MCP 不可用时回退到随包提供的只读 CLI（read-only CLI）；图谱缺失、为空或过期时，绝不会隐式触发构建或更新。
+WSL 和 Windows 上的 Codex 运行环境各有自己的 `CODEX_HOME` 目录和工具清单，
+所以请在实际执行任务的那个运行环境中安装和刷新。
+
+</details>
+
+<details>
+<summary><strong>所有支持的平台，以及如何只配置其中一个</strong></summary>
+<br>
 
 <p align="center">
   <img src="diagrams/diagram8_supported_platforms.png" alt="一次安装，覆盖所有平台：检测 Codex、Claude Code、CodeBuddy Code、Cursor、Windsurf、Zed、Continue、OpenCode、MiMo Code、Antigravity、Gemini CLI、Qwen Code、Qoder、Kiro、GitHub Copilot、GitHub Copilot CLI、Hermes Agent 和 DeepSeek Harness" width="85%" />
@@ -77,13 +105,11 @@ code-review-graph install --platform codebuddy
 
 配置文件的位置列在 [docs/USAGE.md](docs/USAGE.md#supported-platforms) 中。需要 Python 3.10+。
 
-`install` 写入的文件（例如 `.claude/` 和 `.mcp.json`）对 git 仍然可见，以便你的团队提交它们。`install --gitignore` 会把本次运行新建的文件加入 `.gitignore` 中一个带标记的块；`uninstall` 会移除这个块。
+</details>
 
-对于 Codex，安装程序还会在 `$CODEX_HOME/skills/code-review-graph/`（默认：
-`~/.codex/skills/code-review-graph/`）放置一个全局的 `code-review-graph` Skill。它优先使用 CRG MCP 工具，
-MCP 不可用时回退到随包提供的只读 CLI（read-only CLI）；图谱缺失、为空或过期时，绝不会隐式触发构建或更新。
-WSL 和 Windows 上的 Codex 运行环境各有自己的 `CODEX_HOME` 目录和工具清单，
-所以请在实际执行任务的那个运行环境中安装和刷新。
+<details>
+<summary><strong>用 <code>uninstall</code> 再次移除</strong></summary>
+<br>
 
 `uninstall` 会从 Git 或 SVN 工作树中移除 CRG 自己写入的文件和配置项，不动其他 MCP 服务器、钩子、技能和 JSONC 注释。在工作树内的任意位置运行即可。共享配置文件采用原子替换，写入失败时原文件保持完整。
 
@@ -96,16 +122,28 @@ code-review-graph uninstall --keep-data  # remove integrations, keep graph datab
 code-review-graph uninstall --keep-user-configs --repo .  # this project only
 ```
 
+</details>
+
+运行 `install` 后请重启编辑器或工具。
 然后打开项目，对助手说：
 
 ```
 Build the code review graph for this project
 ```
 
+<details>
+<summary><strong>构建需要多久，以及部分构建是什么意思</strong></summary>
+<br>
+
 构建时间随仓库规模增长；一个约 3,000 个文件的仓库冷构建约需 40 秒（[实测](docs/REPRODUCING.md#incremental-update-latency)）。之后由钩子和 watch 模式保持图谱更新。如果部分文件解析失败，结果状态为 `partial` 并在摘要中列出这些文件；CLI 还会在 stderr 上打印一行 `Warning:`，这些文件保留原有的图谱记录。
 
+</details>
 
 ### 使用 Docker 或 Podman 运行
+
+<details>
+<summary><strong>构建镜像，然后在你的仓库上运行</strong></summary>
+<br>
 
 在本仓库根目录构建镜像：
 
@@ -151,19 +189,31 @@ podman run --rm \
 运行前请启动兼容 Docker 的容器引擎或 Podman 虚拟机。
 在启用 SELinux 的主机（如 Fedora）上，请在挂载中加上 `:z`（`"$PWD:/workspace:z"`），否则容器无法访问仓库。
 
+</details>
+
 ## 工作原理
+
+仓库通过 Tree-sitter 解析为 AST，并以节点（函数、类、导入）和边（调用、继承、测试覆盖）的形式存为图谱。审查时查询图谱，得到助手需要读取的最小文件集合。
+
+<details>
+<summary><strong>两张图：助手如何使用图谱，以及构建流程</strong></summary>
+<br>
 
 <p align="center">
   <img src="diagrams/diagram7_mcp_integration_flow.png" alt="助手如何使用图谱：用户请求审查，助手调用 MCP 工具，图谱返回影响半径和风险评分，助手只读取受影响的文件" width="80%" />
 </p>
 
-仓库通过 Tree-sitter 解析为 AST，并以节点（函数、类、导入）和边（调用、继承、测试覆盖）的形式存为图谱。审查时查询图谱，得到助手需要读取的最小文件集合。
-
 <p align="center">
   <img src="diagrams/diagram2_architecture_pipeline.png" alt="架构流程：仓库 → Tree-sitter 解析器 → SQLite 图谱 → 影响半径 → 最小审查集" width="100%" />
 </p>
 
+</details>
+
 ### 影响半径分析
+
+<details>
+<summary><strong>一次改动可能影响的每个调用者、依赖方和测试</strong></summary>
+<br>
 
 文件变更时，图谱会追踪所有可能受影响的调用者、依赖方和测试。助手读取这些文件，而不是扫描整个项目。
 
@@ -171,7 +221,13 @@ podman run --rm \
   <img src="diagrams/diagram3_blast_radius.png" alt="影响半径：login() 的改动传播到调用者、依赖方和测试" width="70%" />
 </p>
 
+</details>
+
 ### 增量更新
+
+<details>
+<summary><strong>只重新解析变更的文件（修改两个文件约 2.5 秒）</strong></summary>
+<br>
 
 编辑器钩子、git 钩子（pre-commit、post-checkout、post-merge、post-rewrite）和 watch 模式都会触发增量更新。更新时对变更文件做 diff，沿图谱的导入边和调用边找出依赖方，并只重新解析 SHA-256 哈希发生变化的文件。在一个约 3,000 个文件的项目（django）上，修改两个文件后沿钩子路径重新索引约需 2.5 秒，其中约 1.4 秒是进程启动；空更新只花这段启动时间。参见[增量更新延迟](docs/REPRODUCING.md#incremental-update-latency)。
 
@@ -179,7 +235,13 @@ podman run --rm \
   <img src="diagrams/diagram4_incremental_update.png" alt="增量更新流程：钩子或 watch 更新触发 git diff，通过图谱的边找到依赖方，只重新解析 SHA-256 哈希发生变化的文件" width="90%" />
 </p>
 
+</details>
+
 ### 整个代码库，还是有的放矢的回答？
+
+<details>
+<summary><strong>按问题裁剪的图谱切片，而不是整个代码库</strong></summary>
+<br>
 
 图谱不会把整个语料喂给模型，而是返回按问题裁剪的切片。在 2026-08-02 对本仓库 `84bde354` 的快照中，208,821 个源码 token 变成每个问题约 3,190 个 token。此后仓库增长了很多，所以今天这两个数字都更大。
 
@@ -187,7 +249,13 @@ podman run --rm \
   <img src="diagrams/diagram6_monorepo_funnel.png" alt="code-review-graph 在 84bde354 快照：208,821 个源码 token 收敛为约 3,190 token 的图谱响应，每个问题的 token 约少 65 倍" width="80%" />
 </p>
 
+</details>
+
 ### 语言覆盖与笔记本
+
+<details>
+<summary><strong>Python、JavaScript、TypeScript、Go、Rust、Java、C/C++、C# 等众多语言，外加笔记本：完整列表</strong></summary>
+<br>
 
 <p align="center">
   <img src="diagrams/diagram9_language_coverage.png" alt="按类别划分的语言覆盖：Web、后端、系统、移动端、脚本、Shell、领域专用、配置和其他，外加 Jupyter 和 Databricks 笔记本" width="90%" />
@@ -199,7 +267,13 @@ PHP 项目还会得到仓库范围内的 Composer PSR-4 解析、Blade 模板引
 
 Java 项目会得到 Spring 依赖注入的调用解析、请求端点与 WebFlux 路由、定时触发器、应用事件的发布者到监听者的边、Spring AOP 通知到目标的边，以及 Temporal 工作流与活动的边。每个解析器都在解析之后运行，并且需要被注入的字段、发布的事件或工作流 stub 在仓库中可见。
 
+</details>
+
 ### 添加你自己的语言
+
+<details>
+<summary><strong>在 <code>languages.toml</code> 中把文件扩展名映射到自带的 Tree-sitter 语法</strong></summary>
+<br>
 
 如果你的仓库使用了解析器尚未覆盖的语言，在 `.code-review-graph/` 中添加一个 `languages.toml`，把文件扩展名映射到 `tree_sitter_language_pack` 中自带的任意语法，并给出函数、类、导入和调用的节点类型：
 
@@ -215,7 +289,13 @@ call_node_types = ["call"]
 
 提取工作由通用的 tree-sitter 遍历器完成。内置语言不能被覆盖。schema、校验规则和完整示例见 [docs/CUSTOM_LANGUAGES.md](docs/CUSTOM_LANGUAGES.md)。
 
+</details>
+
 ### 在 CI 中做风险评分的 PR 审查（GitHub Action）
+
+<details>
+<summary><strong>一条 pull request 评论，列出风险评分、受影响的执行流和测试缺口；见示例工作流</strong></summary>
+<br>
 
 同样的分析也以组合式 GitHub Action 的形式运行。图谱在你的 CI runner 上构建和查询，不会把源代码发送给外部服务。每个 pull request 上，该 action 会发布一条常驻评论，列出风险评分的函数、受影响的执行流和测试缺口，并在每次推送时就地更新。可选的 `fail-on-risk` 输入可以把它变成合并门禁。可选的 `details` 输入会加入更多图谱上下文，默认折叠并限制大小：每个排名靠前的符号为什么得到这个分数、改动涉及的社区、枢纽和跨边界连接、它的影响半径、未测试的热点，以及图谱的来源。
 
@@ -240,17 +320,25 @@ jobs:
 
 输入参数、风险等级和缓存见 [docs/GITHUB_ACTION.md](docs/GITHUB_ACTION.md)，本仓库自己运行的工作流见 [`.github/workflows/pr-review.yml`](.github/workflows/pr-review.yml)。
 
+</details>
+
 ---
 
 ## 基准测试
+
+6 个仓库上每个问题的 token 减少中位数约为 **63 倍**（全语料基线对比图谱查询）。**358 倍**的最大值只属于一个仓库（fastapi，语料最大），不是典型结果。
+
+<details>
+<summary><strong>基准测试总览图，以及这些数字是怎么得出的</strong></summary>
+<br>
 
 <p align="center">
   <img src="diagrams/diagram5_benchmark_board.png" alt="6 个仓库的基准测试：每个问题的 token 减少中位数约 63 倍（最高 358 倍），对图谱生成的基准答案平均影响 F1 为 0.69" width="85%" />
 </p>
 
-6 个仓库上每个问题的 token 减少中位数约为 **63 倍**（全语料基线对比图谱查询）。**358 倍**的最大值只属于一个仓库（fastapi，语料最大），不是典型结果。
-
 所有数字都来自针对 6 个开源仓库（13 次提交）的评估运行器。每个配置都固定了上游 SHA，Leiden 使用固定随机种子，嵌入在 CPU 上是确定性的，因此不同机器上的两次运行得到相同的数字。复现步骤见 [`docs/REPRODUCING.md`](docs/REPRODUCING.md)。在两个最小配置上每周运行一次、只出报告的评估位于 [`.github/workflows/eval.yml`](.github/workflows/eval.yml)。
+
+</details>
 
 <details>
 <summary><strong>Token 效率：每个问题减少中位数约 63 倍（范围 35 倍到 358 倍；全语料对比图谱查询）</strong></summary>
@@ -324,15 +412,27 @@ jobs:
 
 ### 局限
 
+<details>
+<summary><strong>五个已知局限：循环论证的召回率、小改动、搜索排序、执行流检测、误报</strong></summary>
+<br>
+
 - **影响分析的"召回率 1.0"是循环论证。** 历史基准答案来自预测器所遍历的同一批图谱边，因此按构造它就是一个上限。在带着路径修复重新运行基准之前，不引用共变更数字。
 - **小的单文件改动。** 对于琐碎的编辑，图谱上下文可能比直接读文件还大。多出来的是让多文件分析成为可能的结构化元数据。
 - **搜索排序。** 关键词搜索通常能把正确结果排在靠前位置，但排序还需要改进。由于模块模式的命名方式，针对 Express 的查询可能返回零命中。
 - **执行流检测。** 入口点检测对 Python 和 PHP/Laravel 最强。JavaScript 和 Go 的流检测还需要改进。
 - **精确率与召回率。** 影响分析偏保守。它会标出可能受影响的文件，这意味着在大型依赖图中会出现误报。
 
+</details>
+
 ---
 
 ## 功能
+
+更新、影响分析、搜索、可视化、CI 审查、重构和多仓库支持，全部留在你的机器上。
+
+<details>
+<summary><strong>完整功能表</strong></summary>
+<br>
 
 | 功能 | 说明 |
 |---------|---------|
@@ -368,9 +468,13 @@ jobs:
 | **全文搜索** | FTS5 混合搜索，结合关键词与向量相似度 |
 | **本地存储** | `.code-review-graph/` 中的一个 SQLite 文件；没有外部数据库或云服务 |
 
+</details>
+
 ---
 
 ## 使用方式
+
+图谱构建好后，助手会自己使用它。展开下面各部分，查看技能、命令、MCP 工具和设置。
 
 <details>
 <summary><strong>技能</strong></summary>
@@ -689,6 +793,10 @@ CRG_TOOLS=query_graph_tool,semantic_search_nodes_tool code-review-graph serve
 
 答案见 [docs/FAQ.md](docs/FAQ.md)：
 
+<details>
+<summary><strong>与 LSP、RAG 和 grep 的对比、什么时候不要用它，以及更多</strong></summary>
+<br>
+
 - [对比 LSP / 语言服务器](docs/FAQ.md#how-is-this-different-from-lsp-and-language-servers)：一张持久的跨语言图谱，而不是每种语言一个守护进程；LSP 在单个符号上仍然更精确。
 - [对比 RAG / 嵌入](docs/FAQ.md#isnt-this-just-rag)：从 AST 解析出的结构化边，而不是相似度分块；嵌入是可选的，只辅助搜索。
 - [对比 grep / 智能体搜索](docs/FAQ.md#why-not-just-grep)：单跳查找 grep 更快；多跳问题（影响半径、调用者的调用者、tests-for、受影响的执行流）图谱更强。
@@ -696,11 +804,17 @@ CRG_TOOLS=query_graph_tool,semantic_search_nodes_tool code-review-graph serve
 - [它会回传数据吗？](docs/FAQ.md#does-it-phone-home)：没有遥测；云端嵌入需要主动开启。
 - [怎么确认它在工作？](docs/FAQ.md#how-do-i-verify-it-is-working)：`status`、`detect-changes --brief`、`/mcp`。
 
+</details>
+
 ## 故障排查
 
 更多情况，包括 Windows/WSL，见 [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)。
 
 ### `pip` / `pipx` 无法下载 `hatchling`（或出现 `Errno 9` / `Bad file descriptor` 连 PyPI 的错误）
+
+<details>
+<summary><strong>如何修复</strong></summary>
+<br>
 
 从源码树安装（例如 `pipx install .`）需要从 PyPI 取构建依赖。如果在一堆连接警告之后看到 `Could not find a version that satisfies the requirement hatchling`，那么该终端里的 Python 可能无法与 `pypi.org` 建立 HTTPS 连接。这在编辑器的集成终端里最常见，有时也与 VPN、防火墙或代理有关。
 
@@ -716,7 +830,13 @@ CRG_TOOLS=query_graph_tool,semantic_search_nodes_tool code-review-graph serve
 
 诊断方法：`python3 scripts/diagnose_pypi_connectivity.py`。如果它打印 `FAILED`，问题出在网络环境，而不是包名。
 
+</details>
+
 ### Windows：`Invalid JSON: EOF while parsing` 或 `MCP error -32000: Connection closed`
+
+<details>
+<summary><strong>如何修复</strong></summary>
+<br>
 
 不要在 Claude Code 配置中使用 `cmd /c` 包装。让 `~/.claude.json` 直接指向 `.exe`，并通过配置设置 UTF-8：
 
@@ -728,7 +848,18 @@ CRG_TOOLS=query_graph_tool,semantic_search_nodes_tool code-review-graph serve
 }
 ```
 
+</details>
+
 ## 参与贡献
+
+Pull request 请提交到 `staging`（默认分支）。变更按
+`staging` → `testing` → `main` 的顺序推进，版本从 `main` 打标签。没有任何推进是自动的：
+每一次都由人审查并合并。完整流程见
+[CONTRIBUTING.md](CONTRIBUTING.md#branching-and-promotion)。
+
+<details>
+<summary><strong>搭建开发副本并运行测试</strong></summary>
+<br>
 
 ```bash
 git clone https://github.com/tirth8205/code-review-graph.git
@@ -738,12 +869,15 @@ pip install -e ".[dev]"
 pytest
 ```
 
-Pull request 请提交到 `staging`（默认分支）。变更按
-`staging` → `testing` → `main` 的顺序推进，版本从 `main` 打标签。没有任何推进是自动的：
-每一次都由人审查并合并。完整流程见
-[CONTRIBUTING.md](CONTRIBUTING.md#branching-and-promotion)。
+</details>
+
+<details>
+<summary><strong>添加内置语言</strong></summary>
+<br>
 
 要添加内置语言，编辑 `code_review_graph/parser.py`：把扩展名加入 `EXTENSION_TO_LANGUAGE`，并把节点类型映射加入 `_CLASS_TYPES`、`_FUNCTION_TYPES`、`_IMPORT_TYPES` 和 `_CALL_TYPES`。附上测试 fixture 并提交 PR。如果某种语言只在一个仓库里需要，请改用 [`languages.toml`](docs/CUSTOM_LANGUAGES.md)。
+
+</details>
 
 ## 许可证
 
