@@ -40,6 +40,7 @@ if sys.version_info < (3, 10):
 
 import argparse
 import contextlib
+import difflib
 import fnmatch
 import io
 import json
@@ -139,26 +140,77 @@ def _print_banner() -> None:
 {c}  │╱ │ ╲│{r}       {d}Structural knowledge graph for{r}
 {c}  ●──●──●{r}       {d}smarter code reviews{r}
 
-  {b}Commands:{r}
-    {g}install{r}     Set up MCP server for AI coding platforms
-    {g}init{r}        Alias for install
-    {g}build{r}       Full graph build {d}(parse all files){r}
-    {g}update{r}      Incremental update {d}(changed files only){r}
-    {g}watch{r}       Auto-update on file changes
-    {g}status{r}      Show graph statistics
-    {g}visualize{r}   Generate interactive HTML graph
-    {g}wiki{r}        Generate markdown wiki from communities
-    {g}detect-changes{r} Analyze change impact {d}(risk-scored review){r}
-    {g}register{r}    Register a repository in the multi-repo registry
-    {g}unregister{r}  Remove a repository from the registry
-    {g}repos{r}       List registered repositories
-    {g}postprocess{r} Run post-processing {d}(flows, communities, FTS){r}
-    {g}daemon{r}      Multi-repo watch daemon management
-    {g}eval{r}        Run evaluation benchmarks
-    {g}serve{r}       Start MCP server {d}(stdio, or {g}--http{r} on localhost:5555){r}
+  {b}Start:{r} code-review-graph install && code-review-graph build
 
+{_banner_commands(b, g, r)}
   {d}Run{r} {b}code-review-graph <command> --help{r} {d}for details{r}
 """)
+
+
+#: Every command a user types, grouped, with one short line each. The three
+#: hook commands (``enrich``, ``hook-update``, ``hook-status``) are left out
+#: on purpose: only the hooks ``install`` writes call them. A test holds this
+#: list to the parser, so a new command cannot be left off.
+_BANNER_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
+    ("Set up", (
+        ("install", "Set up the MCP server, hooks and skills for your AI tools"),
+        ("init", "Same as install"),
+        ("uninstall", "Remove what install added"),
+    )),
+    ("Build the graph", (
+        ("build", "Parse every file into a new graph"),
+        ("update", "Parse only the files that changed"),
+        ("watch", "Update the graph as files change"),
+        ("status", "Show graph counts"),
+        ("postprocess", "Redo flows, communities and the search index"),
+        ("embed", "Add vectors for search by meaning"),
+        ("forget", "Drop files from the graph"),
+    )),
+    ("Review", (
+        ("detect-changes", "Score the risk of your changes (read-only)"),
+        ("impact", "Show what a change can reach"),
+        ("dead-code", "Find code that nothing calls or tests"),
+        ("refactor", "Preview a rename, dead code or suggestions"),
+    )),
+    ("Explore", (
+        ("query", "Callers, callees, imports, tests and more"),
+        ("search", "Find code by name or keyword"),
+        ("architecture", "Show the main parts of the code"),
+        ("flows", "List execution flows"),
+        ("flow", "Show one execution flow"),
+        ("communities", "List groups of related code"),
+        ("community", "Show one group"),
+        ("large-functions", "Find very long functions and classes"),
+        ("visualize", "Draw the graph as an interactive page"),
+        ("wiki", "Write a Markdown wiki from the graph"),
+        ("context-history", "Show the saved-context log"),
+    )),
+    ("Serve and more", (
+        ("serve", "Start the MCP server (stdio, or --http on localhost)"),
+        ("mcp", "Same as serve"),
+        ("daemon", "Watch many repositories in the background"),
+        ("register", "Add a repository to the multi-repo list"),
+        ("unregister", "Remove a repository from that list"),
+        ("repos", "Show the listed repositories"),
+        ("eval", "Run the benchmarks"),
+    )),
+)
+
+#: Commands only the hooks ``install`` writes call. Hidden from ``--help``
+#: and from the banner, and never offered as a "did you mean".
+_HIDDEN_COMMANDS = frozenset({"enrich", "hook-update", "hook-status"})
+
+
+def _banner_commands(bold: str, green: str, reset: str) -> str:
+    """Render ``_BANNER_GROUPS`` as the banner's command list."""
+    width = max(len(name) for _, rows in _BANNER_GROUPS for name, _ in rows) + 2
+    lines: list[str] = []
+    for title, rows in _BANNER_GROUPS:
+        lines.append(f"  {bold}{title}:{reset}")
+        for name, text in rows:
+            lines.append(f"    {green}{name}{reset}{' ' * (width - len(name))}{text}")
+        lines.append("")
+    return "\n".join(lines)
 
 
 def _instruction_files_to_modify(
@@ -1588,9 +1640,12 @@ def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="code-review-graph",
         description="Persistent incremental knowledge graph for code reviews",
+        epilog="Start: code-review-graph install && code-review-graph build",
     )
     ap.add_argument("-v", "--version", action="store_true", help="Show version and exit")
-    sub = ap.add_subparsers(dest="command")
+    # Without a metavar argparse prints every command name, hidden ones too,
+    # as one long {a,b,c,...} list in the usage line.
+    sub = ap.add_subparsers(dest="command", metavar="<command>")
 
     # install (primary) + init (alias)
     install_cmd = sub.add_parser("install", help="Register MCP server with AI coding platforms")
@@ -1978,7 +2033,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     # visualize
-    vis_cmd = sub.add_parser("visualize", help="Generate interactive HTML graph visualization")
+    vis_cmd = sub.add_parser("visualize", help="Generate an interactive HTML graph visualisation")
     vis_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
     vis_cmd.add_argument(
         "--mode",
@@ -1989,7 +2044,7 @@ def build_parser() -> argparse.ArgumentParser:
     vis_cmd.add_argument(
         "--serve",
         action="store_true",
-        help="Start a local HTTP server to view the visualization (localhost:8765)",
+        help="Start a local HTTP server to view the visualisation (localhost:8765)",
     )
     vis_group = vis_cmd.add_argument_group(
         "neighbourhood view",
@@ -2156,7 +2211,7 @@ def build_parser() -> argparse.ArgumentParser:
     # detect-changes
     detect_cmd = sub.add_parser(
         "detect-changes",
-        help="Analyze change impact against the existing graph (read-only). "
+        help="Analyse change impact against the existing graph (read-only). "
              "Does NOT re-parse files — for that, use 'update --brief'.",
     )
     detect_cmd.add_argument(
@@ -2196,12 +2251,26 @@ def build_parser() -> argparse.ArgumentParser:
              "impact, gaps, graph, or all. Not used with --brief.",
     )
 
-    # enrich (Claude Code PreToolUse hook; reads one JSON object from stdin)
-    sub.add_parser("enrich", help="Enrich hook input with graph context")
+    # Hook-only commands: the hooks install writes call them with one JSON
+    # object on stdin, and nobody types them. No ``help=`` keeps them out of
+    # the command list in --help; ``help=argparse.SUPPRESS`` would not, as
+    # argparse before 3.14 prints it as "==SUPPRESS==" for a subcommand.
+    # ``description`` still explains each one under ``<command> --help``.
     sub.add_parser(
-        "hook-update", help="Update the graph of the repo that holds the hook's edited file"
+        "enrich",
+        description="Hook command: add graph context to a Claude Code "
+                    "PreToolUse event read from stdin.",
     )
-    sub.add_parser("hook-status", help="Show graph status for the hook payload cwd")
+    sub.add_parser(
+        "hook-update",
+        description="Hook command: update the graph of the repository that "
+                    "holds the edited file named in the event read from stdin.",
+    )
+    sub.add_parser(
+        "hook-status",
+        description="Hook command: show graph status for the folder named in "
+                    "the event read from stdin.",
+    )
 
     # dead-code
     dead_cmd = sub.add_parser(
@@ -2260,7 +2329,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     query_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
 
-    impact_cmd = sub.add_parser("impact", help="Analyze the blast radius of changes")
+    impact_cmd = sub.add_parser("impact", help="Analyse the blast radius of changes")
     impact_cmd.add_argument(
         "--files",
         nargs="+",
@@ -2439,7 +2508,7 @@ def build_parser() -> argparse.ArgumentParser:
     daemon_start.add_argument(
         "--foreground",
         action="store_true",
-        help="Run in foreground instead of daemonizing",
+        help="Run in the foreground instead of in the background",
     )
 
     daemon_sub.add_parser(
@@ -2454,7 +2523,7 @@ def build_parser() -> argparse.ArgumentParser:
     daemon_restart.add_argument(
         "--foreground",
         action="store_true",
-        help="Run in foreground instead of daemonizing",
+        help="Run in the foreground instead of in the background",
     )
 
     daemon_sub.add_parser("status", help="Show daemon and watcher status")
@@ -2510,10 +2579,41 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
+def _command_names(ap: argparse.ArgumentParser) -> list[str]:
+    """Every top-level command name the parser accepts, hidden ones included."""
+    for action in ap._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            return list(action.choices)
+    return []
+
+
+def _reject_unknown_command(ap: argparse.ArgumentParser, argv: list[str]) -> None:
+    """Stop on a mistyped command with a "did you mean", exit 2.
+
+    argparse's own message lists every command, hidden ones too, in one long
+    line and suggests nothing. The top level takes no option with a value, so
+    the first word that is not an option is the command.
+    """
+    names = _command_names(ap)
+    for word in argv:
+        if word in ("-h", "--help") or word in names:
+            return
+        if word.startswith("-"):
+            continue
+        visible = [name for name in names if name not in _HIDDEN_COMMANDS]
+        close = difflib.get_close_matches(word, visible, n=3, cutoff=0.6)
+        hint = f" Did you mean {' or '.join(close)}?" if close else ""
+        ap.error(
+            f"unknown command '{word}'.{hint} "
+            "Run code-review-graph --help to see every command."
+        )
+
+
 def _dispatch() -> None:
     """Parse arguments and run the requested subcommand."""
     _configure_utf8_stdio()
     ap = build_parser()
+    _reject_unknown_command(ap, sys.argv[1:])
     args = ap.parse_args()
 
     if args.version:
@@ -3223,7 +3323,7 @@ def _dispatch() -> None:
                     print(f"visualize: {exc}", file=sys.stderr)
                     sys.exit(2)
                 label = _describe_visualization(args, vis_mode, depth)
-                print(f"Visualization ({label}): {html_path}")
+                print(f"Visualisation ({label}): {html_path}")
                 _print_seed_budget(seed_report)
                 if getattr(args, "sidecar", False):
                     print(f"Payload sidecar: {html_path.parent / 'graph.data.js'}")

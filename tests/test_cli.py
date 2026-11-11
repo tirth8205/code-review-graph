@@ -30,7 +30,7 @@ def test_main_handles_legacy_stdio_encoding(monkeypatch):
     assert legacy_stdout.encoding == "utf-8"
     assert legacy_stderr.encoding == "utf-8"
     assert "code-review-graph" in output
-    assert "Commands:" in output
+    assert "Start:" in output
 
 
 def test_get_version_falls_back_to_package_attr_when_metadata_missing(
