@@ -19,6 +19,8 @@
   with no Git error text.
 - The review tools review a new file Git does not track as a whole. It used to
   drop out of the review when another file had changed lines.
+- `detect-changes --brief` lists the top three things to review, each with its
+  file and line, its risk out of 1.00, its callers and its tests.
 
 ## [2.4.0] - 2026-11-10
 

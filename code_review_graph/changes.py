@@ -33,6 +33,9 @@ from .parser import CodeParser, NodeInfo, _repo_relative_path, is_test_file, nor
 
 logger = logging.getLogger(__name__)
 
+# The summary's score line; ``format_brief`` finds it to add the scale.
+_OVERALL_RISK_LINE = "  - Overall risk score: {:.2f}"
+
 
 # Lifecycle and construction methods are exercised implicitly by every test
 # that touches their class, so listing them as test gaps is noise that
@@ -1783,7 +1786,7 @@ def analyze_changes(
         *_removed_summary_lines(deletion_review),
         f"  - {affected['total']} affected flow(s)",
         gap_line,
-        f"  - Overall risk score: {overall_risk:.2f}",
+        _OVERALL_RISK_LINE.format(overall_risk),
     ]
 
     # Dedup by bare name in the human summary. The underlying test_gaps list
@@ -1897,3 +1900,93 @@ def analyze_changes(
         "diff_ranges_unavailable": ranges_unavailable,
         "churn_status": churn_status,
     }
+
+
+# ---------------------------------------------------------------------------
+# 6. detect-changes --brief
+# ---------------------------------------------------------------------------
+
+#: How many review priorities ``detect-changes --brief`` names.
+BRIEF_PRIORITIES = 3
+
+
+def risk_label(score: float) -> str:
+    """Name a 0.00 - 1.00 risk score: high above 0.70, medium above 0.40."""
+    return "high" if score > 0.7 else "medium" if score > 0.4 else "low"
+
+
+def _short_name(qualified_name: str) -> str:
+    """The part of a qualified name after the file, for one line of text."""
+    return _sanitize_name(qualified_name.rsplit("::", 1)[-1])
+
+
+def _name_list(names: list[str], limit: int = 2) -> str:
+    """``a, b`` or ``a, b and 3 more``, with repeats dropped."""
+    unique = list(dict.fromkeys(name for name in names if name))
+    shown = ", ".join(unique[:limit])
+    extra = len(unique) - limit
+    return f"{shown} and {extra} more" if extra > 0 else shown
+
+
+def _brief_priority_line(
+    store: GraphStore, priority: dict[str, Any], repo_root: str | None,
+) -> str:
+    """One line: name, file:line, risk out of 1.00, callers, tests."""
+    name = _sanitize_name(str(priority.get("name") or priority.get("qualified_name", "")))
+    file_path = str(priority.get("file_path") or "")
+    if repo_root and file_path:
+        try:
+            file_path = Path(file_path).relative_to(Path(repo_root)).as_posix()
+        except ValueError:
+            pass
+    where = f"{file_path}:{priority['line_start']}" if priority.get("line_start") else file_path
+    score = float(priority.get("risk_score") or 0.0)
+    parts = [name, where, f"risk {score:.2f} ({risk_label(score)})"]
+
+    qualified_name = str(priority.get("qualified_name") or "")
+    callers: list[str] = []
+    tests: list[str] = []
+    if qualified_name:
+        found_tests = store.get_transitive_tests(
+            qualified_name, include_helper_routes=False,
+        )
+        tests = [_sanitize_name(str(test.get("name", ""))) for test in found_tests]
+        test_qns = {str(test.get("qualified_name", "")) for test in found_tests}
+        # A test that calls the symbol is named once, under "tested by".
+        callers = [
+            _short_name(edge.source_qualified)
+            for edge in store.get_edges_by_target(qualified_name)
+            if edge.kind == "CALLS" and edge.source_qualified not in test_qns
+        ]
+    parts.append(f"called by {_name_list(callers)}" if callers else "no callers found")
+    parts.append(f"tested by {_name_list(tests)}" if tests else "no tests found")
+    return "  ".join(parts)
+
+
+def format_brief(
+    store: GraphStore,
+    analysis: dict[str, Any],
+    repo_root: str | Path | None = None,
+    limit: int = BRIEF_PRIORITIES,
+) -> str:
+    """The text ``detect-changes --brief`` prints before the savings panel.
+
+    The summary counts what changed; the lines after it say where to look
+    first: the top *limit* review priorities, each with its file and line,
+    its risk out of 1.00, its callers and the tests that reach it.
+    """
+    summary = str(analysis.get("summary") or "No summary available.")
+    score = analysis.get("risk_score")
+    if isinstance(score, (int, float)):
+        overall = _OVERALL_RISK_LINE.format(score)
+        summary = summary.replace(overall, f"{overall} of 1.00 ({risk_label(score)})", 1)
+    priorities = [
+        p for p in analysis.get("review_priorities") or [] if isinstance(p, dict)
+    ][:limit]
+    if not priorities:
+        return summary
+    root = str(repo_root) if repo_root is not None else None
+    lines = [summary, "", "Review first (risk out of 1.00):"]
+    for index, priority in enumerate(priorities, 1):
+        lines.append(f"  {index}. {_brief_priority_line(store, priority, root)}")
+    return "\n".join(lines)

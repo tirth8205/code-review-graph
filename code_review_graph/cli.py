@@ -3311,11 +3311,12 @@ def _dispatch() -> None:
                     ),
                 )
                 if args.brief:
+                    from .changes import format_brief
                     from .context_savings import (
                         format_context_savings_panel,
                         verify_with_tiktoken,
                     )
-                    print(result.get("summary", "No summary available."))
+                    print(format_brief(store, result, repo_root))
                     verified = None
                     if getattr(args, "verify", False):
                         verified = verify_with_tiktoken(repo_root, changed, result)
