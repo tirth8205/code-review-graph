@@ -27,6 +27,9 @@
   skip them; `uninstall` says it took no and how to go ahead. At a terminal,
   `install` says that Ctrl-C at the question stops it before anything is
   written.
+- `uninstall` and `uninstall --dry-run` word every planned action as "would
+  remove …" and every action they took as "removed …". Most planned actions
+  read "would removed …", and a few that were taken read "remove …".
 
 ## [2.4.0] - 2026-11-10
 

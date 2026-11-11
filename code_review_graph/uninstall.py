@@ -108,14 +108,25 @@ def _safe_path(
     return True
 
 
+def _done(detail: str, dry_run: bool) -> str:
+    """Word an action for the report: ``detail`` starts with a verb in its base form.
+
+    A dry run says what it would do ("would remove owned file"); a real run
+    says what it did ("removed owned file").
+    """
+    if dry_run:
+        return f"would {detail}"
+    verb, _, rest = detail.partition(" ")
+    past = f"{verb}d" if verb.endswith("e") else f"{verb}ed"
+    return f"{past} {rest}" if rest else past
+
+
 def _record_edit(report: UninstallReport, path: Path, detail: str, dry_run: bool) -> None:
-    verb = f"would {detail}" if dry_run else detail
-    report.edited_paths.append(f"{path} ({verb})")
+    report.edited_paths.append(f"{path} ({_done(detail, dry_run)})")
 
 
 def _record_remove(report: UninstallReport, path: Path, detail: str, dry_run: bool) -> None:
-    verb = f"would {detail}" if dry_run else detail
-    report.removed_paths.append(f"{path} ({verb})")
+    report.removed_paths.append(f"{path} ({_done(detail, dry_run)})")
 
 
 def _read_text(path: Path, report: UninstallReport) -> str | None:
@@ -261,7 +272,7 @@ def _remove_mcp_entry(
         path,
         rewritten,
         report,
-        detail=f"removed {_ENTRY_NAME!r} from {key!r}",
+        detail=f"remove {_ENTRY_NAME!r} from {key!r}",
         dry_run=dry_run,
     )
 
@@ -307,7 +318,7 @@ def _remove_toml_entry(
         path,
         rewritten,
         report,
-        detail=f"removed [{key}.{_ENTRY_NAME}]",
+        detail=f"remove [{key}.{_ENTRY_NAME}]",
         dry_run=dry_run,
     )
 
@@ -351,7 +362,7 @@ def _remove_dsh_patch_entry(
         path,
         rewritten,
         report,
-        detail=f"removed the {dsh.ENTRY_ID} insert",
+        detail=f"remove the {dsh.ENTRY_ID} insert",
         dry_run=dry_run,
     )
 
@@ -451,7 +462,7 @@ def _remove_yaml_entry(
         path,
         rewritten,
         report,
-        detail=f"removed {key}.{_ENTRY_NAME}",
+        detail=f"remove {key}.{_ENTRY_NAME}",
         dry_run=dry_run,
     )
 
@@ -680,7 +691,7 @@ def _remove_hooks(
         path,
         rewritten,
         report,
-        detail="removed code-review-graph hook entries",
+        detail="remove code-review-graph hook entries",
         dry_run=dry_run,
     )
 
@@ -691,7 +702,7 @@ def _remove_file(
     report: UninstallReport,
     *,
     dry_run: bool,
-    detail: str = "removed owned file",
+    detail: str = "remove owned file",
 ) -> None:
     if not path.exists() and not path.is_symlink():
         return
@@ -730,7 +741,7 @@ def _remove_tree(
     except OSError as exc:
         report.errors.append(f"{path}: remove failed ({exc})")
         return
-    _record_remove(report, path, "removed owned directory", False)
+    _record_remove(report, path, "remove owned directory", False)
 
 
 def _prune_empty_directory(path: Path, boundary: Path) -> None:
@@ -823,7 +834,7 @@ def _remove_instruction(
             path,
             rewritten,
             report,
-            detail="removed code-review-graph instruction section",
+            detail="remove code-review-graph instruction section",
             dry_run=dry_run,
         )
     else:
@@ -923,14 +934,14 @@ def _remove_git_hook(
             "left unchanged)"
         )
         return
-    detail = "removed code-review-graph hook block"
+    detail = "remove code-review-graph hook block"
     if _GIT_HOOK_MARKER in new_text or skills._GIT_HOOK_BEGIN_MARKER in new_text:
         # One block was generated and another was edited by hand. Take out what
         # this project owns and say so on the edit itself: the file was changed,
         # so listing it as "left unchanged" as well would contradict that.
         detail = (
-            "removed code-review-graph hook block; a further block differs from "
-            "every known installed block and was kept"
+            "remove code-review-graph hook block (a further block, edited by "
+            "hand, stays)"
         )
 
     _rewrite_or_remove_hook(path, new_text, repo_root, report, detail=detail, dry_run=dry_run)
@@ -1000,7 +1011,7 @@ def _remove_git_sync_hooks(
             text,
             repo_root,
             report,
-            detail="removed code-review-graph hook block",
+            detail="remove code-review-graph hook block",
             dry_run=dry_run,
         )
 
@@ -1050,7 +1061,7 @@ def _remove_gitignore(
             path,
             new_text,
             report,
-            detail="removed installer-owned ignore block",
+            detail="remove installer-owned ignore block",
             dry_run=dry_run,
         )
     else:

@@ -1436,3 +1436,31 @@ def test_a_steering_hook_under_another_matcher_is_the_users(
     uninstall.run(repo=fake_repo, keep_data=True)
 
     assert _read_jsonc(path) == config
+
+
+def test_every_report_line_reads_right_in_a_dry_run_and_a_real_run(
+    fake_repo: Path, fake_home: Path
+) -> None:
+    """A dry run printed "would removed ..." for most actions."""
+    _write_json(fake_repo / ".mcp.json", {"mcpServers": {"code-review-graph": {}}})
+    _write_json(
+        fake_repo / ".claude" / "settings.json",
+        {"model": "kept", **skills.generate_hooks_config(fake_repo)},
+    )
+    _write(fake_repo / ".code-review-graph" / "graph.db", "")
+    _write(fake_repo / ".claude" / "skills" / "debug-issue" / "SKILL.md", "x\n")
+    skills.install_git_hook(fake_repo)
+
+    preview = uninstall.run(repo=fake_repo, keep_data=False, dry_run=True)
+    planned = preview.removed_paths + preview.edited_paths
+    assert len(planned) >= 5
+    for line in planned:
+        assert " (would remove" in line, line
+        assert "would removed" not in line, line
+
+    done = uninstall.run(repo=fake_repo, keep_data=False)
+    applied = done.removed_paths + done.edited_paths
+    assert len(applied) == len(planned)
+    for line in applied:
+        assert " (removed " in line, line
+        assert "(remove " not in line and "would" not in line, line
