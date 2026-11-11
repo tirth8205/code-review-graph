@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The MCP entry and every hook `install` writes now run the copy of
+  code-review-graph that ran `install`. The MCP entry used `uvx` whenever it
+  was on PATH, and hooks ran the first copy on PATH, so an older copy could
+  answer and refuse a newer graph. `uvx` is now used only when `install` itself
+  runs from `uvx` or a `uv tool` install. A hook whose copy is gone, as on a
+  collaborator's machine, runs the copy on PATH. Run `install` again to update
+  the entry and the hooks.
+- The git pre-commit hook runs `update --quiet`, so a commit shows only the
+  risk summary.
+
 ## [2.4.0] - 2026-11-10
 
 Two new platforms, MiMo Code and DeepSeek Harness, so `install` now supports

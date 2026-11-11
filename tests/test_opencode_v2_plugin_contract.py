@@ -170,7 +170,7 @@ def test_reinstall_replaces_the_plugin_released_in_2_3_9(tmp_path, monkeypatch):
     install_opencode_plugin(opencode_major=2)
 
     content = plugin.read_text(encoding="utf-8")
-    assert content == _opencode_plugin_content()
+    assert content == _opencode_plugin_content(2, skills._hook_launcher())
     assert "app.on(" not in content
     assert 'id: "code-review-graph"' in content
     assert "setup(ctx" in content
@@ -203,7 +203,6 @@ def test_uninstall_removes_the_plugin_and_keeps_other_plugins(tmp_path, monkeypa
 
 def test_opencode_platform_still_installs_the_plugin_via_the_cli_path(tmp_path, monkeypatch):
     """``install --platform opencode`` reaches ``install_opencode_plugin``."""
-    assert skills.PLATFORMS["opencode"]["detect"]()
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setattr(skills, "_detect_opencode_major_version", lambda: 2)
     from code_review_graph import cli
@@ -219,7 +218,9 @@ def test_opencode_platform_still_installs_the_plugin_via_the_cli_path(tmp_path, 
     except SystemExit as exc:  # argparse exits 0 on success paths in some versions
         assert exc.code in (0, None)
     plugin = tmp_path / ".config" / "opencode" / "plugins" / "crg-plugin.ts"
-    assert plugin.read_text(encoding="utf-8") == _opencode_plugin_content()
+    assert plugin.read_text(encoding="utf-8") == _opencode_plugin_content(
+        2, skills._hook_launcher()
+    )
 
 
 # ---------------------------------------------------------------------------

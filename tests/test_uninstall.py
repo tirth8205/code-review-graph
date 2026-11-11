@@ -1347,3 +1347,67 @@ def test_uninstall_removes_the_empty_codex_skills_folder(
     uninstall.run(repo=fake_repo, keep_data=True)
 
     assert not skills_root.exists()
+
+
+# Hooks name the copy that ran install, which may not be the copy uninstalling.
+_OTHER_COPY = skills._HookProgram(
+    "[ -x '/other venv/bin/python3' ]", "'/other venv/bin/python3' -m code_review_graph"
+)
+_ANY_COPY = pytest.mark.parametrize(
+    "program",
+    [_OTHER_COPY, skills._UVX_HOOK_PROGRAM, skills._PATH_HOOK_PROGRAM],
+    ids=["other-interpreter", "uvx", "path-as-2.4.0-wrote"],
+)
+
+
+@_ANY_COPY
+@pytest.mark.parametrize("settings_dir", [".claude", ".qoder", ".codebuddy"])
+def test_removes_project_hooks_that_name_any_copy(
+    fake_home: Path, fake_repo: Path, settings_dir: str, program: skills._HookProgram
+) -> None:
+    path = fake_repo / settings_dir / "settings.json"
+    _write_json(path, {"model": "kept", **skills.generate_hooks_config(fake_repo, program)})
+
+    uninstall.run(repo=fake_repo, keep_data=True)
+
+    assert _read_jsonc(path) == {"model": "kept"}
+
+
+@_ANY_COPY
+def test_removes_codex_hooks_that_name_any_copy(
+    fake_home: Path, fake_repo: Path, program: skills._HookProgram
+) -> None:
+    path = fake_home / ".codex" / "hooks.json"
+    _write_json(
+        path, {"note": "kept", **skills.generate_codex_hooks_config(fake_repo, program)}
+    )
+
+    uninstall.run(repo=fake_repo, keep_data=True)
+
+    assert _read_jsonc(path) == {"note": "kept"}
+
+
+@_ANY_COPY
+def test_removes_a_steering_hook_that_names_any_copy(
+    fake_home: Path, fake_repo: Path, program: skills._HookProgram
+) -> None:
+    path = fake_repo / ".claude" / "settings.json"
+    _write_json(path, {"model": "kept", **skills.generate_steering_hooks_config(program)})
+
+    report = uninstall.remove_steering_hook(fake_repo)
+
+    assert report.total_actions == 1
+    assert _read_jsonc(path) == {"model": "kept"}
+
+
+def test_a_steering_hook_under_another_matcher_is_the_users(
+    fake_home: Path, fake_repo: Path
+) -> None:
+    config = skills.generate_steering_hooks_config(_OTHER_COPY)
+    config["hooks"]["PreToolUse"][0]["matcher"] = "Read"
+    path = fake_repo / ".claude" / "settings.json"
+    _write_json(path, config)
+
+    uninstall.run(repo=fake_repo, keep_data=True)
+
+    assert _read_jsonc(path) == config

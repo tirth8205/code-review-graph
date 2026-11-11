@@ -3,6 +3,7 @@
 import os
 import subprocess
 
+from code_review_graph import skills
 from code_review_graph.skills import install_git_hook
 
 LEGACY_SCRIPT = """#!/bin/sh
@@ -54,6 +55,10 @@ def hook_repo(tmp_path, monkeypatch):
     )
     binary.chmod(0o755)
     monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ["PATH"])
+    # The hook names the copy that ran install; here that is the stub.
+    quoted = skills._sh_single_quote(str(binary))
+    program = skills._HookProgram(f"[ -x {quoted} ]", quoted)
+    monkeypatch.setattr(skills, "_hook_program", lambda: program)
     return repo, commands
 
 
@@ -78,8 +83,9 @@ def test_main_tree_hook_still_runs_with_explicit_root(tmp_path, monkeypatch):
     repo, commands = hook_repo(tmp_path, monkeypatch)
     install_git_hook(repo)
     commit_change(repo)
+    # The update runs quietly, so a commit shows only the risk summary.
     assert commands.read_text().splitlines() == [
-        f"update --repo {repo}",
+        f"update --quiet --repo {repo}",
         f"detect-changes --brief --repo {repo}",
     ]
 
@@ -128,6 +134,6 @@ def test_hook_opt_in_runs_in_linked_worktree(tmp_path, monkeypatch):
     monkeypatch.setenv("CRG_HOOK_WORKTREES", "1")
     commit_change(linked)
     assert commands.read_text().splitlines() == [
-        f"update --repo {linked}",
+        f"update --quiet --repo {linked}",
         f"detect-changes --brief --repo {linked}",
     ]
