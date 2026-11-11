@@ -168,8 +168,12 @@ def _repo_for_file(path: Path, session_repo: Path | None) -> Path | None:
 
 
 def _read_payload() -> Any:
+    """Read the event JSON as bytes, so json finds the UTF-8 hosts write.
+
+    On Windows a text-mode stdin decodes a pipe with the ANSI code page.
+    """
     try:
-        return json.load(sys.stdin)
+        return json.loads(getattr(sys.stdin, "buffer", sys.stdin).read())
     except (json.JSONDecodeError, OSError, ValueError):
         return None
 
