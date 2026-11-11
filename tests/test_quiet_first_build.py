@@ -116,3 +116,51 @@ def test_missing_igraph_gives_a_tip_with_the_quoted_extra(
         for line in lines
     ), lines
     assert not any("igraph not available" in line for line in lines)
+
+
+def _graph_at(db: Path, version: int) -> None:
+    """A graph with one node, stamped as an older schema version."""
+    store = GraphStore(db)
+    store.upsert_node(NodeInfo(
+        kind="Function", name="f", file_path="a.py",
+        line_start=1, line_end=2, language="python",
+    ), file_hash="h")
+    store.commit()
+    store.close()
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "UPDATE metadata SET value = ? WHERE key = 'schema_version'", (str(version),),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_an_upgrade_across_v15_says_to_build_once(tmp_path: Path, caplog) -> None:
+    """``update`` after the upgrade said "0 files updated" and left new file
+    kinds out until a full build (gstack release-docs review, item 7)."""
+    db = tmp_path / "graph.db"
+    _graph_at(db, 14)
+    caplog.set_level(logging.INFO, logger=MIGRATIONS_LOGGER)
+
+    GraphStore(db).close()
+
+    hints = [
+        line for line in _info_lines(caplog, MIGRATIONS_LOGGER)
+        if "Run code-review-graph build once" in line
+    ]
+    assert hints == [
+        f"Graph upgraded to schema v{LATEST_VERSION}. Run code-review-graph build once "
+        "(and code-review-graph embed if you use embeddings): an update parses only "
+        "changed files, so files this release can newly read stay out until then."
+    ]
+
+
+def test_a_new_or_current_graph_gets_no_build_hint(tmp_path: Path, caplog) -> None:
+    caplog.set_level(logging.INFO, logger=MIGRATIONS_LOGGER)
+    db = tmp_path / "graph.db"
+    GraphStore(db).close()
+    GraphStore(db).close()
+
+    assert not any(
+        "build once" in line for line in _info_lines(caplog, MIGRATIONS_LOGGER)
+    )

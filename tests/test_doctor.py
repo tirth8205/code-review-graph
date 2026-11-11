@@ -120,7 +120,7 @@ def test_healthy_setup_exits_zero(repo, env, tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert out.rstrip().endswith("All good.")
     assert "Hooks and your shell run this one." in out
-    assert f"built at HEAD" in out
+    assert "built at HEAD" in out
 
 
 def test_an_older_copy_first_on_path_fails_and_says_which(repo, env, tmp_path, monkeypatch):

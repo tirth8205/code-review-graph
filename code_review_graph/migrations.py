@@ -685,6 +685,18 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
 
 LATEST_VERSION = max(MIGRATIONS.keys())
 
+#: Schema versions that shipped with parser changes an ``update`` alone does
+#: not apply: it parses only changed files, so new file kinds and fixed
+#: parsers reach the rest of the graph only through a full ``build``.
+#: Crossing one of these on an existing graph logs the hint below once.
+_REBUILD_AFTER: frozenset[int] = frozenset({15})
+
+_REBUILD_HINT = (
+    "Graph upgraded to schema v%d. Run code-review-graph build once (and "
+    "code-review-graph embed if you use embeddings): an update parses only "
+    "changed files, so files this release can newly read stay out until then."
+)
+
 
 def _run_one(conn: sqlite3.Connection, version: int) -> None:
     """Apply a single migration, surviving a peer doing the same thing.
@@ -770,3 +782,5 @@ def run_migrations(conn: sqlite3.Connection) -> None:
         _progress_level.reset(token)
     if new_database:
         logger.info("Created graph database (schema v%d).", LATEST_VERSION)
+    elif any(current < version <= LATEST_VERSION for version in _REBUILD_AFTER):
+        logger.info(_REBUILD_HINT, LATEST_VERSION)
