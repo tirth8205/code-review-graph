@@ -9,7 +9,7 @@ answered.
 It now looks at the files: when each file changed between the recorded commit
 and HEAD has the same SHA-256 in the graph as on disk, the graph is current.
 
-Found by the gstack developer-experience review of 2.4.0 (product item 4).
+Found by the developer-experience review of 2.4.0 (product item 4).
 """
 
 from __future__ import annotations

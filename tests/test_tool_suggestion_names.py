@@ -10,7 +10,7 @@ compact impact answer did the same.
 This reads the source rather than calling each tool, so a suggestion list on
 a path no test reaches is still checked.
 
-Found by the gstack developer-experience review of 2.4.0 (product item 5).
+Found by the developer-experience review of 2.4.0 (product item 5).
 """
 
 from __future__ import annotations

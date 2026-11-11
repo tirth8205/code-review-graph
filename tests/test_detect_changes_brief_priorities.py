@@ -5,7 +5,7 @@ names the top three review priorities, each with its file and line, its risk
 out of 1.00 with a level, who calls it and which tests reach it, and says the
 overall score is out of 1.00 too.
 
-Found by the gstack developer-experience review of 2.4.0 (product item 9).
+Found by the developer-experience review of 2.4.0 (product item 9).
 """
 
 from __future__ import annotations

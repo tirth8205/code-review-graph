@@ -14,7 +14,7 @@ New files are reviewed whole: ``git diff`` lists no lines for a file Git does
 not track, so a new file used to drop out of the review whenever another file
 had changed lines.
 
-Found by the gstack developer-experience review of 2.4.0 (product item 6).
+Found by the developer-experience review of 2.4.0 (product item 6).
 """
 
 from __future__ import annotations

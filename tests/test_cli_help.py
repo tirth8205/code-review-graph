@@ -1,6 +1,6 @@
 """The banner and --help list every command, and a typo gets a suggestion.
 
-From the gstack developer-experience review (item 14): the banner listed 16
+From the developer-experience review (item 14): the banner listed 16
 of 35 commands, --help opened with a brace list of every name, the hook-only
 commands sat among the real ones, and a mistyped command got a wall of names
 with no suggestion.

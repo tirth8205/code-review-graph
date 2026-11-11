@@ -1,6 +1,6 @@
 """A first build logs what the user needs, not every step it took.
 
-From the gstack developer-experience review (item 7): a brand-new database
+From the developer-experience review (item 7): a brand-new database
 logged about thirty migration lines, a resolver logged a line of zeros, and
 the community step said "igraph not available" without saying how to get it.
 """
@@ -178,7 +178,7 @@ def _graph_at(db: Path, version: int) -> None:
 
 def test_an_upgrade_across_v15_says_to_build_once(tmp_path: Path, caplog) -> None:
     """``update`` after the upgrade said "0 files updated" and left new file
-    kinds out until a full build (gstack release-docs review, item 7)."""
+    kinds out until a full build (release-docs review, item 7)."""
     db = tmp_path / "graph.db"
     _graph_at(db, 14)
     caplog.set_level(logging.INFO, logger=MIGRATIONS_LOGGER)

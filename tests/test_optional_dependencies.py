@@ -99,7 +99,7 @@ def test_visualize_svg_without_matplotlib_prints_one_line_and_exits(
 
 
 # Every "pip install" hint for an extra must quote it: zsh reads the bare
-# square brackets as a glob and fails with "no matches found" (gstack devex
+# square brackets as a glob and fails with "no matches found" (developer-experience
 # review, item 12). The four messages below are the ones a user can see.
 _UNQUOTED_EXTRA = __import__("re").compile(r"pip install code-review-graph\[")
 

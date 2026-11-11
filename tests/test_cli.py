@@ -255,7 +255,7 @@ class TestBuildUpdateCommands:
                         cli.main()
 
     def test_build_says_what_to_do_next(self, capsys):
-        """A new user should not stop at a line of counts (gstack devex, item 8)."""
+        """A new user should not stop at a line of counts (developer-experience review, item 8)."""
         self._run_build({"files_parsed": 3, "total_nodes": 9, "total_edges": 4})
 
         out = capsys.readouterr().out

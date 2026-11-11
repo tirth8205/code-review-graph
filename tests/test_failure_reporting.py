@@ -129,7 +129,7 @@ def test_a_newer_schema_is_refused_with_both_versions(tmp_path):
 
 
 def test_a_newer_schema_names_this_copy_and_how_to_find_the_others(tmp_path):
-    """"Upgrade code-review-graph" did not say which copy (gstack devex, item 13).
+    """"Upgrade code-review-graph" did not say which copy (developer-experience review, item 13).
 
     The usual cause is two installs: the MCP entry runs one, the shell another.
     The refusal names the running version and where it lives, and points at

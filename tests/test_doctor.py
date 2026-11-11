@@ -1,6 +1,6 @@
 """``code-review-graph doctor`` names what is wrong with a setup, and changes nothing.
 
-From the gstack developer-experience review (item 16). The case that started
+From the developer-experience review (item 16). The case that started
 it: pip installed 2.4.0 in a virtual environment, the MCP entry ran
 ``uvx code-review-graph serve``, uvx ran an older uv tool install, and that
 copy refused the graph the new one wrote. Nothing said which copy was which.

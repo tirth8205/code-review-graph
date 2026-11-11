@@ -9,7 +9,7 @@ that list and leave out the paths Git does not track, so a new user's first
 A path Git tracks is kept: once the user commits an install file it is theirs.
 No manifest means nothing changes.
 
-Found by the gstack developer-experience review of 2.4.0 (product item 3).
+Found by the developer-experience review of 2.4.0 (product item 3).
 """
 
 from __future__ import annotations
