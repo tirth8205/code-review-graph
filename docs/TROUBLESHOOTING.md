@@ -270,7 +270,9 @@ code-review-graph install
 `install` merges its entries into the existing `hooks` block and does not
 delete entries it did not write. If the old flat entries are still there,
 remove them from `.claude/settings.json` by hand (`install` writes a backup to
-`.claude/settings.json.bak` first), then run `install` again.
+`.claude/settings.json.bak` first, and a later `install` keeps that first
+backup), then run `install` again. `uninstall` removes a backup that holds
+only code-review-graph settings.
 
 Comments and trailing commas in the file are fine; they are kept. If the file
 cannot be merged (it is not valid JSON, a `/*` comment never closes, or `hooks`
@@ -303,10 +305,11 @@ not the one the session started in, so it works from a folder of sibling
 repos, an outer repo with nested ones, or a main checkout that edits a linked
 worktree. It updates that repository only if it already has a graph, or if it
 is the repository the session started in (which is built on first edit, as
-before). An edit anywhere else on disk changes no graph. A submodule with no
-graph of its own passes the edit to its superproject. Under `CRG_DATA_DIR`
-every repository points at the same database, so it counts only as the graph
-of the repository it was built for.
+before). The Codex hook runs `hook-update --existing-only`, which builds no
+new graph, since Codex builds one only when you ask. An edit anywhere else on
+disk changes no graph. A submodule with no graph of its own passes the edit to
+its superproject. Under `CRG_DATA_DIR` every repository points at the same
+database, so it counts only as the graph of the repository it was built for.
 
 ### The git pre-commit hook
 
@@ -325,10 +328,10 @@ code-review-graph detect-changes --brief
 ```
 
 `install` also appends `post-checkout`, `post-merge` and `post-rewrite` hooks
-that run `code-review-graph update --quiet` after a branch checkout, a merge
-and a rebase. With a hook manager, add that command to the same three hooks;
-run it from `post-checkout` only when its third argument is `1`, and from
-`post-rewrite` only when its first argument is `rebase`. Do the same from an
+that run `code-review-graph update --quiet` after a branch checkout, a merge,
+a rebase and `commit --amend`. With a hook manager, add that command to the
+same three hooks, and run it from `post-checkout` only when its third argument
+is `1`. Do the same from an
 existing hook written in a language other than shell, which `install` leaves
 unchanged.
 
@@ -626,7 +629,9 @@ and it was empty. A CI review gate can rely on that distinction. A `--base` Git
 does not know also exits 1; see *`Error: base 'X' is not a known revision`*
 above. `build` and
 `update` are unaffected — they re-parse the working tree and reconcile by
-content hash, so they still succeed without git.
+content hash, so they still succeed without git. Outside a Git repository,
+`update` with no `--repo` updates the current folder when it holds a
+`.code-review-graph` graph, and stops with an error otherwise.
 
 If only the line-level diff is unreadable while the changed-file list is not,
 the analysis degrades to whole-file scoring and says so rather than failing:
@@ -657,7 +662,7 @@ on first use. Nothing else is needed.
   after each Edit/Write (see *How the hooks work* for which repositories it
   touches), the pre-commit hook runs `update --quiet` before each commit, and
   the post-checkout, post-merge and post-rewrite hooks run it after a branch
-  switch, a merge and a rebase (not in linked worktrees).
+  switch, a merge, a rebase and an amend (not in linked worktrees).
 - `code-review-graph doctor` says whether the graph was built at HEAD, whether
   the last build finished, and which hooks are installed.
 - Run `code-review-graph update`, or ask the assistant to call

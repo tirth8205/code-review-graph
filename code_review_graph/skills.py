@@ -245,10 +245,14 @@ def _dsh_config_path() -> Path:
     return _dsh_home() / "cordis.patch.yml"
 
 
+def _opencode_config_paths(repo_root: Path) -> tuple[Path, Path]:
+    """Return both OpenCode project configs. OpenCode loads each one."""
+    return repo_root / "opencode.jsonc", repo_root / "opencode.json"
+
+
 def _opencode_config_path(repo_root: Path) -> Path:
     """Return OpenCode's existing project config, preferring JSONC."""
-    for name in ("opencode.jsonc", "opencode.json"):
-        path = repo_root / name
+    for path in _opencode_config_paths(repo_root):
         if path.exists():
             return path
     return repo_root / "opencode.jsonc"
@@ -343,6 +347,8 @@ PLATFORMS: dict[str, dict[str, Any]] = {
     "opencode": {
         "name": "OpenCode",
         "config_path": _opencode_config_path,
+        # Every file install may have written. Uninstall cleans each one.
+        "config_paths": _opencode_config_paths,
         "key": "mcp",
         "detect": _opencode_detected,
         "format": "object",
@@ -1915,6 +1921,21 @@ def _hook_chain(
 
 
 def _session_status_body(cli: str) -> str:
+    """Print the graph status in a Git checkout, and say so outside one."""
+    return (
+        "if git rev-parse --git-dir >/dev/null 2>&1; then"
+        f" {cli} status"
+        " --repo \"$(git rev-parse --show-toplevel 2>/dev/null)\" || true;"
+        " else echo 'Not a git repo, skipping'; fi"
+    )
+
+
+def _legacy_session_status_body(cli: str) -> str:
+    """The body up to 2.4.0, kept so hooks that carry it are still ours.
+
+    A failing ``status``, as in a Git repo with no graph, also printed
+    "Not a git repo".
+    """
     return (
         "git rev-parse --git-dir >/dev/null 2>&1"
         f" && {cli} status"
@@ -1938,14 +1959,22 @@ def _claude_update_hook_command(program: _HookProgram) -> str:
     )
 
 
-def _claude_session_hook_command(program: _HookProgram) -> str:
+def _claude_session_hook_command(
+    program: _HookProgram, body: Callable[[str], str] = _session_status_body
+) -> str:
     """The session hook: print the graph status of the repository it starts in."""
     if program == _PATH_HOOK_PROGRAM:
-        return (
-            f"cat >/dev/null || true; {_PATH_GUARD} || exit 0; "
-            + _session_status_body("code-review-graph")
-        )
-    return "cat >/dev/null || true; " + _hook_chain(_session_status_body, program)
+        return f"cat >/dev/null || true; {_PATH_GUARD} || exit 0; " + body("code-review-graph")
+    return "cat >/dev/null || true; " + _hook_chain(body, program)
+
+
+# The plugin's hook for a worktree Claude Code enters: build its graph in the
+# background, but only in a Git checkout, so no other folder gets a graph.
+_PLUGIN_WORKTREE_BUILD_COMMAND = (
+    f"cat >/dev/null || true; {_PATH_GUARD} || exit 0; "
+    "if git rev-parse --git-dir >/dev/null 2>&1; then"
+    " code-review-graph build >/dev/null 2>&1 & fi"
+)
 
 
 def _codex_hook_command(subcommand: str, program: _HookProgram | None = None) -> str:
@@ -2027,6 +2056,26 @@ def generate_hooks_config(
     }
 
 
+def generate_plugin_hooks_config() -> dict[str, Any]:
+    """Return what ``hooks/hooks.json``, the Claude Code plugin's hooks, holds.
+
+    The plugin cannot know which copy a user has, so its hooks run the one on
+    PATH. Beside the hooks ``install`` writes, it builds a graph in a
+    worktree Claude Code enters.
+    """
+    hooks = generate_hooks_config(Path("."), program=_PATH_HOOK_PROGRAM)["hooks"]
+    worktree = {
+        "matcher": "EnterWorktree",
+        "hooks": [{"type": "command", "command": _PLUGIN_WORKTREE_BUILD_COMMAND}],
+    }
+    return {
+        "hooks": {
+            "SessionStart": hooks["SessionStart"],
+            "PostToolUse": [worktree, *hooks["PostToolUse"]],
+        }
+    }
+
+
 def generate_steering_hooks_config(program: _HookProgram | None = None) -> dict[str, Any]:
     """Generate the opt-in Claude Code hook that runs ``code-review-graph enrich``.
 
@@ -2054,6 +2103,12 @@ def generate_steering_hooks_config(program: _HookProgram | None = None) -> dict[
     }
 
 
+# Codex builds a graph only when the user asks (see its skill), so its edit
+# hook updates one that exists and builds none. Up to 2.4.0 it ran plain
+# ``hook-update``, which built one on first use.
+_CODEX_UPDATE_SUBCOMMAND = "hook-update --existing-only"
+
+
 def generate_codex_hooks_config(
     repo_root: Path, program: _HookProgram | None = None
 ) -> dict[str, Any]:
@@ -2070,7 +2125,9 @@ def generate_codex_hooks_config(
                     "hooks": [
                         {
                             "type": "command",
-                            "command": _codex_hook_command("hook-update", program),
+                            "command": _codex_hook_command(
+                                _CODEX_UPDATE_SUBCOMMAND, program
+                            ),
                             "timeout": 30,
                             "statusMessage": "Updating code-review-graph",
                         },
@@ -2296,6 +2353,93 @@ def _upgrade_git_hook_block(
     return None
 
 
+# A top-level ``exit`` line: no indent, at most one argument, an optional
+# trailing ``;`` and comment.
+_TOP_LEVEL_EXIT_RE = re.compile(r"exit(?:[ \t]+(?P<arg>[^\s#;]+))?[ \t]*;?[ \t]*(?:#.*)?")
+
+# A line ending in one of these goes on to the next line.
+_SHELL_LINE_CONTINUATIONS = ("\\", "&&", "||", "|")
+
+
+def _is_shell_filler(line: str) -> bool:
+    """Return whether ``line`` is blank or only a comment."""
+    stripped = line.strip()
+    return not stripped or stripped.startswith("#")
+
+
+def _trailing_exit(text: str) -> tuple[int, bool] | None:
+    """Find the top-level ``exit`` a shell hook ends with, if any.
+
+    Returns ``(offset, safe)``: where the ``exit`` line starts, and whether
+    code put just before it leaves the hook's exit status alone. A bare
+    ``exit`` or ``exit $?`` passes on the last command's status, so it is not
+    safe. None when the hook does not end with such a line, or when the
+    ``exit`` belongs to the command on the line before (``check ||`` then
+    ``exit 1``).
+    """
+    lines = text.splitlines(keepends=True)
+    offset = len(text)
+    for index in range(len(lines) - 1, -1, -1):
+        offset -= len(lines[index])
+        if _is_shell_filler(lines[index]):
+            continue
+        match = _TOP_LEVEL_EXIT_RE.fullmatch(lines[index].rstrip("\r\n"))
+        if match is None:
+            return None
+        for before in reversed(lines[:index]):
+            if not _is_shell_filler(before):
+                if before.strip().endswith(_SHELL_LINE_CONTINUATIONS):
+                    return None
+                break
+        arg = match.group("arg")
+        return offset, bool(arg) and "$?" not in arg
+    return None
+
+
+def _add_hook_block(existing: str, block: str) -> str | None:
+    """Return a user's shell hook with ``block`` added where it will run.
+
+    That is the end, or just before a top-level ``exit`` the hook ends with,
+    since the shell stops there. None when the block would change what the
+    hook exits with (see ``_trailing_exit``): the caller leaves it alone.
+    """
+    trailing = _trailing_exit(existing)
+    if trailing is None:
+        return existing.rstrip("\n") + "\n" + block
+    offset, safe = trailing
+    if not safe:
+        return None
+    return existing[:offset] + block + existing[offset:]
+
+
+def _lift_block_above_exit(text: str, begin_marker: str, end_marker: str) -> str:
+    """Move a marked block that sits after a hook's final ``exit`` to just before it.
+
+    Earlier releases appended the block after it, where it never ran. Text
+    the user wrote after the block, or an ``exit`` that is not safe to move
+    past, keeps the block where it is.
+    """
+    span = _git_hook_block_span(text, 0, begin_marker, end_marker)
+    if span is None or text[span[1]:].strip():
+        return text
+    begin, end = span
+    trailing = _trailing_exit(text[:begin])
+    if trailing is None or not trailing[1]:
+        return text
+    offset = trailing[0]
+    return text[:offset] + text[begin:end] + text[offset:begin] + text[end:]
+
+
+def _exit_warning(hook_path: Path, command: str) -> None:
+    logger.warning(
+        "%s ends with an 'exit' that passes on the last command's status, so a "
+        "block added after it would never run; leaving it alone. Call "
+        "'code-review-graph %s' from it before the 'exit'.",
+        hook_path,
+        command,
+    )
+
+
 def _git_hooks_dir(repo_root: Path) -> Path | None:
     """Return the directory git runs hooks from, or None when there is none.
 
@@ -2342,12 +2486,14 @@ def install_git_hook(repo_root: Path) -> Path | None:
 
     Creates ``pre-commit`` if it doesn't exist, or appends to an existing
     one — the hook is appended, not overwritten, preserving any hooks
-    already there. Falls back to the legacy ``.git/hooks`` resolution when
-    git itself is unavailable. Returns None when no hooks directory can be
-    determined. A block written by any past release is upgraded in place, and
-    a hand-edited one is left alone. The installed hook skips automatic checks
-    in linked worktrees, where an implicit update could build a duplicate graph
-    for a different branch; ``CRG_HOOK_WORKTREES=1`` opts a worktree back in.
+    already there. A hook that ends with a top-level ``exit`` gets the block
+    just before that line, where it still runs. Falls back to the legacy
+    ``.git/hooks`` resolution when git itself is unavailable. Returns None
+    when no hooks directory can be determined. A block written by any past
+    release is upgraded in place, and a hand-edited one is left alone. The
+    installed hook skips automatic checks in linked worktrees, where an
+    implicit update could build a duplicate graph for a different branch;
+    ``CRG_HOOK_WORKTREES=1`` opts a worktree back in.
     Detection relies only on ``git rev-parse --absolute-git-dir`` (Git 2.13),
     not on newer options.
     """
@@ -2388,14 +2534,19 @@ def install_git_hook(repo_root: Path) -> Path | None:
                     hook_path,
                 )
                 return hook_path
+            upgraded = _lift_block_above_exit(
+                upgraded, _GIT_HOOK_BEGIN_MARKER, _GIT_HOOK_END_MARKER
+            )
             if upgraded == existing:
                 logger.info("%s already holds the current hook block.", hook_path)
                 return hook_path
             install_plan.write_text(hook_path, upgraded)
         else:
-            install_plan.write_text(
-                hook_path, existing.rstrip("\n") + "\n" + _git_hook_block(program)
-            )
+            added = _add_hook_block(existing, _git_hook_block(program))
+            if added is None:
+                _exit_warning(hook_path, "detect-changes --brief")
+                return hook_path
+            install_plan.write_text(hook_path, added)
     else:
         install_plan.write_text(hook_path, _GIT_HOOK_SHEBANG + _git_hook_block(program))
 
@@ -2418,8 +2569,9 @@ def install_git_hook(repo_root: Path) -> Path | None:
 #   nothing is left to replay, Git never runs post-rewrite, so that checkout
 #   is the final tree and post-checkout updates after all.
 # - post-merge, after a merge or a merge-mode ``git pull``.
-# - post-rewrite, after a rebase has replayed every commit. ``--amend`` also
-#   fires it, but ``pre-commit`` already updated the graph for that commit.
+# - post-rewrite, after a rebase has replayed every commit and after
+#   ``commit --amend``. ``pre-commit`` updates before an amend too, but
+#   ``--no-verify`` skips it.
 #
 # They share the pre-commit block's rules: explicit begin/end markers, appended
 # to an existing hook rather than overwriting it, and skipped in linked
@@ -2437,8 +2589,9 @@ _GIT_SYNC_HOOK_CONDITIONS = {
     # $3 is 1 for a branch checkout and 0 for a file checkout.
     "post-checkout": '[ "$3" = "1" ] && ',
     "post-merge": "",
-    # $1 names the command that rewrote commits: "rebase" or "amend".
-    "post-rewrite": '[ "$1" = "rebase" ] && ',
+    # Git passes "rebase" or "amend" as $1; both update. Up to 2.4.0 it was
+    # '[ "$1" = "rebase" ] && ', and the markers still find that block.
+    "post-rewrite": "",
 }
 
 
@@ -2514,8 +2667,9 @@ def install_git_sync_hooks(repo_root: Path) -> list[Path]:
 
     Called automatically by ``code-review-graph install`` next to
     :func:`install_git_hook`, and resolves the hooks directory the same way.
-    Each block is appended to an existing hook, never overwriting it, and a
-    block written by an earlier release is replaced in place. A hook whose
+    Each block is appended to an existing hook, never overwriting it (just
+    before a final top-level ``exit``, so it runs), and a block written by an
+    earlier release is replaced in place. A hook whose
     markers are unbalanced was edited by hand and is left alone, and so is a
     hook written in a language other than shell. A failed
     update never fails the git command that triggered it.
@@ -2557,11 +2711,19 @@ def install_git_sync_hooks(repo_root: Path) -> list[Path]:
                     )
                     continue
                 begin, end = span
-                updated = existing[:begin] + block + existing[end:]
+                updated = _lift_block_above_exit(
+                    existing[:begin] + block + existing[end:],
+                    _GIT_SYNC_HOOK_BEGIN_MARKER,
+                    _GIT_SYNC_HOOK_END_MARKER,
+                )
                 if updated != existing:
                     install_plan.write_text(hook_path, updated)
             else:
-                install_plan.write_text(hook_path, existing.rstrip("\n") + "\n" + block)
+                added = _add_hook_block(existing, block)
+                if added is None:
+                    _exit_warning(hook_path, "update --quiet")
+                    continue
+                install_plan.write_text(hook_path, added)
         else:
             install_plan.write_text(hook_path, _GIT_HOOK_SHEBANG + block)
         install_plan.chmod(hook_path, 0o755)  # nosec B103 - a hook must be executable
@@ -2622,7 +2784,7 @@ _GENERATED_HOOK_COMMAND_RE = re.compile(
     r"(?:\s*\|\|\s*(?:true|echo\s+'Not a git repo, skipping'))?"
     # The Codex hook that forwards the event JSON to a payload-scoped subcommand.
     r"|cat\s*\|\s*\{\s*if\s+command\s+-v\s+code-review-graph\s*>/dev/null\s+2>&1;\s*"
-    r"then\s+code-review-graph\s+hook-(?:update|status);\s*"
+    r"then\s+code-review-graph\s+hook-(?:update(?:\s+--existing-only)?|status);\s*"
     r"else\s+cat\s*>/dev/null;\s*fi;\s*\}"
     # The project edit hook that forwards the event JSON to ``hook-update``.
     r"|command\s+-v\s+code-review-graph\s*>/dev/null\s+2>&1\s*&&\s*"
@@ -2671,11 +2833,12 @@ _PINNED_PROJECT_HOOK_COMMAND_RES = tuple(
     for text in (
         _claude_update_hook_command(_PINNED_SENTINEL),
         _claude_session_hook_command(_PINNED_SENTINEL),
+        _claude_session_hook_command(_PINNED_SENTINEL, _legacy_session_status_body),
     )
 )
 _PINNED_CODEX_HOOK_COMMAND_RES = tuple(
     _pinned_shape(_codex_hook_command(subcommand, _PINNED_SENTINEL))
-    for subcommand in ("hook-update", "hook-status")
+    for subcommand in (_CODEX_UPDATE_SUBCOMMAND, "hook-update", "hook-status")
 )
 _PINNED_STEERING_HOOK_COMMAND_RE = _pinned_shape(
     f"{_codex_hook_command('enrich', _PINNED_SENTINEL)} || true"
@@ -3032,8 +3195,9 @@ def _write_merged_settings(
 
     Returns False when the file was left alone instead. A file that already
     holds these settings is not touched, so reinstalling neither rewrites it nor
-    replaces the backup of what the user wrote with our own earlier edit, nor
-    leaves a backup that is the same as the file.
+    leaves a backup that is the same as the file. An existing backup is kept:
+    it is the copy from before the first install, and a later install that
+    changes the file must not replace it with our own earlier edit.
     """
     spliced: str | None = None
     if raw.strip() and not jsonc.has_comments(raw):
@@ -3054,8 +3218,10 @@ def _write_merged_settings(
                 label, path, "has comments this installer cannot keep through the edit",
             )
             return False
-    if raw.strip():
-        backup_path = path.with_name(f"{path.name}.bak")
+    backup_path = path.with_name(f"{path.name}.bak")
+    if raw.strip() and install_plan.lexists(backup_path):
+        logger.info("Kept the existing backup %s", backup_path)
+    elif raw.strip():
         try:
             install_plan.copy_file(path, backup_path)
         except OSError as exc:
@@ -4021,6 +4187,14 @@ import { promisify } from "node:util"
 
 const execFileAsync = promisify(execFile)
 
+// Say in OpenCode's log why a command failed. No CLI at all is not a failure.
+function logFailure(args: string[], error: unknown): void {
+  const failure = error as { code?: unknown; stderr?: unknown; message?: unknown } | null
+  if (failure?.code === "ENOENT") return
+  const detail = String(failure?.stderr || failure?.message || error).trim()
+  console.error(`[code-review-graph] ${args[0]} failed: ${detail}`)
+}
+
 async function runQuiet(args: string[], cwd: string, timeoutMs: number): Promise<string> {
   try {
     const { stdout } = await execFileAsync("code-review-graph", args, {
@@ -4028,7 +4202,8 @@ async function runQuiet(args: string[], cwd: string, timeoutMs: number): Promise
       timeout: timeoutMs,
     })
     return String(stdout ?? "").trim()
-  } catch {
+  } catch (error) {
+    logFailure(args, error)
     return ""
   }
 }
@@ -4136,7 +4311,16 @@ import { promisify } from "node:util"
 
 const execFileAsync = promisify(execFile)
 
-// Run code-review-graph quietly, swallowing errors. Never blocks the session.
+// Say in OpenCode's log why a command failed. No CLI at all is not a failure.
+function logFailure(args: string[], error: unknown): void {
+  const failure = error as { code?: unknown; stderr?: unknown; message?: unknown } | null
+  if (failure?.code === "ENOENT") return
+  const detail = String(failure?.stderr || failure?.message || error).trim()
+  console.error(`[code-review-graph] ${args[0]} failed: ${detail}`)
+}
+
+// Run code-review-graph quietly. A failure is logged, never thrown, so it
+// never blocks the session.
 async function runQuiet(args: string[], cwd: string, timeoutMs: number): Promise<string> {
   try {
     const { stdout } = await execFileAsync("code-review-graph", args, {
@@ -4144,7 +4328,8 @@ async function runQuiet(args: string[], cwd: string, timeoutMs: number): Promise
       timeout: timeoutMs,
     })
     return String(stdout ?? "").trim()
-  } catch {
+  } catch (error) {
+    logFailure(args, error)
     return ""
   }
 }
@@ -4238,7 +4423,8 @@ async function runQuiet(args: string[], cwd: string, timeoutMs: number): Promise
       timeout: timeoutMs,
     })
     return String(stdout ?? "").trim()
-  } catch {
+  } catch (error) {
+    logFailure(args, error)
     return ""
   }
 }
@@ -4259,7 +4445,10 @@ async function runQuiet(args: string[], cwd: string, timeoutMs: number): Promise
       return String(stdout ?? "").trim()
     } catch (error) {
       // Try the next copy only when this one is not there at all.
-      if ((error as { code?: unknown } | null)?.code !== "ENOENT") return ""
+      if ((error as { code?: unknown } | null)?.code !== "ENOENT") {
+        logFailure(args, error)
+        return ""
+      }
     }
   }
   return ""
@@ -4291,12 +4480,22 @@ def _opencode_plugin_content(
     )
 
 
+def _opencode_plugin_path() -> Path:
+    """Return where OpenCode loads our global plugin from.
+
+    OpenCode keeps its global config in ``$XDG_CONFIG_HOME/opencode``
+    (default ``~/.config/opencode``).
+    """
+    return _xdg_config_home() / "opencode" / "plugins" / "crg-plugin.ts"
+
+
 def install_opencode_plugin(opencode_major: int | None = None) -> Path:
     """Install the OpenCode user-level plugin for code-review-graph.
 
-    Writes ``~/.config/opencode/plugins/crg-plugin.ts``.  Creates the
-    directories if they don't exist.  If the file already exists it is
-    overwritten (the plugin is self-contained and idempotent).
+    Writes ``crg-plugin.ts`` to OpenCode's global plugins folder (see
+    ``_opencode_plugin_path``).  Creates the directories if they don't
+    exist.  If the file already exists it is overwritten (the plugin is
+    self-contained and idempotent).
 
     Returns:
         Path to the plugin file that was written.
@@ -4313,8 +4512,7 @@ def install_opencode_plugin(opencode_major: int | None = None) -> Path:
             "defaulting to the OpenCode 2.x plugin template"
         )
 
-    plugins_dir = Path.home() / ".config" / "opencode" / "plugins"
-    plugin_path = plugins_dir / "crg-plugin.ts"
+    plugin_path = _opencode_plugin_path()
 
     install_plan.write_text(
         plugin_path, _opencode_plugin_content(opencode_major, _hook_launcher())

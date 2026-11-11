@@ -2371,10 +2371,15 @@ def build_parser() -> argparse.ArgumentParser:
         description="Hook command: add graph context to a Claude Code "
                     "PreToolUse event read from stdin.",
     )
-    sub.add_parser(
+    hook_update_cmd = sub.add_parser(
         "hook-update",
         description="Hook command: update the graph of the repository that "
                     "holds the edited file named in the event read from stdin.",
+    )
+    hook_update_cmd.add_argument(
+        "--existing-only",
+        action="store_true",
+        help="Update only a graph that exists; never build a new one.",
     )
     sub.add_parser(
         "hook-status",
@@ -2756,9 +2761,12 @@ def _dispatch() -> None:
         return
 
     if args.command in {"hook-update", "hook-status"}:
-        from .hook_update import run_status_hook, run_update_hook
+        from . import hook_update
 
-        (run_update_hook if args.command == "hook-update" else run_status_hook)()
+        if args.command == "hook-update":
+            hook_update.run_update_hook(existing_only=args.existing_only)
+        else:
+            hook_update.run_status_hook()
         return
 
     if args.command in _GRAPH_TOOL_COMMANDS:
@@ -3134,6 +3142,12 @@ def _dispatch() -> None:
     if args.command in ("update", "detect-changes"):
         # update and detect-changes require git for diffing
         repo_root = Path(args.repo) if args.repo else find_repo_root()
+        if not repo_root and args.command == "update":
+            # A project with a graph but no Git is updated in place, as with
+            # --repo. A folder with no graph is not built here.
+            project = find_project_root()
+            if (project / ".code-review-graph").is_dir():
+                repo_root = project
         if not repo_root:
             logging.error(
                 "Not in a git repository. '%s' requires git for diffing.",

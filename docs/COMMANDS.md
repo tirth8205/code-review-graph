@@ -165,6 +165,7 @@ code-review-graph eval --benchmark search_quality --embed [--embed-provider loca
 # Hook entry points (the hooks install writes run these; they read the hook event JSON on stdin).
 # --help and the command list leave them out, but they still run.
 code-review-graph hook-update                  # Update the graph of the repo that holds the edited file
+code-review-graph hook-update --existing-only  # The same, but never build a new graph (the Codex hook)
 code-review-graph hook-status                  # Graph status for the event's cwd
 code-review-graph enrich                       # Graph context for a search or read (the --steering hook)
 
@@ -371,10 +372,10 @@ A hook or CI job can tell these apart without reading the message. `75` is
   `CRG_HOOK_WORKTREES=1` is set, so a worktree does not build a second graph
   for another branch.
 - `install` also appends `post-checkout`, `post-merge` and `post-rewrite` Git
-  hooks that run `update --quiet` after a branch switch, a merge and a rebase, with
-  the same worktree rule. An existing hook written in a language other than
-  shell is left alone, `--no-hooks` skips all four, and `uninstall` removes
-  them.
+  hooks that run `update --quiet` after a branch switch, a merge, a rebase and
+  `commit --amend`, with the same worktree rule. An existing hook written in a
+  language other than shell is left alone, `--no-hooks` skips all four, and
+  `uninstall` removes them.
 - For an empty or incomplete graph, run `code-review-graph build`. See
   docs/TROUBLESHOOTING.md, "Empty or incomplete graph".
 - `context-history` reads a log that is off by default. Set

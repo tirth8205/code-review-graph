@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cat >/dev/null || true; command -v code-review-graph >/dev/null 2>&1 || exit 0; git rev-parse --git-dir >/dev/null 2>&1 && code-review-graph status --repo \"$(git rev-parse --show-toplevel 2>/dev/null)\" || echo 'Not a git repo, skipping'",
+            "command": "cat >/dev/null || true; command -v code-review-graph >/dev/null 2>&1 || exit 0; if git rev-parse --git-dir >/dev/null 2>&1; then code-review-graph status --repo \"$(git rev-parse --show-toplevel 2>/dev/null)\" || true; else echo 'Not a git repo, skipping'; fi",
             "timeout": 10
           }
         ]
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cat >/dev/null || true; code-review-graph build >/dev/null 2>&1 &"
+            "command": "cat >/dev/null || true; command -v code-review-graph >/dev/null 2>&1 || exit 0; if git rev-parse --git-dir >/dev/null 2>&1; then code-review-graph build >/dev/null 2>&1 & fi"
           }
         ]
       },

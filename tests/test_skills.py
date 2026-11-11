@@ -882,7 +882,10 @@ class TestGenerateCodexHooksConfig:
         post_cmd = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
         session_cmd = config["hooks"]["SessionStart"][0]["hooks"][0]["command"]
         exe = "'/opt/crg venv/bin/python3'"
-        for command, subcommand in ((post_cmd, "hook-update"), (session_cmd, "hook-status")):
+        for command, subcommand in (
+            (post_cmd, "hook-update --existing-only"),
+            (session_cmd, "hook-status"),
+        ):
             assert command == (
                 f"cat | {{ if [ -x {exe} ]; then {exe} -m code_review_graph {subcommand}; "
                 "elif command -v code-review-graph >/dev/null 2>&1; "
@@ -890,11 +893,12 @@ class TestGenerateCodexHooksConfig:
             )
 
     def test_the_path_copy_keeps_the_shape_2_4_0_wrote(self, tmp_path):
+        """Only ``--existing-only`` is new (crg-cjw); the rest is as 2.4.0 wrote it."""
         config = generate_codex_hooks_config(tmp_path, program=skills_module._PATH_HOOK_PROGRAM)
         post_cmd = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
         assert post_cmd == (
             "cat | { if command -v code-review-graph >/dev/null 2>&1; "
-            "then code-review-graph hook-update; else cat >/dev/null; fi; }"
+            "then code-review-graph hook-update --existing-only; else cat >/dev/null; fi; }"
         )
 
 

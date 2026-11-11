@@ -513,6 +513,12 @@ def _legacy_repo_hook_commands(repo_root: Path) -> set[str]:
     path_copy = _commands(
         skills.generate_hooks_config(repo_root, program=skills._PATH_HOOK_PROGRAM)
     )
+    # Its session hook also said "Not a git repo" when ``status`` failed.
+    path_copy.add(
+        skills._claude_session_hook_command(
+            skills._PATH_HOOK_PROGRAM, skills._legacy_session_status_body
+        )
+    )
     # v2.3.7 - v2.3.9 resolved the repository from the session's directory,
     # which #311 replaced with the edited file's repository.
     from_cwd = (
@@ -543,6 +549,8 @@ def _legacy_codex_hook_commands() -> set[str]:
     path_copy = _commands(
         skills.generate_codex_hooks_config(Path("."), program=skills._PATH_HOOK_PROGRAM)
     )
+    # Its edit hook ran plain ``hook-update``, before ``--existing-only``.
+    path_copy.add(skills._codex_hook_command("hook-update", skills._PATH_HOOK_PROGRAM))
     return {update, status, stdin_guard + update, stdin_guard + status} | path_copy
 
 
@@ -659,8 +667,70 @@ def remove_steering_hook(repo_root: Path, *, dry_run: bool = False) -> Uninstall
         dry_run=dry_run,
         scoped_commands=_steering_hook_scopes(),
         scoped_owns=(skills._is_steering_hook_command, _steering_hook_scope()),
+        backup=False,
     )
     return report
+
+
+def _without_our_servers(data: dict[str, Any]) -> dict[str, Any]:
+    """``data`` with every server entry named ``code-review-graph`` taken out."""
+    keys = {str(spec["key"]) for spec in skills.PLATFORMS.values()}
+    for spec in skills.PLATFORMS.values():
+        keys.update(str(item) for item in spec.get("legacy_keys", ()))
+    cleaned = dict(data)
+    for key in keys & set(cleaned):
+        container = cleaned[key]
+        if isinstance(container, dict):
+            cleaned[key] = {k: v for k, v in container.items() if k != _ENTRY_NAME}
+        elif isinstance(container, list):
+            cleaned[key] = [
+                entry
+                for entry in container
+                if not (isinstance(entry, dict) and entry.get("name") == _ENTRY_NAME)
+            ]
+    return cleaned
+
+
+def _remove_backup_of_ours(
+    path: Path,
+    owned_commands: set[str],
+    boundary: Path,
+    report: UninstallReport,
+    *,
+    dry_run: bool,
+    scoped_commands: dict[str, tuple[str, Any]] | None,
+    owns: Callable[[str], bool] | None,
+    scoped_owns: tuple[Callable[[str], bool], tuple[str, Any]] | None,
+) -> None:
+    """Remove the ``.bak`` install made of ``path`` when it holds only our content.
+
+    Install backs a settings file up before it merges hooks in. When the file
+    held only what install wrote (hooks from an earlier install, or the server
+    entry it had just added), the backup is a copy of ours and nothing of the
+    user's. A backup with anything else in it is the user's, and stays.
+    """
+    backup = path.with_name(f"{path.name}.bak")
+    if not install_plan.exists(backup) or not _safe_path(
+        backup, boundary, report, describe_skip=False
+    ):
+        return
+    raw = _read_text(backup, report)
+    if raw is None:
+        return
+    try:
+        data = json.loads(skills._strip_jsonc(raw))
+    except (json.JSONDecodeError, RecursionError, ValueError):
+        return
+    if not isinstance(data, dict) or _holds_nothing(data):
+        return
+    cleaned, _paths = _clean_hook_data(
+        data, owned_commands, scoped_commands, owns=owns, scoped_owns=scoped_owns
+    )
+    if _holds_nothing(_without_our_servers(cleaned)):
+        _remove_file(
+            backup, boundary, report, dry_run=dry_run,
+            detail="remove backup holding only code-review-graph settings",
+        )
 
 
 def _remove_hooks(
@@ -673,7 +743,18 @@ def _remove_hooks(
     scoped_commands: dict[str, tuple[str, Any]] | None = None,
     owns: Callable[[str], bool] | None = None,
     scoped_owns: tuple[Callable[[str], bool], tuple[str, Any]] | None = None,
+    backup: bool = True,
 ) -> None:
+    """Take our hooks out of ``path``, and drop its backup if only ours is in it.
+
+    ``backup=False`` leaves the backup alone, for a change smaller than an
+    uninstall.
+    """
+    if backup:
+        _remove_backup_of_ours(
+            path, owned_commands, boundary, report, dry_run=dry_run,
+            scoped_commands=scoped_commands, owns=owns, scoped_owns=scoped_owns,
+        )
     if not install_plan.exists(path) or not _safe_path(path, boundary, report):
         return
     raw = _read_text(path, report)
@@ -1557,12 +1638,14 @@ def _process_user(
             report,
             dry_run=dry_run,
         )
-    _remove_file(
-        home / ".config" / "opencode" / "plugins" / "crg-plugin.ts",
-        home,
-        report,
-        dry_run=dry_run,
-    )
+    # Where install puts the plugin now, and ``~/.config``, where it put it
+    # before it followed ``$XDG_CONFIG_HOME``.
+    config_home = skills._xdg_config_home()
+    for plugin, boundary in {
+        skills._opencode_plugin_path(): config_home,
+        home / ".config" / "opencode" / "plugins" / "crg-plugin.ts": home,
+    }.items():
+        _remove_file(plugin, boundary, report, dry_run=dry_run)
 
     hermes_skills = skills._hermes_home() / "skills" / "code-review-graph"
     for slug in _generated_skill_slugs():
