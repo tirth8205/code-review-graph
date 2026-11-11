@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config_keys import normalize_spring_config_key
-from ..constants import IMPORT_SCOPE_KEY, MAX_IMPACT_NODES
+from ..constants import IMPORT_SCOPE_KEY, MAX_IMPACT_NODES, QUERY_PATTERNS
 from ..context_history import CallInfo
 from ..context_savings import attach_context_savings, estimate_file_tokens
 from ..embeddings import EmbeddingStore
@@ -110,27 +110,8 @@ _SANITIZED_NAME_MAX = 256
 # Tool 2: get_impact_radius
 # ---------------------------------------------------------------------------
 
-_QUERY_PATTERNS = {
-    "callers_of": "Find all functions that call a given function",
-    "references_to": "Find all nodes that reference a given symbol",
-    "callees_of": "Find all functions called by a given function",
-    "imports_of": "Find all imports of a given file or module",
-    "importers_of": "Find all files that import a given file or module",
-    "children_of": "Find all nodes contained in a file or class",
-    "tests_for": "Find all tests for a given function or class",
-    "inheritors_of": "Find all classes that inherit from a given class",
-    "triggers_of": "Find methods invoked by a scheduler or other trigger",
-    "triggered_by": "Find schedulers or other triggers that invoke a method",
-    "publishers_of": "Find methods that publish an event",
-    "listeners_of": "Find methods that listen for an event",
-    "advises": "Find methods an AOP advice targets via its pointcut",
-    "advised_by": "Find AOP advice methods that intercept a given method",
-    "handlers_of": "Find methods that handle an endpoint",
-    "endpoints_for": "Find endpoints handled by a method",
-    "consumers_of": "Find classes that consume a Spring configuration property",
-    "file_summary": "Get a summary of all nodes in a file",
-    "path_to": "Find how a given symbol or file reaches another",
-}
+# The patterns live in constants, so the CLI can list them without this import.
+_QUERY_PATTERNS = QUERY_PATTERNS
 
 _JAVA_FQN_PART = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
 #: A test block's name, such as ``it:adds@L12``, which ends in its line number.

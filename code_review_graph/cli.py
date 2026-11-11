@@ -2419,19 +2419,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Graph tool wrappers
     query_cmd = sub.add_parser("query", help="Query graph relationships")
+    from .constants import QUERY_PATTERNS
+
     query_cmd.add_argument(
         "pattern",
-        choices=[
-            "callers_of",
-            "callees_of",
-            "imports_of",
-            "importers_of",
-            "children_of",
-            "tests_for",
-            "inheritors_of",
-            "file_summary",
-            "path_to",
-        ],
+        choices=list(QUERY_PATTERNS),
+        metavar="pattern",
+        help="One of: " + ", ".join(QUERY_PATTERNS),
     )
     query_cmd.add_argument("target", help="Node name, qualified name, or file path")
     query_cmd.add_argument(

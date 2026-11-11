@@ -12,12 +12,22 @@ from pathlib import Path
 
 QUERY_PATTERNS = (
     "callers_of",
+    "references_to",
     "callees_of",
     "imports_of",
     "importers_of",
     "children_of",
     "tests_for",
     "inheritors_of",
+    "triggers_of",
+    "triggered_by",
+    "publishers_of",
+    "listeners_of",
+    "advises",
+    "advised_by",
+    "handlers_of",
+    "endpoints_for",
+    "consumers_of",
     "file_summary",
     "path_to",
 )
