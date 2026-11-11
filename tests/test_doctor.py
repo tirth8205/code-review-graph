@@ -119,7 +119,7 @@ def test_healthy_setup_exits_zero(repo, env, tmp_path, monkeypatch, capsys):
 
     out = capsys.readouterr().out
     assert out.rstrip().endswith("All good.")
-    assert "Hooks and your shell run this one." in out
+    assert "Your shell runs this one, and so does a hook that names no copy." in out
     assert "built at HEAD" in out
 
 

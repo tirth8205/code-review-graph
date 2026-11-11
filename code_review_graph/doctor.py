@@ -807,11 +807,16 @@ def check_path_copies(prober: _Prober) -> tuple[list[Copy], list[Finding]]:
     findings: list[Finding] = []
     if not copies:
         findings.append(Finding(
-            INFO, "On PATH: no code-review-graph. Hooks and your shell cannot find it.",
+            INFO,
+            "On PATH: no code-review-graph. Your shell cannot find it, and nor can a "
+            "hook that names no copy.",
         ))
     for index, copy in enumerate(copies):
-        role = "Hooks and your shell run this one" if index == 0 else (
-            "Hidden behind the one above"
+        # Hooks install writes now name their own copy (checked under
+        # Hooks); only a shell, and a hook that names none, use this one.
+        role = (
+            "Your shell runs this one, and so does a hook that names no copy"
+            if index == 0 else "Hidden behind the one above"
         )
         shown = copy.version or "no answer to --version"
         message = f"On PATH: {copy.path} {shown}. {role}."
