@@ -182,8 +182,9 @@ export class SqliteReader {
   }
 
   constructor(dbPath: string) {
+    // The Python side sets WAL mode. A read-only open cannot change the
+    // journal mode, and trying fails with SQLITE_READONLY.
     this.db = new Database(dbPath, { readonly: true });
-    this.db.pragma('journal_mode = WAL');
     this.db.pragma('busy_timeout = 5000');
   }
 

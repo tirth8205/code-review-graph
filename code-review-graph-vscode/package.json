@@ -292,14 +292,13 @@
     "watch": "node esbuild.mjs --watch",
     "package": "vsce package",
     "lint": "tsc --noEmit",
-    "test": "node --experimental-vm-modules node_modules/@vscode/test-electron/out/runTest.js"
+    "test": "esbuild test/sqlite.test.ts --bundle --platform=node --format=cjs --target=node18 --external:better-sqlite3 --outfile=out/test/sqlite.test.js --log-level=warning && node --test out/test/sqlite.test.js"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "@types/d3": "^7.4.3",
     "@types/node": "^20.11.0",
     "@types/vscode": "^1.85.0",
-    "@vscode/test-electron": "^2.3.8",
     "@vscode/vsce": "^2.22.0",
     "esbuild": "^0.20.0",
     "typescript": "^5.3.3"
