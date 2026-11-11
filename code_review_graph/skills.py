@@ -1538,10 +1538,11 @@ _SKILLS: dict[str, dict[str, str]] = {
             "6. Call `list_graph_stats_tool` only when you need node, edge and language counts.\n\n"
             "## Token Efficiency Rules\n"
             '- Call `get_minimal_context_tool(task="<your task>")` before any other graph tool.\n'
-            '- Pass `detail_level="minimal"` wherever a tool accepts it. Use "standard" only when '
-            "minimal is not enough.\n"
+            '- Pass `detail_level="minimal"` unless it is not enough. Minimal drops source, so '
+            "leave `semantic_search_nodes_tool(include_source=True)` and "
+            "`get_review_context_tool` at standard.\n"
             "- Prefer a targeted `query_graph_tool` call over a broad listing call.\n"
-            "- Budget: about five tool calls and 800 tokens of graph output per task.\n"
+            "- Budget: about five tool calls per task. Source snippets stand in for file reads.\n"
             "- Read the implementation and its tests before changing code. The graph narrows "
             "scope; it does not replace the source."
         ),
@@ -1567,10 +1568,11 @@ _SKILLS: dict[str, dict[str, str]] = {
             "recommendation.\n\n"
             "## Token Efficiency Rules\n"
             '- Call `get_minimal_context_tool(task="<your task>")` before any other graph tool.\n'
-            '- Pass `detail_level="minimal"` wherever a tool accepts it. Use "standard" only when '
-            "minimal is not enough.\n"
+            '- Pass `detail_level="minimal"` unless it is not enough. Minimal drops source, so '
+            "leave `semantic_search_nodes_tool(include_source=True)` and "
+            "`get_review_context_tool` at standard.\n"
             "- Prefer a targeted `query_graph_tool` call over a broad listing call.\n"
-            "- Budget: about five tool calls and 800 tokens of graph output per task.\n"
+            "- Budget: about five tool calls per task. Source snippets stand in for file reads.\n"
             "- Read the implementation and its tests before changing code. The graph narrows "
             "scope; it does not replace the source."
         ),
@@ -1592,10 +1594,11 @@ _SKILLS: dict[str, dict[str, str]] = {
             "affect.\n\n"
             "## Token Efficiency Rules\n"
             '- Call `get_minimal_context_tool(task="<your task>")` before any other graph tool.\n'
-            '- Pass `detail_level="minimal"` wherever a tool accepts it. Use "standard" only when '
-            "minimal is not enough.\n"
+            '- Pass `detail_level="minimal"` unless it is not enough. Minimal drops source, so '
+            "leave `semantic_search_nodes_tool(include_source=True)` and "
+            "`get_review_context_tool` at standard.\n"
             "- Prefer a targeted `query_graph_tool` call over a broad listing call.\n"
-            "- Budget: about five tool calls and 800 tokens of graph output per task.\n"
+            "- Budget: about five tool calls per task. Source snippets stand in for file reads.\n"
             "- Read the implementation and its tests before changing code. The graph narrows "
             "scope; it does not replace the source."
         ),
@@ -1619,10 +1622,11 @@ _SKILLS: dict[str, dict[str, str]] = {
             "plan.\n\n"
             "## Token Efficiency Rules\n"
             '- Call `get_minimal_context_tool(task="<your task>")` before any other graph tool.\n'
-            '- Pass `detail_level="minimal"` wherever a tool accepts it. Use "standard" only when '
-            "minimal is not enough.\n"
+            '- Pass `detail_level="minimal"` unless it is not enough. Minimal drops source, so '
+            "leave `semantic_search_nodes_tool(include_source=True)` and "
+            "`get_review_context_tool` at standard.\n"
             "- Prefer a targeted `query_graph_tool` call over a broad listing call.\n"
-            "- Budget: about five tool calls and 800 tokens of graph output per task.\n"
+            "- Budget: about five tool calls per task. Source snippets stand in for file reads.\n"
             "- Read the implementation and its tests before changing code. The graph narrows "
             "scope; it does not replace the source."
         ),
