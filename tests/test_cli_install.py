@@ -452,10 +452,12 @@ def test_install_all_writes_nothing_for_tools_that_are_not_found(
     _handle_init(args)
     out = capsys.readouterr().out
 
-    assert _files_under(repo) - {".gitignore"} == {
+    written = {
         ".vscode/mcp.json",
         ".github/instructions/code-review-graph.instructions.md",
     }
+    record = {".code-review-graph/install-manifest.json", ".code-review-graph/.gitignore"}
+    assert _files_under(repo) - {".gitignore"} == written | record
     assert _files_under(home) == set()
     assert "Configured 1 platform(s): GitHub Copilot" in out
     assert "Not found here, so not set up: codex, claude, cursor," in out

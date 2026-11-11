@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- `install` keeps a record of the files it writes inside the repository, in
+  `.code-review-graph/install-manifest.json`. Each install adds to it and
+  never drops a file. `uninstall` drops each file it removes or cleans, and
+  deletes the record when it is empty. `install --dry-run` shows the record
+  like any other file.
+
 ### Fixed
 
 - The MCP entry and every hook `install` writes now run the copy of

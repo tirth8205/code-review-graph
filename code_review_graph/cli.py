@@ -52,7 +52,7 @@ from importlib.metadata import version as pkg_version
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Iterable, TypedDict
 
-from . import install_plan
+from . import install_manifest, install_plan
 from .errors import CodeReviewGraphError, is_lock_error
 
 if TYPE_CHECKING:
@@ -480,6 +480,10 @@ def _handle_init(args: argparse.Namespace) -> None:
                     print()
                     _report_gitignore_block(repo_root, gitignore_plan, dry_run=dry_run)
 
+            # The record of what install wrote is planned after every other
+            # file, so it lists them all (see install_manifest).
+            install_manifest.plan_record(repo_root, plan)
+
             if dry_run:
                 _print_instruction_conflicts(outcomes)
                 if codex_skill_error and target == "codex":
@@ -524,6 +528,9 @@ def _handle_init(args: argparse.Namespace) -> None:
                     with contextlib.redirect_stdout(gitignore_report):
                         print()
                         _report_gitignore_block(repo_root, gitignore_plan, dry_run=False)
+                # The rollback dropped the record too; it must not list the
+                # instruction files either.
+                install_manifest.plan_record(repo_root, plan)
             with contextlib.redirect_stdout(report):
                 if inject:
                     for label, wording in (

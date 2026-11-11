@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
-from . import install_gitignore, install_plan, jsonc, skills
+from . import install_gitignore, install_manifest, install_plan, jsonc, skills
 
 _tomllib: Any = importlib.import_module(
     "tomllib" if sys.version_info >= (3, 11) else "tomli"
@@ -41,6 +41,8 @@ class UninstallReport:
     edited_paths: list[str] = field(default_factory=list)
     skipped_paths: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    # Every file removed or edited, so the install record can drop it.
+    touched: list[Path] = field(default_factory=list, repr=False, compare=False)
 
     @property
     def total_actions(self) -> int:
@@ -123,10 +125,12 @@ def _done(detail: str, dry_run: bool) -> str:
 
 def _record_edit(report: UninstallReport, path: Path, detail: str, dry_run: bool) -> None:
     report.edited_paths.append(f"{path} ({_done(detail, dry_run)})")
+    report.touched.append(path)
 
 
 def _record_remove(report: UninstallReport, path: Path, detail: str, dry_run: bool) -> None:
     report.removed_paths.append(f"{path} ({_done(detail, dry_run)})")
+    report.touched.append(path)
 
 
 def _read_text(path: Path, report: UninstallReport) -> str | None:
@@ -1244,6 +1248,26 @@ def _remove_legacy_mcp_configs(
 
 
 def _process_repo(
+    repo_root: Path,
+    home: Path,
+    report: UninstallReport,
+    *,
+    keep_data: bool,
+    dry_run: bool,
+    platforms: frozenset[str] | None = None,
+) -> None:
+    try:
+        _process_repo_files(
+            repo_root, home, report, keep_data=keep_data, dry_run=dry_run, platforms=platforms
+        )
+    finally:
+        if not dry_run:
+            # A file uninstall removed or cleaned is no longer install's; the
+            # record goes with the data folder when that is removed.
+            install_manifest.forget(repo_root, report.touched)
+
+
+def _process_repo_files(
     repo_root: Path,
     home: Path,
     report: UninstallReport,
