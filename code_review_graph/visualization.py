@@ -1431,6 +1431,14 @@ communities.forEach(function(c) {
     nodeToCommunity.set(qn, c.id);
   });
 });
+// Communities unticked in the community legend. The filter only applies
+// while community colours are on, as the checkboxes are hidden otherwise.
+var hiddenCommunities = new Set();
+function inHiddenCommunity(d) {
+  if (!communityColoringOn || !hiddenCommunities.size) return false;
+  var cid = d.community_id != null ? d.community_id : nodeToCommunity.get(d.qualified_name);
+  return cid != null && hiddenCommunities.has(cid);
+}
 // Compute node degree (connection count) for size scaling
 var nodeDegree = new Map();
 edges.forEach(function(e) {
@@ -1558,7 +1566,7 @@ var labelGroup = gRoot.append("g").attr("class","labels");
 var linkSel, labelSel;
 var showLabels = true;
 function updateLinks() {
-  var vis = new Set(nodes.filter(function(n) { return !n._hidden; }).map(function(n) { return n.qualified_name; }));
+  var vis = new Set(nodes.filter(function(n) { return !n._hidden && !inHiddenCommunity(n); }).map(function(n) { return n.qualified_name; }));
   var visEdges = edges.filter(function(e) {
     if (hiddenEdgeKinds.has(e.kind)) return false;
     var s = typeof e.source === "object" ? e.source.qualified_name : e._source;
@@ -1645,6 +1653,7 @@ function updateNodes() {
     .on("focus", function(ev, d) { highlightConnected(d, true); showTooltip(ev, d); })
     .on("blur",  function(ev, d) { highlightConnected(d, false); hideTooltip(); });
   nodeSel = enter.merge(nodeSel);
+  nodeSel.attr("display", function(d) { return inHiddenCommunity(d) ? "none" : null; });
   labelSel = labelGroup.selectAll("text.node-label").data(vis, function(d) { return d.qualified_name; });
   labelSel.exit().remove();
   var lEnter = labelSel.enter().append("text").attr("class","node-label")
@@ -1921,7 +1930,6 @@ document.getElementById("btn-community").addEventListener("click", function() {
   else cl.classList.remove("visible");
 });
 // Build community legend with toggle checkboxes
-var hiddenCommunities = new Set();
 (function buildCommunityLegend() {
   var cl = document.getElementById("community-legend");
   if (!communities.length) return;
@@ -1949,26 +1957,12 @@ var hiddenCommunities = new Set();
   );
 })();
 function applyCommunityFilter() {
+  nodeGroup.selectAll("g.node-g")
+    .attr("display", function(d) { return d._hidden || inHiddenCommunity(d) ? "none" : null; });
   if (!communityColoringOn || !hiddenCommunities.size) {
-    nodeGroup.selectAll("g.node-g")
-      .attr("display", function(d) {
-        return d._hidden ? "none" : null;
-      });
     updateLinks();
     return;
   }
-  nodeGroup.selectAll("g.node-g")
-    .attr("display", function(d) {
-      if (d._hidden) return "none";
-      var cid = d.community_id;
-      if (cid == null) {
-        cid = nodeToCommunity.get(d.qualified_name);
-      }
-      if (cid != null && hiddenCommunities.has(cid)) {
-        return "none";
-      }
-      return null;
-    });
   if (labelSel) labelSel
     .attr("display", function(d) {
       var cid = d.community_id;

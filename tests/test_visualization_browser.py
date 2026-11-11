@@ -502,6 +502,36 @@ def test_legend_edge_toggle_hides_that_edge_type(full_page):
 
 
 # ---------------------------------------------------------------------------
+# Community filter, detail panel and keyboard focus (crg-nf8.1)
+# ---------------------------------------------------------------------------
+
+# mod0_func_0 calls into mod1, and mod2_func_0 calls into mod0.
+MOD0_CALLS = 2
+
+_SHOWN_NODE_COUNT_JS = """
+() => Array.from(document.querySelectorAll("#graph-svg g.nodes g.node-g"))
+  .filter((g) => g.getAttribute("display") !== "none").length
+"""
+
+
+def _community_box(probe, cid: int):
+    return probe.page.locator(f'#community-legend input[data-cid="{cid}"]')
+
+
+def test_hiding_a_community_hides_its_edges(full_page):
+    """An edge with a hidden end must go too, or it points at nothing."""
+    full_page.page.locator("#btn-community").click()
+    _community_box(full_page, 0).uncheck()
+
+    assert full_page.page.evaluate(_SHOWN_NODE_COUNT_JS) == TOTAL_NODES - NODES_PER_FILE
+    assert full_page.edge_lines.count() == TOTAL_EDGES - CONTAINS_PER_FILE - MOD0_CALLS
+
+    _community_box(full_page, 0).check()
+    assert full_page.edge_lines.count() == TOTAL_EDGES
+    full_page.assert_no_errors()
+
+
+# ---------------------------------------------------------------------------
 # Aggregated (community) page
 # ---------------------------------------------------------------------------
 

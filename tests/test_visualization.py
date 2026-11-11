@@ -639,6 +639,43 @@ def test_generate_html_includes_focus_visible(store_with_data, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Full-page script: community filter, detail panel, keyboard focus (crg-nf8.1).
+# tests/test_visualization_browser.py drives the same fixes in Chromium.
+# ---------------------------------------------------------------------------
+
+
+def _full_page_script(store, tmp_path) -> str:
+    from code_review_graph.visualization import generate_html
+
+    output_path = tmp_path / "graph.html"
+    generate_html(store, output_path, mode="full")
+    _, inline_scripts = _extract_scripts(output_path.read_text())
+    return next(s for s in inline_scripts if "function updateNodes(" in s)
+
+
+def _js_block(script: str, marker: str) -> str:
+    """Return *marker* through the brace that closes the first ``{`` after it."""
+    start = script.index(marker)
+    depth = 0
+    for i in range(script.index("{", start), len(script)):
+        if script[i] == "{":
+            depth += 1
+        elif script[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return script[start:i + 1]
+    raise AssertionError(f"no closing brace after {marker!r}")
+
+
+def test_edges_of_a_hidden_community_are_not_drawn(store_with_data, tmp_path):
+    """An edge with an end in a hidden community would point at nothing."""
+    script = _full_page_script(store_with_data, tmp_path)
+    assert "inHiddenCommunity(n)" in _js_block(script, "function updateLinks(")
+    # Nodes drawn again later (a File expanded) obey the filter as well.
+    assert "inHiddenCommunity(d)" in _js_block(script, "function updateNodes(")
+
+
+# ---------------------------------------------------------------------------
 # Phase 9: Visualization Aggregation
 # ---------------------------------------------------------------------------
 
