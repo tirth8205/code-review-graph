@@ -6,6 +6,9 @@
   `.code-review-graph/install-manifest.json`, until Git tracks them. Your first
   review now shows your change, not `.mcp.json` and hook scripts. A file you
   commit counts like any other.
+- `get_minimal_context_tool` no longer says `stale_graph` right after a commit the
+  pre-commit hook updated. When every file changed since the graph's commit has
+  the same content in the graph, the graph counts as current.
 - `next_tool_suggestions` give the names the server registers, which end in
   `_tool`, such as `build_or_update_graph_tool`. Some answers gave names no
   client could call.

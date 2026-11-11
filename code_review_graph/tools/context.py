@@ -8,7 +8,12 @@ import subprocess
 from typing import Any
 
 from ..errors import ChangeDiscoveryError
-from ..incremental import discover_review_changes, get_db_path, resolve_review_base
+from ..incremental import (
+    discover_review_changes,
+    get_db_path,
+    graph_holds_commits,
+    resolve_review_base,
+)
 from ..parser import normalize_file_path
 from ._common import _get_store, _resolve_root, compact_response, graph_provenance
 
@@ -66,7 +71,14 @@ def get_minimal_context(
             )
 
         provenance = graph_provenance(str(root))
-        if provenance and provenance.get("head_matches_build") is False:
+        if (
+            provenance
+            and provenance.get("head_matches_build") is False
+            # The pre-commit hook updates the graph before the commit
+            # exists, so it records the parent. A graph that already holds
+            # every file the newer commits changed is current.
+            and not graph_holds_commits(root, store, str(provenance.get("built_at_sha", "")))
+        ):
             return _not_ready(
                 "stale_graph",
                 "The graph was built at a different Git commit. "

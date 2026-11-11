@@ -1697,6 +1697,78 @@ def discover_review_changes(
     return changed, resolved_base
 
 
+#: More files than this between the graph's commit and HEAD is answered
+#: "not current" without reading them: an update is the cheaper answer.
+_FRESHNESS_FILE_LIMIT = 200
+
+
+def graph_holds_commits(
+    repo_root: Path,
+    store: GraphStore,
+    built_at: str,
+    *,
+    timeout: float | None = None,
+) -> bool:
+    """Return True when the graph already holds every file changed since *built_at*.
+
+    The pre-commit hook updates the graph before Git makes the commit, so the
+    graph records the parent commit while already holding the committed
+    files. Comparing commit ids alone then calls the graph stale after every
+    hooked commit. This looks at the files instead: each file that differs
+    between *built_at* and ``HEAD`` must have the same SHA-256 in the graph
+    as on disk, a deleted file must be gone from the graph, and a file the
+    graph does not hold must be one a build would leave out too.
+
+    Any doubt -- git failing, too many files, a file that cannot be read --
+    answers False, which keeps the old "update first" advice.
+    """
+    if timeout is None:
+        timeout = discovery_timeout()
+    if not built_at or built_at.startswith("-") or not _SAFE_GIT_REF.fullmatch(built_at):
+        return False
+    repo_root = _canonical_repo_root(repo_root)
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--relative", "--name-status", "-z", built_at, "HEAD", "--", "."],
+            capture_output=True,
+            cwd=str(repo_root),
+            timeout=timeout,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        logger.debug("git diff failed while checking graph freshness", exc_info=True)
+        return False
+    if result.returncode != 0:
+        return False
+    changed = _decode_name_status_paths(result.stdout)
+    if len(changed) > _FRESHNESS_FILE_LIMIT:
+        return False
+
+    stored_hashes = store.get_file_hashes()
+    parser: CodeParser | None = None
+    ignore_patterns: list[str] | None = None
+    for rel_path in changed:
+        full_path = repo_root / rel_path
+        stored_hash = stored_hashes.get(normalize_file_path(full_path))
+        if stored_hash is not None:
+            try:
+                current = hashlib.sha256(full_path.read_bytes()).hexdigest()
+            except OSError:
+                return False
+            if current != stored_hash:
+                return False
+            continue
+        if not full_path.exists():
+            continue
+        if parser is None:
+            parser = _get_code_parser_cls()(repo_root)
+            ignore_patterns = _load_ignore_patterns(repo_root)
+        if _keep_candidate(repo_root, rel_path, ignore_patterns or [], parser):
+            # A file a build would hold, and the graph does not.
+            return False
+    return True
+
+
 def get_all_tracked_files(
     repo_root: Path,
     recurse_submodules: bool | None = None,
