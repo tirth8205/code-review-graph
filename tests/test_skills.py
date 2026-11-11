@@ -1542,7 +1542,7 @@ class TestCodeBuddyPlatform:
         assert "code-review-graph" in data["servers"]
         # Claude and CodeBuddy share one exact contract/write. A different
         # contract that happens to share the path must still be processed.
-        assert capsys.readouterr().out.count(f"configured {shared_path}") == 2
+        assert capsys.readouterr().out.count("configured .mcp.json") == 2
 
     def test_all_does_not_credit_shared_alias_when_write_is_unsafe(
         self, tmp_path, capsys

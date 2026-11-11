@@ -197,6 +197,7 @@ def test_handle_init_mimo_writes_a_runnable_project_config(monkeypatch, tmp_path
 
 
 def test_handle_init_codex_skips_claude_skills(monkeypatch, tmp_path, capsys):
+    (tmp_path / ".git" / "hooks").mkdir(parents=True)
     monkeypatch.setattr(
         "code_review_graph.incremental.find_repo_root",
         lambda: tmp_path,
@@ -530,3 +531,45 @@ def test_platforms_that_used_to_be_always_on_are_detected(
         monkeypatch.setattr(skills.shutil, "which", lambda name: None)
         monkeypatch.setenv(env, "1")
         assert detect() is True
+
+
+
+def test_install_writes_each_git_hook_once_and_shows_short_paths(
+    monkeypatch, tmp_path, capsys
+):
+    """Codex, Claude Code and Qoder all want the git hooks; they are written once."""
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: home)
+    _only_detect(monkeypatch, "claude", "qoder", "codex")
+
+    _handle_init(_args(repo, "all"))
+    out = capsys.readouterr().out
+
+    assert out.count("Installed git pre-commit hook in .git/hooks/pre-commit") == 1
+    assert out.count("Installed git post-merge hook in .git/hooks/post-merge") == 1
+    assert "Installed hooks in .claude/settings.json" in out
+    assert "Installed Codex hooks in ~/.codex/hooks.json" in out
+    assert "Claude Code: configured .mcp.json" in out
+    assert str(repo) not in out
+
+
+def test_install_outside_git_warns_once_about_git_hooks(monkeypatch, tmp_path, caplog):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    _only_detect(monkeypatch, "claude", "qoder", "codex")
+
+    with caplog.at_level("WARNING", logger="code_review_graph.skills"):
+        _handle_init(_args(repo, "all"))
+
+    warnings = [r for r in caplog.records if "No git hooks directory" in r.getMessage()]
+    assert len(warnings) == 1

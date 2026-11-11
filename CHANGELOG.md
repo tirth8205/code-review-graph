@@ -19,6 +19,9 @@
   and Gemini CLI skills and hooks, Codex hooks and all nine instruction files
   were written whatever was found. `install` now lists the tools it did not
   find; add one anyway with `install --platform NAME`.
+- `install` writes each git hook once, so each one is reported once, and
+  shows paths relative to the repository or with `~`. Outside Git it says once,
+  not four times, that there is no hooks folder.
 
 ## [2.4.0] - 2026-11-10
 

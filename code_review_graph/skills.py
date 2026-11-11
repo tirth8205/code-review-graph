@@ -1302,6 +1302,7 @@ def _install_platform_configs(
         if key == "opencode":
             _warn_legacy_opencode_config(repo_root)
         config_path: Path = plat["config_path"](repo_root)
+        shown = install_plan.display_path(config_path, repo_root)
         server_key = plat["key"]
         server_entry = _build_server_entry(plat, key=key, repo_root=repo_root)
 
@@ -1325,13 +1326,13 @@ def _install_platform_configs(
                 # Refused to avoid data loss; the reason was already printed.
                 continue
             if not changed:
-                print(f"  {plat['name']}: already configured in {config_path}")
+                print(f"  {plat['name']}: already configured in {shown}")
                 _record_configured(key, plat)
                 continue
             if dry_run:
-                print(f"  [dry-run] {plat['name']}: would write {config_path}")
+                print(f"  [dry-run] {plat['name']}: would write {shown}")
             else:
-                print(f"  {plat['name']}: configured {config_path}")
+                print(f"  {plat['name']}: configured {shown}")
             _record_configured(key, plat)
             continue
 
@@ -1402,7 +1403,7 @@ def _install_platform_configs(
                     _report_user_owned_entry(config_path, plat["name"])
                     continue
                 if len(ours) == 1 and current == arr_entry:
-                    print(f"  {plat['name']}: already configured in {config_path}")
+                    print(f"  {plat['name']}: already configured in {shown}")
                     _record_configured(key, plat)
                     continue
                 # Replace the first registration and drop any duplicates an
@@ -1442,7 +1443,7 @@ def _install_platform_configs(
                 if not migrated:
                     continue
             elif current == server_entry and not migrated:
-                print(f"  {plat['name']}: already configured in {config_path}")
+                print(f"  {plat['name']}: already configured in {shown}")
                 _record_configured(key, plat)
                 continue
             else:
@@ -1477,9 +1478,9 @@ def _install_platform_configs(
             else json.dumps(existing, indent=2, ensure_ascii=False) + "\n",
         )
         if dry_run:
-            print(f"  [dry-run] {plat['name']}: would write {config_path}")
+            print(f"  [dry-run] {plat['name']}: would write {shown}")
         else:
-            print(f"  {plat['name']}: configured {config_path}")
+            print(f"  {plat['name']}: configured {shown}")
 
         if wrote_entry:
             _record_configured(key, plat)

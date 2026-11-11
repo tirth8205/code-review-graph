@@ -606,6 +606,7 @@ def _plan_integrations(
     """
     from .incremental import ensure_repo_gitignore_excludes_crg
     from .skills import (
+        _git_hooks_dir,
         generate_skills,
         install_codebuddy_hooks,
         install_codebuddy_skills,
@@ -622,6 +623,9 @@ def _plan_integrations(
         install_qoder_skills,
         selected_platforms,
     )
+
+    def shown(path: Path) -> str:
+        return install_plan.display_path(path, repo_root)
 
     chosen = frozenset(
         selected_platforms(repo_root, target) if platforms is None else platforms
@@ -651,68 +655,71 @@ def _plan_integrations(
                 if target == "all":
                     print(codex_skill_error, file=sys.stderr)
             else:
-                say(f"Installed Codex skill in {codex_skill_dir}")
+                say(f"Installed Codex skill in {shown(codex_skill_dir)}")
 
         if "claude" in chosen:
             skills_dir = generate_skills(repo_root)
-            say(f"Generated Claude Code skills in {skills_dir}")
+            say(f"Generated Claude Code skills in {shown(skills_dir)}")
 
         # Gemini CLI skills are workspace-scoped under .gemini/.
         if "gemini-cli" in chosen:
             gemini_skills_dir = install_gemini_cli_skills(repo_root)
-            say(f"Installed Gemini CLI skills in {gemini_skills_dir}")
+            say(f"Installed Gemini CLI skills in {shown(gemini_skills_dir)}")
 
         # CodeBuddy discovers project skills under .codebuddy/skills/.
         if "codebuddy" in chosen:
             codebuddy_skills_dir = install_codebuddy_skills(repo_root)
-            say(f"Installed CodeBuddy skills in {codebuddy_skills_dir}")
+            say(f"Installed CodeBuddy skills in {shown(codebuddy_skills_dir)}")
 
         # Hermes Agent discovers skills under <HERMES_HOME>/skills/.
         if "hermes" in chosen:
             hermes_skills_dir = install_hermes_skills(repo_root)
-            say(f"Installed Hermes Agent skills in {hermes_skills_dir}")
+            say(f"Installed Hermes Agent skills in {shown(hermes_skills_dir)}")
 
         # Qoder skills live in the project's .qoder/skills/.
         if "qoder" in chosen:
             qoder_skills_dir = install_qoder_skills(repo_root)
             if qoder_skills_dir:
-                say(f"Installed Qoder skills to {qoder_skills_dir}")
+                say(f"Installed Qoder skills in {shown(qoder_skills_dir)}")
 
     if not skip_hooks and "codebuddy" in chosen:
         try:
             codebuddy_settings = install_codebuddy_hooks(repo_root)
             if codebuddy_settings:
-                say(f"Installed CodeBuddy hooks in {codebuddy_settings}")
+                say(f"Installed CodeBuddy hooks in {shown(codebuddy_settings)}")
         except Exception as exc:
             logger.warning("Could not install CodeBuddy hooks: %s", exc)
     if not skip_hooks and "codex" in chosen:
         hooks_path = install_codex_hooks(repo_root)
         if hooks_path:
-            say(f"Installed Codex hooks in {hooks_path}")
-        git_hook = install_git_hook(repo_root)
-        if git_hook:
-            say(f"Installed git pre-commit hook in {git_hook}")
-        for sync_hook in install_git_sync_hooks(repo_root):
-            say(f"Installed git {sync_hook.name} hook in {sync_hook}")
-    if not skip_hooks and target in ("claude", "qoder", "all"):
+            say(f"Installed Codex hooks in {shown(hooks_path)}")
+    if not skip_hooks:
         for plat in ("claude", "qoder"):
             if plat not in chosen:
                 continue
             settings_path = install_hooks(repo_root, platform=plat)
             if settings_path:
-                say(f"Installed hooks in {settings_path}")
+                say(f"Installed hooks in {shown(settings_path)}")
+    # The git hooks keep the graph fresh for every tool, so they are written
+    # once, and only when git has a hooks folder for this repository (the
+    # lookup warns once when it has none).
+    if (
+        not skip_hooks
+        and target in ("all", "claude", "qoder", "codex")
+        and _git_hooks_dir(repo_root) is not None
+    ):
         git_hook = install_git_hook(repo_root)
         if git_hook:
-            say(f"Installed git pre-commit hook in {git_hook}")
+            say(f"Installed git pre-commit hook in {shown(git_hook)}")
         for sync_hook in install_git_sync_hooks(repo_root):
-            say(f"Installed git {sync_hook.name} hook in {sync_hook}")
+            say(f"Installed git {sync_hook.name} hook in {shown(sync_hook)}")
 
     # Cursor hooks are user-level, written like the MCP entry.
     if not skip_hooks and "cursor" in chosen:
         try:
             hooks_path = install_cursor_hooks()
             if hooks_path:
-                say(f"Installed Cursor hooks in {hooks_path}")
+                say(f"Installed Cursor hooks in {shown(hooks_path)}")
         except Exception as exc:
             logger.warning("Could not install Cursor hooks: %s", exc)
 
@@ -720,7 +727,7 @@ def _plan_integrations(
         try:
             gemini_settings = install_gemini_cli_hooks(repo_root)
             if gemini_settings:
-                say(f"Installed Gemini CLI hooks in {gemini_settings}")
+                say(f"Installed Gemini CLI hooks in {shown(gemini_settings)}")
         except Exception as exc:
             logger.warning("Could not install Gemini CLI hooks: %s", exc)
 
@@ -728,7 +735,7 @@ def _plan_integrations(
     if not skip_hooks and "opencode" in chosen:
         try:
             plugin_path = install_opencode_plugin()
-            say(f"Installed OpenCode plugin in {plugin_path}")
+            say(f"Installed OpenCode plugin in {shown(plugin_path)}")
         except Exception as exc:
             logger.warning("Could not install OpenCode plugin: %s", exc)
     return codex_skill_error
