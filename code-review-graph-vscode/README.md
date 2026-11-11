@@ -14,7 +14,7 @@ Visualise code dependencies, blast radius, and review context from your code gra
 - **Interactive Graph** -- Force-directed D3.js visualisation of your code dependencies
 - **Live Search** -- Fuzzy search across your entire code graph with instant results
 - **Compute Embeddings** -- Generate vector embeddings for semantic search
-- **Watch Mode** -- Runs `code-review-graph watch` for up to 60 seconds; for updates that keep going, run `code-review-graph watch` in a terminal
+- **Watch Mode** -- Runs `code-review-graph watch` to keep the graph up to date until you stop it
 - **Auto-Update** -- Graph rebuilds in the background when you save files
 
 ## Quick Start
@@ -57,7 +57,7 @@ The graph database is stored locally at `.code-review-graph/graph.db` and update
 | `Code Graph: Search` | Search the code graph |
 | `Code Graph: Show Graph` | Open the interactive graph visualisation |
 | `Code Graph: Compute Embeddings` | Generate vector embeddings for semantic search |
-| `Code Graph: Watch Mode` | Run `code-review-graph watch` (stops after 60 seconds) |
+| `Code Graph: Watch Mode` | Start `code-review-graph watch`; run it again to stop |
 
 ## Settings
 
