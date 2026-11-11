@@ -39,8 +39,6 @@ Requires Python 3.10+.
 
 Open the Command Palette (`Ctrl+Shift+P`) and run **Code Graph: Build Graph**.
 
-The extension stops the build after 60 seconds. For a large repository, run `code-review-graph build` in a terminal instead.
-
 The graph database is stored locally at `.code-review-graph/graph.db` and updates automatically on file save.
 
 ## Commands

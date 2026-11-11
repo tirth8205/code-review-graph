@@ -5,6 +5,9 @@ import * as vscode from 'vscode';
 const execFileAsync = promisify(execFile);
 
 const CLI_TIMEOUT_MS = 60_000;
+// Build and update can take many minutes on a large repository, so they
+// run with no time limit (0 means none).
+const NO_TIMEOUT = 0;
 const INSTALL_TIMEOUT_MS = 120_000;
 
 export interface CliResult {
@@ -68,7 +71,7 @@ export class CliWrapper {
                 title: 'Code Review Graph: Building graph\u2026',
                 cancellable: false,
             },
-            () => this.exec(args, workspaceRoot),
+            () => this.exec(args, workspaceRoot, NO_TIMEOUT),
         );
     }
 
@@ -76,7 +79,7 @@ export class CliWrapper {
      * Incrementally update the graph database for a workspace.
      */
     async updateGraph(workspaceRoot: string): Promise<CliResult> {
-        return this.exec(['update'], workspaceRoot);
+        return this.exec(['update'], workspaceRoot, NO_TIMEOUT);
     }
 
     /**
@@ -166,11 +169,15 @@ export class CliWrapper {
     /**
      * Execute the CLI with the given arguments inside `cwd`.
      */
-    private async exec(args: string[], cwd?: string): Promise<CliResult> {
+    private async exec(
+        args: string[],
+        cwd?: string,
+        timeout: number = CLI_TIMEOUT_MS,
+    ): Promise<CliResult> {
         try {
             const { stdout, stderr } = await execFileAsync(this.cliPath, args, {
                 cwd,
-                timeout: CLI_TIMEOUT_MS,
+                timeout,
             });
             return { success: true, stdout, stderr };
         } catch (err: unknown) {
