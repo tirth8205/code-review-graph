@@ -41,6 +41,19 @@ PLACEHOLDERS = {
     "_GEMINI_CLI_HOOK_FILENAMES[1]": "crg-update.sh",
     "sys.executable": "/opt/previous-release/bin/python3.9",
     "hook_command": _PASSTHROUGH,
+    # v2.4.0 moved these commands into a constant and a helper.
+    "_CLAUDE_UPDATE_HOOK_COMMAND": (
+        "command -v code-review-graph >/dev/null 2>&1"
+        " && code-review-graph hook-update; cat >/dev/null || true"
+    ),
+    "_codex_hook_command('hook-status')": (
+        "cat | { if command -v code-review-graph >/dev/null 2>&1; "
+        "then code-review-graph hook-status; else cat >/dev/null; fi; }"
+    ),
+    "_codex_hook_command('hook-update')": (
+        "cat | { if command -v code-review-graph >/dev/null 2>&1; "
+        "then code-review-graph hook-update; else cat >/dev/null; fi; }"
+    ),
 }
 
 # Frozen from the tags below, so a checkout without tags still checks
@@ -139,7 +152,7 @@ def _render(node: ast.expr) -> str | None:
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
         left, right = _render(node.left), _render(node.right)
         return None if left is None or right is None else left + right
-    if isinstance(node, (ast.Name, ast.Attribute, ast.Subscript)):
+    if isinstance(node, (ast.Name, ast.Attribute, ast.Subscript, ast.Call)):
         return PLACEHOLDERS.get(ast.unparse(node))
     return None
 
