@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+- New `code-review-graph doctor` command. It lists every `code-review-graph`
+  on PATH with its version, the version each MCP entry in the repository's
+  configs runs (read from a `uvx` pin or `uv tool list`, never by starting a
+  download), the graph's schema, whether it was built at HEAD and whether the
+  last build finished, and which git and editor hooks are installed. It
+  changes nothing, exits 1 when a check fails, and takes `--json`.
+- A graph written by a newer copy now names the copy that refused it, its
+  version and its folder, and points at `doctor` to find the others.
+- `build` ends with a next step, and warns on stderr when it found no source
+  files ("Is this the project root?").
+- A first build logs one line, `Created graph database (schema v15).`,
+  instead of every migration step. The Spring event resolver is quiet when it
+  found nothing, and a missing igraph is now a tip naming
+  `pip install "code-review-graph[communities]"`. Upgrading an existing graph
+  to schema 15 logs one line asking for a `build` once.
+- The banner lists every command, in groups, with a start line. `--help`
+  shows `<command>` instead of a list of every name and leaves out the
+  hook-only `enrich`, `hook-update` and `hook-status`, which still run. A
+  mistyped command exits 2 with "Did you mean ...?". Help text uses British
+  spelling.
+- Every `pip install` hint for an extra quotes it, so it works in zsh.
+
 ## [2.4.0] - 2026-11-10
 
 Two new platforms, MiMo Code and DeepSeek Harness, so `install` now supports
