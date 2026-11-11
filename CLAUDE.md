@@ -23,16 +23,16 @@ Core package `code_review_graph/` (Python 3.10+):
 - `main.py`: FastMCP server entry point. Registers 30 tools and 5 prompts.
 - `tools/`: tool implementations by domain: `build.py`, `query.py`, `review.py`, `context.py`, `flows_tools.py`, `community_tools.py`, `refactor_tools.py`, `docs.py`, `registry_tools.py`, `analysis_tools.py`; shared helpers in `_common.py`.
 - `prompts.py`: 5 MCP prompts (review_changes, architecture_map, debug_issue, onboard_developer, pre_merge_check).
-- `cli.py`: the `code-review-graph` command. `daemon.py` and `daemon_cli.py`: the `crg-daemon` multi-repo watch daemon. `multi_worktree.py`: `serve --multi-worktree`, one child server per linked Git worktree. `hook_update.py`: the `hook-update` and `hook-status` commands, which act on the repository that holds the edited file.
+- `cli.py`: the `code-review-graph` command. `errors.py`: errors the CLI prints as one `Error:` line and MCP tools return as `status: error`. `daemon.py` and `daemon_cli.py`: the `crg-daemon` multi-repo watch daemon. `multi_worktree.py`: `serve --multi-worktree`, one child server per linked Git worktree. `hook_update.py`: the `hook-update` and `hook-status` commands, which act on the repository that holds the edited file.
 - `parser.py`: Tree-sitter multi-language parser with fallbacks for notebooks and other formats. `custom_languages.py`: languages defined in `.code-review-graph/languages.toml` (see docs/CUSTOM_LANGUAGES.md).
 - `graph.py`: SQLite graph store (nodes, edges, impact analysis). `migrations.py`: schema migrations; the current schema version is 15 and must equal `SUPPORTED_SCHEMA_VERSION` in the VS Code extension (CI checks this).
-- `incremental.py`: full build, Git/SVN change detection, incremental update, stale-file reconciliation, watch mode. `locking.py`: the cross-process lock that lets one graph write run at a time. `postprocessing.py`: shared post-build pipeline (signatures, flows, communities, FTS).
+- `incremental.py`: full build, Git/SVN change detection, incremental update, stale-file reconciliation, watch mode. `locking.py`: the cross-process lock that lets one graph write run at a time. `build_state.py`: records whether the last build finished, so the next `update` can repair a half-built graph. `postprocessing.py`: shared post-build pipeline (signatures, flows, communities, FTS).
 - Post-build resolvers: `python_resolver.py`, `jedi_resolver.py` (optional `enrichment` extra), `spring_resolver.py`, `event_resolver.py`, `aop_resolver.py` (Spring AOP advice), `temporal_resolver.py`, `config_keys.py`, `scoped_resolver.py` (PHP, Rust; it runs `csharp_resolver.py` for C# namespaces), `inheritance.py` (which ancestor declares an inherited method), `rescript_resolver.py`, `hcl_resolver.py`, `tsconfig_resolver.py` (tsconfig and jsconfig path aliases), `workspace_resolver.py` (npm, yarn and pnpm workspace package names), `npm_alias_resolver.py` (npm aliases that point at a workspace package).
 - `flows.py`: execution flows and criticality. `communities.py`: Leiden via igraph (optional) or file-based grouping, plus the architecture overview. `analysis.py`: hub and bridge nodes, knowledge gaps, surprise scoring, suggested questions.
 - `search.py`: FTS5 keyword search combined with optional vector search. `embeddings.py`: providers for local sentence-transformers, OpenAI-compatible endpoints, Google Gemini, MiniMax and Voyage AI.
-- `changes.py`: risk-scored change analysis. `change_details.py`: the bounded `--details` sections of `detect-changes` (risk terms, hubs, coupling, impact, gaps) for the GitHub Action comment. `refactor.py`: rename preview, dead code, suggestions. `hints.py`: `next_tool_suggestions`. `uncertainty.py`: `confidence` notes on empty results and on answers that are part guesses. `context_savings.py`: estimated context-savings metadata. `context_history.py`: the opt-in local log of those estimates (`CRG_CONTEXT_HISTORY=1`) and the `context-history` command's reader.
+- `changes.py`: risk-scored change analysis. `change_details.py`: the bounded `--details` sections of `detect-changes` (risk, communities, hubs, coupling, impact, gaps, graph, or all) for the GitHub Action comment. `refactor.py`: rename preview, dead code, suggestions. `hints.py`: `next_tool_suggestions`. `uncertainty.py`: `confidence` notes on empty results and on answers that are part guesses. `context_savings.py`: estimated context-savings metadata. `context_history.py`: the opt-in local log of those estimates (`CRG_CONTEXT_HISTORY=1`) and the `context-history` command's reader.
 - `visualization.py`: D3.js HTML graph (D3 is bundled in `assets/`). `neighbourhood.py`: seeded k-hop views and the path between two symbols. `exports.py`: JSON, GraphML, Neo4j Cypher, Obsidian, SVG. `wiki.py`: Markdown wiki. `graph_diff.py`: snapshot diffing. `memory.py`: stored Q&A feedback.
-- `skills.py`: `install` (platform MCP configs, hooks, skills, instruction blocks). `install_plan.py`: every install read and write goes through it, so `install --dry-run` can show each change as a diff and a real install writes nothing before its question is answered. `codex_skill.py`: the global Codex skill under `$CODEX_HOME/skills/`. `_legacy_instructions.py`: instruction blocks shipped by earlier releases. `jsonc.py`: comment-preserving JSONC tokenising and splices, shared by install and uninstall so neither flattens a commented config. `install_gitignore.py`: the opt-in `install --gitignore` block listing the files a run created. `uninstall.py`: reverses `install`. `enrich.py`: PreToolUse hook enrichment. `forget.py`: drops files from the graph. `registry.py`: multi-repo registry. `http_origin_guard.py`: Host/Origin checks for `serve --http`. `token_benchmark.py` and `eval/`: benchmarks. `constants.py`: shared constants.
+- `skills.py`: `install` (platform MCP configs, hooks, skills, instruction blocks). `install_plan.py`: every install read and write goes through it, so `install --dry-run` can show each change as a diff and a real install writes nothing before its question is answered. `codex_skill.py`: the global Codex skill under `$CODEX_HOME/skills/`. `dsh.py`: adds and removes the server row in the DeepSeek Harness patch file `$DSH_HOME/cordis.patch.yml` (default `~/.dsh/cordis.patch.yml`). `_legacy_instructions.py`: instruction blocks shipped by earlier releases. `jsonc.py`: comment-preserving JSONC tokenising and splices, shared by install and uninstall so neither flattens a commented config. `install_gitignore.py`: the opt-in `install --gitignore` block listing the files a run created. `uninstall.py`: reverses `install`. `enrich.py`: PreToolUse hook enrichment. `forget.py`: drops files from the graph. `registry.py`: multi-repo registry. `http_origin_guard.py`: Host/Origin checks for `serve --http`. `token_benchmark.py` and `eval/`: benchmarks. `constants.py`: shared constants.
 - `docs/LLM-OPTIMIZED-REFERENCE.md`: the reference served by `get_docs_section_tool`.
 
 VS Code extension: `code-review-graph-vscode/` (TypeScript, separate `package.json` and `tsconfig.json`). Reads `.code-review-graph/graph.db` directly.
@@ -56,7 +56,7 @@ uv run code-review-graph forget PATH        # drop files from the graph
 uv run code-review-graph serve              # MCP server (stdio; --http for localhost)
 uv run code-review-graph wiki               # Markdown wiki
 uv run code-review-graph register <path>    # add a repo to the multi-repo registry
-uv run code-review-graph eval               # benchmarks
+uv run code-review-graph eval --all         # benchmarks
 uv run code-review-graph --help             # full command list
 ```
 
@@ -91,7 +91,7 @@ uv run code-review-graph --help             # full command list
 - Watch and daemon: `test_watch_*.py`, `test_daemon*.py`.
 - Install and platforms: `test_skills.py`, `test_cli_install.py`, `test_uninstall.py`, `test_git_hook_worktree.py`, `test_hermes_install.py`, `test_qoder_bundled_skills.py`, `test_installer_ownership.py` (what install may rewrite and what belongs to the user), `test_install_gitignore_block.py` (the opt-in `--gitignore` block), `test_install_outputs_are_ignored.py` (what install writes in this checkout is tracked or in the root `.gitignore`), `test_released_shapes.py` (reads the hooks and MCP entries every released tag wrote and requires them to still be recognised; needs tags, skips without them), `test_platform_lifecycle.py` (opt-in marker `platform_lifecycle`).
 - Windows: `test_windows_compat.py`, `test_windows_path_identity.py`.
-- Docs and GitHub Action: `test_documentation.py`, `test_action_render.py`.
+- Docs and GitHub Action: `test_documentation.py`, `test_readme_parity.py` (README.md and its four translations must keep the same heading levels, code blocks, links, table rows and language switcher), `test_action_render.py`.
 - Distribution gate: `test_packaging.py`, marked `packaging` and **skipped by default**. Builds a wheel and an sdist with `python -m build`, installs each into its own virtual environment, and drives the installed program with the checkout out of reach. Needs network and takes a couple of minutes. Run it before a release with `uv run --python 3.13 python -m pytest tests/test_packaging.py -m packaging`.
 - `tests/fixtures/`: sample files per supported language.
 
@@ -104,6 +104,9 @@ uv run code-review-graph --help             # full command list
 - security: bandit with the exemptions in `pyproject.toml`.
 - schema-sync: `LATEST_VERSION` in `migrations.py` must equal `SUPPORTED_SCHEMA_VERSION` in the VS Code extension.
 - test: pytest on Python 3.10, 3.11, 3.12 and 3.13; coverage must be at least 65%.
+- viz-browser: the browser tests (`-m browser`, needs the `browser-test` extra).
+- e2e: the real MCP client tests (`-m e2e`) on Linux, macOS and Windows. Not a required check.
+- upgrade-path: manual run only. Upgrades graphs built by released versions with this code (`-m upgrade`).
 - minimum-dependencies: pytest at the exact floors in `.github/requirements-minimum.txt` on the same four Pythons. Raise a floor in `pyproject.toml` and that file together; `tests/test_dependency_floors.py` checks they match.
 - google-embeddings: constructs the Google provider with the `google-embeddings` and `all` extras.
 - windows-native: a subset of the suite on windows-latest.
@@ -119,6 +122,7 @@ receive promotion PRs, always merged with a merge commit.
 `tests/test_promotion_is_manual.py` enforces that. Full rules in CONTRIBUTING.md "Branching and
 promotion".
 
+<!-- code-review-graph MCP tools -->
 ## MCP Tools: code-review-graph
 
 **This project has a knowledge graph. Start with the code-review-graph
@@ -127,7 +131,7 @@ gives you structural context (callers, dependents, test coverage) that file sear
 
 ### When to use graph tools FIRST
 
-- **Exploring code**: `semantic_search_nodes_tool` or `query_graph_tool` instead of Grep
+- **Exploring code**: `semantic_search_nodes_tool(include_source=True, expand_neighbors=True)`
 - **Understanding impact**: `get_impact_radius_tool` instead of manually tracing imports
 - **Code review**: `detect_changes_tool` + `get_review_context_tool` instead of reading entire files
 - **Finding relationships**: `query_graph_tool` with callers_of/callees_of/imports_of/tests_for
@@ -135,12 +139,12 @@ gives you structural context (callers, dependents, test coverage) that file sear
 
 ### Verify in the source
 
-- Narrow scope with the graph, then read the source. Do not change code from graph output alone.
-- For any non-trivial change, read the implementation and the relevant tests before concluding.
+- Answer from `include_source=True, expand_neighbors=True`; read a file only if truncated.
+- Do not change code from graph output alone: for any non-trivial change,
+  read the implementation and the relevant tests before concluding.
 - Verify the exact source when touching behavior, database logic, migrations, retries, fallbacks,
   recovery, or compatibility code.
-- When the graph and the source disagree, the source wins. The graph may be stale or may not
-  model that relationship.
+- When the graph and the source disagree, the source wins. The graph may be stale.
 - An empty graph result can mean "not indexed" or "not statically visible", not "does not exist".
 
 ### Key Tools

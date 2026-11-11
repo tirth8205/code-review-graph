@@ -11,9 +11,10 @@ On each run the action:
 2. Restores the cached `.code-review-graph/` SQLite graph and re-parses the
    files changed by the PR, or builds the graph from scratch on a cache miss.
 3. Runs `code-review-graph detect-changes --base origin/<base-branch>` to get
-   risk-scored functions, affected execution flows and test gaps. With the
-   `details` input set it adds `--details <sections>`, and nothing else
-   changes.
+   risk-scored functions, affected execution flows and test gaps. On events
+   with no base branch (anything but `pull_request` and
+   `pull_request_target`) the base is `HEAD~1` instead. With the `details`
+   input set it adds `--details <sections>`, and nothing else changes.
 4. Renders a markdown report with `scripts/render_pr_comment.py` and upserts
    one sticky PR comment. The same comment is updated on every push.
 5. Optionally fails the job when the overall risk score reaches a threshold
@@ -23,9 +24,12 @@ On each run the action:
 with `HEAD`, which matches GitHub's **Files changed** scope on divergent
 branches when the common ancestor is available locally. In a shallow clone
 where Git cannot find that ancestor, it falls back to the branch ref as
-given. Commit ids and revision expressions are used exactly. The default
-`actions/checkout` depth of 1 is such a shallow clone; set `fetch-depth: 0`
-on the checkout step if you need merge-base scoping.
+given. Commit ids and revision expressions are used exactly. With the
+default `pull_request` checkout (GitHub's test merge commit) the base tip is
+a parent of `HEAD`, so the diff already covers only the pull request. The
+action fetches the base branch with `--depth=1`, which makes even a full
+clone shallow at the base tip, so `fetch-depth: 0` does not give merge-base
+scoping when you check out the pull request head instead.
 
 ## Quick start (external repositories)
 
@@ -70,7 +74,7 @@ To turn the review into a merge gate:
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
 | `github-token` | yes | none | Token used to post the sticky PR comment via the GitHub API. The workflow's default `GITHUB_TOKEN` works when the job has `pull-requests: write`. A personal access token or a GitHub App installation token also works; see [Which comment gets updated](#which-comment-gets-updated). |
-| `comment` | no | `true` | Post (and keep updated) the sticky PR comment. Set to `false` to run analysis and gating without commenting. |
+| `comment` | no | `true` | Post (and keep updated) the sticky PR comment. This happens only on `pull_request` events; on any other event (including `pull_request_target`) no comment is posted. Set to `false` to run analysis and gating without commenting. |
 | `fail-on-risk` | no | `none` | Fail the job when the overall risk score reaches a level: `none` (never fail), `high` (risk >= 0.70), `critical` (risk >= 0.85). |
 | `python-version` | no | `3.12` | Python version used to run code-review-graph (3.10 or newer). |
 | `details` | no | empty | Extra graph context for the comment, as a comma-separated list of `risk`, `communities`, `hubs`, `coupling`, `impact`, `gaps`, `graph`, or `all`. Empty leaves the comment byte for byte as it is. See [Graph context](#graph-context-opt-in). |
@@ -140,7 +144,7 @@ The `details` input adds more of what the graph knows, under one folded
 | `coupling` | Links from or to the changed symbols that cross a community or a language boundary. Links to or from tests are left out. |
 | `impact` | How many symbols and files depend on or test the changed files (2 hops by default, `CRG_MAX_IMPACT_DEPTH`), the most affected files, and the direct callers of the riskiest symbols. |
 | `gaps` | The test gaps, ranked by how many callers and flows depend on them. |
-| `graph` | Graph size and languages, the community count and the method that found the communities (Leiden through igraph, or file-based grouping when igraph is not installed), flow count, last build, versions. |
+| `graph` | Graph size and languages, the community count and the method that found the communities (Leiden through igraph, or file-based grouping when igraph is not installed), flow count, last build, versions. The action installs code-review-graph without the `communities` extra, so on the runner this is file-based grouping. |
 
 Each list shows at most 5 rows. The whole block, note included, is capped at
 12,000 UTF-8 bytes, and never takes room the report itself needs. When the cap
@@ -168,7 +172,7 @@ stops the action adopting it. When the token's identity cannot be
 established the action posts a comment of its own rather than editing
 someone else's.
 
-## Cache behavior
+## Cache behaviour
 
 The action caches the `.code-review-graph/` directory (the SQLite graph
 database) with `actions/cache`:
@@ -207,7 +211,10 @@ database) with `actions/cache`:
   markup characters and strips control characters from symbol names and file
   paths, on top of the server-side `_sanitize_name()` step.
 - **Pinning**: when consuming the action from another repository, pin
-  `uses:` to a release tag or commit SHA rather than `@main`.
+  `uses:` to a release tag or commit SHA rather than `@main`. Pinning fixes
+  the action's steps and `scripts/render_pr_comment.py`, not the package:
+  the action installs `code-review-graph` from PyPI with no version, so a
+  run gets the newest release, whatever tag you pin.
 - **Fork PRs**: `pull_request` runs from forks get a read-only
   `GITHUB_TOKEN`, so they cannot post the comment directly. Use an
   unprivileged `pull_request` workflow with `comment: false`, upload the
@@ -277,13 +284,13 @@ Options: `--input` (JSON file or `-` for stdin, default `-`), `--output`
 (file or `-` for stdout, default `-`), `--fail-on-risk none|high|critical`,
 `--max-functions` (default 10), `--max-flows` (default 5), `--details`
 (graph context sections, default none), `--quiet` (skip writing the body). Exit codes: 0 rendered and gate passed or disabled, 2 the
-input file could not be read, 3 risk gate breached, 4 `detect-changes`
+input file could not be read or the output file could not be written, 3 risk gate breached, 4 `detect-changes`
 produced no analysis at all.
 
 Exit 4 is deliberately distinct from 0. `detect-changes` prints exactly
 `No changes detected.` for a tree it read and found unchanged; anything else
 that is not JSON means the analysis never ran. The rendered comment then says
 so, and the action fails the job, because a reassuring comment on a pull
-request nobody analyzed is worse than no comment at all. This is not
+request nobody analysed is worse than no comment at all. This is not
 something `fail-on-risk: none` can switch off: an unknown risk is not a low
 one.

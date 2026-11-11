@@ -138,7 +138,7 @@ Both. The pieces are scoped differently:
 |---|---|---|
 | Python package | User | Installed once with `pip`, `pipx` or `uvx` |
 | Graph database | Project | `.code-review-graph/graph.db` in each repository (or `--data-dir` / `CRG_DATA_DIR`) |
-| MCP server config (`.mcp.json` and platform equivalents) | Project | One server per project; the entry carries `cwd=<project>` |
+| MCP server config | Project or user, by platform | Project files such as `.mcp.json`, `.cursor/mcp.json` or `.vscode/mcp.json`; user files for Codex, Windsurf, Zed, Continue, Antigravity, Qwen Code, GitHub Copilot CLI, Hermes Agent and DeepSeek Harness. Most entries carry `cwd=<project>`; OpenCode and MiMo Code pass `--repo`; Hermes Agent and DeepSeek Harness pin no repo |
 | Multi-repo registry | User | `~/.code-review-graph/registry.json` (or under `$CRG_HOME`) |
 
 Install the package once, then run
@@ -239,7 +239,7 @@ edits; keep the checkout in sync yourself and run `code-review-graph update`
 there after changes.
 
 See [#828](https://github.com/tirth8205/code-review-graph/issues/828) for the
-reported setup and workaround. Remote MCP behavior depends on your Zed version;
+reported setup and workaround. Remote MCP behaviour depends on your Zed version;
 track upstream support in
 [zed#39213](https://github.com/zed-industries/zed/issues/39213) and
 [zed#47671](https://github.com/zed-industries/zed/issues/47671).
@@ -329,6 +329,10 @@ exit `75` (`EX_TEMPFAIL`).
   JSON test files, JSON under folders such as `docs`, `examples`, `samples`,
   `demo` or `data`, JSON files over 256 KB, and HTML pages over 2 MB.
 - Look for a parse warning (next entry) after `update`.
+- After upgrading to 2.4.0, run `code-review-graph build` once. `update` parses
+  only changed files, so files of the new types (HTML, XSLT, Liquid, JSON,
+  plain YAML, `.cjs` and `.kts`) that have not changed since reach the graph
+  only on a full build.
 - Run `code-review-graph build`, or the MCP tool `build_or_update_graph_tool`
   with `full_rebuild=True`, to re-parse everything.
 
@@ -394,6 +398,11 @@ A database another process is writing is not in this list at all. Contention
 is reported as contention (see *Database lock errors* above) and never
 discarded: the graph is healthy and the answer is to try again.
 
+The VS Code extension makes its own check. Extension 0.3.0 and older show
+`Database was created with a newer version (schema v15). Update the extension.`
+once the CLI has moved the graph to schema v15. Install extension 0.4.0 or
+later.
+
 ## Unwritable data directory
 
 ```
@@ -448,8 +457,8 @@ on first use. Nothing else is needed.
   pre-commit hook runs `update` before each commit, and the post-checkout,
   post-merge and post-rewrite hooks run it after a branch switch, a merge and
   a rebase (not in linked worktrees; see above).
-- Run `code-review-graph update`, or `/code-review-graph:build-graph` in Claude
-  Code, to catch up.
+- Run `code-review-graph update`, or ask the assistant to call
+  `build_or_update_graph_tool`, to catch up.
 - Check `.claude/settings.json` still has the hooks; `code-review-graph install`
   rewrites them.
 
@@ -541,8 +550,11 @@ off for the whole repository.
   nothing; run `code-review-graph embed` once with the same provider and model.
 - Cloud providers (`--provider openai|google|minimax|voyage`) read their key
   from `CRG_OPENAI_API_KEY`, `GOOGLE_API_KEY`, `MINIMAX_API_KEY` or
-  `VOYAGE_API_KEY`, and print an egress warning until
-  `CRG_ACCEPT_CLOUD_EMBEDDINGS=1` is set.
+  `VOYAGE_API_KEY`. The OpenAI-compatible provider also needs
+  `CRG_OPENAI_BASE_URL` and `CRG_OPENAI_MODEL` (or `--model`), and is used by
+  itself when the key and base URL are set and no provider is named. Each
+  prints an egress warning until `CRG_ACCEPT_CLOUD_EMBEDDINGS=1` is set; a
+  localhost base URL gives none.
 
 ## MCP server won't start
 
@@ -593,8 +605,8 @@ If a tool returns an ImportError, install the relevant group:
   through Jedi. It is off until you ask for it with `build --enrich`,
   `update --enrich` or `CRG_ENABLE_ENRICHMENT=1`, because it adds about a
   second per Python file.
-- `pip install "code-review-graph[eval]"`: evaluation benchmarks (matplotlib,
-  PyYAML).
+- `pip install "code-review-graph[eval]"`: evaluation benchmarks and
+  `visualize --format svg` (matplotlib, PyYAML).
 - `pip install "code-review-graph[wiki]"`: installs the `ollama` client. The
   current wiki generator is structural only and does not call it.
 - `pip install "code-review-graph[all]"`: everything above.

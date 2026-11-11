@@ -1,11 +1,10 @@
 # FAQ: how code-review-graph compares
 
-Where another tool is better for a job, this page says so.
+This page says what code-review-graph is good at, and when it is not worth using.
 
 - [How is this different from LSP and language servers?](#how-is-this-different-from-lsp-and-language-servers)
 - [Isn't this just RAG?](#isnt-this-just-rag)
 - [Why not just grep?](#why-not-just-grep)
-- [How does it compare to Serena, codegraph, claude-context, and repomix?](#how-does-it-compare-to-serena-codegraph-claude-context-and-repomix)
 - [When should I not use it?](#when-should-i-not-use-it)
 - [Does it phone home?](#does-it-phone-home)
 - [How do I verify it is working?](#how-do-i-verify-it-is-working)
@@ -102,25 +101,6 @@ questions on 6 repositories); see [REPRODUCING.md](REPRODUCING.md) for what
 each benchmark measures. For single-hop lookups in a small repository, grep is
 cheap and good.
 
-## How does it compare to Serena, codegraph, claude-context, and repomix?
-
-These solve adjacent problems. The table is based on each project's public
-documentation; check upstream for current behaviour.
-
-| Tool | Approach | Persistence | External deps | Review focus |
-|---|---|---|---|---|
-| **code-review-graph** | Tree-sitter AST to structural graph (calls, imports, inheritance, tests) over MCP and CLI | SQLite in `.code-review-graph/`, incremental updates | None for the core; embeddings optional | Yes: blast radius, risk-scored change analysis, test-gap detection |
-| **Serena** | LSP-backed symbol retrieval and editing tools over MCP | Language-server state plus per-project memories | A language server per language | General coding-agent toolkit, not review-specific |
-| **codegraph** | AST/call-graph indexing over MCP (several projects share this name) | Varies by implementation | Varies by implementation | Retrieval-focused |
-| **claude-context** | Chunk and embed semantic code search over MCP | Vector index in a vector database | Embedding provider plus vector DB | Search-focused, not review-specific |
-| **repomix** | Packs the whole repository into one file for an LLM | None; regenerated per run | Node.js | One-shot context packing; no structural queries |
-
-If you want symbol-precise editing tools, Serena's LSP approach fits better.
-If you want semantic search and can run a vector store, claude-context covers
-that. If the repository fits in one context window, repomix is the simplest
-option. CRG's niche is a persistent structural graph for review: impact
-analysis, risk scoring and test-coverage tracing with no external services.
-
 ## When should I not use it?
 
 - Repositories under a few hundred files. An agent can read what it needs
@@ -165,8 +145,9 @@ See [LEGAL.md](LEGAL.md).
    code-review-graph status
    ```
 
-   It prints `Nodes`, `Edges` and `Files`. Zero nodes means the build did not
-   run or found nothing to parse.
+   It prints `Nodes`, `Edges` and `Files`. If you have not built yet, it prints
+   `No graph found at <path>` instead. Zero nodes means the build did not run
+   (`Last updated: never`) or found nothing to parse.
 
 2. See the savings on a real change. Edit something, then:
 
@@ -222,13 +203,13 @@ graph by accident. The edit hook updates the graph of the repository that
 holds the edited file, so a session in the main checkout that edits a worktree
 updates the worktree's graph, once you have built one there. To keep the
 database outside the working tree (ephemeral workspaces, network shares), pass
-`--data-dir <path>` to `build`, `update`, `status` and the other graph
-commands, or set `CRG_DATA_DIR`.
+`--data-dir <path>` to `build` or `update` (the path is saved in the registry,
+so later commands find it), or set `CRG_DATA_DIR`.
 
 For parallel PR reviews in one stdio MCP session, use the opt-in
 `code-review-graph serve --multi-worktree --repo <primary-root>` mode. Each
 tool call must pass the linked worktree root in `repo_root`; the server routes
-it to a child MCP process dedicated to that worktree. The router authorizes
+it to a child MCP process dedicated to that worktree. The router authorises
 only the primary root and active linked worktrees from the same Git common
 directory, and starts children lazily. Do not use `CRG_DATA_DIR` with this
 mode; use one Registry `data_dir` per worktree when graph files must live

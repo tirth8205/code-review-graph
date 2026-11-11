@@ -1413,7 +1413,8 @@ _SKILLS: dict[str, dict[str, str]] = {
             "`list_communities_tool`, then `get_community_tool`, only for the modules you need.\n"
             "2. Call `semantic_search_nodes_tool` to find a function or class by name or keyword. "
             "Pass `include_source=True, expand_neighbors=True` to get the code of the hits and "
-            "their direct callers and callees, so you need not open the files.\n"
+            "their direct callers and callees, so you need not open the files. Leave "
+            "`detail_level` at its default for this call: `minimal` drops the source.\n"
             "3. Call `query_graph_tool` with `callers_of`, `callees_of` or `imports_of` to trace "
             "relationships. `children_of` on a file lists its functions and classes, and "
             "`path_to` with `to` shows how one symbol reaches another.\n"
@@ -1440,7 +1441,8 @@ _SKILLS: dict[str, dict[str, str]] = {
             "### Steps\n\n"
             "1. Call `detect_changes_tool` for risk-scored changed functions, test gaps and "
             "affected flows.\n"
-            "2. Call `get_affected_flows_tool` only when you need the steps of an affected flow.\n"
+            '2. Call `get_affected_flows_tool(detail_level="standard")` only when you need the '
+            "steps of an affected flow; `minimal` returns no steps.\n"
             '3. For each high-risk function, call `query_graph_tool` with `pattern="tests_for"` '
             "to check test coverage.\n"
             "4. Call `get_impact_radius_tool` when the blast radius is not clear from step 1.\n"
@@ -1552,7 +1554,7 @@ def generate_skills(repo_root: Path, skills_dir: Path | None = None) -> Path:
 DOCUMENTARY_SKILLS: dict[str, dict[str, str]] = {
     "build-graph": {
         "description": (
-            "Build or update the code review knowledge graph. Run this first to initialize, or let "
+            "Build or update the code review knowledge graph. Run this first to initialise, or let "
             "hooks keep it updated automatically."
         ),
         "argument_hint": "[full]",
@@ -1596,9 +1598,9 @@ DOCUMENTARY_SKILLS: dict[str, dict[str, str]] = {
             "2. Call `detect_changes_tool(detail_level=\"minimal\")` for risk-scored changed "
             "functions, test gaps and affected flows. Changes come from `git diff` against "
             "`HEAD~1`; if the argument names a file, pass it in `changed_files`.\n"
-            "3. Call `get_review_context_tool(detail_level=\"minimal\")` when you need source "
-            "snippets for the changed areas and `review_guidance` (untested functions, wide blast "
-            "radius, inheritance changes).\n"
+            "3. Call `get_review_context_tool()` (standard detail: `minimal` returns no source and "
+            "no `review_guidance`) when you need source snippets for the changed areas and "
+            "`review_guidance` (untested functions, wide blast radius, inheritance changes).\n"
             "4. For each untested high-risk function, confirm with "
             "`query_graph_tool(pattern=\"tests_for\", target=\"<function>\")`.\n"
             "5. Use `detail_level=\"standard\"` only for a high-risk item the minimal output "
@@ -1621,9 +1623,11 @@ DOCUMENTARY_SKILLS: dict[str, dict[str, str]] = {
         "body": (
             "Review all commits of a pull request or branch against its base branch.\n\n"
             "## Steps\n\n"
-            "1. Identify the changes. With a branch name run `git diff --name-only "
-            "main...<branch>`; otherwise diff the current branch against `main` (or `master`). Use "
-            "that ref as `base` below.\n"
+            "1. The graph tools read the files on disk, so check out what you review first: "
+            "`git switch <branch>`, or for a PR `git fetch origin pull/<n>/head:pr-<n>` then "
+            "`git switch pr-<n>`, then call `build_or_update_graph_tool()`. Diff it against "
+            "`main` (or `master`) with `git diff --name-only main...HEAD`, and use that ref as "
+            "`base` below.\n"
             "2. Call `get_minimal_context_tool(task=\"review PR\", base=\"main\")`. If it returns "
             "`status: not_ready`, call `build_or_update_graph_tool()` and continue.\n"
             "3. Call `detect_changes_tool(base=\"main\", detail_level=\"minimal\")` for "

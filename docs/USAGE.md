@@ -45,7 +45,7 @@ code-review-graph install --platform codebuddy
 | Qoder | `qoder` | `.qoder/mcp.json` |
 | GitHub Copilot | `copilot` | `.vscode/mcp.json` |
 | GitHub Copilot CLI | `copilot-cli` | `~/.copilot/mcp-config.json` |
-| Hermes Agent | `hermes` | `~/.hermes/config.yaml` (or `$HERMES_HOME/config.yaml`) |
+| Hermes Agent | `hermes` | `~/.hermes/config.yaml` (Windows: `%LOCALAPPDATA%\hermes\config.yaml`; or `$HERMES_HOME/config.yaml`) |
 | DeepSeek Harness | `dsh` | `~/.dsh/cordis.patch.yml` (or `$DSH_HOME/cordis.patch.yml`) + `AGENTS.md` |
 
 DeepSeek Harness reads `cordis.patch.yml` in its home folder for every profile,
@@ -106,22 +106,24 @@ graph does not update on its own there.
 ## Core Workflow
 
 ### 1. Build the graph (first time only)
+```bash
+code-review-graph build
 ```
-/code-review-graph:build-graph
-```
+Or ask your assistant: "Build the code review graph for this project".
 Parses the whole codebase. Build time scales with repository size; a cold build of a ~3,000-file repository took about 40 seconds on the machine described in [REPRODUCING.md](REPRODUCING.md#incremental-update-latency).
 
 If some files fail to parse, the build or update result has status `partial` and its summary names the files. Their previous graph rows are kept. The CLI also prints a `Warning:` line for them on stderr.
 
 ### 2. Review changes (daily use)
+```bash
+code-review-graph detect-changes --brief
 ```
-/code-review-graph:review-delta
-```
-Reviews the files changed since the last commit plus their graph-derived impact radius. Review and impact responses carry a compact `context_savings` estimate. Across the 6 benchmark repositories, graph queries use about 65x fewer tokens per question (median; range 36x to 376x) than reading the whole corpus. That baseline is an upper bound: against an agent that greps and reads the top 3 files, the median is 6.65x (range 4.2x to 72.6x). See the [README benchmarks](../README.md#benchmarks) and [REPRODUCING.md](REPRODUCING.md).
+Or ask your assistant: "Review my changes". Where `install` wrote skills, this uses the `review-changes` skill.
+Reviews the files changed since the last commit plus their graph-derived impact radius. Review and impact responses carry a compact `context_savings` estimate. Across the 6 benchmark repositories, graph queries use about 63x fewer tokens per question (median; range 35x to 358x) than reading the whole corpus. That baseline is an upper bound: against an agent that greps and reads the top 3 files, the median is 6.65x (range 4.2x to 72.6x). See the [README benchmarks](../README.md#benchmarks) and [REPRODUCING.md](REPRODUCING.md).
 
 ### 3. Review a PR
-```
-/code-review-graph:review-pr
+```bash
+code-review-graph detect-changes --brief --base main
 ```
 Structural review of a branch diff with blast-radius analysis.
 
@@ -142,7 +144,7 @@ Interactive D3.js force-directed graph. Past 2,000 nodes it starts collapsed (Fi
 ```bash
 pip install "code-review-graph[embeddings]"
 ```
-Then run `code-review-graph embed` or the `embed_graph_tool` MCP tool to compute vectors. `semantic_search_nodes_tool` uses vector similarity when matching embeddings exist and falls back to keyword/FTS search otherwise.
+Then run `code-review-graph embed` or the `embed_graph_tool` MCP tool to compute vectors. `semantic_search_nodes_tool` uses vector similarity when matching embeddings exist and falls back to keyword/FTS search otherwise. Pass `include_source=True` to get each hit's source lines with it, so you need not open the files. Add `expand_neighbors=True` as well to also get the direct callers and callees of the top three hits. `max_source_lines` (1 to 60, default 60) caps each snippet. Source is not attached when `detail_level="minimal"`.
 
 Providers: local sentence-transformers, OpenAI-compatible endpoints, Google Gemini, MiniMax, and Voyage AI. Local embeddings read `CRG_EMBEDDING_MODEL`; OpenAI-compatible providers read `CRG_OPENAI_BASE_URL`, `CRG_OPENAI_API_KEY` and `CRG_OPENAI_MODEL`; Voyage reads `VOYAGE_API_KEY` and optionally `CRG_VOYAGE_MODEL`. Cloud providers print an egress warning unless `CRG_ACCEPT_CLOUD_EMBEDDINGS=1` is set. The full variable list is in the [README](../README.md#environment-variables).
 
@@ -267,15 +269,15 @@ more than reading the files. `Largest reply` is the biggest single reply,
 which is where to look for a spike. Rows by day use UTC days, and `--days 1`
 means today.
 
-The evaluation runner produces the benchmark numbers quoted in the README:
+To reproduce the benchmark numbers quoted in the README, follow [REPRODUCING.md](REPRODUCING.md). The eval runner is one part of it:
 
 ```bash
-code-review-graph eval --all
+code-review-graph eval --all --embed
 ```
 
 ## Supported Languages
 
-The parser covers Python, JavaScript, TypeScript/TSX, Go, Rust, Java, C/C++, C#, VB.NET, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL/PL/SQL (Oracle), dbt models (`ref()` and `source()` become imports), Terraform/OpenTofu (`.tf`; other `.hcl` files become file nodes only), Ansible YAML (playbooks, roles, tasks), value-free generic YAML structure (translation files in folders such as `locales/` become file nodes only), XSLT stylesheets (`.xsl`, `.xslt`), value-free JSON structure (`.json`; translation, test, docs, example and data files keep only a file node, and lock files are skipped), Vue/Svelte single-file components, HTML pages (`.html`, `.htm`; inline scripts, plus `div`, `section` and `article` blocks with an id as `DocSection` nodes), Astro files (parsed with the TypeScript grammar), Jupyter and Databricks notebooks (`.ipynb` and Databricks `.py` exports), Perl XS files (`.xs`), Robot Framework files (`.robot`, `.resource`), and Liquid templates (`.liquid`).
+The parser covers Python, JavaScript/TypeScript/TSX (including `.mjs`, `.cjs`, `.mts` and `.cts`), Go, Rust, Java, C/C++, C#, VB.NET, Ruby, Kotlin (`.kt`, `.kts`), Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL/PL/SQL (Oracle), dbt models (`ref()` and `source()` become imports), Terraform/OpenTofu (`.tf`, and Terraform blocks in `.hcl` files; an `.hcl` file with no Terraform blocks keeps only a file node), Ansible YAML (playbooks, roles, tasks), Spring Boot application config (`application.properties`, `application.yml`, `application.yaml` and their `application-<profile>` variants; key names and value types only, never values), value-free generic YAML structure (translation files in folders such as `locales/` become file nodes only), XSLT stylesheets (`.xsl`, `.xslt`), value-free JSON structure (`.json`; translation, test, docs, example and data files keep only a file node, and lock files are skipped), Vue/Svelte single-file components, HTML pages (`.html`, `.htm`; inline scripts, plus `div`, `section` and `article` blocks with an id as `DocSection` nodes), Astro files (parsed with the TypeScript grammar), Jupyter and Databricks notebooks (`.ipynb` and Databricks `.py` exports), Perl XS files (`.xs`), Robot Framework files (`.robot`, `.resource`), and Liquid templates (`.liquid`). Other `.properties` files are not treated as source code.
 
 Extension-less scripts are detected by shebang for bash/sh/zsh/ksh/dash/ash, Python, Node, Ruby, Perl, Lua, Rscript, and PHP interpreters.
 

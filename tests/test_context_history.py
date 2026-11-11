@@ -415,6 +415,29 @@ class TestRealTools:
         for leak in (SECRET_BODY, "core.py", "pkg", str(built_repo), "helper"):
             assert leak not in text
 
+    def test_a_compact_impact_answer_writes_one_line(self, built_repo, monkeypatch, capsys):
+        """The compact impact answer carries ``context_savings`` like the
+        others, so it must log like the others, from the tool and the CLI."""
+        from code_review_graph.tools import get_impact_radius
+
+        _enable(monkeypatch)
+        result = get_impact_radius(
+            changed_files=["pkg/core.py"], repo_root=str(built_repo), detail_level="compact",
+        )
+        argv = [
+            "code-review-graph", "impact", "--files", "pkg/core.py",
+            "--detail-level", "compact", "--repo", str(built_repo),
+        ]
+        with patch.object(sys, "argv", argv):
+            cli.main()
+        capsys.readouterr()
+
+        assert "context_savings" in result
+        entries = _log_lines(built_repo / ".code-review-graph")
+        assert [e["tool"] for e in entries] == ["get_impact_radius_tool", "impact"]
+        assert all(e["files"] == 1 and e["depth"] == 2 for e in entries)
+        assert entries[0]["saved_tokens"] == result["context_savings"]["saved_tokens"]
+
     def test_with_the_option_off_the_tools_write_nothing(self, built_repo, monkeypatch):
         from code_review_graph.tools import detect_changes_func, get_impact_radius
 

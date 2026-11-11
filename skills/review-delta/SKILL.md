@@ -12,7 +12,7 @@ Review only the changed code and its blast radius.
 
 1. Call `get_minimal_context_tool(task="review changes")`. If it returns `status: not_ready`, call `build_or_update_graph_tool()` and continue.
 2. Call `detect_changes_tool(detail_level="minimal")` for risk-scored changed functions, test gaps and affected flows. Changes come from `git diff` against `HEAD~1`; if the argument names a file, pass it in `changed_files`.
-3. Call `get_review_context_tool(detail_level="minimal")` when you need source snippets for the changed areas and `review_guidance` (untested functions, wide blast radius, inheritance changes).
+3. Call `get_review_context_tool()` (standard detail: `minimal` returns no source and no `review_guidance`) when you need source snippets for the changed areas and `review_guidance` (untested functions, wide blast radius, inheritance changes).
 4. For each untested high-risk function, confirm with `query_graph_tool(pattern="tests_for", target="<function>")`.
 5. Use `detail_level="standard"` only for a high-risk item the minimal output leaves unclear. Do not load whole files unless a snippet is not enough.
 

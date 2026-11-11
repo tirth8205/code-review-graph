@@ -348,6 +348,15 @@ CREATE TABLE embeddings (
 | `svn_branch`, `svn_revision` | Builds in an SVN working copy |
 | `postprocess_level` | Post-processing |
 | `community_detector` | Community detection: `leiden`, `file`, or both joined by `+` |
+| `last_postprocessed_at` | Post-processing; when it last finished |
+| `repo_root` | Builds; the repository the graph belongs to |
+| `build_state` | Builds and post-processing: `in-progress`, `postprocess-pending` or `complete`; `status` reads it to report an unfinished build |
+| `verified_file_count` | Builds; how many files a complete graph holds (`0` until checked) |
+| `intentionally_incomplete` | `forget` sets `1`; a full build sets `0` |
+| `symlink_followed_files`, `symlink_followed_dirs` | Builds that follow symlinked folders (`--follow-symlinks` or `CRG_FOLLOW_SYMLINKS`): files and outside folders reached through a link |
+| `dependents_reparse_pending` | Incremental updates; importers whose re-parse failed, to retry. A full build clears it |
+| `cpp_identity_version`, `cpp_identity_pending`, `csharp_identity_version`, `csharp_identity_pending_files`, `nested_scope_identity_version`, `nested_scope_identity_pending_files` | Builds and updates; force one re-parse when node names change shape |
+| `csharp_flows_dirty` | C# call resolution sets `1`; rebuilding flows clears it |
 
 ### Indexes
 

@@ -10,7 +10,7 @@ Use the code-review-graph MCP tools to find your way around the codebase.
 ### Steps
 
 1. Call `get_architecture_overview_tool` for the community structure. Call `list_communities_tool`, then `get_community_tool`, only for the modules you need.
-2. Call `semantic_search_nodes_tool` to find a function or class by name or keyword. Pass `include_source=True, expand_neighbors=True` to get the code of the hits and their direct callers and callees, so you need not open the files.
+2. Call `semantic_search_nodes_tool` to find a function or class by name or keyword. Pass `include_source=True, expand_neighbors=True` to get the code of the hits and their direct callers and callees, so you need not open the files. Leave `detail_level` at its default for this call: `minimal` drops the source.
 3. Call `query_graph_tool` with `callers_of`, `callees_of` or `imports_of` to trace relationships. `children_of` on a file lists its functions and classes, and `path_to` with `to` shows how one symbol reaches another.
 4. Call `list_flows_tool`, then `get_flow_tool` for one flow, to follow an execution path.
 5. Call `find_large_functions_tool` to find oversized functions.

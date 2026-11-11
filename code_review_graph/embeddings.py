@@ -4,8 +4,8 @@ Supports multiple providers:
 1. Local (sentence-transformers) - Private, fast, offline.
 2. Google Gemini - High-quality, cloud-based. Requires explicit opt-in.
 3. MiniMax (embo-01) - High-quality 1536-dim cloud embeddings. Requires MINIMAX_API_KEY.
-4. OpenAI-compatible - Any endpoint speaking OpenAI /v1/embeddings (real OpenAI,
-   Azure OpenAI, self-hosted gateways like new-api / LiteLLM / vLLM / LocalAI / Ollama).
+4. OpenAI-compatible - Any endpoint speaking OpenAI /v1/embeddings (OpenAI,
+   Azure OpenAI or one you run yourself).
 5. Voyage AI - Code retrieval embeddings via the Voyage embeddings API.
 """
 
@@ -370,7 +370,7 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
     Works with any endpoint that speaks the OpenAI ``/v1/embeddings`` schema:
     - Real OpenAI API (``https://api.openai.com/v1``)
     - Azure OpenAI
-    - Self-hosted gateways: new-api, LiteLLM, vLLM, LocalAI, Ollama (openai mode)
+    - Any endpoint you run yourself that speaks the same schema
 
     Provider identity in ``name`` includes both the model and the endpoint
     host (``openai:{model}@{host}``), so switching base URL while keeping the

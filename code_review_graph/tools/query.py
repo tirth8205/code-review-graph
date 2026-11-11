@@ -841,7 +841,9 @@ def get_impact_radius(
                 )
                 if confidence:
                     compact_response["confidence"] = confidence
-            attach_context_savings(compact_response, original_tokens=original_tokens)
+            attach_context_savings(
+                compact_response, original_tokens=original_tokens, call=history_call,
+            )
             return compact_response
 
         impact_scores = result.get("impact_scores", {})

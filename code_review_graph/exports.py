@@ -62,7 +62,7 @@ def export_json(store: GraphStore, output_path: Path) -> Path:
 
 
 # -------------------------------------------------------------------
-# GraphML export (for Gephi, yEd, Cytoscape)
+# GraphML export
 # -------------------------------------------------------------------
 
 #: The GraphML 1.0 namespace. Every GraphML reader keys off this exact URI.
@@ -94,7 +94,7 @@ def _xml_text(value: object) -> str:
 
 
 def export_graphml(store: GraphStore, output_path: Path) -> Path:
-    """Export the graph as GraphML XML for Gephi/yEd/Cytoscape.
+    """Export the graph as GraphML XML.
 
     The document declares the official GraphML namespace and validates
     against the GraphML 1.0 schema. That schema types ``node/@id`` as an
