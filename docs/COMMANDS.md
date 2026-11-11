@@ -154,6 +154,7 @@ code-review-graph daemon remove <path_or_alias>     # Remove a repo from the dae
 code-review-graph eval --all                   # Run every benchmark on every repo config (bare `eval` runs nothing)
 code-review-graph eval --benchmark token_efficiency --repo flask  # Pick benchmarks and repos (comma-separated); --repo takes config names, not paths
 code-review-graph eval --report                # Write evaluate/reports/summary.md from evaluate/results and print README tables
+                                                #   (only each repo's newest run of each benchmark)
                                                 #   (--output-dir sets the results folder that runs write and --report reads)
 code-review-graph eval --benchmark search_quality --embed [--embed-provider local|openai|google|minimax|voyage] [--embed-model M]  # --embed builds vectors; agent_baseline,
                                                 #   search_quality and multi_hop_retrieval need it

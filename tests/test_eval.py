@@ -283,6 +283,33 @@ def test_generate_full_report():
         assert "testrepo" in report
 
 
+def test_reports_read_only_the_newest_run_of_each_benchmark(tmp_path):
+    """Each run writes ``<repo>_<benchmark>_<date>.csv`` and old ones stay in
+    the folder. Reading them all mixed last month's numbers into this
+    month's report (crg-5sn). Each repo's newest run is the one reported,
+    so a repo left out of the latest run keeps its own newest numbers.
+    """
+    fields = ["repo", "changed_files", "naive_tokens", "graph_tokens"]
+
+    def write(name: str, repo: str, naive: str) -> None:
+        with open(tmp_path / name, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=fields)
+            w.writeheader()
+            w.writerow({
+                "repo": repo, "changed_files": "1",
+                "naive_tokens": naive, "graph_tokens": "10",
+            })
+
+    write("flask_token_efficiency_2026-01-01.csv", "flask", "1111")
+    write("flask_token_efficiency_2026-02-01.csv", "flask", "2222")
+    write("httpx_token_efficiency_2026-01-15.csv", "httpx", "3333")
+
+    for text in (generate_full_report(tmp_path), generate_readme_tables(tmp_path)):
+        assert "2222" in text
+        assert "3333" in text
+        assert "1111" not in text, "an old run leaked into the report"
+
+
 @pytest.mark.skipif(not _HAS_YAML, reason="pyyaml not installed")
 def test_runner_with_mock_repo():
     """Create a tiny git repo with 2 Python files, run benchmarks, verify output."""
