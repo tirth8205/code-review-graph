@@ -1013,10 +1013,19 @@ def test_step4b_qoder_uninstall_removes_every_skill_file_install_wrote(
     assert not report.errors, f"qoder: uninstall reported errors {report.errors}"
 
 
+# Platforms whose config file lives in the repository. install records it,
+# so uninstall removes it when nothing else is left in it and Git does not
+# track it. A config in the home folder is not on that record and stays.
+HUSK_FIXED = frozenset({"claude", "codebuddy", "copilot", "kiro", "mimo", "opencode", "qoder"})
+
+
 @pytest.mark.parametrize(
     "key",
-    [pytest.param(k, marks=[pytest.mark.xfail(strict=True, reason=HUSK_XFAIL)])
-     for k in PLATFORM_KEYS],
+    [
+        k if k in HUSK_FIXED
+        else pytest.param(k, marks=[pytest.mark.xfail(strict=True, reason=HUSK_XFAIL)])
+        for k in PLATFORM_KEYS
+    ],
 )
 def test_step4c_uninstall_leaves_no_empty_config_husk(sandbox: Sandbox, key: str) -> None:
     """A config file the installer created should not outlive the uninstall."""

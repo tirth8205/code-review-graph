@@ -1464,3 +1464,84 @@ def test_every_report_line_reads_right_in_a_dry_run_and_a_real_run(
     for line in applied:
         assert " (removed " in line, line
         assert "(remove " not in line and "would" not in line, line
+
+
+# --- files install made and nothing else uses ---------------------------------
+
+
+def _git_repo(path: Path) -> Path:
+    import subprocess
+
+    path.mkdir()
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+    return path
+
+
+def _record(repo: Path, *files: str) -> None:
+    _write_json(
+        repo / ".code-review-graph" / "install-manifest.json",
+        {"version": 1, "files": sorted(files)},
+    )
+
+
+@pytest.mark.skipif(not __import__("shutil").which("git"), reason="needs git")
+def test_uninstall_removes_files_install_made_that_hold_nothing_else(
+    tmp_path: Path, fake_home: Path
+) -> None:
+    """An install and an uninstall used to leave {"mcpServers": {}}, a settings
+    file of {} and empty folders behind in a repository that had none of them."""
+    repo = _git_repo(tmp_path / "repo")
+    _write_json(repo / ".mcp.json", {"mcpServers": {"code-review-graph": {}}})
+    _write_json(repo / ".vscode" / "mcp.json", {"servers": {"code-review-graph": {}}})
+    _write_json(repo / ".claude" / "settings.json", skills.generate_hooks_config(repo))
+    _write(repo / ".claude" / "skills" / "debug-issue" / "SKILL.md", "x\n")
+    _record(
+        repo, ".mcp.json", ".vscode/mcp.json", ".claude/settings.json",
+        ".claude/skills/debug-issue/SKILL.md",
+    )
+
+    preview = uninstall.run(repo=repo, dry_run=True)
+    assert any(
+        ".mcp.json (would remove file install wrote" in line for line in preview.removed_paths
+    )
+    assert (repo / ".mcp.json").exists()
+
+    uninstall.run(repo=repo)
+
+    assert sorted(path.name for path in repo.iterdir()) == [".git"]
+
+
+@pytest.mark.skipif(not __import__("shutil").which("git"), reason="needs git")
+def test_uninstall_keeps_an_emptied_file_git_tracks_or_that_holds_more(
+    tmp_path: Path, fake_home: Path
+) -> None:
+    import subprocess
+
+    repo = _git_repo(tmp_path / "repo")
+    _write_json(repo / ".mcp.json", {"mcpServers": {"code-review-graph": {}}})
+    subprocess.run(["git", "-C", str(repo), "add", ".mcp.json"], check=True)
+    _write(
+        repo / ".vscode" / "mcp.json",
+        '{\n  // the team\'s note\n  "servers": {"code-review-graph": {}}\n}\n',
+    )
+    _write_json(
+        repo / ".claude" / "settings.json",
+        {"model": "kept", **skills.generate_hooks_config(repo)},
+    )
+    _record(repo, ".mcp.json", ".vscode/mcp.json", ".claude/settings.json")
+
+    uninstall.run(repo=repo)
+
+    assert _read_jsonc(repo / ".mcp.json") == {"mcpServers": {}}
+    assert "the team's note" in (repo / ".vscode" / "mcp.json").read_text(encoding="utf-8")
+    assert _read_jsonc(repo / ".claude" / "settings.json") == {"model": "kept"}
+
+
+def test_uninstall_without_an_install_record_keeps_emptied_files(
+    fake_repo: Path, fake_home: Path
+) -> None:
+    _write_json(fake_repo / ".mcp.json", {"mcpServers": {"code-review-graph": {}}})
+
+    uninstall.run(repo=fake_repo)
+
+    assert _read_jsonc(fake_repo / ".mcp.json") == {"mcpServers": {}}

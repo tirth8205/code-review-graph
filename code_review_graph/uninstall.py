@@ -43,6 +43,10 @@ class UninstallReport:
     errors: list[str] = field(default_factory=list)
     # Every file removed or edited, so the install record can drop it.
     touched: list[Path] = field(default_factory=list, repr=False, compare=False)
+    # For the repository being processed: the files install wrote, by
+    # absolute path, that Git does not track. One that holds nothing once
+    # its entries are gone is removed, not left behind as an empty shell.
+    install_only: frozenset[str] = field(default_factory=frozenset, repr=False, compare=False)
 
     @property
     def total_actions(self) -> int:
@@ -272,9 +276,10 @@ def _remove_mcp_entry(
     if reparsed != expected_data:
         report.skipped_paths.append(f"{path} (safe JSONC edit did not validate; left unchanged)")
         return
-    _write_text(
+    _write_or_drop(
         path,
         rewritten,
+        boundary,
         report,
         detail=f"remove {_ENTRY_NAME!r} from {key!r}",
         dry_run=dry_run,
@@ -691,13 +696,89 @@ def _remove_hooks(
     if reparsed != expected:
         report.skipped_paths.append(f"{path} (safe hook edit did not validate; left unchanged)")
         return
-    _write_text(
+    _write_or_drop(
         path,
         rewritten,
+        boundary,
         report,
         detail="remove code-review-graph hook entries",
         dry_run=dry_run,
     )
+
+
+def _holds_nothing(value: Any) -> bool:
+    """True for ``{}``, ``[]``, or objects and lists made only of those."""
+    if isinstance(value, dict):
+        return all(_holds_nothing(item) for item in value.values())
+    if isinstance(value, list):
+        return all(_holds_nothing(item) for item in value)
+    return False
+
+
+def _write_or_drop(
+    path: Path,
+    text: str,
+    boundary: Path,
+    report: UninstallReport,
+    *,
+    detail: str,
+    dry_run: bool,
+) -> None:
+    """Write ``text`` back, or remove the file when install made it and nothing is left.
+
+    Removed only when the install record lists the file, Git does not track
+    it, and ``text`` is plain JSON (no comments) that holds nothing, such as
+    ``{"mcpServers": {}}``. Anything else is written back as before.
+    """
+    if os.path.abspath(path) in report.install_only:
+        try:
+            empty = _holds_nothing(json.loads(text))
+        except (ValueError, RecursionError):
+            empty = False
+        if empty:
+            _remove_file(
+                path, boundary, report, dry_run=dry_run,
+                detail="remove file install wrote, as nothing else was in it",
+            )
+            return
+    _write_text(path, text, report, detail=detail, dry_run=dry_run)
+
+
+def _install_only_files(repo_root: Path) -> list[str]:
+    """The files the install record lists that Git does not track, repo-relative.
+
+    Empty when there is no record, or Git cannot say: then nothing is removed
+    that would not have been removed before the record existed.
+    """
+    listed = install_manifest.read(repo_root)
+    if not listed:
+        return []
+    try:
+        result = subprocess.run(
+            ["git", "--literal-pathspecs", "ls-files", "-z", "--", *listed],
+            capture_output=True,
+            cwd=str(repo_root),
+            timeout=30,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if result.returncode != 0:
+        return []
+    tracked = {os.fsdecode(path) for path in result.stdout.split(b"\0") if path}
+    return [path for path in listed if path not in tracked]
+
+
+def _prune_install_folders(repo_root: Path, relative_files: Sequence[str]) -> None:
+    """Remove the folders install wrote into, deepest first, when they are empty."""
+    folders: set[Path] = set()
+    for relative in relative_files:
+        parent = (repo_root / relative).parent
+        while parent != repo_root and _is_lexical_child(parent, repo_root):
+            folders.add(parent)
+            parent = parent.parent
+    for folder in sorted(folders, key=lambda item: len(item.parts), reverse=True):
+        _prune_empty_directory(folder, repo_root)
 
 
 def _remove_file(
@@ -1256,15 +1337,24 @@ def _process_repo(
     dry_run: bool,
     platforms: frozenset[str] | None = None,
 ) -> None:
+    # Read before anything is removed: the record lives in the data folder.
+    install_only = _install_only_files(repo_root)
+    report.install_only = frozenset(
+        os.path.abspath(repo_root / relative) for relative in install_only
+    )
     try:
         _process_repo_files(
             repo_root, home, report, keep_data=keep_data, dry_run=dry_run, platforms=platforms
         )
     finally:
+        report.install_only = frozenset()
         if not dry_run:
             # A file uninstall removed or cleaned is no longer install's; the
             # record goes with the data folder when that is removed.
             install_manifest.forget(repo_root, report.touched)
+            # Folders install made, such as .vscode or .claude/skills, that
+            # are now empty go too.
+            _prune_install_folders(repo_root, install_only)
 
 
 def _process_repo_files(
