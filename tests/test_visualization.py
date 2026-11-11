@@ -151,7 +151,8 @@ def store_with_data(tmp_path):
     store.upsert_edge(contains_edge)
     store.upsert_edge(calls_edge)
     store.commit()
-    return store
+    yield store
+    store.close()
 
 
 def test_export_graph_data(store_with_data):
@@ -331,7 +332,7 @@ def test_bundled_d3_asset_is_packaged_and_pinned():
 
 
 @pytest.mark.parametrize("vis_mode", ["full", "community"])
-def test_graph_data_containing_script_sentinel_is_not_expanded(tmp_path, vis_mode):
+def test_graph_data_containing_script_sentinel_is_not_expanded(tmp_path, vis_mode, request):
     """Repo content must never be run through the __D3_SCRIPTS__ substitution.
 
     The template placeholders are substituted scripts-first, data-last: a node
@@ -342,6 +343,7 @@ def test_graph_data_containing_script_sentinel_is_not_expanded(tmp_path, vis_mod
     from code_review_graph.visualization import generate_html
 
     store = GraphStore(tmp_path / "test.db")
+    request.addfinalizer(store.close)
     store.upsert_node(
         NodeInfo(
             kind="File", name="evil.py", file_path="src/evil.py",
@@ -406,7 +408,7 @@ def test_script_extraction_handles_case_insensitive_html_tags():
     assert inline_scripts == ["const responsive = 1 < 2;"]
 
 
-def test_cpp_include_resolution(tmp_path):
+def test_cpp_include_resolution(tmp_path, request):
     """IMPORTS_FROM edges with bare C++ include paths should resolve to File nodes
     stored under absolute paths — previously these were dropped, leaving the
     graph almost entirely disconnected for C/C++ projects."""
@@ -414,6 +416,7 @@ def test_cpp_include_resolution(tmp_path):
 
     db_path = tmp_path / "test.db"
     store = GraphStore(db_path)
+    request.addfinalizer(store.close)
 
     def _file(name, path, lang="cpp"):
         return NodeInfo(
@@ -862,7 +865,8 @@ def large_store(tmp_path):
         )
 
     store.commit()
-    return store
+    yield store
+    store.close()
 
 
 def test_community_mode_fewer_nodes(large_store, tmp_path):

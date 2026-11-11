@@ -8,6 +8,7 @@ never the one next to the file it changed.
 
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import os
@@ -327,7 +328,7 @@ def test_installed_claude_hook_updates_the_sibling_that_was_edited(tmp_path):
         import sqlite3
 
         db = repo / ".code-review-graph" / "graph.db"
-        with sqlite3.connect(db) as conn:
+        with contextlib.closing(sqlite3.connect(db)) as conn:
             return {
                 row[0]
                 for row in conn.execute("SELECT name FROM nodes WHERE kind = 'Function'")

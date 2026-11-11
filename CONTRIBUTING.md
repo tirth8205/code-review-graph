@@ -190,7 +190,8 @@ a GitHub release, and the `publish` workflow uploads to PyPI. When
 `SUPPORTED_SCHEMA_VERSION` in the VS Code extension changes, publish the extension in the
 same release and add its row to the Versions table in `code-review-graph-vscode/README.md`:
 the `publish` workflow does not ship it, and an older extension cannot read the new graph.
-Nothing is ever released from `staging` or `testing`.
+Nothing is ever released from `staging` or `testing`. The full steps are in
+[docs/RELEASING.md](docs/RELEASING.md).
 
 **Archived branches.** Old branches are not deleted outright. A branch that carried work
 not on `main` is kept as a tag under `archive/<branch-name>` (list them with

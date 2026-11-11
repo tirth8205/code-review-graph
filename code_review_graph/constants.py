@@ -292,8 +292,6 @@ IMPACT_SCORE_FLOOR = _bounded_float_env(
 #: Follows the same convention as CRG_DATA_DIR.
 CRG_HOME_ENV = "CRG_HOME"
 
-_DEFAULT_CRG_HOME = Path.home() / ".code-review-graph"
-
 
 def crg_home() -> Path:
     """Return the per-user state directory for code-review-graph.
@@ -309,7 +307,7 @@ def crg_home() -> Path:
     override = os.environ.get(CRG_HOME_ENV, "").strip()
     if override:
         return Path(override).expanduser()
-    return _DEFAULT_CRG_HOME
+    return Path.home() / ".code-review-graph"
 
 
 # ---------------------------------------------------------------------------

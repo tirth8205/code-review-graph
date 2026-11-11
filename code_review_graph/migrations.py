@@ -19,12 +19,13 @@ statements and the other process is about to finish.
 
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import logging
 import os
 import sqlite3
 import time
-from typing import Callable
+from typing import Callable, Iterator
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +85,25 @@ def _apply(conn: sqlite3.Connection, sql: str, *, what: str) -> bool:
             return False
         raise
     return True
+
+
+@contextlib.contextmanager
+def _write_lock_held(conn: sqlite3.Connection) -> Iterator[None]:
+    """Run the block as one write that no other opener can come between.
+
+    A peer that wants to write waits on SQLite's busy timeout until this
+    commits. Inside a transaction the caller already owns, it adds nothing.
+    """
+    if conn.in_transaction:
+        yield
+        return
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        yield
+    except BaseException:
+        conn.rollback()
+        raise
+    conn.commit()
 
 
 def get_schema_version(conn: sqlite3.Connection) -> int:
@@ -191,16 +211,13 @@ def ensure_nodes_fts_state(conn: sqlite3.Connection) -> None:
         f"CREATE TABLE IF NOT EXISTS {NODES_FTS_STATE_TABLE} ("  # nosec B608
         f"  node_id INTEGER PRIMARY KEY, {columns})"
     )
-    existing = {
-        row[1] for row in conn.execute(
-            f"PRAGMA table_info({NODES_FTS_STATE_TABLE})"  # nosec B608
-        )
-    }
     for name in NODES_FTS_COLUMNS:
-        if name not in existing:
-            conn.execute(
+        if not _has_column(conn, NODES_FTS_STATE_TABLE, name):
+            _apply(
+                conn,
                 f"ALTER TABLE {NODES_FTS_STATE_TABLE} "  # nosec B608
-                f"ADD COLUMN {name} TEXT"
+                f"ADD COLUMN {name} TEXT",
+                what=f"{NODES_FTS_STATE_TABLE}.{name}",
             )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_nodes_fts_state_file "
@@ -479,7 +496,11 @@ def _migrate_v11(conn: sqlite3.Connection) -> None:
     paths and module names, for which "unresolved" would be a false claim.
     """
     if not _has_column(conn, "edges", "target_resolution"):
-        conn.execute("ALTER TABLE edges ADD COLUMN target_resolution TEXT")
+        _apply(
+            conn,
+            "ALTER TABLE edges ADD COLUMN target_resolution TEXT",
+            what="edges.target_resolution",
+        )
     placeholders = ", ".join("?" for _ in TARGET_RESOLUTION_KINDS)
     conn.execute(
         f"UPDATE edges SET target_resolution = {TARGET_RESOLUTION_EXPR} "  # noqa: S608
@@ -542,9 +563,17 @@ def _migrate_v13(conn: sqlite3.Connection) -> None:
     from .graph import node_index_tokens
 
     if not _has_column(conn, "nodes", "docstring"):
-        conn.execute("ALTER TABLE nodes ADD COLUMN docstring TEXT")
+        _apply(
+            conn,
+            "ALTER TABLE nodes ADD COLUMN docstring TEXT",
+            what="nodes.docstring",
+        )
     if not _has_column(conn, "nodes", "name_tokens"):
-        conn.execute("ALTER TABLE nodes ADD COLUMN name_tokens TEXT")
+        _apply(
+            conn,
+            "ALTER TABLE nodes ADD COLUMN name_tokens TEXT",
+            what="nodes.name_tokens",
+        )
 
     # The docstring backfill is pure SQL; json_extract returns NULL for rows
     # whose extra holds no docstring, which is exactly the wanted value.
@@ -571,24 +600,27 @@ def _migrate_v13(conn: sqlite3.Connection) -> None:
     if pending:
         conn.executemany("UPDATE nodes SET name_tokens = ? WHERE id = ?", pending)
 
-    conn.execute("DROP TABLE IF EXISTS nodes_fts")
-    conn.execute(NODES_FTS_DDL)
-    conn.execute("INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild')")
+    # Drop, make again and refill as one write, or a peer opening the same
+    # graph can drop between our steps or make the table a second time.
+    with _write_lock_held(conn):
+        conn.execute("DROP TABLE IF EXISTS nodes_fts")
+        conn.execute(NODES_FTS_DDL)
+        conn.execute("INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild')")
 
-    # The index now carries two columns the v12 mirror has no room for, and
-    # an entry can only be deleted by replaying every indexed value. Widen
-    # the mirror and refill it from the rebuild that just ran.
-    ensure_nodes_fts_state(conn)
-    columns = ", ".join(NODES_FTS_COLUMNS)
-    conn.execute(f"DELETE FROM {NODES_FTS_STATE_TABLE}")  # nosec B608
-    conn.execute(
-        f"INSERT INTO {NODES_FTS_STATE_TABLE} (node_id, {columns}) "  # nosec B608
-        f"SELECT id, {columns} FROM nodes"
-    )
-    conn.execute(
-        "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
-        (FTS_STATE_METADATA_KEY, FTS_STATE_VERSION),
-    )
+        # The index now carries two columns the v12 mirror has no room for,
+        # and an entry can only be deleted by replaying every indexed value.
+        # Widen the mirror and refill it from the rebuild that just ran.
+        ensure_nodes_fts_state(conn)
+        columns = ", ".join(NODES_FTS_COLUMNS)
+        conn.execute(f"DELETE FROM {NODES_FTS_STATE_TABLE}")  # nosec B608
+        conn.execute(
+            f"INSERT INTO {NODES_FTS_STATE_TABLE} (node_id, {columns}) "  # nosec B608
+            f"SELECT id, {columns} FROM nodes"
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+            (FTS_STATE_METADATA_KEY, FTS_STATE_VERSION),
+        )
     _progress("Migration v13: indexed nodes.docstring and nodes.name_tokens")
 
 
