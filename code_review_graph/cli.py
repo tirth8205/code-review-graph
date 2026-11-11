@@ -1410,11 +1410,7 @@ def _handle_build_update(args, repo_root: Path, embedding_refresh_kwargs) -> Non
         if getattr(args, "brief", False) and not args.quiet:
             from .changes import analyze_changes
             from .context_history import CallInfo
-            from .context_savings import (
-                attach_context_savings,
-                estimate_file_tokens,
-                format_context_savings_panel,
-            )
+            from .context_savings import attach_context_savings, estimate_file_tokens
             from .incremental import discover_review_changes
 
             # Reuse the base the update actually resolved to (args.base is
@@ -1455,31 +1451,42 @@ def _handle_build_update(args, repo_root: Path, embedding_refresh_kwargs) -> Non
                     summary = impact.get("summary", "")
                     if summary:
                         print(summary)
-                    verified = None
-                    if getattr(args, "verify", False):
-                        from .context_savings import verify_with_tiktoken
-                        verified = verify_with_tiktoken(
-                            repo_root, changed, impact,
-                        )
-                        if verified is None:
-                            print(
-                                "Note: --verify requires tiktoken. "
-                                "Install with `pip install tiktoken`.",
-                            )
-                    panel = format_context_savings_panel(
-                        impact.get("context_savings"),
-                        original_tokens=original_tokens,
-                        response=impact,
-                        verified=verified,
-                    )
-                    if panel:
-                        print(panel)
+                    _print_savings_panel(args, repo_root, changed, impact, original_tokens)
                 finally:
                     try:
                         if store is not None:
                             store.close()
                     finally:
                         brief_lock.release()
+
+
+def _print_savings_panel(
+    args, repo_root: Path, changed: list[str], response: dict, original_tokens: int
+) -> None:
+    """Print the Token Savings panel of a ``--brief`` review.
+
+    With no changed function the response is almost empty, so the panel would
+    claim nearly all of it saved for telling the reader nothing. One plain
+    line says why there is no panel instead.
+    """
+    from .context_savings import format_context_savings_panel, verify_with_tiktoken
+
+    if not response.get("changed_functions"):
+        print("Token Savings: none to show, as no functions changed.")
+        return
+    verified = None
+    if getattr(args, "verify", False):
+        verified = verify_with_tiktoken(repo_root, changed, response)
+        if verified is None:
+            print("Note: --verify requires tiktoken. Install with `pip install tiktoken`.")
+    panel = format_context_savings_panel(
+        response.get("context_savings"),
+        original_tokens=original_tokens,
+        response=response,
+        verified=verified,
+    )
+    if panel:
+        print(panel)
 
 
 def _handle_forget(args, repo_root: Path, db_path: Path, *, legacy: bool = False) -> None:
@@ -3544,27 +3551,9 @@ def _dispatch() -> None:
                 )
                 if args.brief:
                     from .changes import format_brief
-                    from .context_savings import (
-                        format_context_savings_panel,
-                        verify_with_tiktoken,
-                    )
+
                     print(format_brief(store, result, repo_root))
-                    verified = None
-                    if getattr(args, "verify", False):
-                        verified = verify_with_tiktoken(repo_root, changed, result)
-                        if verified is None:
-                            print(
-                                "Note: --verify requires tiktoken. "
-                                "Install with `pip install tiktoken`.",
-                            )
-                    panel = format_context_savings_panel(
-                        result.get("context_savings"),
-                        original_tokens=original_tokens,
-                        response=result,
-                        verified=verified,
-                    )
-                    if panel:
-                        print(panel)
+                    _print_savings_panel(args, repo_root, changed, result, original_tokens)
                 else:
                     print(json.dumps(result, indent=2, default=str))
 

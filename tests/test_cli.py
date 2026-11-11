@@ -666,7 +666,10 @@ class TestDetectChangesCommand:
                     ):
                         with patch(
                             "code_review_graph.changes.analyze_changes",
-                            return_value={"summary": "summary only"},
+                            return_value={
+                                "summary": "summary only",
+                                "changed_functions": [{"name": "app.f"}],
+                            },
                         ):
                             cli.main()
 
