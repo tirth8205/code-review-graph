@@ -9,7 +9,7 @@ Usage:
     code-review-graph forget PATH [PATH ...] [--dry-run]
     code-review-graph watch
     code-review-graph status
-    code-review-graph serve [--auto-watch] [--http] [--host ADDR] [--port PORT]
+    code-review-graph serve [--auto-watch] [--http] [--host ADDR] [--port PORT] [--multi-repo]
     code-review-graph mcp [--auto-watch]
     code-review-graph visualize
     code-review-graph wiki
@@ -39,7 +39,9 @@ if sys.version_info < (3, 10):
     sys.exit(1)
 
 import argparse
+import contextlib
 import fnmatch
+import io
 import json
 import logging
 import os
@@ -48,25 +50,39 @@ from functools import partial
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 from pathlib import Path
-from typing import Iterable, TypedDict
+from typing import TYPE_CHECKING, Callable, Iterable, TypedDict
 
+from . import install_plan
 from .errors import CodeReviewGraphError, is_lock_error
+
+if TYPE_CHECKING:
+    from .install_gitignore import Plan as _GitignorePlan
 from .neighbourhood import DEFAULT_DEPTH as NB_DEFAULT_DEPTH
 from .neighbourhood import DEFAULT_MAX_NODES as NB_DEFAULT_MAX_NODES
+from .stdio import configure_utf8_stdio as _configure_utf8_stdio
 
 logger = logging.getLogger(__name__)
 
 # Shared platform choices for install and init commands
 _PLATFORM_CHOICES = [
     "codex", "claude", "claude-code", "cursor", "windsurf", "zed",
-    "continue", "opencode", "antigravity", "gemini-cli", "qwen", "kiro", "qoder",
-    "copilot", "copilot-cli", "codebuddy", "hermes", "all",
+    "continue", "opencode", "mimo", "antigravity", "gemini-cli", "qwen", "kiro", "qoder",
+    "copilot", "copilot-cli", "codebuddy", "hermes", "dsh", "all",
 ]
+
+_GITIGNORE_HELP = (
+    "Also add the files and folders this run creates, and git does not track, "
+    "to a marked block in .gitignore. Off by default; uninstall removes the block"
+)
 
 
 class _EmbeddingRefreshKwargs(TypedDict, total=False):
     embedding_provider: str
     embedding_model: str
+
+
+class _FollowSymlinksKwargs(TypedDict, total=False):
+    follow_symlinks: bool
 
 
 def _get_version() -> str:
@@ -101,21 +117,6 @@ def _supports_color() -> bool:
     if not hasattr(sys.stdout, "isatty"):
         return False
     return sys.stdout.isatty()
-
-
-def _configure_utf8_stdio() -> None:
-    """Allow Unicode CLI decoration on streams using a legacy encoding."""
-    for stream in (sys.stdout, sys.stderr):
-        encoding = getattr(stream, "encoding", None)
-        if not encoding or encoding.lower().replace("-", "") == "utf8":
-            continue
-        reconfigure = getattr(stream, "reconfigure", None)
-        if reconfigure is None:
-            continue
-        try:
-            reconfigure(encoding="utf-8")
-        except (OSError, ValueError):
-            pass
 
 
 def _print_banner() -> None:
@@ -163,12 +164,12 @@ def _print_banner() -> None:
 def _instruction_files_to_modify(
     repo_root: Path,
     target: str,
-) -> list[str]:
-    """Return the list of instruction files that ``install`` would write
-    or modify, given the current state of the repo and the selected
-    platform target. Used for the dry-run / confirm preview (#173).
+) -> list[tuple[str, str]]:
+    """Return ``(filename, how)`` for each instruction file that ``install``
+    would write or modify, given the current state of the repo and the
+    selected platform target. Shown before the question about them (#173).
 
-    A file holding a section from an older release is listed as ``(update)``:
+    A file holding a section from an older release is listed as ``update``:
     install replaces that block in place rather than leaving it stale (#314).
     """
     from .skills import (
@@ -180,17 +181,17 @@ def _instruction_files_to_modify(
         _upgrade_managed_block,
     )
 
-    targets: list[str] = []
+    targets: list[tuple[str, str]] = []
 
     def _describe(filename: str, path: Path, section: str) -> None:
-        if not path.exists():
-            targets.append(f"{filename} (new)")
+        if not install_plan.exists(path):
+            targets.append((filename, "new"))
             return
-        content = path.read_text(encoding="utf-8", errors="replace")
+        content = install_plan.read_text(path, encoding="utf-8", errors="replace")
         if _CLAUDE_MD_SECTION_MARKER not in content:
-            targets.append(f"{filename} (append)")
+            targets.append((filename, "append"))
         elif _upgrade_managed_block(content, section) is not None:
-            targets.append(f"{filename} (update)")
+            targets.append((filename, "update"))
 
     if target in ("claude", "all"):
         _describe("CLAUDE.md", repo_root / "CLAUDE.md", _CLAUDE_MD_SECTION)
@@ -208,20 +209,30 @@ def _instruction_files_to_modify(
     return targets
 
 
-def _confirm_yes_no(prompt: str, default_yes: bool = True) -> bool:
+def _confirm_yes_no(
+    prompt: str, default_yes: bool = True, *, cancel_on_interrupt: bool = False
+) -> bool:
     """Prompt the user [Y/n] and return True for yes.
 
     Non-interactive environments (no TTY on stdin, e.g. an MCP wrapper
     piping the CLI) return ``default_yes`` without blocking — the
     stdio transport cannot safely read from stdin without corrupting
     the JSON-RPC stream. See: #173, #174
+
+    Ctrl-C counts as "no" unless ``cancel_on_interrupt`` is set, in which case
+    it is raised so the caller can stop altogether.
     """
     if not sys.stdin.isatty():
         return default_yes
     suffix = "[Y/n]" if default_yes else "[y/N]"
     try:
         answer = input(f"{prompt} {suffix} ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
+    except KeyboardInterrupt:
+        print()
+        if cancel_on_interrupt:
+            raise
+        return False
+    except EOFError:
         print()
         return False
     if not answer:
@@ -284,10 +295,107 @@ def _match_files_to_forget(
     return sorted(matched)
 
 
+_STEERING_HELP = (
+    "Claude Code only: add (or, with --no-steering, remove) a hook that puts graph "
+    "context beside each search and read. Off unless asked for; it uses a few "
+    "hundred tokens at most on each call"
+)
+
+
+def _say_nothing(*_args: object, **_kwargs: object) -> None:
+    """Drop a progress message: a dry run shows that change as a diff instead."""
+
+
+def _apply_steering_choice(
+    repo_root: Path, target: str, steering: bool, *, skip_hooks: bool, dry_run: bool,
+) -> None:
+    """Add or remove the steering hook, as ``--steering`` or ``--no-steering`` asked.
+
+    Called inside the install plan in both modes, so the change is planned
+    with the rest and a dry run shows it as a diff.
+    """
+    from .skills import install_steering_hook
+    from .uninstall import remove_steering_hook
+
+    lead = "[dry-run] " if dry_run else ""
+    # Checked before either way: --no-steering for another platform must not
+    # touch Claude Code's settings.
+    if target not in ("claude", "all"):
+        print(f"{lead}Skipped the steering hook: it is only for Claude Code.")
+        return
+    if not steering:
+        report = remove_steering_hook(repo_root)
+        for skipped in report.skipped_paths:
+            print(f"{lead}Could not remove the steering hook: {skipped}")
+        if report.errors:
+            for error in report.errors:
+                print(f"{lead}Could not remove the steering hook: {error}")
+        elif report.total_actions == 0:
+            if not report.skipped_paths:
+                print(f"{lead}No steering hook to remove.")
+        elif dry_run:
+            print("[dry-run] Would remove the steering hook.")
+        else:
+            print("Removed the steering hook.")
+        return
+    if skip_hooks:
+        print(f"{lead}Skipped the steering hook: --no-hooks was given.")
+        return
+    path = install_steering_hook(repo_root)
+    if path and dry_run:
+        print(f"[dry-run] Would add the steering hook to {path}.")
+    elif path:
+        print(f"Installed the steering hook in {path}. Remove it with --no-steering.")
+
+
+def _report_gitignore_block(
+    repo_root: Path, plan: _GitignorePlan, *, dry_run: bool
+) -> None:
+    """Plan the --gitignore block and say what it does (#471).
+
+    Called inside the install plan in both modes, so the block is worked out
+    from the files the plan creates and the dry run lists exactly what a real
+    install writes.
+    """
+    from . import install_gitignore
+
+    result = install_gitignore.apply(repo_root, plan, dry_run=False)
+    lead = "[dry-run] " if dry_run else ""
+    if result.status == "written":
+        if result.added:
+            verb = "Would add" if dry_run else "Added"
+            print(f"{lead}{verb} to .gitignore, in the code-review-graph install files block:")
+            for entry in result.added:
+                print(f"    /{entry}")
+        else:
+            verb = "Would drop" if dry_run else "Dropped"
+            print(f"{lead}{verb} entries for paths that are gone from the .gitignore block.")
+    elif result.status == "unchanged":
+        if result.entries:
+            print(f"{lead}The .gitignore block already lists every file install created.")
+        else:
+            print(f"{lead}No files to add to .gitignore: install created none that git shows.")
+    elif result.status == "edited":
+        print(
+            f"{lead}Left the code-review-graph install files block in .gitignore alone: "
+            "it was edited by hand."
+        )
+    elif result.status == "not-git":
+        print(f"{lead}Skipped --gitignore: {repo_root} is not a Git work tree.")
+    else:
+        print(f"{lead}Could not update .gitignore: {result.detail}", file=sys.stderr)
+
+
 def _handle_init(args: argparse.Namespace) -> None:
-    """Set up MCP config for detected AI coding platforms."""
-    from .incremental import ensure_repo_gitignore_excludes_crg, find_repo_root
-    from .skills import install_platform_configs
+    """Set up MCP config, hooks, skills and instructions for AI coding platforms.
+
+    Every write is planned in memory first (see ``install_plan``). ``--dry-run``
+    prints the plan as diffs and writes nothing. A real install lists the files
+    it will change and asks about instruction files before it writes anything,
+    then writes exactly that plan (#173).
+    """
+    from .incremental import find_repo_root
+    from .skills import inject_instruction_files
 
     repo_root = Path(args.repo) if args.repo else find_repo_root()
     if not repo_root:
@@ -299,150 +407,296 @@ def _handle_init(args: argparse.Namespace) -> None:
         target = "claude"
     auto_yes = getattr(args, "yes", False)
     skip_instructions = getattr(args, "no_instructions", False)
+    skip_hooks = getattr(args, "no_hooks", False)
+    steering = getattr(args, "steering", None)
+
+    # --gitignore (#471, off by default): note what exists before anything is
+    # planned, so only files this run creates are added to .gitignore.
+    gitignore_plan: _GitignorePlan | None = None
+    if getattr(args, "gitignore", False):
+        from . import install_gitignore
+
+        gitignore_plan = install_gitignore.plan(
+            repo_root,
+            target,
+            with_skills=not getattr(args, "no_skills", False),
+            with_hooks=not skip_hooks,
+            with_instructions=not skip_instructions,
+        )
+
+    # In a real install the progress messages wait until the files are
+    # written, so none of them reports a change that has not happened yet.
+    # A dry run prints its messages as it goes, but not the ones that only
+    # say a file was written: its diffs show those.
+    report = io.StringIO()
+    try:
+        with install_plan.planning() as plan:
+            quiet = contextlib.nullcontext() if dry_run else contextlib.redirect_stdout(report)
+            with quiet:
+                _plan_mcp_configs(repo_root, target, dry_run)
+                codex_skill_error = _plan_integrations(
+                    args, repo_root, target, say=_say_nothing if dry_run else print
+                )
+                if steering is not None:
+                    _apply_steering_choice(
+                        repo_root, target, steering, skip_hooks=skip_hooks, dry_run=dry_run,
+                    )
+
+            # Instruction files are planned before the question too, so the
+            # same plan is shown in both modes and an edit made while the
+            # question is open is left alone, as for every other file.
+            instr_targets: list[tuple[str, str]] = []
+            outcomes: dict[str, str] = {}
+            before_instructions = plan.checkpoint()
+            if not skip_instructions:
+                instr_targets = _instruction_files_to_modify(repo_root, target)
+                outcomes = inject_instruction_files(repo_root, target=target)
+            instr_changes = plan.changes_since(before_instructions)
+
+            # The --gitignore block lists what the run creates, instruction
+            # files included, so it is planned last. Its messages are kept
+            # apart: saying no to the question plans it again.
+            gitignore_report = io.StringIO()
+            if gitignore_plan is not None:
+                to = sys.stdout if dry_run else gitignore_report
+                with contextlib.redirect_stdout(to):
+                    print()
+                    _report_gitignore_block(repo_root, gitignore_plan, dry_run=dry_run)
+
+            if dry_run:
+                _print_instruction_conflicts(outcomes)
+                if codex_skill_error and target == "codex":
+                    # With --platform all the error was already printed above.
+                    print(f"[dry-run] {codex_skill_error}", file=sys.stderr)
+                _print_dry_run(plan, repo_root)
+                return
+
+            _print_planned_files(plan, repo_root, skip=instr_changes)
+            inject = False
+            if instr_changes:
+                # An old copy that install removes is listed too.
+                named = {(repo_root / name).resolve() for name, _ in instr_targets}
+                for change in instr_changes:
+                    if change.path not in named:
+                        shown = install_plan.display_path(change.path, repo_root)
+                        how = "old file removed" if change.after is None else "old section removed"
+                        instr_targets.append((shown, how))
+                print()
+                print("Graph instructions will be injected into:")
+                for name, how in instr_targets:
+                    print(f"  {name} ({how})")
+                try:
+                    inject = auto_yes or _confirm_yes_no(
+                        "Inject graph instructions into these files?",
+                        default_yes=True,
+                        cancel_on_interrupt=True,
+                    )
+                except KeyboardInterrupt:
+                    # Nothing has been written yet, so stopping here leaves no trace.
+                    print("Install cancelled. No files were written.")
+                    raise SystemExit(130) from None
+            if instr_changes and not inject:
+                plan.rollback(before_instructions)
+                if gitignore_plan is not None:
+                    # The block must not list instruction files that will not
+                    # be written, so it is planned again without them.
+                    gitignore_report = io.StringIO()
+                    with contextlib.redirect_stdout(gitignore_report):
+                        print()
+                        _report_gitignore_block(repo_root, gitignore_plan, dry_run=False)
+            with contextlib.redirect_stdout(report):
+                if inject:
+                    for label, wording in (
+                        ("created", "Injected graph instructions into"),
+                        ("updated", "Updated graph instructions in"),
+                    ):
+                        names = [f for f, o in outcomes.items() if o == label]
+                        if names:
+                            print(f"{wording}: {', '.join(names)}")
+                    _print_instruction_conflicts(outcomes)
+                elif skip_instructions:
+                    print("Skipped instruction injection (--no-instructions).")
+                elif instr_changes:
+                    print("Skipped instruction injection (user declined).")
+                else:
+                    _print_instruction_conflicts(outcomes)
+            report.write(gitignore_report.getvalue())
+    except Exception:
+        # A step failed while planning, before any file reached the disk.
+        print("Install stopped before writing any file.", file=sys.stderr)
+        raise
+    planned = plan.changes()
+    failures = plan.apply()
+
+    print()
+    if failures:
+        # The progress messages would claim files that were left alone, so
+        # name only what was written.
+        failed = {path for path, _ in failures}
+        written = [change for change in planned if change.path not in failed]
+        if written:
+            print("These files were written:")
+            for change in written:
+                print(f"  {install_plan.display_path(change.path, repo_root)}")
+        for path, reason in failures:
+            print(f"Could not write {path}: {reason}", file=sys.stderr)
+        raise CodeReviewGraphError(
+            f"install could not write {len(failures)} file(s); see the messages above"
+        )
+    sys.stdout.write(report.getvalue())
+    if codex_skill_error and target == "codex":
+        raise CodeReviewGraphError(codex_skill_error)
+    print()
+    print("Next steps:")
+    print("  1. code-review-graph build    # build the knowledge graph")
+    print("  2. Restart your AI coding tool to pick up the new config")
+
+
+def _plan_mcp_configs(repo_root: Path, target: str, dry_run: bool) -> None:
+    """Plan the MCP server entry for each platform and say what it does."""
+    from .skills import install_platform_configs
 
     print("Installing MCP server config...")
     configured = install_platform_configs(repo_root, target=target, dry_run=dry_run)
-
     if not configured:
         print("No platforms detected.")
+    elif dry_run:
+        print(
+            f"\n[dry-run] Would configure {len(configured)} platform(s): "
+            f"{', '.join(configured)}"
+        )
     else:
         print(f"\nConfigured {len(configured)} platform(s): {', '.join(configured)}")
 
-    # Preview the instruction files that would be touched (#173).
-    instr_targets = _instruction_files_to_modify(repo_root, target)
-    if instr_targets:
-        print()
-        print("Graph instructions will be injected into:")
-        for t in instr_targets:
-            print(f"  {t}")
 
-    if dry_run:
-        print("\n[dry-run] Would ensure .gitignore ignores .code-review-graph/.")
-        print("[dry-run] No files were modified.")
-        return
+def _plan_integrations(
+    args: argparse.Namespace, repo_root: Path, target: str, *, say: Callable[[str], None]
+) -> str | None:
+    """Plan the .gitignore entry, skills and hooks. Return a Codex skill error, if any.
 
-    gitignore_state = ensure_repo_gitignore_excludes_crg(repo_root)
-    if gitignore_state == "created":
-        print("Created .gitignore and added .code-review-graph/.")
-    elif gitignore_state == "updated":
-        print("Updated .gitignore with .code-review-graph/.")
-    else:
-        print(".gitignore already contains .code-review-graph/.")
-
-    # Platform-native skills and hooks are installed by default where supported
-    # so the graph tools are used proactively. Use --no-skills / --no-hooks /
-    # --no-instructions to opt out.
-    skip_skills = getattr(args, "no_skills", False)
-    skip_hooks = getattr(args, "no_hooks", False)
-    # Legacy: --skills/--hooks/--all still accepted (no-op, everything is default)
-
+    Platform-native skills and hooks are installed by default where supported
+    so the graph tools are used proactively; ``--no-skills`` and ``--no-hooks``
+    opt out. The legacy ``--skills``/``--hooks``/``--all`` flags are still
+    accepted and do nothing. ``say`` prints a message that only reports a
+    write; a warning is printed in both modes.
+    """
+    from .incremental import ensure_repo_gitignore_excludes_crg
     from .skills import (
         PLATFORMS,
         generate_skills,
-        inject_instruction_files,
         install_codebuddy_hooks,
         install_codebuddy_skills,
         install_codex_hooks,
+        install_codex_skill,
         install_cursor_hooks,
         install_gemini_cli_hooks,
         install_gemini_cli_skills,
         install_git_hook,
+        install_git_sync_hooks,
         install_hermes_skills,
         install_hooks,
         install_opencode_plugin,
         install_qoder_skills,
     )
 
+    gitignore_state = ensure_repo_gitignore_excludes_crg(repo_root)
+    if gitignore_state == "created":
+        say("Created .gitignore and added .code-review-graph/.")
+    elif gitignore_state == "updated":
+        say("Updated .gitignore with .code-review-graph/.")
+    else:
+        say(".gitignore already contains .code-review-graph/.")
+
+    skip_skills = getattr(args, "no_skills", False)
+    skip_hooks = getattr(args, "no_hooks", False)
+    codex_skill_error: str | None = None
     if not skip_skills:
+        codex_detected = target == "codex" or (
+            target == "all" and PLATFORMS["codex"]["detect"]()
+        )
+        if codex_detected:
+            try:
+                codex_skill_dir = install_codex_skill()
+            except OSError as exc:
+                codex_skill_dir = None
+                codex_skill_error = f"Could not install Codex skill: {exc}"
+            if codex_skill_dir is None:
+                codex_skill_error = codex_skill_error or (
+                    "Codex skill installation refused existing files; check the warning above"
+                )
+                if target == "all":
+                    print(codex_skill_error, file=sys.stderr)
+            else:
+                say(f"Installed Codex skill in {codex_skill_dir}")
+
         # Claude Code skills are only relevant for Claude (or full install).
         if target in ("claude", "all"):
             skills_dir = generate_skills(repo_root)
-            print(f"Generated Claude Code skills in {skills_dir}")
+            say(f"Generated Claude Code skills in {skills_dir}")
 
         # Gemini CLI skills are workspace-scoped under .gemini/.
         if target in ("gemini-cli", "all"):
             gemini_skills_dir = install_gemini_cli_skills(repo_root)
-            print(f"Installed Gemini CLI skills in {gemini_skills_dir}")
+            say(f"Installed Gemini CLI skills in {gemini_skills_dir}")
 
         # CodeBuddy discovers project skills under .codebuddy/skills/.
         if target in ("codebuddy", "all"):
             codebuddy_skills_dir = install_codebuddy_skills(repo_root)
-            print(f"Installed CodeBuddy skills in {codebuddy_skills_dir}")
+            say(f"Installed CodeBuddy skills in {codebuddy_skills_dir}")
 
         # Hermes Agent discovers skills under <HERMES_HOME>/skills/.
         if target == "hermes" or (target == "all" and PLATFORMS["hermes"]["detect"]()):
             hermes_skills_dir = install_hermes_skills(repo_root)
-            print(f"Installed Hermes Agent skills in {hermes_skills_dir}")
+            say(f"Installed Hermes Agent skills in {hermes_skills_dir}")
 
-    # Confirm before writing instruction files (#173). --yes skips the
-    # prompt; --no-instructions skips the whole block.
-    if not skip_instructions and instr_targets:
-        if auto_yes or _confirm_yes_no(
-            "Inject graph instructions into the files above?",
-            default_yes=True,
-        ):
-            outcomes = inject_instruction_files(repo_root, target=target)
-            for label, wording in (
-                ("created", "Injected graph instructions into"),
-                ("updated", "Updated graph instructions in"),
-            ):
-                names = [f for f, o in outcomes.items() if o == label]
-                if names:
-                    print(f"{wording}: {', '.join(names)}")
-            # A hand-edited block is never overwritten, so say which file it is
-            # rather than reporting success the user did not get (#314).
-            stale = [f for f, o in outcomes.items() if o == "conflict"]
-            if stale:
-                print(
-                    "Left edited graph instructions alone in: "
-                    f"{', '.join(stale)}. Delete the section between "
-                    "<!-- code-review-graph MCP tools --> and its closing marker "
-                    "and reinstall to pick up the current text."
-                )
-        else:
-            print("Skipped instruction injection (user declined).")
-    elif skip_instructions:
-        print("Skipped instruction injection (--no-instructions).")
+        # Qoder skills live in the project's .qoder/skills/.
+        if target in ("qoder", "all"):
+            qoder_skills_dir = install_qoder_skills(repo_root)
+            if qoder_skills_dir:
+                say(f"Installed Qoder skills to {qoder_skills_dir}")
 
-
-    # Install Qoder skills (global user-level skills directory)
-    if not skip_skills and target in ("qoder", "all"):
-        qoder_skills_dir = install_qoder_skills(repo_root)
-        if qoder_skills_dir:
-            print(f"Installed Qoder skills to {qoder_skills_dir}")
     if not skip_hooks and target in ("codebuddy", "all"):
         try:
             codebuddy_settings = install_codebuddy_hooks(repo_root)
-            print(f"Installed CodeBuddy hooks in {codebuddy_settings}")
+            if codebuddy_settings:
+                say(f"Installed CodeBuddy hooks in {codebuddy_settings}")
         except Exception as exc:
             logger.warning("Could not install CodeBuddy hooks: %s", exc)
     if not skip_hooks and target in ("codex", "all"):
         hooks_path = install_codex_hooks(repo_root)
-        print(f"Installed Codex hooks in {hooks_path}")
+        if hooks_path:
+            say(f"Installed Codex hooks in {hooks_path}")
         git_hook = install_git_hook(repo_root)
         if git_hook:
-            print(f"Installed git pre-commit hook in {git_hook}")
+            say(f"Installed git pre-commit hook in {git_hook}")
+        for sync_hook in install_git_sync_hooks(repo_root):
+            say(f"Installed git {sync_hook.name} hook in {sync_hook}")
     if not skip_hooks and target in ("claude", "qoder", "all"):
         platforms_to_install = [target] if target != "all" else ["claude", "qoder"]
         for plat in platforms_to_install:
-            install_hooks(repo_root, platform=plat)
-            print(f"Installed hooks in {repo_root / f'.{plat}' / 'settings.json'}")
+            settings_path = install_hooks(repo_root, platform=plat)
+            if settings_path:
+                say(f"Installed hooks in {settings_path}")
         git_hook = install_git_hook(repo_root)
         if git_hook:
-            print(f"Installed git pre-commit hook in {git_hook}")
+            say(f"Installed git pre-commit hook in {git_hook}")
+        for sync_hook in install_git_sync_hooks(repo_root):
+            say(f"Installed git {sync_hook.name} hook in {sync_hook}")
 
     # Cursor hooks (user-level, only if ~/.cursor exists — matching MCP detect)
     if not skip_hooks and target in ("all", "cursor") and PLATFORMS["cursor"]["detect"]():
         try:
             hooks_path = install_cursor_hooks()
-            print(f"Installed Cursor hooks in {hooks_path}")
+            if hooks_path:
+                say(f"Installed Cursor hooks in {hooks_path}")
         except Exception as exc:
             logger.warning("Could not install Cursor hooks: %s", exc)
 
     if not skip_hooks and target in ("gemini-cli", "all"):
         try:
             gemini_settings = install_gemini_cli_hooks(repo_root)
-            print(f"Installed Gemini CLI hooks in {gemini_settings}")
+            if gemini_settings:
+                say(f"Installed Gemini CLI hooks in {gemini_settings}")
         except Exception as exc:
             logger.warning("Could not install Gemini CLI hooks: %s", exc)
 
@@ -450,14 +704,61 @@ def _handle_init(args: argparse.Namespace) -> None:
     if not skip_hooks and target in ("all", "opencode") and PLATFORMS["opencode"]["detect"]():
         try:
             plugin_path = install_opencode_plugin()
-            print(f"Installed OpenCode plugin in {plugin_path}")
+            say(f"Installed OpenCode plugin in {plugin_path}")
         except Exception as exc:
             logger.warning("Could not install OpenCode plugin: %s", exc)
+    return codex_skill_error
 
+
+def _print_instruction_conflicts(outcomes: dict[str, str]) -> None:
+    """Name each file whose graph block was edited by hand, so left alone (#314)."""
+    stale = [f for f, o in outcomes.items() if o == "conflict"]
+    if stale:
+        print(
+            "Left edited graph instructions alone in: "
+            f"{', '.join(stale)}. Delete the section between "
+            "<!-- code-review-graph MCP tools --> and its closing marker "
+            "and reinstall to pick up the current text."
+        )
+
+
+def _print_planned_files(
+    plan: install_plan.Plan,
+    repo_root: Path,
+    skip: Iterable[install_plan.FileChange] = (),
+) -> None:
+    """List each file a real install is about to write, before it writes any.
+
+    ``skip`` holds the instruction changes, listed apart because they wait on
+    the question.
+    """
+
+    skipped = {change.path for change in skip}
+    changes = [change for change in plan.changes() if change.path not in skipped]
     print()
-    print("Next steps:")
-    print("  1. code-review-graph build    # build the knowledge graph")
-    print("  2. Restart your AI coding tool to pick up the new config")
+    if not changes:
+        print("No config, hook or skill files need changing.")
+        return
+    print("Install will change these files:")
+    for change in changes:
+        shown = install_plan.display_path(change.path, repo_root)
+        print(f"  {shown} ({install_plan.describe(change)})")
+    print("Run with --dry-run to see each change first.")
+
+
+def _print_dry_run(plan: install_plan.Plan, repo_root: Path) -> None:
+    """Show what each file would become, then say that nothing was written."""
+
+    changes = plan.changes()
+    print()
+    if not changes:
+        print("[dry-run] Every file is already up to date.")
+    else:
+        print(f"[dry-run] Install would change {len(changes)} file(s):")
+        print()
+        sys.stdout.write(install_plan.render(changes, repo_root))
+    print()
+    print("[dry-run] No files were modified.")
 
 
 def _handle_data_dir_option(args, repo_root: Path) -> None:
@@ -493,6 +794,29 @@ def _add_embedding_refresh_args(command) -> None:
             "source-derived text and incur API cost"
         ),
     )
+
+
+def _add_follow_symlinks_arg(command) -> None:
+    """Add the opt-in for following symlinked folders inside the repo (#269)."""
+    command.add_argument(
+        "--follow-symlinks",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Also index files in symlinked folders, inside or outside the "
+            "repository, stored under their path inside it. Links that loop "
+            "are skipped, and at most CRG_MAX_FOLLOWED_FILES files are taken. "
+            "Default: off, or CRG_FOLLOW_SYMLINKS"
+        ),
+    )
+
+
+def _follow_symlinks_kwargs(args) -> _FollowSymlinksKwargs:
+    """Pass the flag on only when it was given; otherwise the env var decides."""
+    value = getattr(args, "follow_symlinks", None)
+    if value is None:
+        return {}
+    return {"follow_symlinks": bool(value)}
 
 
 def _embedding_refresh_kwargs(args, parser) -> _EmbeddingRefreshKwargs:
@@ -532,6 +856,16 @@ def _positive_int(value: str) -> int:
     return parsed
 
 
+def _detail_sections_arg(value: str) -> tuple[str, ...]:
+    """Parse ``detect-changes --details``; an unknown name is a usage error."""
+    from .change_details import parse_detail_sections
+
+    try:
+        return parse_detail_sections(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
 _GRAPH_TOOL_COMMANDS = {
     "query",
     "impact",
@@ -547,6 +881,7 @@ _GRAPH_TOOL_COMMANDS = {
 
 
 _PATH_REPO_COMMANDS = frozenset({
+    "context-history",
     "install",
     "init",
     "uninstall",
@@ -604,6 +939,79 @@ def _find_explicit_repo_root(start: Path) -> "Path | None":
         current = current.parent
 
 
+def _handle_context_history(args) -> None:
+    """Print the opt-in context history log as a trend (#813).
+
+    Reads only. A repository with no log, or no data directory at all, gets
+    a hint and exit 0, and nothing is created.
+    """
+    from datetime import datetime, time, timedelta, timezone
+
+    from . import context_history as ch
+    from .incremental import find_project_root, get_data_dir
+
+    if args.repo:
+        # Same walk as the graph-tool commands, so ``impact --repo repo/src``
+        # and ``context-history --repo repo/src`` use the same log.
+        given = Path(args.repo).expanduser()
+        repo_root = _find_explicit_repo_root(given) or given
+    else:
+        repo_root = find_project_root()
+    if args.data_dir:
+        data_dir = Path(args.data_dir).expanduser().resolve()
+    else:
+        data_dir = get_data_dir(repo_root, create=False)
+    since = None
+    if args.days:
+        # Whole UTC days, matching the rows: --days 1 is today.
+        first_day = datetime.now(timezone.utc).date() - timedelta(days=args.days - 1)
+        since = datetime.combine(first_day, time(), tzinfo=timezone.utc)
+    entries, skipped = ch.read_history(data_dir, since=since)
+    recording = ch.history_enabled()
+    rows = ch.summarise(entries, by=args.by)
+    totals = ch.total(entries)
+    log_path = data_dir / ch.HISTORY_FILE
+
+    if args.json_output:
+        print(json.dumps({
+            "log": str(log_path),
+            "recording": recording,
+            "by": args.by,
+            "days": args.days,
+            "rows": rows,
+            "total": totals,
+            "skipped_lines": skipped,
+        }, indent=2))
+        return
+
+    window = f"last {args.days} day(s)" if args.days else "whole log"
+    if not entries:
+        if recording:
+            print(f"No context history ({window}) in {log_path}.")
+        else:
+            print(f"No context history ({window}). Recording is off.")
+            print(
+                f"Set {ch.HISTORY_ENV}=1 where the MCP server or the CLI runs, and "
+                f"each call that reports context savings adds one line to {log_path}."
+            )
+            print("The log stays on this machine and holds only token counts and tool names.")
+        if skipped:
+            print(f"Skipped {skipped} line(s) that could not be read.")
+        return
+
+    print(
+        f"Context history ({window}): {totals['calls']:,} call(s). "
+        "Token counts are estimates (about 4 characters per token)."
+    )
+    print(f"Log: {log_path}")
+    print()
+    print(ch.format_table(rows, totals, by=args.by))
+    if skipped:
+        print(f"\nSkipped {skipped} line(s) that could not be read.")
+    if not recording:
+        print(f"\nRecording is off. Set {ch.HISTORY_ENV}=1 to add new calls.")
+
+
 def _run_graph_tool_command(args, repo_root: Path) -> None:
     """Run one graph-tool CLI wrapper and emit exactly one JSON value."""
     from . import tools
@@ -614,6 +1022,7 @@ def _run_graph_tool_command(args, repo_root: Path) -> None:
             pattern=args.pattern,
             target=args.target,
             repo_root=root,
+            **({"to": args.to} if args.to else {}),
         )
     elif args.command == "impact":
         result = tools.get_impact_radius(
@@ -622,6 +1031,8 @@ def _run_graph_tool_command(args, repo_root: Path) -> None:
             max_results=args.max_results,
             repo_root=root,
             base=args.base,
+            detail_level=args.detail_level,
+            max_files=args.max_files,
         )
     elif args.command == "search":
         result = tools.semantic_search_nodes(
@@ -682,6 +1093,29 @@ def _run_graph_tool_command(args, repo_root: Path) -> None:
     print(json.dumps(result, indent=2, default=str))
 
 
+#: Exit code for "another writer holds the lock; nothing was done".
+#:
+#: ``EX_TEMPFAIL`` from sysexits.h rather than 1: the condition is temporary
+#: and expected, so a hook or script can tell it apart from a real failure
+#: (bad config, corrupt database) without parsing the message, while still
+#: seeing a non-zero status the way the SQLite busy timeout used to report it.
+EXIT_TEMPFAIL = getattr(os, "EX_TEMPFAIL", 75)
+
+
+def _exit_if_contended(result: dict) -> None:
+    """Stop when another writer already owns this repository's graph.
+
+    The process holding the lock is writing the same graph, so this invocation
+    has nothing left to do. ``EXIT_TEMPFAIL`` says so precisely: non-zero, so a
+    caller cannot mistake a skip for success, but distinct from the exit code
+    of an actual failure.
+    """
+    if result.get("status") != "contended":
+        return
+    print(f"Skipped: {result.get('summary', 'another write is running')}", file=sys.stderr)
+    sys.exit(EXIT_TEMPFAIL)
+
+
 def _warn_failed_files(result: dict) -> None:
     """Report files that failed to parse; their previous graph rows are kept."""
     failed = result.get("errors") or []
@@ -697,42 +1131,282 @@ def _warn_failed_files(result: dict) -> None:
 
 
 def _open_graph_store(db_path: Path, command: str):
-    """Open the graph store, recovering from an unusable database file.
+    """Open a store; CLI builds request recovery inside their write lock."""
+    from .tools._common import _open_graph_store as open_store
 
-    A restored CI cache can hold a truncated or half-written ``graph.db``,
-    and it can just as easily hold a valid SQLite file whose tables are the
-    wrong shape. SQLite refuses either one and the command used to die with a
-    traceback, which is why ``action.yml``'s ``update || build`` fallback
-    could not recover: the full build failed for exactly the same reason.
-    ``build`` rewrites the graph from scratch, so there the bad file is
-    discarded and the build proceeds.
+    return open_store(db_path, command)
 
-    Every other command re-raises, and ``main`` prints the one actionable
-    line the error already carries. That is the whole difference between the
-    two paths, and it is worth stating why the reporting is not duplicated
-    here: a second message would compete with the first, and one of them
-    would drift.
 
-    ``build`` discards only what ``CorruptGraphDatabaseError`` names, and
-    that class is deliberately narrow. A contended database, a read-only
-    checkout, a foreign SQLite file and a graph from a newer release all
-    reach ``main`` as themselves, because deleting any of those would destroy
-    a graph, or data, that is not broken.
+def _ensure_project_marker(repo_root: Path) -> None:
+    """Let a plain directory pass tool validation, without opening graph.db.
+
+    ``build``, ``update`` and ``postprocess`` all accept one, and each now
+    reaches the tools before anything has created the data directory.
     """
-    from .graph import CorruptGraphDatabaseError, GraphStore, discard_corrupt_database
+    if repo_root.is_dir() and not any(
+        (repo_root / marker).exists() for marker in (".git", ".svn", ".code-review-graph")
+    ):
+        from .incremental import _create_data_dir
+        _create_data_dir(repo_root / ".code-review-graph")
 
-    try:
-        return GraphStore(db_path)
-    except CorruptGraphDatabaseError as exc:
-        if command != "build":
-            raise
-        logger.warning(
-            "Graph database at %s is unusable (%s); discarding it and "
-            "building from scratch.",
-            db_path, exc.reason,
+
+def _enrich_kwargs(args) -> dict:
+    """``--enrich`` asks for Jedi; without it the env var decides (see full_build)."""
+    return {"enrich": True} if getattr(args, "enrich", False) else {}
+
+
+def _handle_build_update(args, repo_root: Path, embedding_refresh_kwargs) -> None:
+    """Run writers before the generic CLI store initialization."""
+    from .incremental import assert_graph_serves_root, get_db_path
+
+    _ensure_project_marker(repo_root)
+    if args.command == "build":
+        pp = (
+            "none"
+            if getattr(args, "skip_postprocess", False)
+            else ("minimal" if getattr(args, "skip_flows", False) else "full")
         )
-        discard_corrupt_database(db_path)
-        return GraphStore(db_path)
+        from .tools.build import build_or_update_graph
+
+        previous_disable = logging.root.manager.disable
+        if args.quiet:
+            logging.disable(logging.INFO)
+        try:
+            result = build_or_update_graph(
+                full_rebuild=True,
+                recover_corrupt=True,
+                repo_root=str(repo_root),
+                postprocess=pp,
+                wait_for_lock=getattr(args, "wait", False),
+                **_enrich_kwargs(args),
+                **embedding_refresh_kwargs,
+                **_follow_symlinks_kwargs(args),
+            )
+        finally:
+            logging.disable(previous_disable)
+        _exit_if_contended(result)
+        parsed = result.get("files_parsed", 0)
+        nodes = result.get("total_nodes", 0)
+        edges = result.get("total_edges", 0)
+        if not args.quiet:
+            print(
+                f"Full build: {parsed} files, {nodes} nodes, {edges} edges "
+                f"(postprocess={pp})"
+            )
+            if result.get("errors"):
+                print(f"Errors: {len(result['errors'])}")
+
+    elif args.command == "update":
+        pp = (
+            "none"
+            if getattr(args, "skip_postprocess", False)
+            else ("minimal" if getattr(args, "skip_flows", False) else "full")
+        )
+        from .tools.build import build_or_update_graph
+
+        previous_disable = logging.root.manager.disable
+        if args.quiet:
+            logging.disable(logging.INFO)
+        try:
+            result = build_or_update_graph(
+                full_rebuild=False,
+                repo_root=str(repo_root),
+                base=args.base,
+                postprocess=pp,
+                wait_for_lock=getattr(args, "wait", False),
+                **_enrich_kwargs(args),
+                **embedding_refresh_kwargs,
+                **_follow_symlinks_kwargs(args),
+            )
+        except RuntimeError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+        finally:
+            logging.disable(previous_disable)
+        _exit_if_contended(result)
+        if result.get("status") == "error":
+            print(f"Error: {result.get('summary', 'update failed')}", file=sys.stderr)
+            sys.exit(1)
+        nodes = result.get("total_nodes", 0)
+        edges = result.get("total_edges", 0)
+        if not args.quiet:
+            if result.get("build_type") == "full":
+                # No usable incremental base (fresh/legacy graph, or the
+                # last-synced commit was lost to a rewrite/shallow clone),
+                # so the update fell back to a full rebuild.
+                parsed = result.get("files_parsed", 0)
+                print(
+                    f"Full rebuild (no usable incremental base): "
+                    f"{parsed} files, {nodes} nodes, {edges} edges"
+                    f" (postprocess={pp})"
+                )
+            else:
+                updated = result.get("files_updated", 0)
+                print(
+                    f"Incremental: {updated} files updated, "
+                    f"{nodes} nodes, {edges} edges"
+                    f" (postprocess={pp})"
+                )
+        _warn_failed_files(result)
+
+        # --brief: append a one-line change-impact summary with the same
+        # estimated context-savings approximation that detect-changes uses.
+        # Same baseline (changed files vs analysis response), so the two
+        # commands are directly comparable.
+        if getattr(args, "brief", False) and not args.quiet:
+            from .changes import analyze_changes
+            from .context_history import CallInfo
+            from .context_savings import (
+                attach_context_savings,
+                estimate_file_tokens,
+                format_context_savings_panel,
+            )
+            from .incremental import discover_review_changes
+
+            # Reuse the base the update actually resolved to (args.base is
+            # None by default now, which get_changed_files cannot accept),
+            # then apply the same merge-base rule as detect-changes so a
+            # branch ref scopes the summary to this branch's own commits.
+            changed, brief_base = discover_review_changes(
+                repo_root, result.get("base_resolved") or "HEAD~1"
+            )
+            if changed:
+                from .locking import WriteLock
+
+                db_path = get_db_path(repo_root, read_only=True)
+                brief_lock = WriteLock(db_path)
+                if not brief_lock.acquire(blocking=True):
+                    from .tools.build import _write_skipped_response
+                    _exit_if_contended(_write_skipped_response(db_path, brief_lock.holder_pid()))
+                store = None
+                try:
+                    store = _open_graph_store(db_path, "update")
+                    assert_graph_serves_root(repo_root, store)
+                    impact = analyze_changes(
+                        store,
+                        changed,
+                        repo_root=str(repo_root),
+                        base=brief_base,
+                    )
+                    original_tokens = estimate_file_tokens(repo_root, changed)
+                    attach_context_savings(
+                        impact,
+                        original_tokens=original_tokens,
+                        call=CallInfo(
+                            data_dir=store.db_path.parent,
+                            tool="update --brief",
+                            files=len(changed),
+                        ),
+                    )
+                    summary = impact.get("summary", "")
+                    if summary:
+                        print(summary)
+                    verified = None
+                    if getattr(args, "verify", False):
+                        from .context_savings import verify_with_tiktoken
+                        verified = verify_with_tiktoken(
+                            repo_root, changed, impact,
+                        )
+                        if verified is None:
+                            print(
+                                "Note: --verify requires tiktoken. "
+                                "Install with `pip install tiktoken`.",
+                            )
+                    panel = format_context_savings_panel(
+                        impact.get("context_savings"),
+                        original_tokens=original_tokens,
+                        response=impact,
+                        verified=verified,
+                    )
+                    if panel:
+                        print(panel)
+                finally:
+                    try:
+                        if store is not None:
+                            store.close()
+                    finally:
+                        brief_lock.release()
+
+
+def _handle_forget(args, repo_root: Path, db_path: Path, *, legacy: bool = False) -> None:
+    """Drop files from the graph. A real run holds the write lock throughout.
+
+    Another writer does not cover this work, so standing down says nothing was
+    forgotten. A dry run takes no lock, so it opens the graph read-only: a
+    writable open would upgrade an older schema. *legacy* means the graph is
+    still the old top-level ``.code-review-graph.db``; a real run moves it into
+    *db_path* only once it holds the lock, and a dry run reads it where it is.
+    """
+    from .incremental import _prepare_db_path, assert_graph_serves_root
+
+    lock = None
+    if not args.dry_run:
+        from .tools.build import _lock_or_skip
+
+        lock, contended = _lock_or_skip(
+            db_path, args.wait, outcome="nothing was forgotten",
+        )
+        if contended is not None:
+            _exit_if_contended(contended)
+    store = None
+    try:
+        if args.dry_run:
+            from .graph import GraphStore
+
+            store = GraphStore(
+                repo_root / ".code-review-graph.db" if legacy else db_path,
+                read_only=True,
+            )
+        else:
+            if legacy:
+                _prepare_db_path(repo_root, db_path)
+            store = _open_graph_store(db_path, args.command)
+        assert_graph_serves_root(repo_root, store)
+        stored_files = store.get_all_files()
+        targets = _match_files_to_forget(stored_files, args.paths, repo_root)
+        if not targets:
+            print("No parsed files matched the given path(s).")
+            print(f"The graph currently tracks {len(stored_files)} file(s).")
+            return
+        print(
+            "[dry-run] Would forget these files:"
+            if args.dry_run
+            else "Forgetting these files:"
+        )
+        for file_path in targets:
+            try:
+                display = os.path.relpath(file_path, str(repo_root))
+            except ValueError:
+                display = file_path
+            print(f"  {display}")
+        if args.dry_run:
+            print(
+                f"\n[dry-run] {len(targets)} file(s) would be removed "
+                "from the graph. No changes made."
+            )
+            return
+
+        from .forget import forget_files
+
+        summary = forget_files(store, repo_root, targets)
+        reparsed = summary.get("reparsed", [])
+        if reparsed:
+            print(
+                f"  re-resolved {len(reparsed)} referring file(s) "
+                "so no edges dangle"
+            )
+        remaining = len(stored_files) - len(targets)
+        print(
+            f"\nForgot {len(targets)} file(s); "
+            f"{remaining} file(s) remain in the graph."
+        )
+    finally:
+        try:
+            if store is not None:
+                store.close()
+        finally:
+            if lock is not None:
+                lock.release()
 
 
 def main() -> None:
@@ -905,7 +1579,7 @@ def build_parser() -> argparse.ArgumentParser:
     install_cmd.add_argument(
         "--dry-run",
         action="store_true",
-        help="Show what would be done without writing files",
+        help="Show each file install would change, as a diff, and write nothing",
     )
     install_cmd.add_argument(
         "--no-skills",
@@ -918,6 +1592,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip installing platform-native hooks",
     )
     install_cmd.add_argument(
+        "--steering",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=_STEERING_HELP,
+    )
+    install_cmd.add_argument(
         "--no-instructions",
         action="store_true",
         help="Skip injecting graph instructions into CLAUDE.md / AGENTS.md / etc.",
@@ -927,6 +1607,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--yes",
         action="store_true",
         help="Auto-confirm instruction injection without an interactive prompt",
+    )
+    install_cmd.add_argument(
+        "--gitignore",
+        action="store_true",
+        help=_GITIGNORE_HELP,
     )
     # Legacy flags (kept for backwards compat, now no-ops since all is default)
     install_cmd.add_argument("--skills", action="store_true", help=argparse.SUPPRESS)
@@ -946,7 +1631,7 @@ def build_parser() -> argparse.ArgumentParser:
     init_cmd.add_argument(
         "--dry-run",
         action="store_true",
-        help="Show what would be done without writing files",
+        help="Show each file install would change, as a diff, and write nothing",
     )
     init_cmd.add_argument(
         "--no-skills",
@@ -959,6 +1644,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip installing platform-native hooks",
     )
     init_cmd.add_argument(
+        "--steering",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=_STEERING_HELP,
+    )
+    init_cmd.add_argument(
         "--no-instructions",
         action="store_true",
         help="Skip injecting graph instructions into CLAUDE.md / AGENTS.md / etc.",
@@ -968,6 +1659,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--yes",
         action="store_true",
         help="Auto-confirm instruction injection without an interactive prompt",
+    )
+    init_cmd.add_argument(
+        "--gitignore",
+        action="store_true",
+        help=_GITIGNORE_HELP,
     )
     init_cmd.add_argument("--skills", action="store_true", help=argparse.SUPPRESS)
     init_cmd.add_argument("--hooks", action="store_true", help=argparse.SUPPRESS)
@@ -1042,6 +1738,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="External directory to store graph database (useful for network shares)"
     )
     _add_embedding_refresh_args(build_cmd)
+    _add_follow_symlinks_arg(build_cmd)
+    build_cmd.add_argument(
+        "--enrich",
+        action="store_true",
+        help="Also resolve Python method calls with Jedi (needs the "
+             "'enrichment' extra; about a second more per Python file). "
+             "Same as CRG_ENABLE_ENRICHMENT=1. Default: off",
+    )
+    build_cmd.add_argument(
+        "--wait",
+        action="store_true",
+        help="If a build for this repository is already running, wait for it "
+             "to finish instead of skipping. Default: report the overlap and "
+             "exit without re-parsing the same files.",
+    )
 
     # update
     update_cmd = sub.add_parser("update", help="Incremental update (only changed files)")
@@ -1086,6 +1797,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="External directory to store graph database (useful for network shares)"
     )
     _add_embedding_refresh_args(update_cmd)
+    _add_follow_symlinks_arg(update_cmd)
+    update_cmd.add_argument(
+        "--enrich",
+        action="store_true",
+        help="Also resolve Python method calls with Jedi (needs the "
+             "'enrichment' extra; about a second more per Python file). "
+             "Same as CRG_ENABLE_ENRICHMENT=1. Default: off",
+    )
+    update_cmd.add_argument(
+        "--wait",
+        action="store_true",
+        help="If a build for this repository is already running, wait for it "
+             "to finish instead of skipping. Default: report the overlap and "
+             "exit without re-parsing the same files.",
+    )
 
     # postprocess
     pp_cmd = sub.add_parser(
@@ -1102,6 +1828,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="External directory to store graph database (useful for network shares)"
     )
     _add_embedding_refresh_args(pp_cmd)
+    pp_cmd.add_argument(
+        "--wait",
+        action="store_true",
+        help="If a build, update or postprocess is already running for this "
+             "repository, wait for it to finish instead of skipping.",
+    )
 
     # embed
     embed_cmd = sub.add_parser(
@@ -1126,6 +1858,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="External directory to store graph database (useful for network shares)"
     )
+    embed_cmd.add_argument(
+        "--wait",
+        action="store_true",
+        help="If another write to this graph is running, wait for it to finish "
+             "instead of exiting without embedding.",
+    )
 
     # watch
     watch_cmd = sub.add_parser("watch", help="Watch for changes and auto-update")
@@ -1136,6 +1874,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="External directory to store graph database (useful for network shares)"
     )
     _add_embedding_refresh_args(watch_cmd)
+    _add_follow_symlinks_arg(watch_cmd)
 
     # status
     status_cmd = sub.add_parser("status", help="Show graph statistics")
@@ -1151,6 +1890,41 @@ def build_parser() -> argparse.ArgumentParser:
         "--data-dir",
         default=None,
         help="External directory to store graph database (useful for network shares)"
+    )
+
+    # context-history
+    history_cmd = sub.add_parser(
+        "context-history",
+        help="Show the opt-in context savings log as a per-day or per-tool trend",
+        description=(
+            "Read the local context history log and print a trend. Recording "
+            "is off unless CRG_CONTEXT_HISTORY=1 is set; the log stays on this "
+            "machine and holds only token counts and tool names."
+        ),
+    )
+    history_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
+    history_cmd.add_argument(
+        "--by",
+        choices=["day", "tool"],
+        default="day",
+        help="Group by UTC day (default) or by tool",
+    )
+    history_cmd.add_argument(
+        "--days",
+        type=_positive_int,
+        default=None,
+        help="Only the last N days (default: everything in the log)",
+    )
+    history_cmd.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Output one machine-readable JSON object",
+    )
+    history_cmd.add_argument(
+        "--data-dir",
+        default=None,
+        help="Directory that holds graph.db, when it is not the default",
     )
 
     # forget
@@ -1175,6 +1949,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--data-dir",
         default=None,
         help="External directory to store graph database (useful for network shares)"
+    )
+    forget_cmd.add_argument(
+        "--wait",
+        action="store_true",
+        help="If another write to this graph is running, wait for it to finish "
+             "instead of exiting without forgetting anything.",
     )
 
     # visualize
@@ -1386,9 +2166,22 @@ def build_parser() -> argparse.ArgumentParser:
              "second row to the panel with the real token counts. Requires "
              "`pip install tiktoken`.",
     )
+    detect_cmd.add_argument(
+        "--details",
+        type=_detail_sections_arg,
+        default=(),
+        metavar="SECTIONS",
+        help="Add bounded graph context to the JSON under 'details': a "
+             "comma-separated list of risk, communities, hubs, coupling, "
+             "impact, gaps, graph, or all. Not used with --brief.",
+    )
 
     # enrich (Claude Code PreToolUse hook; reads one JSON object from stdin)
     sub.add_parser("enrich", help="Enrich hook input with graph context")
+    sub.add_parser(
+        "hook-update", help="Update the graph of the repo that holds the hook's edited file"
+    )
+    sub.add_parser("hook-status", help="Show graph status for the hook payload cwd")
 
     # dead-code
     dead_cmd = sub.add_parser(
@@ -1438,9 +2231,13 @@ def build_parser() -> argparse.ArgumentParser:
             "tests_for",
             "inheritors_of",
             "file_summary",
+            "path_to",
         ],
     )
     query_cmd.add_argument("target", help="Node name, qualified name, or file path")
+    query_cmd.add_argument(
+        "--to", default=None, help="For path_to: the node or file to reach",
+    )
     query_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
 
     impact_cmd = sub.add_parser("impact", help="Analyze the blast radius of changes")
@@ -1452,6 +2249,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     impact_cmd.add_argument("--depth", type=_non_negative_int, default=2)
     impact_cmd.add_argument("--max-results", type=_positive_int, default=500)
+    impact_cmd.add_argument(
+        "--detail-level", choices=["standard", "minimal", "compact"], default="standard",
+        help="standard: graph records; minimal: summary; compact: ranked file paths",
+    )
+    impact_cmd.add_argument(
+        "--max-files", type=_positive_int, default=25,
+        help="Compact-mode file display limit (does not change graph traversal)",
+    )
     impact_cmd.add_argument("--base", default="HEAD~1")
     impact_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
 
@@ -1459,7 +2264,10 @@ def build_parser() -> argparse.ArgumentParser:
     search_cmd.add_argument("query", help="Search string")
     search_cmd.add_argument(
         "--kind",
-        choices=["File", "Class", "Function", "Type", "Test"],
+        choices=[
+            "File", "Class", "Function", "Type", "Test", "YamlPath", "DocSection",
+            "Variable", "Output", "JsonPath",
+        ],
         default=None,
     )
     search_cmd.add_argument("--limit", type=_positive_int, default=20)
@@ -1541,6 +2349,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Start filesystem watch in a daemon thread while MCP server runs",
     )
     serve_cmd.add_argument(
+        "--multi-worktree",
+        action="store_true",
+        help=(
+            "Use one stdio MCP session with one child server per linked Git "
+            "worktree; requires explicit repo_root for non-primary worktrees"
+        ),
+    )
+    serve_cmd.add_argument(
         "--tools", default=None,
         help=(
             "Comma-separated list of tool names to expose "
@@ -1567,6 +2383,14 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PORT",
         help="Port for --http (default: 5555)",
     )
+    serve_cmd.add_argument(
+        "--multi-repo",
+        action="store_true",
+        help=(
+            "With --http, serve every registered repository from one server; "
+            "each tool call must name one in repo_root"
+        ),
+    )
 
     mcp_cmd = sub.add_parser("mcp", help="Alias for serve")
     mcp_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
@@ -1574,6 +2398,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--auto-watch",
         action="store_true",
         help="Start filesystem watch in a daemon thread while MCP server runs",
+    )
+    mcp_cmd.add_argument(
+        "--multi-worktree",
+        action="store_true",
+        help="Use one stdio MCP session with one child server per linked Git worktree",
     )
 
     # daemon
@@ -1656,6 +2485,7 @@ def build_parser() -> argparse.ArgumentParser:
         "serve": serve_cmd,
         "daemon": daemon_cmd,
         "visualize": vis_cmd,
+        "detect-changes": detect_cmd,
     })
     return ap
 
@@ -1683,6 +2513,13 @@ def _dispatch() -> None:
     ):
         _SUBCOMMANDS["refactor"].error("rename requires --old-name and --new-name")
 
+    if args.command == "detect-changes" and args.details and args.brief:
+        # The extra sections are JSON for a renderer; the panel has no room
+        # for them, and dropping them without a word would look like a bug.
+        _SUBCOMMANDS["detect-changes"].error(
+            "--details adds to the JSON output; it cannot be used with --brief"
+        )
+
     if args.command == "visualize":
         # Before the graph is opened: a nonsense flag pair is a usage error,
         # not something the user should have to build a graph to discover.
@@ -1692,6 +2529,12 @@ def _dispatch() -> None:
         from .enrich import run_hook
 
         run_hook()
+        return
+
+    if args.command in {"hook-update", "hook-status"}:
+        from .hook_update import run_status_hook, run_update_hook
+
+        (run_update_hook if args.command == "hook-update" else run_status_hook)()
         return
 
     if args.command in _GRAPH_TOOL_COMMANDS:
@@ -1713,27 +2556,91 @@ def _dispatch() -> None:
                 raise SystemExit(1)
         else:
             repo_root = find_project_root()
-        db_path = get_db_path(repo_root)
+        db_path = get_db_path(repo_root, read_only=True)
+        if (
+            not db_path.exists()
+            and db_path.resolve() == (repo_root / ".code-review-graph" / "graph.db").resolve()
+            and (repo_root / ".code-review-graph.db").exists()
+        ):
+            # Preserve legacy migration without creating graph state for a
+            # repository that has never been indexed or an external data dir.
+            db_path = get_db_path(repo_root)
         if not db_path.exists():
             print(
                 f"No graph found at {db_path}. Run `code-review-graph build` first.",
                 file=sys.stderr,
             )
             raise SystemExit(1)
-        _run_graph_tool_command(args, repo_root)
+        from .context_history import recorded_as
+
+        # ``impact`` and ``architecture`` run the MCP tool bodies; the
+        # context history log names the command that was typed instead.
+        with recorded_as(args.command):
+            _run_graph_tool_command(args, repo_root)
+        return
+
+    if args.command == "context-history":
+        _handle_context_history(args)
         return
 
     embedding_refresh_kwargs = _embedding_refresh_kwargs(args, ap)
 
     if args.command in ("serve", "mcp"):
-        from .main import main as serve_main
-
         auto_watch = getattr(args, "auto_watch", False)
+        multi_worktree = getattr(args, "multi_worktree", False)
         if args.command == "serve":
             if args.port is not None and not args.http:
                 _SUBCOMMANDS["serve"].error("--port requires --http")
             if args.host is not None and not args.http:
                 _SUBCOMMANDS["serve"].error("--host requires --http")
+        multi_repo = getattr(args, "multi_repo", False)
+        if multi_repo:
+            serve_parser = _SUBCOMMANDS["serve"]
+            if not args.http:
+                serve_parser.error("--multi-repo requires --http")
+            if multi_worktree:
+                serve_parser.error("--multi-repo cannot be combined with --multi-worktree")
+            if args.repo:
+                serve_parser.error(
+                    "--multi-repo serves the repositories in the registry; drop --repo "
+                    "and run `code-review-graph register <path>` for each one"
+                )
+            if auto_watch:
+                serve_parser.error(
+                    "--multi-repo cannot be combined with --auto-watch; use "
+                    "`code-review-graph daemon` to watch several repositories"
+                )
+            if os.environ.get("CRG_DATA_DIR", "").strip():
+                serve_parser.error(
+                    "--multi-repo cannot be combined with CRG_DATA_DIR, which would put "
+                    "every repository's graph in one database; use per-repository "
+                    "Registry data_dir entries instead"
+                )
+        if multi_worktree:
+            if args.command == "serve" and args.http:
+                _SUBCOMMANDS["serve"].error(
+                    "--multi-worktree is only supported for stdio"
+                )
+            if os.environ.get("CRG_DATA_DIR", "").strip():
+                _SUBCOMMANDS[args.command].error(
+                    "--multi-worktree cannot be combined with CRG_DATA_DIR; "
+                    "use per-repository Registry data_dir entries instead"
+                )
+            from .multi_worktree import MultiWorktreeError, run_multi_worktree_server
+
+            try:
+                run_multi_worktree_server(
+                    repo_root=args.repo,
+                    auto_watch=auto_watch,
+                    tools=getattr(args, "tools", None),
+                )
+            except MultiWorktreeError as exc:
+                _SUBCOMMANDS[args.command].error(str(exc))
+            return
+
+        from .main import main as serve_main
+
+        if args.command == "serve":
             if args.http:
                 host = args.host if args.host is not None else "127.0.0.1"
                 port = args.port if args.port is not None else 5555
@@ -1744,6 +2651,7 @@ def _dispatch() -> None:
                     host=host,
                     port=port,
                     tools=args.tools,
+                    multi_repo=multi_repo,
                 )
             else:
                 serve_main(repo_root=args.repo, auto_watch=auto_watch, tools=args.tools)
@@ -1918,6 +2826,13 @@ def _dispatch() -> None:
                     alias = entry.get("alias", "")
                     alias_str = f"  ({alias})" if alias else ""
                     print(f"  {entry['path']}{alias_str}")
+                    if registered_data_dir := entry.get("data_dir"):
+                        try:
+                            accessible = Path(registered_data_dir).is_dir()
+                        except OSError:
+                            accessible = False
+                        missing = " [MISSING]" if not accessible else ""
+                        print(f"    data_dir: {registered_data_dir}{missing}")
         return
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -1933,38 +2848,36 @@ def _dispatch() -> None:
     if args.command == "postprocess":
         repo_root = Path(args.repo) if args.repo else find_project_root()
         _handle_data_dir_option(args, repo_root)
-        db_path = get_db_path(repo_root)
-        store = _open_graph_store(db_path, args.command)
-        try:
-            from .tools.build import run_postprocess
+        _ensure_project_marker(repo_root)
+        from .tools.build import run_postprocess
 
-            result = run_postprocess(
-                flows=not getattr(args, "no_flows", False),
-                communities=not getattr(args, "no_communities", False),
-                fts=not getattr(args, "no_fts", False),
-                repo_root=str(repo_root),
-                **embedding_refresh_kwargs,
+        result = run_postprocess(
+            flows=not getattr(args, "no_flows", False),
+            communities=not getattr(args, "no_communities", False),
+            fts=not getattr(args, "no_fts", False),
+            repo_root=str(repo_root),
+            wait_for_lock=getattr(args, "wait", False),
+            **embedding_refresh_kwargs,
+        )
+        _exit_if_contended(result)
+        parts = []
+        if result.get("flows_detected"):
+            parts.append(f"{result['flows_detected']} flows")
+        if result.get("communities_detected"):
+            parts.append(f"{result['communities_detected']} communities")
+        if result.get("fts_indexed"):
+            parts.append(f"{result['fts_indexed']} FTS entries")
+        print(f"Post-processing: {', '.join(parts) or 'done'}")
+        if result.get("build_incomplete"):
+            # Post-processing rebuilt derived data for the nodes that are
+            # stored, which is not the same as a repaired graph: the build
+            # that stored them never finished, so files are still missing.
+            print(
+                "Build state: INCOMPLETE - the last build stopped before "
+                "every file was stored, so files are still missing from "
+                "the graph. Post-processing cannot add them. Run "
+                "'code-review-graph build' to rebuild."
             )
-            parts = []
-            if result.get("flows_detected"):
-                parts.append(f"{result['flows_detected']} flows")
-            if result.get("communities_detected"):
-                parts.append(f"{result['communities_detected']} communities")
-            if result.get("fts_indexed"):
-                parts.append(f"{result['fts_indexed']} FTS entries")
-            print(f"Post-processing: {', '.join(parts) or 'done'}")
-            if result.get("build_incomplete"):
-                # Post-processing rebuilt derived data for the nodes that are
-                # stored, which is not the same as a repaired graph: the build
-                # that stored them never finished, so files are still missing.
-                print(
-                    "Build state: INCOMPLETE - the last build stopped before "
-                    "every file was stored, so files are still missing from "
-                    "the graph. Post-processing cannot add them. Run "
-                    "'code-review-graph build' to rebuild."
-                )
-        finally:
-            store.close()
         return
 
     if args.command == "embed":
@@ -1976,7 +2889,9 @@ def _dispatch() -> None:
             repo_root=str(repo_root),
             model=args.model,
             provider=args.provider,
+            wait_for_lock=args.wait,
         )
+        _exit_if_contended(result)
         if result.get("status") == "error":
             logging.error(result.get("error", "embed_graph failed"))
             sys.exit(1)
@@ -2027,6 +2942,11 @@ def _dispatch() -> None:
     if args.command in _data_dir_cmds and not read_only_explicit_data_dir:
         _handle_data_dir_option(args, repo_root)
 
+    if args.command in ("build", "update"):
+        _handle_build_update(args, repo_root, embedding_refresh_kwargs)
+        return
+
+    legacy_pending = False
     if args.command in (*_read_only_db_cmds, "dead-code", "forget"):
         if read_only_explicit_data_dir:
             db_path = Path(args.data_dir).expanduser().resolve() / "graph.db"
@@ -2041,19 +2961,27 @@ def _dispatch() -> None:
             and legacy_db.exists()
         ):
             # Preserve the established one-time legacy migration, but do not
-            # materialize graph state when neither database exists.
-            db_path = get_db_path(repo_root)
+            # materialize graph state when neither database exists. ``forget``
+            # moves it itself, once it holds the write lock.
+            if args.command == "forget":
+                legacy_pending = True
+            else:
+                db_path = get_db_path(repo_root)
     else:
         db_path = get_db_path(repo_root)
     if (
         args.command in ("dead-code", "forget", *_read_only_db_cmds)
         and not db_path.exists()
+        and not legacy_pending
     ):
         print(
             f"No graph found at {db_path}. Run `code-review-graph build` first.",
             file=sys.stderr,
         )
         raise SystemExit(1)
+    if args.command == "forget":
+        _handle_forget(args, repo_root, db_path, legacy=legacy_pending)
+        return
     store = _open_graph_store(db_path, args.command)
 
     try:
@@ -2088,141 +3016,6 @@ def _dispatch() -> None:
                     file_path = item.get("relative_path") or item.get("file", "?")
                     line = item.get("line", "?")
                     print(f"  [{kind}] {name}  ({file_path}:{line})")
-
-        elif args.command == "build":
-            pp = (
-                "none"
-                if getattr(args, "skip_postprocess", False)
-                else ("minimal" if getattr(args, "skip_flows", False) else "full")
-            )
-            from .tools.build import build_or_update_graph
-
-            previous_disable = logging.root.manager.disable
-            if args.quiet:
-                logging.disable(logging.INFO)
-            try:
-                result = build_or_update_graph(
-                    full_rebuild=True,
-                    repo_root=str(repo_root),
-                    postprocess=pp,
-                    **embedding_refresh_kwargs,
-                )
-            finally:
-                logging.disable(previous_disable)
-            parsed = result.get("files_parsed", 0)
-            nodes = result.get("total_nodes", 0)
-            edges = result.get("total_edges", 0)
-            if not args.quiet:
-                print(
-                    f"Full build: {parsed} files, {nodes} nodes, {edges} edges "
-                    f"(postprocess={pp})"
-                )
-                if result.get("errors"):
-                    print(f"Errors: {len(result['errors'])}")
-
-        elif args.command == "update":
-            pp = (
-                "none"
-                if getattr(args, "skip_postprocess", False)
-                else ("minimal" if getattr(args, "skip_flows", False) else "full")
-            )
-            from .tools.build import build_or_update_graph
-
-            previous_disable = logging.root.manager.disable
-            if args.quiet:
-                logging.disable(logging.INFO)
-            try:
-                result = build_or_update_graph(
-                    full_rebuild=False,
-                    repo_root=str(repo_root),
-                    base=args.base,
-                    postprocess=pp,
-                    **embedding_refresh_kwargs,
-                )
-            except RuntimeError as exc:
-                print(f"Error: {exc}", file=sys.stderr)
-                sys.exit(1)
-            finally:
-                logging.disable(previous_disable)
-            if result.get("status") == "error":
-                print(f"Error: {result.get('summary', 'update failed')}", file=sys.stderr)
-                sys.exit(1)
-            nodes = result.get("total_nodes", 0)
-            edges = result.get("total_edges", 0)
-            if not args.quiet:
-                if result.get("build_type") == "full":
-                    # No usable incremental base (fresh/legacy graph, or the
-                    # last-synced commit was lost to a rewrite/shallow clone),
-                    # so the update fell back to a full rebuild.
-                    parsed = result.get("files_parsed", 0)
-                    print(
-                        f"Full rebuild (no usable incremental base): "
-                        f"{parsed} files, {nodes} nodes, {edges} edges"
-                        f" (postprocess={pp})"
-                    )
-                else:
-                    updated = result.get("files_updated", 0)
-                    print(
-                        f"Incremental: {updated} files updated, "
-                        f"{nodes} nodes, {edges} edges"
-                        f" (postprocess={pp})"
-                    )
-            _warn_failed_files(result)
-
-            # --brief: append a one-line change-impact summary with the same
-            # estimated context-savings approximation that detect-changes uses.
-            # Same baseline (changed files vs analysis response), so the two
-            # commands are directly comparable.
-            if getattr(args, "brief", False) and not args.quiet:
-                from .changes import analyze_changes
-                from .context_savings import (
-                    attach_context_savings,
-                    estimate_file_tokens,
-                    format_context_savings_panel,
-                )
-                from .incremental import discover_review_changes
-
-                # Reuse the base the update actually resolved to (args.base is
-                # None by default now, which get_changed_files cannot accept),
-                # then apply the same merge-base rule as detect-changes so a
-                # branch ref scopes the summary to this branch's own commits.
-                changed, brief_base = discover_review_changes(
-                    repo_root, result.get("base_resolved") or "HEAD~1"
-                )
-                if changed:
-                    impact = analyze_changes(
-                        store,
-                        changed,
-                        repo_root=str(repo_root),
-                        base=brief_base,
-                    )
-                    original_tokens = estimate_file_tokens(repo_root, changed)
-                    attach_context_savings(
-                        impact,
-                        original_tokens=original_tokens,
-                    )
-                    summary = impact.get("summary", "")
-                    if summary:
-                        print(summary)
-                    verified = None
-                    if getattr(args, "verify", False):
-                        from .context_savings import verify_with_tiktoken
-                        verified = verify_with_tiktoken(
-                            repo_root, changed, impact,
-                        )
-                        if verified is None:
-                            print(
-                                "Note: --verify requires tiktoken. "
-                                "Install with `pip install tiktoken`.",
-                            )
-                    panel = format_context_savings_panel(
-                        impact.get("context_savings"),
-                        original_tokens=original_tokens,
-                        response=impact,
-                        verified=verified,
-                    )
-                    if panel:
-                        print(panel)
 
         elif args.command == "status":
             from .build_state import BUILD_IN_PROGRESS, read_build_state
@@ -2298,46 +3091,6 @@ def _dispatch() -> None:
                     if stored_rev:
                         print(f"SVN revision at build: {stored_rev}")
 
-        elif args.command == "forget":
-            stored_files = store.get_all_files()
-            targets = _match_files_to_forget(stored_files, args.paths, repo_root)
-            if not targets:
-                print("No parsed files matched the given path(s).")
-                print(f"The graph currently tracks {len(stored_files)} file(s).")
-            else:
-                header = (
-                    "[dry-run] Would forget these files:"
-                    if args.dry_run
-                    else "Forgetting these files:"
-                )
-                print(header)
-                for file_path in targets:
-                    try:
-                        display = os.path.relpath(file_path, str(repo_root))
-                    except ValueError:
-                        display = file_path
-                    print(f"  {display}")
-                if args.dry_run:
-                    print(
-                        f"\n[dry-run] {len(targets)} file(s) would be removed "
-                        "from the graph. No changes made."
-                    )
-                else:
-                    from .forget import forget_files
-
-                    summary = forget_files(store, repo_root, targets)
-                    reparsed = summary.get("reparsed", [])
-                    if reparsed:
-                        print(
-                            f"  re-resolved {len(reparsed)} referring file(s) "
-                            "so no edges dangle"
-                        )
-                    remaining = len(stored_files) - len(targets)
-                    print(
-                        f"\nForgot {len(targets)} file(s); "
-                        f"{remaining} file(s) remain in the graph."
-                    )
-
         elif args.command == "watch":
             from .postprocessing import run_post_processing
 
@@ -2347,7 +3100,10 @@ def _dispatch() -> None:
                     if embedding_refresh_kwargs
                     else run_post_processing
                 )
-                watch(repo_root, store, on_files_updated=callback)
+                watch(
+                    repo_root, store, on_files_updated=callback,
+                    **_follow_symlinks_kwargs(args),
+                )
             except RuntimeError as exc:
                 print(f"Error: {exc}", file=sys.stderr)
                 sys.exit(1)
@@ -2493,6 +3249,7 @@ def _dispatch() -> None:
 
         elif args.command == "detect-changes":
             from .changes import analyze_changes
+            from .context_history import CallInfo
             from .context_savings import (
                 attach_context_savings,
                 estimate_file_tokens,
@@ -2519,10 +3276,36 @@ def _dispatch() -> None:
                     include_churn=getattr(args, "churn", False),
                     require_vcs=True,
                 )
+                sections = getattr(args, "details", ())
+                if sections:
+                    # Opt-in only: without --details the report is exactly
+                    # what it was. Built before the savings estimate so the
+                    # estimate measures the larger response it describes.
+                    from .change_details import build_change_details
+                    from .changes import review_churn_counts
+                    from .parser import normalize_file_path
+
+                    churn_counts, _ = review_churn_counts(
+                        str(repo_root), getattr(args, "churn", False),
+                    )
+                    result["details"] = build_change_details(
+                        store,
+                        result,
+                        sections,
+                        changed_files=[
+                            normalize_file_path(repo_root / fp) for fp in changed
+                        ],
+                        churn_counts=churn_counts,
+                    )
                 original_tokens = estimate_file_tokens(repo_root, changed)
                 attach_context_savings(
                     result,
                     original_tokens=original_tokens,
+                    call=CallInfo(
+                        data_dir=store.db_path.parent,
+                        tool="detect-changes",
+                        files=len(changed),
+                    ),
                 )
                 if args.brief:
                     from .context_savings import (

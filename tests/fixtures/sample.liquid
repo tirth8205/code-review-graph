@@ -1,0 +1,19 @@
+{% comment %}
+  {% assign commented_out = 1 %}
+{% endcomment %}
+{% assign heading = section.settings.title %}
+<h2>{{ heading }}</h2>
+
+{% raw %}
+  {{ shown_as_text }}
+{% endraw %}
+
+{% liquid
+  # a comment line: render 'not-a-snippet'
+  assign items = collection.products
+%}
+
+{%- for item in items -%}
+  <p>{{ item.title | escape }}</p>
+  {% render 'product-card', product: item %}
+{%- endfor -%}

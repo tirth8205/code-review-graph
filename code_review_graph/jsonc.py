@@ -25,12 +25,14 @@ __all__ = [
     "array_elements",
     "find_value",
     "has_comments",
+    "has_unclosed_comment",
     "object_members",
     "remove_paths",
     "removal_ranges",
     "set_member",
     "skip_value",
     "tokenize",
+    "value_has_comments",
 ]
 
 
@@ -83,6 +85,43 @@ def has_comments(raw: str) -> bool:
             continue
         if char == "/" and index + 1 < length and raw[index + 1] in "/*":
             return True
+        index += 1
+    return False
+
+
+def has_unclosed_comment(raw: str) -> bool:
+    """Return whether a ``/*`` outside a string in ``raw`` is never closed.
+
+    Everything after it is part of the comment, so text added to the end of
+    such a file would be ignored by whatever reads it.
+    """
+    index = 0
+    length = len(raw)
+    while index < length:
+        char = raw[index]
+        if char == '"':
+            index += 1
+            while index < length:
+                if raw[index] == "\\":
+                    index += 2
+                    continue
+                if raw[index] == '"':
+                    index += 1
+                    break
+                index += 1
+            continue
+        if char == "/" and index + 1 < length and raw[index + 1] == "/":
+            newline = raw.find("\n", index + 2)
+            if newline < 0:
+                return False
+            index = newline
+            continue
+        if char == "/" and index + 1 < length and raw[index + 1] == "*":
+            end = raw.find("*/", index + 2)
+            if end < 0:
+                return True
+            index = end + 2
+            continue
         index += 1
     return False
 
@@ -301,6 +340,28 @@ def remove_paths(raw: str, paths: Iterable[Sequence[str | int]]) -> str:
             merged.append((start, end))
     for start, end in reversed(merged):
         raw = raw[:start] + raw[end:]
+    # Adjacent removals use one snapshot: removing the last two siblings can
+    # leave the separator after the surviving sibling. Drop only newly exposed
+    # trailing commas; keep pre-existing JSONC trailing commas and all comments.
+    original_trailing = {
+        token.start
+        for index, token in enumerate(tokens[:-1])
+        if token.kind == "," and tokens[index + 1].kind in ("}", "]")
+    }
+    surviving = [
+        token for token in tokens
+        if not any(start <= token.start < end for start, end in merged)
+    ]
+    exposed = [
+        token.start
+        for index, token in enumerate(surviving[:-1])
+        if token.kind == "," and surviving[index + 1].kind in ("}", "]")
+        and token.start not in original_trailing
+    ]
+    # Offsets above refer to the original document, before the removed spans.
+    for offset in reversed(exposed):
+        rewritten_offset = offset - sum(end - start for start, end in merged if end <= offset)
+        raw = raw[:rewritten_offset] + raw[rewritten_offset + 1:]
     return raw
 
 
@@ -323,6 +384,34 @@ def _render(value: Any, column: int) -> str:
     """Render ``value`` as JSON, continuation lines indented to ``column``."""
     text = json.dumps(value, indent=2, ensure_ascii=False)
     return text.replace("\n", "\n" + " " * column)
+
+
+def _past_trailing_comment(raw: str, offset: int) -> int:
+    """Return the offset past a comment on the same line as ``offset``.
+
+    A comment after a value belongs to that value, so anything inserted goes
+    after it. Without one, ``offset`` comes back unchanged.
+    """
+    cursor = offset
+    while cursor < len(raw) and raw[cursor] in " \t":
+        cursor += 1
+    if raw.startswith("//", cursor):
+        newline = raw.find("\n", cursor)
+        end = len(raw) if newline < 0 else newline
+        return end - 1 if end > cursor and raw[end - 1] == "\r" else end
+    if raw.startswith("/*", cursor):
+        close = raw.find("*/", cursor + 2)
+        if close >= 0 and "\n" not in raw[cursor:close]:
+            return close + 2
+    return offset
+
+
+def value_has_comments(raw: str, path: Sequence[str | int]) -> bool:
+    """Return whether replacing the value at ``path`` would delete a comment."""
+    tokens = tokenize(raw)
+    index = find_value(tokens, path)
+    end = skip_value(tokens, index)
+    return has_comments(raw[tokens[index].start : tokens[end - 1].end])
 
 
 def set_member(raw: str, path: Sequence[str], value: Any) -> str:
@@ -356,20 +445,32 @@ def set_member(raw: str, path: Sequence[str], value: Any) -> str:
         column = _column_of(raw, tokens[last.key_index].start)
         member_text = f"{json.dumps(key)}: {_render(value, column)}"
         if last.comma_index is not None:
-            anchor = tokens[last.comma_index].end
+            anchor = _past_trailing_comment(raw, tokens[last.comma_index].end)
             return raw[:anchor] + "\n" + " " * column + member_text + raw[anchor:]
-        anchor = tokens[last.value_end - 1].end
-        return raw[:anchor] + ",\n" + " " * column + member_text + raw[anchor:]
+        value_end = tokens[last.value_end - 1].end
+        anchor = _past_trailing_comment(raw, value_end)
+        return (
+            raw[:value_end]
+            + ","
+            + raw[value_end:anchor]
+            + "\n"
+            + " " * column
+            + member_text
+            + raw[anchor:]
+        )
 
-    # An empty object: indent one step past the line that opens it.
+    # An empty object: indent one step past the line that opens it, keeping any
+    # comment that is all the object holds so far.
     open_end = tokens[parent_index].end
     close_index = skip_value(tokens, parent_index) - 1
     close_start = tokens[close_index].start
     outer = _line_indent(raw, tokens[parent_index].start)
     column = outer + 2
     member_text = f"{json.dumps(key)}: {_render(value, column)}"
+    inner = raw[open_end:close_start]
     return (
         raw[:open_end]
+        + (inner.rstrip() if has_comments(inner) else "")
         + "\n"
         + " " * column
         + member_text

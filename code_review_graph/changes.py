@@ -11,6 +11,8 @@ import os
 import re
 import subprocess
 import threading
+from collections import Counter
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -18,9 +20,16 @@ from .constants import GIT_TIMEOUT as _GIT_TIMEOUT
 from .constants import SECURITY_KEYWORDS as _SECURITY_KEYWORDS
 from .constants import env_float, env_int
 from .errors import ChangeDiscoveryError
-from .flows import get_affected_flows
-from .graph import GraphNode, GraphStore, _sanitize_name, node_to_dict
-from .parser import is_test_file, normalize_file_path
+from .flows import _trace_single_flow, detect_entry_points, get_affected_flows
+from .graph import (
+    GraphEdge,
+    GraphNode,
+    GraphStore,
+    _sanitize_name,
+    node_to_dict,
+    qualified_name_of,
+)
+from .parser import CodeParser, NodeInfo, _repo_relative_path, is_test_file, normalize_file_path
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +43,49 @@ _TEST_GAP_EXEMPT_NAMES = frozenset({
     "setup_method", "teardown_method", "setUpClass", "tearDownClass",
     "__construct", "__init__", "__destruct",
 })
+
+
+# ``up`` and ``down`` are too common to exempt everywhere, so they are exempt
+# only in a migration file: one in a ``migrations`` folder (Laravel, Phinx,
+# Doctrine, Knex) or a ``migrate`` folder (Rails), inside the repository (#850).
+_MIGRATION_METHOD_NAMES = frozenset({"up", "down"})
+_MIGRATION_DIRS = frozenset({"migrations", "migrate"})
+
+
+def _is_migration_file(file_path: str, repo_root: str | Path | None) -> bool:
+    """Whether *file_path* sits in a migration folder inside the repository.
+
+    Read from the path relative to the root, as test folders are: a checkout
+    under a directory named ``migrations`` must not exempt the whole repository.
+    """
+    relative = _repo_relative_path(normalize_file_path(file_path), repo_root)
+    if relative is None:
+        return False
+    return any(part in _MIGRATION_DIRS for part in relative.split("/")[:-1])
+
+
+def is_test_gap_exempt(node: GraphNode, repo_root: str | Path | None = None) -> bool:
+    """Return whether a lifecycle node is exempt from test-gap reporting."""
+    if node.kind != "Function":
+        return False
+    if node.name in _TEST_GAP_EXEMPT_NAMES:
+        return True
+    return node.name in _MIGRATION_METHOD_NAMES and _is_migration_file(
+        node.file_path, repo_root,
+    )
+
+
+def _is_test_lifecycle(node: GraphNode, store: GraphStore) -> bool:
+    """Return whether *node* is a lifecycle method of real test code.
+
+    The exemption matches on a name, and production code uses these names too:
+    an untested ``__init__`` can hold real logic, so it keeps its coverage risk
+    even though it is left out of the gap list.
+    """
+    return is_test_gap_exempt(node) and (
+        node.is_test or is_test_file(node.file_path, store.get_repo_root())
+    )
+
 
 # Being reached by a tested caller buys no risk discount at all. It was worth
 # 0.03 briefly and that was wrong twice over. Evidentially: a static CALLS path
@@ -236,13 +288,14 @@ def _unquote_c_path(quoted: str) -> str:
     return raw.decode("utf-8", "replace")
 
 
-def _diff_header_path(rest: str) -> str | None:
-    """Extract the post-image path from the text after ``+++ ``.
+def _diff_header_path(rest: str, prefix: str = "b/") -> str | None:
+    """Extract the path from the text after ``+++ `` (or ``--- ``).
 
     Git writes the path three ways, and only the plainest one is a bare
     ``b/path``: it appends a TAB when the path contains a space, and
     C-quotes the whole ``"b/path"`` when it contains a non-ASCII or control
-    byte. Returns None for ``/dev/null``, the post-image of a deleted file.
+    byte. Returns None for ``/dev/null``, the post-image of a deleted file
+    (and the pre-image of a new one). *prefix* is ``"a/"`` for ``--- ``.
     """
     rest = rest.rstrip("\r")
     if rest.startswith('"'):
@@ -252,8 +305,8 @@ def _diff_header_path(rest: str) -> str | None:
         # The trailing TAB is a separator, never part of the path: git emits
         # one only when the path itself contains a space.
         path = rest.split("\t", 1)[0]
-    if path.startswith("b/"):
-        path = path[2:]
+    if path.startswith(prefix):
+        path = path[len(prefix):]
         return path or None
     return None
 
@@ -267,37 +320,148 @@ def _diff_header_path(rest: str) -> str | None:
 _POST_IMAGE_HEADER = re.compile(
     r'^\+\+\+ (/dev/null|"b/(?:[^"\\]|\\.)*"|b/.*)$'
 )
+# The pre-image header, in the same spellings. A deleted line whose text
+# starts with "-- a/" also reads "--- a/...", so this one only counts when the
+# next line is a post-image header, which is how git always writes the pair.
+_PRE_IMAGE_HEADER = re.compile(
+    r'^--- (/dev/null|"a/(?:[^"\\]|\\.)*"|a/.*)$'
+)
+_HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
 
-def _parse_unified_diff(diff_text: str) -> dict[str, list[tuple[int, int]]]:
+@dataclass(frozen=True)
+class PureDeletion:
+    """One hunk that removed lines and added none.
+
+    ``old_start``/``old_end`` are the removed lines in the old file.
+    ``anchor`` is the new-side line the hole now follows (0 at the top of
+    the file): the code on either side of it is code the hunk never touched.
+    """
+
+    old_start: int
+    old_end: int
+    anchor: int
+
+
+@dataclass
+class FileDeletions:
+    """The pure-deletion hunks of one file, and where to read its old side."""
+
+    old_path: str
+    hunks: list[PureDeletion] = field(default_factory=list)
+
+
+class DiffRanges(dict):
+    """``{path: [(start, end), ...]}`` of new-side lines, plus pure deletions.
+
+    It is the plain mapping every caller already reads, unchanged: a hunk
+    that only deletes still appears as its zero-width ``(anchor, anchor)``
+    position, which is where a source snippet should look. That position
+    must not be used to say which code changed -- the lines on either side of
+    a hole are lines the diff left alone -- so ``deletions`` keeps the old
+    side of those hunks for :func:`analyze_changes`, and
+    :meth:`edit_ranges` gives the mapping without them.
+
+    A deleted file has no new side, and is left out of both, as before: once
+    it is gone its importers' calls lose their target, so the graph can no
+    longer say who used what was in it.
+    """
+
+    def __init__(
+        self,
+        ranges: dict[str, list[tuple[int, int]]] | None = None,
+        deletions: dict[str, FileDeletions] | None = None,
+    ) -> None:
+        super().__init__(ranges or {})
+        self.deletions: dict[str, FileDeletions] = deletions or {}
+
+    def edit_ranges(self) -> dict[str, list[tuple[int, int]]]:
+        """The ranges of hunks that added lines, pure deletions taken out."""
+        edits: dict[str, list[tuple[int, int]]] = {}
+        for path, ranges in self.items():
+            kept = list(ranges)
+            held = self.deletions.get(path)
+            for hunk in held.hunks if held else ():
+                # One position per pure deletion, and only one: a real
+                # one-line edit can share the spelling.
+                position = (hunk.anchor, hunk.anchor)
+                if position in kept:
+                    kept.remove(position)
+            if kept:
+                edits[path] = kept
+        return edits
+
+    def remapped(self, root: str | Path) -> DiffRanges:
+        """Re-key on the graph's absolute paths, keeping the old-side paths.
+
+        Diff keys are forward-slash paths relative to the repository root,
+        while the graph stores absolute normalized paths. ``old_path`` stays
+        relative: it is what ``git show`` is asked for.
+        """
+        root_path = Path(root)
+        return DiffRanges(
+            {normalize_file_path(root_path / k): v for k, v in self.items()},
+            {
+                normalize_file_path(root_path / k): v
+                for k, v in self.deletions.items()
+            },
+        )
+
+
+def _parse_unified_diff(diff_text: str) -> DiffRanges:
     """Parse unified diff output into file -> line-range mappings.
 
-    Handles the ``@@ -old,count +new,count @@`` hunk header format.
+    Handles the ``@@ -old,count +new,count @@`` hunk header format. The
+    result is a plain mapping of new-side ranges that also carries the old
+    side of every pure-deletion hunk; see :class:`DiffRanges`.
     """
     ranges: dict[str, list[tuple[int, int]]] = {}
+    deletions: dict[str, FileDeletions] = {}
     current_file: str | None = None
+    old_file: str | None = None
 
-    # Match "@@ ... +start,count @@" or "@@ ... +start @@"
-    hunk_pattern = re.compile(r"^@@ .+? \+(\d+)(?:,(\d+))? @@")
-
-    for line in diff_text.splitlines():
+    lines = diff_text.splitlines()
+    for index, line in enumerate(lines):
         file_match = _POST_IMAGE_HEADER.match(line)
         if file_match:
             current_file = _diff_header_path(file_match.group(1))
+            if index == 0 or not _PRE_IMAGE_HEADER.match(lines[index - 1]):
+                # No pre-image header for this file: its old side has the
+                # same path, not the previous file's.
+                old_file = current_file
+            continue
+        pre_match = _PRE_IMAGE_HEADER.match(line)
+        if pre_match and index + 1 < len(lines) and _POST_IMAGE_HEADER.match(
+            lines[index + 1]
+        ):
+            old_file = _diff_header_path(pre_match.group(1), "a/")
             continue
 
-        hunk_match = hunk_pattern.match(line)
-        if hunk_match and current_file is not None:
-            start = int(hunk_match.group(1))
-            count = int(hunk_match.group(2)) if hunk_match.group(2) else 1
-            if count == 0:
-                # Pure deletion hunk (no lines added); still note the position.
-                end = start
-            else:
-                end = start + count - 1
-            ranges.setdefault(current_file, []).append((start, end))
+        hunk_match = _HUNK_HEADER.match(line)
+        if not hunk_match or current_file is None:
+            continue
+        old_start = int(hunk_match.group(1))
+        old_count = int(hunk_match.group(2)) if hunk_match.group(2) else 1
+        start = int(hunk_match.group(3))
+        count = int(hunk_match.group(4)) if hunk_match.group(4) else 1
+        if count == 0:
+            # Pure deletion: nothing was added, so the new side is only the
+            # line the hole follows. Still note that position, for the
+            # callers that show source, and keep the removed lines.
+            end = start
+            held = deletions.get(current_file)
+            if held is None:
+                held = deletions[current_file] = FileDeletions(
+                    old_path=old_file or current_file,
+                )
+            held.hunks.append(
+                PureDeletion(old_start, old_start + old_count - 1, start)
+            )
+        else:
+            end = start + count - 1
+        ranges.setdefault(current_file, []).append((start, end))
 
-    return ranges
+    return DiffRanges(ranges, deletions)
 
 
 # ---------------------------------------------------------------------------
@@ -563,6 +727,26 @@ def map_changes_to_nodes(
                 continue
             if node.line_start is None or node.line_end is None:
                 continue
+            yaml_ranges = node.extra.get("range_samples")
+            if (
+                node.kind in ("YamlPath", "JsonPath")
+                and isinstance(yaml_ranges, list)
+                and not node.extra.get("lines_truncated")
+            ):
+                overlaps = any(
+                    isinstance(sample, list)
+                    and len(sample) == 2
+                    and isinstance(sample[0], int)
+                    and isinstance(sample[1], int)
+                    and sample[0] <= end
+                    and sample[1] >= start
+                    for sample in yaml_ranges
+                    for start, end in ranges
+                )
+                if overlaps:
+                    result.append(node)
+                    seen.add(node.qualified_name)
+                continue
             # Check overlap with any changed range.
             for start, end in ranges:
                 if node.line_start <= end and node.line_end >= start:
@@ -571,6 +755,455 @@ def map_changes_to_nodes(
                     break
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# 3b. Pure deletions: what survived, what was removed, who still uses it
+# ---------------------------------------------------------------------------
+
+# The kinds reported as changed functions. A pure deletion is judged on these
+# from the old side; every other kind keeps the plain position rule.
+_CODE_KINDS = ("Function", "Test", "Class")
+# Old files read for one analysis: one ``git show`` and one parse each. Past
+# the cap a file falls back to the new-side rule and the summary says so.
+_MAX_DELETION_FILES = env_int("CRG_MAX_DELETION_FILES", 100)
+# Removed symbols whose users are looked up, a few indexed queries each.
+_MAX_REMOVED_SYMBOLS = 200
+# Users listed per removed symbol; ``used_by_total`` keeps the full count.
+# Each costs ~45 tokens, and every MCP response lists up to 25 symbols.
+_MAX_REMOVED_USERS_SHOWN = 3
+_SELF_RECEIVERS = frozenset({"self", "this", "cls"})
+
+
+@dataclass
+class _DeletionReview:
+    changed: list[GraphNode] = field(default_factory=list)
+    removed: list[dict[str, Any]] = field(default_factory=list)
+    removed_total: int = 0
+    files_not_read: int = 0
+
+
+def _nodes_in_file(store: GraphStore, file_path: str) -> list[GraphNode]:
+    """The file's nodes, with the same suffix fallback as map_changes_to_nodes."""
+    nodes = store.get_nodes_by_file(file_path)
+    if not nodes:
+        for matched in store.get_files_matching(file_path):
+            nodes.extend(store.get_nodes_by_file(matched))
+    return nodes
+
+
+@dataclass
+class _OldSide:
+    """The code symbols of a file as it was at the base, and their calls."""
+
+    nodes: list[tuple[str, NodeInfo]]
+    calls: dict[str, list[str]]
+
+
+def _old_side_nodes(
+    parser: CodeParser,
+    repo_root: str,
+    base: str,
+    old_path: str,
+    parse_path: str,
+) -> _OldSide | None:
+    """Parse the file as it was at *base*, or None when that cannot be done.
+
+    The old bytes are parsed as if they lived at *parse_path*, the path the
+    graph knows the file by now, so their qualified names compare directly
+    with the stored ones even across a rename. None means "unknown": git
+    could not produce the old file, or the parser does not read its language.
+    """
+    if not _SAFE_GIT_REF.match(base):
+        return None
+    try:
+        shown = subprocess.run(
+            ["git", "show", f"{base}:{old_path}"],
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            cwd=repo_root,
+            timeout=_GIT_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning("git show failed for %s: %s", old_path, exc)
+        return None
+    if shown.returncode != 0:
+        return None
+    try:
+        nodes, edges = parser.parse_bytes(Path(parse_path), shown.stdout)
+    except Exception as exc:
+        # Any parser fault means "unknown". The parser covers dozens of
+        # grammars, and the update path treats a failure in any of them the
+        # same way: log it and carry on.
+        logger.warning("Could not parse the old side of %s: %s", old_path, exc)
+        return None
+    if not nodes:
+        return None
+    calls: dict[str, list[str]] = {}
+    for edge in edges:
+        if edge.kind == "CALLS":
+            calls.setdefault(edge.source, []).append(edge.target)
+    return _OldSide(
+        nodes=[
+            (qualified_name_of(node), node)
+            for node in nodes
+            if node.kind in _CODE_KINDS
+            and not node.extra.get("verilog_kind")
+            and node.line_start
+            and node.line_end
+        ],
+        calls=calls,
+    )
+
+
+def _bare_call_reaches(edge: GraphEdge, removed: GraphNode) -> bool:
+    """Can this unqualified call be a call to *removed*?
+
+    Once a symbol is gone, the calls that named it only through their own
+    file or a module or class receiver are re-parsed with nothing to resolve
+    to, so they keep only the bare name. The name alone is not enough:
+    ``handle.close()`` is a file's close, not ``Box.close``. Receiver
+    evidence is held to the resolver's own rule, wherever the call is.
+    Without any, only a call in the symbol's own file counts: a plain call
+    for a top-level function, or one from inside the class for a method.
+    """
+    extra = edge.extra or {}
+    if "ambiguous_targets" in extra or "unresolved_targets" in extra:
+        return False
+    if "receiver_binding" in extra:
+        return GraphStore.receiver_evidence_admits(extra, removed)
+    if normalize_file_path(edge.file_path) != removed.file_path:
+        return False
+    if not removed.parent_name:
+        return "receiver" not in extra
+    own_class = f"{removed.file_path}::{removed.parent_name}."
+    return (
+        extra.get("receiver") in _SELF_RECEIVERS or "receiver" not in extra
+    ) and edge.source_qualified.startswith(own_class)
+
+
+@dataclass
+class _RemovedUsers:
+    """What the graph still records as using a removed symbol."""
+
+    users: list[dict[str, Any]]
+    # One entry per CALLS edge, as compute_risk_score counts callers.
+    call_sources: list[str]
+    caller_ids: set[int]
+
+
+def _as_graph_node(qualified_name: str, info: NodeInfo) -> GraphNode:
+    """A parsed node that is not in the store, in the store's own shape."""
+    return GraphNode(
+        id=0, kind=info.kind, name=info.name, qualified_name=qualified_name,
+        file_path=info.file_path, line_start=info.line_start,
+        line_end=info.line_end, language=info.language,
+        parent_name=info.parent_name, params=info.params,
+        return_type=info.return_type, is_test=info.is_test, file_hash=None,
+        extra=info.extra,
+    )
+
+
+def _removed_symbol_users(store: GraphStore, removed: GraphNode) -> _RemovedUsers:
+    """Every node the graph still records as using a removed symbol."""
+    qualified_name = removed.qualified_name
+    users: dict[str, dict[str, Any]] = {}
+    found = _RemovedUsers(users=[], call_sources=[], caller_ids=set())
+
+    def add(source: str, relation: str, line: int) -> None:
+        node = store.get_node(source) if source != qualified_name else None
+        if node is None:
+            return
+        if relation == "CALLS":
+            found.call_sources.append(source)
+            found.caller_ids.add(node.id)
+        if source in users:
+            return
+        # The qualified name carries the file; repeating it doubles the cost.
+        users[source] = {
+            "name": _sanitize_name(node.name),
+            "qualified_name": _sanitize_name(node.qualified_name),
+            "line": line,
+            "relation": relation,
+        }
+
+    for edge in store.get_edges_by_target(qualified_name):
+        if edge.kind != "CONTAINS":
+            add(edge.source_qualified, edge.kind, edge.line)
+    # TESTED_BY points from the production symbol to its test.
+    for edge in store.get_edges_by_source(qualified_name):
+        if edge.kind == "TESTED_BY":
+            add(edge.target_qualified, edge.kind, edge.line)
+    bare_reached: set[int] = set()
+    for edge in store.search_edges_by_target_name(removed.name, kind="CALLS"):
+        if _bare_call_reaches(edge, removed):
+            bare_reached.add(edge.id)
+            add(edge.source_qualified, edge.kind, edge.line)
+    # Once the symbol is gone, an edge that named it is settled back to the
+    # plain name with the old name kept as its claim (#984).
+    for edge in store.get_edges_claiming(qualified_name):
+        if edge.id in bare_reached:
+            continue
+        if edge.kind == "TESTED_BY":
+            add(edge.target_qualified, edge.kind, edge.line)
+        elif edge.kind != "CONTAINS":
+            add(edge.source_qualified, edge.kind, edge.line)
+    found.users = sorted(
+        users.values(), key=lambda u: (u["qualified_name"], u["line"] or 0),
+    )
+    return found
+
+
+@dataclass
+class _RemovedSymbol:
+    """A symbol a diff removed, with what is needed to score it."""
+
+    node: GraphNode
+    # Its calls as the old file made them.
+    old_calls: list[str]
+    # The community its file's surviving symbols share, or None.
+    file_community: int | None
+    found: _RemovedUsers = field(
+        default_factory=lambda: _RemovedUsers(users=[], call_sources=[], caller_ids=set()),
+    )
+
+
+def _removed_flow_criticalities(
+    store: GraphStore, removed: list[_RemovedSymbol],
+) -> dict[str, list[float]]:
+    """The flows each removed symbol was part of, traced again.
+
+    Flows are re-traced after every update, so the ones that ran through a
+    removed symbol are gone, and a caller whose only callee it was no longer
+    starts a flow at all. They are rebuilt in memory: the removed symbols go
+    back into the call graph with the calls their old file made, and every
+    entry point that could reach them -- one whose flow contains a caller,
+    or a caller that is itself an entry point -- is traced again with the
+    same tracer and criticality score the stored flows use.
+    """
+    adj = store.load_flow_adjacency()
+    by_qn: dict[str, int] = {}
+    for index, item in enumerate(removed):
+        # A negative id cannot collide with a stored node.
+        node = replace(item.node, id=-(index + 1))
+        by_qn[node.qualified_name] = node.id
+        adj.nodes_by_qn[node.qualified_name] = node
+        adj.nodes_by_id[node.id] = node
+    for item in removed:
+        node = item.node
+        own_file = f"{node.file_path}::"
+        targets = adj.calls_out.setdefault(node.qualified_name, [])
+        for target in item.old_calls:
+            # The old file names same-file callees by bare name at times.
+            if target not in adj.nodes_by_qn and "::" not in target:
+                target = own_file + target
+            targets.append(target)
+        for source in set(item.found.call_sources):
+            callees = adj.calls_out.setdefault(source, [])
+            if node.qualified_name not in callees:
+                callees.append(node.qualified_name)
+
+    caller_ids = set().union(*(item.found.caller_ids for item in removed))
+    starts = store.get_flow_entry_point_ids(caller_ids)
+    entry_ids = {ep.id for ep in detect_entry_points(store)}
+    starts |= caller_ids & entry_ids
+    criticalities: dict[str, list[float]] = {qn: [] for qn in by_qn}
+    for node_id in starts:
+        entry = adj.nodes_by_id.get(node_id)
+        flow = _trace_single_flow(adj, entry) if entry is not None else None
+        if flow is None:
+            continue
+        on_path = set(flow["path"])
+        for qn, removed_id in by_qn.items():
+            if removed_id in on_path:
+                criticalities[qn].append(flow["criticality"])
+    return criticalities
+
+
+def _score_removed(
+    store: GraphStore,
+    removed: list[_RemovedSymbol],
+    churn_counts: dict[str, int] | None,
+) -> dict[str, float]:
+    """Score removed symbols as :func:`compute_risk_score` scores a change.
+
+    Removing a symbol that is still used breaks its users, so it is at least
+    as risky as changing it would be. The node is gone, so each term is
+    rebuilt from what survives:
+
+    * flows: those it was part of, traced again
+      (:func:`_removed_flow_criticalities`);
+    * community crossing: its callers outside its file's community;
+    * test coverage, security, caller count and churn: as for a change,
+      since the TESTED_BY and CALLS edges that name it are still stored.
+
+    A removed symbol nothing uses breaks nothing and scores 0.
+    """
+    used = [item for item in removed if item.found.users]
+    scores = {item.node.qualified_name: 0.0 for item in removed}
+    if not used:
+        return scores
+    flows = _removed_flow_criticalities(store, used)
+    for item in used:
+        qn = item.node.qualified_name
+        scores[qn] = _score_risk(
+            store,
+            item.node,
+            churn_counts,
+            flow_criticalities=flows[qn],
+            flow_count=0,
+            caller_qns=item.found.call_sources,
+            cross_community=_cross_community(
+                store, item.found.call_sources, item.file_community,
+                own_group=True,
+            ),
+        )
+    return scores
+
+
+def _file_community(store: GraphStore, nodes: list[GraphNode]) -> int | None:
+    """The community most of a file's symbols belong to, or None."""
+    cids = store.get_community_ids_by_qualified_names(
+        [node.qualified_name for node in nodes if node.kind != "File"],
+    )
+    counts = Counter(cid for cid in cids.values() if cid is not None)
+    return counts.most_common(1)[0][0] if counts else None
+
+
+def _review_pure_deletions(
+    store: GraphStore,
+    deletions: dict[str, FileDeletions],
+    repo_root: str | None,
+    base: str,
+    churn_counts: dict[str, int] | None = None,
+) -> _DeletionReview:
+    """Judge pure-deletion hunks from the old side of the diff.
+
+    For each code symbol of the old file whose lines a hunk removed:
+
+    * gone from the graph -> removed, reported with whatever still uses it
+      and scored by :func:`_score_removed`;
+    * still there, and the hunk took only part of it -> changed;
+    * still there, but the hunk took all of it -> it was defined twice or
+      moved within the file, and the lines that added it say so.
+
+    Code around a hole that lost no lines is never marked. When the old side
+    cannot be read the rule falls back to the new side alone: a symbol is
+    changed only when surviving lines of it sit on both sides of the hole.
+    That misses a deleted tail, but it never marks an untouched neighbour.
+    """
+    review = _DeletionReview()
+    parser: CodeParser | None = None
+    files_read = 0
+    candidates: list[_RemovedSymbol] = []
+    for file_path, held in deletions.items():
+        current = _nodes_in_file(store, file_path)
+        if not current:
+            # The graph does not know this file, so it cannot say what
+            # survived; guessing would report every symbol as removed.
+            continue
+        old_side: _OldSide | None = None
+        if repo_root is not None and files_read < _MAX_DELETION_FILES:
+            files_read += 1
+            if parser is None:
+                parser = CodeParser(Path(repo_root))
+            old_side = _old_side_nodes(
+                parser, repo_root, base, held.old_path, file_path,
+            )
+        if old_side is None:
+            review.files_not_read += 1
+            review.changed.extend(
+                node for node in current
+                if node.kind in _CODE_KINDS
+                and node.line_start is not None
+                and node.line_end is not None
+                and any(
+                    node.line_start <= hunk.anchor < node.line_end
+                    for hunk in held.hunks
+                )
+            )
+            continue
+        survivors = {node.qualified_name: node for node in current}
+        community: int | None = None
+        community_known = False
+        for qualified_name, info in old_side.nodes:
+            hit = [
+                hunk for hunk in held.hunks
+                if info.line_start <= hunk.old_end
+                and info.line_end >= hunk.old_start
+            ]
+            if not hit:
+                continue
+            survivor = survivors.get(qualified_name)
+            if survivor is None:
+                if not community_known:
+                    community = _file_community(store, current)
+                    community_known = True
+                candidates.append(_RemovedSymbol(
+                    node=_as_graph_node(qualified_name, info),
+                    old_calls=old_side.calls.get(qualified_name, []),
+                    file_community=community,
+                ))
+            elif not any(
+                hunk.old_start <= info.line_start
+                and info.line_end <= hunk.old_end
+                for hunk in hit
+            ):
+                review.changed.append(survivor)
+
+    review.removed_total = len(candidates)
+    looked_up = candidates[:_MAX_REMOVED_SYMBOLS]
+    for item in looked_up:
+        item.found = _removed_symbol_users(store, item.node)
+    scores = _score_removed(store, looked_up, churn_counts)
+    for item in looked_up:
+        node = item.node
+        review.removed.append({
+            "name": _sanitize_name(node.name),
+            "qualified_name": _sanitize_name(node.qualified_name),
+            "kind": node.kind,
+            "file": node.file_path,
+            "old_line_start": node.line_start,
+            "old_line_end": node.line_end,
+            "risk_score": scores[node.qualified_name],
+            "used_by": item.found.users[:_MAX_REMOVED_USERS_SHOWN],
+            "used_by_total": len(item.found.users),
+        })
+    # What still uses a removed symbol is what may break, so it leads.
+    review.removed.sort(
+        key=lambda r: (
+            -r["risk_score"], -r["used_by_total"], r["file"], r["old_line_start"],
+        ),
+    )
+    return review
+
+
+def _removed_summary_lines(review: _DeletionReview) -> list[str]:
+    """Summary lines for removed symbols: how many, and which are still used."""
+    if not review.removed_total:
+        return []
+    lines = [f"  - {review.removed_total} removed function(s)/class(es)"]
+    still_used = [r for r in review.removed if r["used_by_total"]]
+    if still_used:
+        named = []
+        for entry in still_used[:5]:
+            # "File.convert", not "convert": two users can share a name.
+            users = ", ".join(_symbol_part(u["qualified_name"]) for u in entry["used_by"])
+            more = entry["used_by_total"] - len(entry["used_by"])
+            named.append(
+                f"{_symbol_part(entry['qualified_name'])} (risk "
+                f"{entry['risk_score']:.2f}, by {users}"
+                f"{f' +{more} more' if more else ''})"
+            )
+        lines.append(f"  - Removed but still used: {'; '.join(named)}")
+    return lines
+
+
+def _symbol_part(qualified_name: str) -> str:
+    """``path::Class.name`` -> ``Class.name``; a file node -> its file name."""
+    if "::" in qualified_name:
+        return qualified_name.split("::", 1)[1]
+    return qualified_name.rsplit("/", 1)[-1]
 
 
 # ---------------------------------------------------------------------------
@@ -588,7 +1221,8 @@ def compute_risk_score(
     Scoring factors:
       - Flow participation: 0.05 per flow membership, capped at 0.25
       - Community crossing: 0.05 per caller from a different community, capped at 0.15
-      - Test coverage: 0.30 (untested) scaling down to 0.05 (5+ TESTED_BY edges)
+      - Test coverage: 0.30 (untested) scaling down to 0.05 (5+ TESTED_BY edges);
+        none for a lifecycle method in test code, which has no coverage to lack
       - Security sensitivity: 0.20 if name matches security keywords
       - Caller count: callers / 20, capped at 0.10
       - Change frequency (opt-in): commits touching the file / 10, capped
@@ -598,53 +1232,185 @@ def compute_risk_score(
     symbol that merely sits under a tested caller scores as untested here; see
     :meth:`~code_review_graph.graph.GraphStore.get_caller_test_routes` for why
     that reachability is reported beside the score rather than folded into it.
+
+    The score is the sum of :func:`risk_signals`, so a report that explains
+    a score with those signals can never disagree with the score itself.
     """
+    return _sum_signals(risk_signals(store, node, churn_counts))
+
+
+def risk_signals(
+    store: GraphStore,
+    node: GraphNode,
+    churn_counts: dict[str, int] | None = None,
+) -> dict[str, dict[str, float]]:
+    """Each term of :func:`compute_risk_score`, with the count behind it.
+
+    Returns ``{name: {"score": float, "count": int}}`` for ``flows``,
+    ``cross_community``, ``tests``, ``security``, ``callers`` and ``churn``,
+    in the order the score adds them. A term that does not apply scores 0.0.
+    ``count`` is what the term measured: flow memberships, callers in other
+    communities, tests reaching the node, 1 for a security-looking name,
+    callers, and commits to the file.
+    """
+    flow_criticalities = store.get_flow_criticalities_for_node(node.id)
+    callers = store.get_edges_by_target(node.qualified_name)
+    caller_qns = [e.source_qualified for e in callers if e.kind == "CALLS"]
+    return _risk_signals_from(
+        store,
+        node,
+        churn_counts,
+        flow_criticalities=flow_criticalities,
+        flow_count=(
+            0 if flow_criticalities else store.count_flow_memberships(node.id)
+        ),
+        caller_qns=caller_qns,
+        cross_community=_cross_community(
+            store, caller_qns, store.get_node_community_id(node.id),
+        ),
+    )
+
+
+def _cross_community(
+    store: GraphStore,
+    caller_qns: list[str],
+    node_cid: int | None,
+    *,
+    own_group: bool = False,
+) -> int:
+    """How many distinct callers sit in a community other than *node_cid*.
+
+    *own_group* is for a removed symbol whose file is left in no community:
+    detection drops a group that shrinks to one symbol, so the file's group
+    can vanish with the removal. The symbol was in that group, which no
+    caller in another community shares, so each of those callers crossed.
+    """
+    if not caller_qns or (node_cid is None and not own_group):
+        return 0
+    cid_map = store.get_community_ids_by_qualified_names(caller_qns)
+    return sum(
+        1 for cid in cid_map.values() if cid is not None and cid != node_cid
+    )
+
+
+def _sum_signals(signals: dict[str, dict[str, float]]) -> float:
+    """The risk score the signals add up to, clamped to 0.0 - 1.0."""
     score = 0.0
+    for signal in signals.values():
+        score += signal["score"]
+    return round(min(max(score, 0.0), 1.0), 4)
+
+
+def _score_risk(
+    store: GraphStore,
+    node: GraphNode,
+    churn_counts: dict[str, int] | None,
+    *,
+    flow_criticalities: list[float],
+    flow_count: int,
+    caller_qns: list[str],
+    cross_community: int,
+) -> float:
+    """The terms of :func:`compute_risk_score`, from evidence already gathered.
+
+    Split out so a symbol that is no longer in the graph -- one a diff
+    removed -- is scored on exactly the same scale; see
+    :func:`_score_removed` for where its evidence comes from.
+    *caller_qns* holds one entry per incoming CALLS edge.
+    """
+    return _sum_signals(_risk_signals_from(
+        store,
+        node,
+        churn_counts,
+        flow_criticalities=flow_criticalities,
+        flow_count=flow_count,
+        caller_qns=caller_qns,
+        cross_community=cross_community,
+    ))
+
+
+def _risk_signals_from(
+    store: GraphStore,
+    node: GraphNode,
+    churn_counts: dict[str, int] | None,
+    *,
+    flow_criticalities: list[float],
+    flow_count: int,
+    caller_qns: list[str],
+    cross_community: int,
+) -> dict[str, dict[str, float]]:
+    """:func:`risk_signals` from evidence already gathered (see :func:`_score_risk`)."""
+    signals: dict[str, dict[str, float]] = {}
 
     # --- Flow participation (cap 0.25), weighted by criticality ---
-    flow_criticalities = store.get_flow_criticalities_for_node(node.id)
     if flow_criticalities:
-        score += min(sum(flow_criticalities), 0.25)
+        signals["flows"] = {
+            "score": min(sum(flow_criticalities), 0.25),
+            "count": len(flow_criticalities),
+        }
     else:
-        flow_count = store.count_flow_memberships(node.id)
-        score += min(flow_count * 0.05, 0.25)
+        signals["flows"] = {"score": min(flow_count * 0.05, 0.25), "count": flow_count}
 
     # --- Community crossing (cap 0.15) ---
-    callers = store.get_edges_by_target(node.qualified_name)
-    caller_edges = [e for e in callers if e.kind == "CALLS"]
-
-    cross_community = 0
-    node_cid = store.get_node_community_id(node.id)
-
-    if node_cid is not None and caller_edges:
-        caller_qns = [edge.source_qualified for edge in caller_edges]
-        cid_map = store.get_community_ids_by_qualified_names(caller_qns)
-        for cid in cid_map.values():
-            if cid is not None and cid != node_cid:
-                cross_community += 1
-    score += min(cross_community * 0.05, 0.15)
+    signals["cross_community"] = {
+        "score": min(cross_community * 0.05, 0.15),
+        "count": cross_community,
+    }
 
     # --- Test coverage (direct + transitive) ---
-    transitive_tests = store.get_transitive_tests(node.qualified_name)
-    test_count = len(transitive_tests)
-    score += 0.30 - (min(test_count / 5.0, 1.0) * 0.25)
+    # A lifecycle method in test code has no coverage to lack, so the term
+    # does not apply to it at all.
+    signals["tests"] = {"score": 0.0, "count": 0}
+    if not _is_test_lifecycle(node, store):
+        transitive_tests = store.get_transitive_tests(
+            node.qualified_name, include_helper_routes=False,
+        )
+        test_count = len(transitive_tests)
+        signals["tests"] = {
+            "score": 0.30 - (min(test_count / 5.0, 1.0) * 0.25),
+            "count": test_count,
+        }
 
     # --- Security sensitivity ---
     name_lower = node.name.lower()
     qn_lower = node.qualified_name.lower()
-    if any(kw in name_lower or kw in qn_lower for kw in _SECURITY_KEYWORDS):
-        score += 0.20
+    sensitive = any(kw in name_lower or kw in qn_lower for kw in _SECURITY_KEYWORDS)
+    signals["security"] = {"score": 0.20 if sensitive else 0.0, "count": int(sensitive)}
 
     # --- Caller count (cap 0.10) ---
-    caller_count = len(caller_edges)
-    score += min(caller_count / 20.0, 0.10)
+    caller_count = len(caller_qns)
+    signals["callers"] = {"score": min(caller_count / 20.0, 0.10), "count": caller_count}
 
     # --- Change frequency (opt-in, cap 0.15) ---
+    signals["churn"] = {"score": 0.0, "count": 0}
     if churn_counts and node.file_path:
         commit_count = churn_counts.get(node.file_path, 0)
-        score += min(commit_count / _CHURN_SATURATION, 1.0) * _CHURN_WEIGHT
+        signals["churn"] = {
+            "score": min(commit_count / _CHURN_SATURATION, 1.0) * _CHURN_WEIGHT,
+            "count": commit_count,
+        }
 
-    return round(min(max(score, 0.0), 1.0), 4)
+    return signals
+
+
+def review_churn_counts(
+    repo_root: str | None, include_churn: bool,
+) -> tuple[dict[str, int] | None, str]:
+    """Commit counts per file for the opt-in churn term, and their status.
+
+    Keys are both the repo-relative paths ``git log`` prints and the absolute
+    normalized paths the graph stores, so a lookup by ``node.file_path``
+    finds them. Returns ``(None, "off")`` when churn was not asked for.
+    """
+    if not include_churn or repo_root is None:
+        return None, CHURN_OFF
+    raw_churn, churn_status = compute_file_churn_with_status(repo_root)
+    churn_counts: dict[str, int] = {}
+    root_path = Path(repo_root)
+    for key, count in raw_churn.items():
+        churn_counts[key] = count
+        churn_counts[normalize_file_path(root_path / key)] = count
+    return churn_counts, churn_status
 
 
 # ---------------------------------------------------------------------------
@@ -686,6 +1452,14 @@ def analyze_changes(
         could not be read and the scores therefore exclude the
         change-frequency term, or ``"off"`` when it was not requested).
 
+        ``removed_symbols`` lists the functions and classes a pure-deletion
+        hunk took out of a file that still exists, read from the old side of
+        the diff, each with ``old_line_start``/``old_line_end``, up to three
+        ``used_by`` entries (callers, subclasses, importers and tests the
+        graph still records) and ``used_by_total``; ``removed_symbols_total``
+        is the untruncated count. A removed symbol is never in
+        ``changed_functions``, and neither is the untouched code around it.
+
         Each ``test_gaps`` entry carries ``coverage``: ``"none"`` when no test
         reaches the symbol at all, or ``"indirect"`` when one only reaches it
         through a caller -- those entries also carry ``covered_via``,
@@ -718,10 +1492,9 @@ def analyze_changes(
             logger.warning("%s; scoring whole files instead", exc)
             ranges_unavailable = str(exc)
             raw_ranges = {}
-        changed_ranges = {
-            normalize_file_path(root_path / key): ranges
-            for key, ranges in raw_ranges.items()
-        }
+        if not isinstance(raw_ranges, DiffRanges):
+            raw_ranges = DiffRanges(raw_ranges)
+        changed_ranges = raw_ranges.remapped(root_path)
 
     # The affected-flows lookup and the no-ranges fallback match
     # changed_files against nodes.file_path, which stores absolute
@@ -736,8 +1509,37 @@ def analyze_changes(
             normalize_file_path(_root / fp) for fp in changed_files
         ]
 
+    # Computed before the mapping: removed symbols are scored as it runs.
+    churn_counts, churn_status = review_churn_counts(repo_root, include_churn)
+
     # Map changes to nodes.
-    if changed_ranges:
+    deletions: dict[str, FileDeletions] = (
+        changed_ranges.deletions if isinstance(changed_ranges, DiffRanges) else {}
+    )
+    deletion_review = _DeletionReview()
+    if deletions and isinstance(changed_ranges, DiffRanges):
+        # A pure deletion has no new lines, and the lines around the hole are
+        # lines it never touched (PR #1167 reported the case). Code symbols
+        # are judged from the old side instead; other kinds, such as YAML
+        # paths, keep the plain position rule.
+        changed_nodes = map_changes_to_nodes(store, changed_ranges.edit_ranges())
+        seen_qns = {node.qualified_name for node in changed_nodes}
+        deletion_review = _review_pure_deletions(
+            store, deletions, repo_root, base, churn_counts,
+        )
+        positions = {
+            path: [(hunk.anchor, hunk.anchor) for hunk in held.hunks]
+            for path, held in deletions.items()
+        }
+        positional = [
+            node for node in map_changes_to_nodes(store, positions)
+            if node.kind not in _CODE_KINDS
+        ]
+        for node in [*positional, *deletion_review.changed]:
+            if node.qualified_name not in seen_qns:
+                seen_qns.add(node.qualified_name)
+                changed_nodes.append(node)
+    elif changed_ranges:
         changed_nodes = map_changes_to_nodes(store, changed_ranges)
     else:
         # Fallback: all nodes in changed files.
@@ -752,6 +1554,8 @@ def analyze_changes(
         if n.kind in ("Function", "Test", "Class")
         and not n.extra.get("verilog_kind")
     ]
+    changed_yaml_paths = [n for n in changed_nodes if n.kind == "YamlPath"]
+    changed_json_paths = [n for n in changed_nodes if n.kind == "JsonPath"]
 
     # Cap to prevent O(N*M) query explosion on large PRs.
     _max_funcs = env_int("CRG_MAX_CHANGED_FUNCS", 500)
@@ -759,15 +1563,18 @@ def analyze_changes(
     if funcs_truncated:
         changed_funcs = changed_funcs[:_max_funcs]
 
-    churn_counts: dict[str, int] | None = None
-    churn_status = CHURN_OFF
-    if include_churn and repo_root is not None:
-        raw_churn, churn_status = compute_file_churn_with_status(repo_root)
-        churn_counts = {}
-        root_path = Path(repo_root)
-        for key, count in raw_churn.items():
-            churn_counts[key] = count
-            churn_counts[normalize_file_path(root_path / key)] = count
+    _max_yaml_paths = env_int("CRG_MAX_CHANGED_YAML_PATHS", 200)
+    yaml_paths_truncated = len(changed_yaml_paths) > _max_yaml_paths
+    if yaml_paths_truncated:
+        changed_yaml_paths = changed_yaml_paths[:_max_yaml_paths]
+    json_paths_truncated = len(changed_json_paths) > _max_yaml_paths
+    if json_paths_truncated:
+        changed_json_paths = changed_json_paths[:_max_yaml_paths]
+
+    # Keep one public YAML metadata contract. ``node_to_dict`` owns
+    # sanitization and output limits for query and change analysis.
+    yaml_path_results = [node_to_dict(node) for node in changed_yaml_paths]
+    json_path_results = [node_to_dict(node) for node in changed_json_paths]
 
     # Classify test coverage before scoring: the same answer decides both the
     # gap report and the coverage term of every node's risk score, and doing
@@ -787,10 +1594,13 @@ def analyze_changes(
     # still gives the right answer: those rows carry ``is_test = 0`` and used
     # to be reported back to the author as their own tests needing tests
     # (issue #1014).
+    # TypeScript interfaces and type aliases have no runtime behavior to test,
+    # so they are never gap candidates (issue #1109).
     gap_candidates = [
         node for node in changed_funcs
         if not (node.is_test or is_test_file(node.file_path, gap_root))
-        and node.name not in _TEST_GAP_EXEMPT_NAMES
+        and not is_test_gap_exempt(node, gap_root)
+        and not node.extra.get("typescript_kind")
     ]
     # TESTED_BY edges are stored as source=production, target=test by the
     # parser, so a changed production function finds its tests by source.
@@ -823,8 +1633,16 @@ def analyze_changes(
             "risk_score": risk,
         })
 
-    # Overall risk score: max of individual risks, or 0.
-    overall_risk = max((nr["risk_score"] for nr in node_risks), default=0.0)
+    # Overall risk score: max of individual risks, or 0. A removed symbol
+    # that is still used breaks its users, so its score counts as well; that
+    # is also what the Action's ``fail-on-risk`` gate reads.
+    overall_risk = max(
+        (
+            *(nr["risk_score"] for nr in node_risks),
+            *(r["risk_score"] for r in deletion_review.removed),
+        ),
+        default=0.0,
+    )
 
     # Affected flows.
     affected = get_affected_flows(store, changed_files)
@@ -891,6 +1709,9 @@ def analyze_changes(
     summary_parts = [
         f"Analyzed {len(changed_files)} changed file(s):",
         f"  - {len(changed_funcs)} changed function(s)/class(es)",
+        *([f"  - {len(changed_yaml_paths)} changed YAML path(s)"] if changed_yaml_paths else []),
+        *([f"  - {len(changed_json_paths)} changed JSON path(s)"] if changed_json_paths else []),
+        *_removed_summary_lines(deletion_review),
         f"  - {affected['total']} affected flow(s)",
         gap_line,
         f"  - Overall risk score: {overall_risk:.2f}",
@@ -931,15 +1752,42 @@ def analyze_changes(
             "  - Reached only through a caller: "
             f"{', '.join(_gap_names(indirect_gaps))}"
         )
+    if any(
+        node.language == "php" and node.qualified_name not in directly_tested
+        for node in gap_candidates
+    ):
+        # A Laravel test reaches code through the container or an HTTP call,
+        # and the graph traces neither, so a PHP gap is a guess (#850, #851).
+        summary_parts.append(
+            "  - PHP gaps are a guess: tests that reach code through the "
+            "container or an HTTP call are not traced (tests_for names "
+            "likely ones)"
+        )
     if funcs_truncated:
         summary_parts.append(
             f"  - Warning: analysis capped at {_max_funcs} functions "
             f"(set CRG_MAX_CHANGED_FUNCS to adjust)"
         )
+    if yaml_paths_truncated:
+        summary_parts.append(
+            f"  - Warning: analysis capped at {_max_yaml_paths} YAML paths "
+            f"(set CRG_MAX_CHANGED_YAML_PATHS to adjust)"
+        )
+    if json_paths_truncated:
+        summary_parts.append(
+            f"  - Warning: analysis capped at {_max_yaml_paths} JSON paths "
+            f"(set CRG_MAX_CHANGED_YAML_PATHS to adjust)"
+        )
     if ranges_unavailable:
         summary_parts.append(
             "  - Warning: line-level diff unavailable, whole files scored "
             f"({ranges_unavailable})"
+        )
+    if deletion_review.files_not_read:
+        summary_parts.append(
+            f"  - Note: the old version of {deletion_review.files_not_read} "
+            "file(s) could not be read, so code deleted there is not listed "
+            "as removed (CRG_MAX_DELETION_FILES sets how many files are read)"
         )
     if churn_status == CHURN_UNAVAILABLE:
         # Say it in the summary, not only in a log line nobody reads: the
@@ -956,6 +1804,8 @@ def analyze_changes(
         "summary": "\n".join(summary_parts),
         "risk_score": overall_risk,
         "changed_functions": node_risks,
+        "changed_yaml_paths": yaml_path_results,
+        "changed_json_paths": json_path_results,
         "affected_flows": affected["affected_flows"],
         "test_gaps": test_gaps,
         # Counts, not just the list: every consumer bounds ``test_gaps``, and
@@ -966,8 +1816,15 @@ def analyze_changes(
         "test_gaps_total": len(test_gaps),
         "test_gaps_uncovered": uncovered_count,
         "test_gaps_indirect": indirect_count,
+        # Symbols the diff deleted outright, each with what still uses it.
+        # They are not in ``changed_functions``: nothing of them is left to
+        # score, and the code around the hole did not change.
+        "removed_symbols": deletion_review.removed,
+        "removed_symbols_total": deletion_review.removed_total,
         "review_priorities": review_priorities,
         "functions_truncated": funcs_truncated,
+        "yaml_paths_truncated": yaml_paths_truncated,
+        "json_paths_truncated": json_paths_truncated,
         "diff_ranges_unavailable": ranges_unavailable,
         "churn_status": churn_status,
     }

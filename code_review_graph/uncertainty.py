@@ -1,4 +1,4 @@
-"""Honest uncertainty markers for empty graph results (#314, #819, #850, #851).
+"""Honest uncertainty markers for graph results (#314, #819, #850, #851, #984).
 
 A bare ``result_count: 0`` is ambiguous. It can mean "the code really has no
 such relationship", or it can mean "this graph cannot see that relationship":
@@ -10,8 +10,9 @@ graph and grep the whole repository.
 One short sentence on the empty case is therefore a *token saving*, not a
 cost: it replaces a multi-thousand-token fallback search with roughly thirty
 tokens of honesty. To keep that trade favourable the marker is hard-capped at
-``MAX_CONFIDENCE_CHARS`` and is attached only when a result list is empty, so
-every response that carries results stays byte-identical to before.
+``MAX_CONFIDENCE_CHARS`` and is attached only when a result list is empty, or
+when call-site rows in it are name matches rather than confirmed links, so a
+response whose results are all certain stays byte-identical to before.
 
 The language table below is data, not scattered conditionals. Every entry
 describes a gap that is real in this codebase *today*; capabilities that have
@@ -25,12 +26,16 @@ from __future__ import annotations
 import logging
 import os
 import re
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .constants import GIT_TIMEOUT
 from .graph import _sanitize_name
+from .incremental import _load_ignore_patterns, _should_ignore
+from .parser import normalize_file_path
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .graph import GraphStore
@@ -46,6 +51,7 @@ MAX_CONFIDENCE_CHARS = 140
 IMPACT_PATTERN = "impact_radius"
 
 _UPDATE_HINT = "run `code-review-graph update`"
+
 _WHITESPACE = re.compile(r"\s+")
 
 
@@ -74,7 +80,7 @@ _JS_FAMILY = frozenset({"javascript", "typescript", "tsx"})
 # can hide a real answer. ``references_to`` is deliberately excluded: it reads
 # REFERENCES edges, which is exactly where an unresolved handoff does land.
 _CALL_PATTERNS = frozenset({
-    "callers_of", "callees_of", "tests_for", IMPACT_PATTERN,
+    "callers_of", "callees_of", "tests_for", "advises", "advised_by", IMPACT_PATTERN,
 })
 # Patterns answered from IMPORTS_FROM edges.
 _IMPORT_PATTERNS = frozenset({"imports_of", "importers_of", IMPACT_PATTERN})
@@ -109,8 +115,8 @@ LANGUAGE_GAPS: tuple[LanguageGap, ...] = (
         languages=_JS_FAMILY,
         patterns=_IMPORT_PATTERNS,
         note=(
-            "npm-aliased import specifiers are not resolved, so importers "
-            "can be missing here (#343)"
+            "npm-aliased imports resolve only to one local package whose "
+            "version fits the alias, so importers can be missing here (#343)"
         ),
     ),
     LanguageGap(
@@ -121,12 +127,18 @@ LANGUAGE_GAPS: tuple[LanguageGap, ...] = (
             "is unresolved, so callers can be missing"
         ),
     ),
+    # gap_note() returns only the first match per (language, patterns) (see
+    # its docstring), so a second java/_CALL_PATTERNS entry would never be
+    # reached. The AOP gap narrowed by #592 (within/args/target/this,
+    # cross-aspect refs, compound booleans) and the separate reflective-
+    # invocation gap are folded into one note for that reason.
     LanguageGap(
         languages=frozenset({"java"}),
         patterns=_CALL_PATTERNS,
         note=(
-            "java aop advice and reflective invocation are not statically "
-            "traced, so callers can be missing here (#592)"
+            "java aop pointcuts (within/args/target/this, cross-aspect "
+            "refs, compound booleans) and reflective calls are not "
+            "resolved (#592)"
         ),
     ),
     LanguageGap(
@@ -289,6 +301,106 @@ def _live_git_head(root: Path) -> str | None:
     return _read_live_git_head(root)
 
 
+def _untracked_sources(root: Path, store: GraphStore) -> int | None:
+    """Count source files git has never seen, which the index cannot contain.
+
+    ``update`` discovers changes through git, so a file that was never added
+    is absent from the graph however current the build is. Neither signal in
+    ``_staleness`` can see it: the build commit still matches HEAD, and a file
+    the graph holds no row for has no mtime to compare against. The gap is
+    widest exactly when it matters most, because the files an agent has just
+    written are the ones it is about to ask about.
+
+    "Source" is calibrated from the graph rather than a fixed extension list,
+    so a repo whose languages this build does not parse never reports a file
+    the index was never going to hold. ``--exclude-standard`` honours
+    ``.gitignore``, and the graph's own ignore rules are applied on top, since
+    ``git add`` cannot bring in a file the graph is told to skip.
+
+    A file the graph already holds is not counted: ``watch`` indexes a new
+    file whether or not git has seen it. ``ls-files`` lists only what lies
+    under ``root`` (``-- .`` says so explicitly), so a graph rooted below the
+    repository top level never counts its siblings, and it prints paths
+    relative to ``root``. ``git status --porcelain`` does neither: it reports
+    the whole repository relative to the top level, and those paths never
+    match a stored one once the graph root is a subfolder.
+
+    Returns ``None`` when the scan could not run, which proves nothing either
+    way. A clean tree returns before the graph's file inventory is read.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard", "-z", "--", "."],
+            capture_output=True,
+            cwd=str(root),
+            timeout=GIT_TIMEOUT,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    candidates = [os.fsdecode(record) for record in result.stdout.split(b"\0") if record]
+    if not candidates:
+        return 0
+    # Stored paths may be absolute or repo-relative; anchoring handles both.
+    indexed_files = {normalize_file_path(root / stored) for stored in store.get_all_files()}
+    # Lowercased because that is how the parser picks a language by suffix.
+    indexed_suffixes = {
+        suffix for suffix in (Path(stored).suffix.lower() for stored in indexed_files) if suffix
+    }
+    if not indexed_suffixes:
+        return 0
+    ignore_patterns = _load_ignore_patterns(root)
+    return sum(
+        1 for relative in candidates
+        if Path(relative).suffix.lower() in indexed_suffixes
+        and normalize_file_path(root / relative) not in indexed_files
+        and not _should_ignore(relative, ignore_patterns)
+    )
+
+
+def _is_untracked_note(note: str) -> bool:
+    """Distinguish the untracked signal from the two commit/mtime ones.
+
+    An unresolved target on a stale graph is rewritten into wording about the
+    target; that rewrite would drop the file count, which is the actionable
+    part here.
+    """
+    return "untracked by git" in note
+
+
+def _untracked_note(count: int) -> str:
+    """Say the working tree holds source the index was never offered."""
+    # The suffix has to leave room for the count: at 140 characters it left
+    # none, and _fragment clipped every count past 9 to "1~" — the one part of
+    # the sentence an agent can act on. 128 leaves twelve digits.
+    return _interpolated(
+        "",
+        str(count),
+        " source file(s) untracked by git, absent from the index, so this 0 "
+        "may be short; `git add` them, then `code-review-graph update`",
+    )
+
+
+def _settled(root: Path, store: GraphStore, verified: bool) -> tuple[str | None, bool]:
+    """Last check before a caller is allowed to treat the graph as current.
+
+    Reached from both places where the commit and mtime signals find nothing
+    wrong, including the early return taken when a graph carries no build
+    timestamp. Untracked source is the only remaining way for the index to be
+    missing content, so it has to be answered on every such path rather than
+    on the one that happens to have metadata.
+    """
+    untracked = _untracked_sources(root, store)
+    if untracked is None:
+        # The scan failed, so the caller may not claim a real absence.
+        return None, False
+    if untracked:
+        return _untracked_note(untracked), False
+    return None, verified
+
+
 def _staleness(
     store: GraphStore, root: Path, file_path: str | None,
 ) -> tuple[str | None, bool]:
@@ -312,7 +424,7 @@ def _staleness(
 
     built_at_raw = store.get_metadata("last_updated")
     if not built_at_raw or not file_path:
-        return None, commit_verified and not file_path
+        return _settled(root, store, commit_verified and not file_path)
     try:
         # Graphs store absolute or repo-relative paths depending on how they
         # were built, so anchor relative ones rather than stat-ing the CWD.
@@ -332,7 +444,10 @@ def _staleness(
             path.name,
             f" changed after the last build; {_UPDATE_HINT}",
         ), False
-    return None, commit_verified
+    # Last, so every message this function already produced is unchanged. It
+    # only fires where the two checks above found nothing wrong — which is
+    # precisely where the caller would otherwise claim a real absence.
+    return _settled(root, store, commit_verified)
 
 
 # ---------------------------------------------------------------------------
@@ -363,7 +478,8 @@ def empty_query_confidence(
                 )
             stale, _unused = _staleness(store, root, None)
             if stale:
-                return _bounded(unresolved_stale_note(target))
+                return _bounded(stale if _is_untracked_note(stale)
+                                else unresolved_stale_note(target))
             return _bounded(not_indexed_note(target))
 
         stale, current = _staleness(store, root, getattr(node, "file_path", None))
@@ -415,6 +531,21 @@ def empty_impact_confidence(
     except Exception:
         logger.debug("Could not compute empty-impact confidence", exc_info=True)
         return None
+
+
+def guessed_calls_confidence(split: dict[str, int] | None) -> str | None:
+    """Return the marker for call-site rows that are only name matches.
+
+    A row marked ``target_resolution`` says it is a guess; this says how much of
+    the answer is, and how to ask for the rest.
+    """
+    if not split or not split.get("unresolved"):
+        return None
+    total = split["unresolved"] + split.get("direct", 0)
+    return _bounded(
+        f"{split['unresolved']} of {total} call sites match by name only and may "
+        "be wrong; resolution='direct' keeps the confirmed ones"
+    )
 
 
 def empty_search_confidence(

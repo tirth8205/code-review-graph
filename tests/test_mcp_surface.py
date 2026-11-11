@@ -18,8 +18,8 @@ everything the server publishes:
   responses stay inside the ceilings ``tests/test_token_budget.py`` pins --
   measured here on the bytes the client actually receives;
 * protocol conformance: the requirements issue #919 reports as violated are
-  hand-checked over raw JSON-RPC, and the external checker it used is run
-  when it can be installed.
+  hand-checked over raw JSON-RPC (fastmcp 4 serves the 2026-07-28 revision),
+  and the external checker it used is run when it can be installed.
 
 State the tools need is built, not faked: the fixture repository is a real
 git repository with a committed change and a dirty working tree, the
@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import importlib.metadata
 import json
 import os
 import shutil
@@ -56,7 +57,6 @@ import subprocess
 import sys
 import threading
 from contextlib import asynccontextmanager, contextmanager
-from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -66,10 +66,14 @@ import pytest
 try:
     from mcp import ClientSession
     from mcp.client.stdio import StdioServerParameters, stdio_client
+
+    from tests.mcp_client_compat import read_timeout, wire
 except ImportError:  # pragma: no cover - ``mcp`` is a hard runtime dependency
     ClientSession = None  # type: ignore[assignment,misc]
     StdioServerParameters = None  # type: ignore[assignment,misc]
     stdio_client = None  # type: ignore[assignment]
+    read_timeout = None  # type: ignore[assignment]
+    wire = None  # type: ignore[assignment]
 
 try:
     import tiktoken
@@ -389,7 +393,7 @@ def _server_params(fixture: Fixture, extra_env: dict[str, str] | None = None) ->
 async def _client(fixture: Fixture, extra_env: dict[str, str] | None = None):
     async with stdio_client(_server_params(fixture, extra_env)) as (read, write):
         async with ClientSession(
-            read, write, read_timeout_seconds=timedelta(seconds=CALL_TIMEOUT)
+            read, write, read_timeout_seconds=read_timeout(CALL_TIMEOUT)
         ) as session:
             await asyncio.wait_for(session.initialize(), timeout=CALL_TIMEOUT)
             yield session
@@ -411,7 +415,7 @@ async def _call(session: Any, name: str, args: dict[str, Any] | None = None) -> 
     """Call a tool and decode the JSON object it returned."""
     result = await _raw(session, name, args)
     body = _text(result)
-    assert not result.isError, f"{name}{args or {}} failed: {body[:600]}"
+    assert not wire(result, "isError"), f"{name}{args or {}} failed: {body[:600]}"
     payload = json.loads(body)
     assert isinstance(payload, dict), f"{name} returned {type(payload)!r}, not an object"
     return payload
@@ -589,16 +593,28 @@ async def test_every_registered_tool_returns_real_content(unbuilt: Fixture) -> N
             assert importers["status"] == "ok", importers
             assert importers["result_count"] >= 1, importers["summary"]
 
+            route = await _call(
+                session,
+                "query_graph_tool",
+                {"pattern": "path_to", "target": qualified, "to": "helper_0_0_0"},
+            )
+            assert route["status"] == "ok", route
+            assert route["result_count"] >= 1, route["summary"]
+            assert route["weakest_hop"]["certainty"] == route["certainty"], route
+
             ambiguous = await _call(
                 session,
                 "query_graph_tool",
-                {"pattern": "callers_of", "target": "helper_0_0_0"},
+                {"pattern": "callers_of", "target": "helper_0_0"},
             )
             assert ambiguous["status"] == "ambiguous", ambiguous
             assert ambiguous["candidates"], ambiguous
             walk.verify(
                 "query_graph_tool",
-                ["file_summary", "callers_of", "callees_of", "importers_of", "ambiguous"],
+                [
+                    "file_summary", "callers_of", "callees_of", "importers_of", "path_to",
+                    "ambiguous",
+                ],
             )
 
             # --- 7. review context ----------------------------------------
@@ -825,7 +841,7 @@ async def test_every_registered_tool_returns_real_content(unbuilt: Fixture) -> N
             assert gaps["status"] == "ok", gaps
             assert set(gaps["gaps"]) >= {
                 "isolated_nodes", "thin_communities",
-                "untested_hotspots", "single_file_communities",
+                "untested_hotspots", "single_file_communities", "import_cycles",
             }, gaps["gaps"].keys()
             assert gaps["total_gaps"] >= 1, gaps
             walk.verify("get_knowledge_gaps_tool", ["status", "gap-categories", "total_gaps"])
@@ -1053,6 +1069,8 @@ WRONG_TYPE_CASES: dict[str, dict[str, Any]] = {
 OUT_OF_RANGE_REFUSED: dict[str, dict[str, Any]] = {
     "query_graph_tool": {"pattern": "callers_of", "target": "helper_0_0_0", "max_results": 0},
     "get_review_context_tool": {"max_lines_per_file": -5},
+    "semantic_search_nodes_tool": {"query": "helper", "limit": 0},
+    "find_large_functions_tool": {"limit": 0},
     "list_flows_tool": {"limit": 0},
     "get_flow_tool": {"flow_id": 1, "max_steps": 0},
     "list_communities_tool": {"max_results": 0},
@@ -1088,10 +1106,6 @@ OUT_OF_RANGE_ACCEPTED: dict[str, dict[str, Any]] = {
     "get_impact_radius_tool": {"max_depth": -1},
     # depth is documented "1-6"; 99 is silently clamped to 6, not refused.
     "traverse_graph_tool": {"query": "helper_0_1_2", "depth": 99},
-    # limit is neither validated nor capped (see QUERY_OWNED_UNBOUNDED in
-    # tests/test_token_budget.py); limit=0 silently returns no results.
-    "semantic_search_nodes_tool": {"query": "helper", "limit": 0},
-    "find_large_functions_tool": {"limit": 0},
     # max_flows=0 is the documented "no caller limit" escape, but -1 is not.
     "get_affected_flows_tool": {"max_flows": -1},
 }
@@ -1102,7 +1116,7 @@ def _is_clean_error(result: Any, payload: dict[str, Any] | None, hint: str) -> t
     body = _text(result)
     if "Traceback (most recent call last)" in body:
         return False, f"traceback leaked to the client: {body[:400]}"
-    if result.isError:
+    if wire(result, "isError"):
         return True, body
     if payload is None:
         return False, f"non-JSON success payload: {body[:200]}"
@@ -1115,7 +1129,7 @@ def _is_clean_error(result: Any, payload: dict[str, Any] | None, hint: str) -> t
 async def _probe(session: Any, name: str, args: dict[str, Any]) -> tuple[Any, dict | None]:
     result = await _raw(session, name, args)
     payload: dict | None = None
-    if not result.isError:
+    if not wire(result, "isError"):
         try:
             decoded = json.loads(_text(result))
             payload = decoded if isinstance(decoded, dict) else None
@@ -1128,7 +1142,7 @@ async def test_missing_required_argument_is_a_clean_error(built: Fixture) -> Non
     """Dropping a required argument must be refused, not crashed on."""
     async with _client(built) as session:
         listed = await asyncio.wait_for(session.list_tools(), timeout=CALL_TIMEOUT)
-        schemas = {tool.name: tool.inputSchema for tool in listed.tools}
+        schemas = {tool.name: wire(tool, "inputSchema") for tool in listed.tools}
 
         # Canary: the split between "has required args" and "has none" is read
         # from the advertised schemas, not trusted from this file.
@@ -1201,7 +1215,7 @@ async def test_out_of_range_argument_is_a_clean_error(built: Fixture) -> None:
             result, payload = await _probe(session, name, args)
             body = _text(result)
             assert "Traceback (most recent call last)" not in body, f"{name}: {body[:400]}"
-            assert payload is not None or result.isError, f"{name}: {body[:200]}"
+            assert payload is not None or wire(result, "isError"), f"{name}: {body[:200]}"
 
 
 # ---------------------------------------------------------------------------
@@ -1254,7 +1268,7 @@ async def test_repo_root_outside_a_project_root_is_refused(built: Fixture) -> No
     async with _client(built) as session:
         listed = await asyncio.wait_for(session.list_tools(), timeout=CALL_TIMEOUT)
         registered = {tool.name for tool in listed.tools}
-        schemas = {tool.name: tool.inputSchema for tool in listed.tools}
+        schemas = {tool.name: wire(tool, "inputSchema") for tool in listed.tools}
         takes_root = {
             name for name in registered
             if "repo_root" in (schemas[name].get("properties") or {})
@@ -1468,7 +1482,7 @@ async def test_responses_stay_inside_the_pinned_token_budgets(built: Fixture) ->
             }
             result = await _raw(session, tool, resolved)
             body = _text(result)
-            assert not result.isError, f"{label}: {body[:400]}"
+            assert not wire(result, "isError"), f"{label}: {body[:400]}"
             tokens = _count_tokens(body)
             measured[label] = tokens
             assert tokens <= ceiling, (
@@ -1544,43 +1558,78 @@ class RawStdioServer:
 # The JSON-RPC error code an unrecognised method must carry (JSON-RPC 2.0
 # section 5.1, which MCP inherits).
 METHOD_NOT_FOUND = -32601
-INVALID_PARAMS = -32602
+
+# fastmcp 4 brings the mcp SDK 2.x, the first to serve the 2026-07-28
+# revision. fastmcp 3 cannot answer server/discover at all (#919, #970).
+FASTMCP_MAJOR = int(importlib.metadata.version("fastmcp").split(".")[0])
+MODERN_REVISION = "2026-07-28"
 
 
+def _envelope() -> dict[str, Any]:
+    """The per-request ``_meta`` a 2026-07-28 client sends instead of a handshake."""
+    return {
+        "_meta": {
+            "io.modelcontextprotocol/protocolVersion": MODERN_REVISION,
+            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientInfo": {
+                "name": "surface-conformance", "version": "0",
+            },
+        }
+    }
+
+
+@pytest.mark.skipif(
+    FASTMCP_MAJOR < 4, reason="fastmcp 3 has no server/discover; #919 needs fastmcp 4"
+)
 def test_spec_conformance_requirements_from_issue_919(built: Fixture) -> None:
     """Hand-check each requirement issue #919 reports, over raw JSON-RPC.
 
     The issue's checker found seven violations, all rooted in ``server/discover``
-    (the method the 2026-07-28 revision introduces) never answering. These
-    assertions pin the behaviour that is actually there today, so a future
-    ``server/discover`` implementation, or a regression in the older
-    revision's handshake, both show up here without needing npx or a network.
+    (the method the 2026-07-28 revision introduces) never answering. fastmcp 4
+    answers it (#970). These checks pin that, and that the older revision's
+    handshake still works, without needing npx or a network.
     """
     server = RawStdioServer(built)
     try:
         # #919 case 1: "server/discover is answered without a session or
-        # handshake". It is not implemented, so it answers with an error.
-        pre = server.request("server/discover", {}, req_id=1)
-        assert pre is not None, "server/discover did not answer at all (a hang, not an error)"
-        assert "error" in pre, f"server/discover unexpectedly succeeded: {pre}"
-        discover_code = pre["error"]["code"]
+        # handshake".
+        first = server.request("server/discover", _envelope(), req_id=1)
+        assert first is not None, "server/discover did not answer at all (a hang)"
+        assert "result" in first, first
+        found = first["result"]
 
-        # And an unrecognised method gets exactly the same code, which is
-        # what shows server/discover is simply unimplemented rather than
-        # implemented-and-misconfigured.
-        unknown = server.request("surface/no-such-method", {}, req_id=2)
+        # Cases 2-5: it advertises the versions it serves, carries cache hints,
+        # and reports the server's identity and capabilities.
+        assert MODERN_REVISION in found["supportedVersions"], found
+        assert "ttlMs" in found and "cacheScope" in found, found
+        info = found["_meta"]["io.modelcontextprotocol/serverInfo"]
+        assert info["name"] == "code-review-graph", found
+        assert set(found["capabilities"]) >= {"tools", "prompts", "resources"}, found
+        assert found["instructions"], found
+
+        # Case 6: stable across calls.
+        again = server.request("server/discover", _envelope(), req_id=2)
+        assert again is not None and "result" in again, again
+        assert again["result"]["supportedVersions"] == found["supportedVersions"]
+        assert again["result"]["capabilities"] == found["capabilities"]
+
+        # The modern path serves the real tool list with no handshake at all.
+        tools = server.request("tools/list", _envelope(), req_id=3)
+        assert tools is not None and "result" in tools, tools
+        assert len(tools["result"]["tools"]) == 30, len(tools["result"]["tools"])
+
+        # An unknown method gets the JSON-RPC 2.0 code for one (section 5.1).
+        unknown = server.request("surface/no-such-method", _envelope(), req_id=4)
         assert unknown is not None and "error" in unknown, unknown
-        assert unknown["error"]["code"] == discover_code, (unknown, pre)
+        assert unknown["error"]["code"] == METHOD_NOT_FOUND, unknown
+    finally:
+        server.close()
 
-        # The code itself is wrong for an unimplemented method: JSON-RPC 2.0
-        # reserves -32601 for that and -32602 for bad params on a method that
-        # does exist. Reported, not fixed here.
-        assert discover_code in {METHOD_NOT_FOUND, INVALID_PARAMS}, pre
-        unimplemented_method_code = discover_code
-
-        # The handshake itself is conformant on the revision the checker
-        # passed against, which is what makes the discover failures the only
-        # real finding.
+    # The older revision still works on its own handshake, and case 7 ("a
+    # request with no version at all is served on the default"): over stdio
+    # a plain tools/list after the handshake must be served, not refused.
+    server = RawStdioServer(built)
+    try:
         init = server.request(
             "initialize",
             {
@@ -1588,25 +1637,16 @@ def test_spec_conformance_requirements_from_issue_919(built: Fixture) -> None:
                 "capabilities": {},
                 "clientInfo": {"name": "surface-conformance", "version": "0"},
             },
-            req_id=3,
+            req_id=1,
         )
         assert init is not None and "result" in init, init
         result = init["result"]
         assert result["serverInfo"]["name"] == "code-review-graph"
-        assert result["protocolVersion"], result
+        assert result["protocolVersion"] == "2025-06-18", result
         assert set(result["capabilities"]) >= {"tools", "prompts", "resources"}, result
         server.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
 
-        # #919 cases 2-6: the five discover follow-ups. All of them depend on
-        # discover succeeding after the handshake; it still does not.
-        post = server.request("server/discover", {}, req_id=4)
-        assert post is not None and "error" in post, post
-        assert post["error"]["code"] == unimplemented_method_code, post
-
-        # #919 case 7: "a request with no version at all is served on the
-        # default". Over stdio there is no version header, and a plain
-        # tools/list after the handshake must be served rather than refused.
-        tools = server.request("tools/list", {}, req_id=5)
+        tools = server.request("tools/list", {}, req_id=2)
         assert tools is not None and "result" in tools, tools
         assert len(tools["result"]["tools"]) == 30, len(tools["result"]["tools"])
 
@@ -1614,11 +1654,10 @@ def test_spec_conformance_requirements_from_issue_919(built: Fixture) -> None:
         # unrecognised pagination cursor is answered with a first page rather
         # than rejected with -32602. Reported, not fixed here.
         paged = server.request(
-            "tools/list", {"cursor": "surface-garbage-cursor"}, req_id=6
+            "tools/list", {"cursor": "surface-garbage-cursor"}, req_id=3
         )
         assert paged is not None, paged
-        cursor_rejected = "error" in paged
-        if not cursor_rejected:
+        if "error" not in paged:
             assert paged["result"]["tools"], paged
     finally:
         server.close()
@@ -1675,13 +1714,17 @@ def test_external_mcp_spec_checker(built: Fixture, tmp_path: Path) -> None:
 
     newer = reports["2026-07-28"].stdout
     assert "conformance report" in newer, newer[-2000:]
-    # Every remaining failure on the newest revision is a server/discover
-    # case; if something else starts failing, this test says so by name.
     failing_section = newer.split("FAILED", 1)[-1].split("NOT VERIFIED", 1)[0]
     offenders = [
         line.strip()
         for line in failing_section.splitlines()
         if line.strip().startswith("✗")
     ]
-    assert offenders, "expected the server/discover failures from #919 to reproduce"
-    assert all("discover" in line for line in offenders), offenders
+    if FASTMCP_MAJOR < 4:
+        # fastmcp 3: every failure on the newest revision is a server/discover
+        # case; if something else starts failing, this says so by name.
+        assert offenders, "expected the server/discover failures from #919 to reproduce"
+        assert all("discover" in line for line in offenders), offenders
+    else:
+        # fastmcp 4 answers server/discover (#970), so none of those may return.
+        assert not [line for line in offenders if "discover" in line], offenders

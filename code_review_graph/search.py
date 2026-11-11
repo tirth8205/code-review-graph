@@ -11,6 +11,7 @@ import logging
 import re
 import sqlite3
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any, NamedTuple, Optional
 
 from .graph import GraphStore, _sanitize_name, identifier_words
@@ -22,9 +23,14 @@ from .migrations import (
     NODES_FTS_STATE_TABLE,
     ensure_nodes_fts_state,
 )
-from .parser import normalize_file_path
+from .parser import is_test_file, normalize_file_path
 
 logger = logging.getLogger(__name__)
+
+# A Liquid output's name is the text it prints, and a theme prints thousands of
+# them: on Shopify's Dawn all ten top hits for "product" were outputs. They stay
+# in the graph and ``kind="Output"`` still finds them, but no other search does.
+_UNSEARCHED_KIND = "Output"
 
 # Per-column BM25 weights for the FTS5 index, looked up by column name so the
 # weight vector follows the table's real shape (see NODES_FTS_DDL). A name hit
@@ -53,6 +59,22 @@ _EXACT_SYMBOL_BOOST = 3.0
 # multiply a hit by how much of the query its own symbol name accounts for.
 _NAME_COVERAGE_BOOST = 1.0
 _NAME_EXACT_COVERAGE_BOOST = 2.0
+
+# A question about production code is usually answered by production code, but
+# a test that names the same symbol scores just as well on keywords alone: a
+# two-line stub in tests/ could outrank the implementation. Rank test symbols
+# below production ones unless the caller is actually asking about tests.
+_TEST_RANK_PENALTY = 0.4
+_TEST_INTENT_WORDS = frozenset({
+    "test", "tests", "tested", "testing", "spec", "specs", "fixture",
+    "fixtures", "mock", "mocks", "stub", "stubs", "coverage",
+})
+
+# JSON shares words with code: ``package.json`` names ``cookie`` as a
+# dependency, and ``locales/en/translation.json`` matches "translation" by its
+# path alone. Rank JSON files and paths below code unless the caller asks for
+# them: by kind, by a ``$`` path, or by naming a ``.json`` file.
+_JSON_RANK_PENALTY = 0.25
 
 
 # ---------------------------------------------------------------------------
@@ -725,12 +747,18 @@ def _fts_search(
     conn: sqlite3.Connection,
     query: str,
     limit: int = 50,
+    kind: str | None = None,
+    skip_json: bool = False,
 ) -> list[tuple[int, float]]:
     """Run an FTS5 BM25 search against the nodes_fts table.
 
     Tries each expression from :func:`build_fts_queries` in turn and returns
     the first non-empty result, so the precise reading of a query wins and
-    the widened one is only a fallback.
+    the widened one is only a fallback. *kind* filters inside the statement, so
+    rows of another kind neither use up *limit* nor count as an answer. Without
+    *kind*, ``_UNSEARCHED_KIND`` rows are left out there for the same reason.
+    With *skip_json*, JSON rows are left out, so an expression that matches
+    only JSON falls through as it did before JSON was indexed.
 
     Returns list of ``(node_id, bm25_score)`` tuples. The BM25 score is
     negated so higher = better (FTS5 returns negative BM25).
@@ -748,13 +776,36 @@ def _fts_search(
     # The weights are floats formatted from a module constant, never from the
     # query, so there is no user-controlled text in this statement. The MATCH
     # expression itself stays a bound parameter.
-    sql = (  # nosec B608
-        f"SELECT rowid, bm25(nodes_fts, {weights}) AS score FROM nodes_fts "
-        "WHERE nodes_fts MATCH ? ORDER BY score LIMIT ?"
-    )
+    # Each filter is a fixed fragment; only its values are bound parameters.
+    conditions = ["nodes_fts MATCH ?"]
+    filters: tuple[Any, ...] = ()
+    if kind:
+        conditions.append("nodes.kind = ?")
+        filters = (kind,)
+    # Most graphs hold no unsearched rows, and they keep the plain statement.
+    elif conn.execute(
+        "SELECT 1 FROM nodes WHERE kind = ? LIMIT 1", (_UNSEARCHED_KIND,),
+    ).fetchone():
+        conditions.append("nodes.kind != ?")
+        filters = (_UNSEARCHED_KIND,)
+    if skip_json:
+        conditions.append("nodes.language IS NOT 'json'")
+    if len(conditions) > 1:
+        # CROSS JOIN keeps the full-text index as the outer loop.
+        sql = (  # nosec B608
+            f"SELECT nodes_fts.rowid, bm25(nodes_fts, {weights}) AS score FROM nodes_fts "
+            "CROSS JOIN nodes ON nodes.id = nodes_fts.rowid "
+            f"WHERE {' AND '.join(conditions)} ORDER BY score LIMIT ?"
+        )
+    else:
+        sql = (  # nosec B608
+            f"SELECT rowid, bm25(nodes_fts, {weights}) AS score FROM nodes_fts "
+            "WHERE nodes_fts MATCH ? ORDER BY score LIMIT ?"
+        )
     for expression in expressions:
+        params = (expression, *filters, limit)
         try:
-            rows = conn.execute(sql, (expression, limit)).fetchall()
+            rows = conn.execute(sql, params).fetchall()
         except sqlite3.OperationalError as e:
             logger.warning("FTS5 search failed for %r: %s", expression, e)
             return []
@@ -775,12 +826,19 @@ def _embedding_search(
     limit: int = 50,
     model: str | None = None,
     provider: str | None = None,
+    kind: str | None = None,
 ) -> list[tuple[int, float]]:
     """Run a vector similarity search using the embedding store.
+
+    Vectors do not carry a node kind, so with *kind* set every one is ranked
+    and the filter runs on that whole list, before *limit* cuts it.
 
     Returns list of ``(node_id, similarity_score)`` tuples.
     Gracefully returns an empty list if embeddings are not available.
     """
+    if store.read_only:
+        # EmbeddingStore creates and migrates its table when opened.
+        return []
     try:
         from .embeddings import EmbeddingStore
     except ImportError:
@@ -792,7 +850,20 @@ def _embedding_search(
             if not emb_store.available or emb_store.count() == 0:
                 return []
 
-            results = emb_store.search(query, limit=limit)
+            if kind:
+                of_kind = {
+                    row[0]
+                    for row in store._conn.execute(
+                        "SELECT qualified_name FROM nodes WHERE kind = ?", (kind,),
+                    )
+                }
+                results = [
+                    hit
+                    for hit in emb_store.search(query, limit=emb_store.count())
+                    if hit[0] in of_kind
+                ][:limit]
+            else:
+                results = emb_store.search(query, limit=limit)
             # Map qualified names back to node IDs
             id_scores: list[tuple[int, float]] = []
             for qn, score in results:
@@ -816,10 +887,13 @@ def _keyword_search(
     conn: sqlite3.Connection,
     query: str,
     limit: int = 50,
+    kind: str | None = None,
 ) -> list[tuple[int, float]]:
     """Fall back to simple LIKE keyword matching.
 
-    Each word in the query must match independently (AND logic).
+    Each word in the query must match independently (AND logic), and *kind*
+    filters before *limit* cuts the rows. Without *kind*, ``_UNSEARCHED_KIND``
+    rows are left out before *limit* cuts them.
     Returns ``(node_id, score)`` tuples with a basic relevance score.
     """
     words = query.lower().split()
@@ -833,6 +907,12 @@ def _keyword_search(
             "(LOWER(name) LIKE ? OR LOWER(qualified_name) LIKE ?)"
         )
         params.extend([f"%{word}%", f"%{word}%"])
+    if kind:
+        conditions.append("kind = ?")
+        params.append(kind)
+    else:
+        conditions.append("kind != ?")
+        params.append(_UNSEARCHED_KIND)
 
     where = " AND ".join(conditions)
     params.append(limit)
@@ -865,6 +945,53 @@ def _keyword_search(
 # ---------------------------------------------------------------------------
 
 
+def _has_json_intent(query: str, kind: Optional[str]) -> bool:
+    """Whether the caller asked for JSON: by kind, a ``$`` path or a file name."""
+    return (
+        kind == "JsonPath"
+        or query.lstrip().startswith("$")
+        or ".json" in query.lower()
+    )
+
+
+def _fts_search_past_json(
+    conn: sqlite3.Connection,
+    query: str,
+    results: list[tuple[int, float]],
+    limit: int,
+    kind: Optional[str] = None,
+) -> list[tuple[int, float]]:
+    """Add the best other matches when JSON rows take places in a full window.
+
+    On next-i18next, six ``translation.json`` files filled the window for
+    "translation" and pushed ``appWithTranslation`` out of the results. The
+    other rows are fetched on their own, up to *limit* of them, and merged in
+    by score, so no number of JSON rows ahead of the code can hide it.
+    """
+    if len(results) < limit:
+        return results
+    ids = [node_id for node_id, _ in results]
+    json_rows = 0
+    for start in range(0, len(ids), 450):
+        batch = ids[start:start + 450]
+        placeholders = ",".join("?" for _ in batch)
+        json_rows += conn.execute(
+            "SELECT count(*) FROM nodes WHERE language = 'json' "  # nosec B608
+            f"AND id IN ({placeholders})",
+            batch,
+        ).fetchone()[0]
+    if not json_rows:
+        return results
+    seen = set(ids)
+    others = [
+        row for row in _fts_search(conn, query, limit=limit, kind=kind, skip_json=True)
+        if row[0] not in seen
+    ]
+    if not others:
+        return results
+    return sorted(results + others, key=lambda row: row[1], reverse=True)
+
+
 def hybrid_search(
     store: GraphStore,
     query: str,
@@ -874,6 +1001,7 @@ def hybrid_search(
     model: Optional[str] = None,
     provider: Optional[str] = None,
     _out_mode: Optional[list[str]] = None,
+    repo_root: Optional[str | Path] = None,
 ) -> list[dict[str, Any]]:
     """Hybrid search combining FTS5 BM25 and vector embeddings via RRF.
 
@@ -905,7 +1033,7 @@ def hybrid_search(
     # because those operate on the FTS virtual table or need raw Row
     # access for batch-fetch performance.  This is documented coupling.
     conn = store._conn
-    fetch_limit = limit * 3  # Fetch extra to allow for filtering and boosting
+    fetch_limit = limit * 3  # Fetch extra to allow for boosting
 
     # ------ Phase 1: Gather ranked lists ------
     fts_results: list[tuple[int, float]] = []
@@ -913,14 +1041,19 @@ def hybrid_search(
 
     # Try FTS5 search
     try:
-        fts_results = _fts_search(conn, query, limit=fetch_limit)
+        fts_results = _fts_search(conn, query, limit=fetch_limit, kind=kind)
     except Exception as e:
         logger.warning("FTS5 unavailable, will use fallback: %s", e)
 
     # Try embedding search
     emb_results = _embedding_search(
-        store, query, limit=fetch_limit, model=model, provider=provider,
+        store, query, limit=fetch_limit, model=model, provider=provider, kind=kind,
     )
+
+    # JSON rows rank below code (``_JSON_RANK_PENALTY``), so they must not use
+    # up the window that code would otherwise fill, whatever the kind filter.
+    if fts_results and not _has_json_intent(query, kind):
+        fts_results = _fts_search_past_json(conn, query, fts_results, fetch_limit, kind)
 
     # ------ Phase 2: Merge via RRF or fallback ------
     if fts_results or emb_results:
@@ -939,7 +1072,7 @@ def hybrid_search(
                 _out_mode.append("semantic")
     else:
         # Fallback: keyword LIKE matching
-        keyword_results = _keyword_search(conn, query, limit=fetch_limit)
+        keyword_results = _keyword_search(conn, query, limit=fetch_limit, kind=kind)
         if not keyword_results:
             if _out_mode is not None:
                 _out_mode.append("none")
@@ -956,6 +1089,13 @@ def hybrid_search(
     )
 
     query_words = identifier_words(query)
+
+    # Asking for kind="Test", or using a word like "spec" or "fixture", means
+    # test code is what was wanted; do not push it down in that case.
+    test_intent = kind == "Test" or bool(
+        {w.lower() for w in query_words} & _TEST_INTENT_WORDS
+    )
+    json_intent = _has_json_intent(query, kind)
 
     # Batch-fetch all candidate nodes in one query
     candidate_ids = [node_id for node_id, _ in merged]
@@ -1010,6 +1150,18 @@ def hybrid_search(
                 boost *= _EXACT_SYMBOL_BOOST
         if context_set and file_path in context_set:
             boost *= 1.5
+        if row["language"] == "json" and not json_intent:
+            boost *= _JSON_RANK_PENALTY
+
+        if not test_intent:
+            row_keys = row.keys()
+            is_test = bool(row["is_test"]) if "is_test" in row_keys else False
+            if not is_test and file_path:
+                # The graph stores absolute paths, so without the root only
+                # file names count and tests/helpers.py reads as production.
+                is_test = is_test_file(file_path, repo_root)
+            if is_test:
+                boost *= _TEST_RANK_PENALTY
 
         boosted.append((node_id, score * boost))
 
@@ -1027,6 +1179,8 @@ def hybrid_search(
 
         node_kind = row["kind"]
         if kind and node_kind != kind:
+            continue
+        if not kind and node_kind == _UNSEARCHED_KIND:
             continue
 
         results.append({

@@ -721,10 +721,14 @@ class TestGraphBackedToolProvenanceCoverage:
                 f"{category}: {tool_name} does not attach graph provenance"
             )
 
-    @pytest.mark.parametrize("tool_name", [
-        "get_docs_section_tool", "list_repos_tool", "cross_repo_search_tool",
+    @pytest.mark.parametrize(("tool_name", "offloads"), [
+        ("get_docs_section_tool", False),
+        ("list_repos_tool", False),
+        ("cross_repo_search_tool", True),
     ])
-    def test_non_single_repository_tools_do_not_claim_one_graph(self, tool_name):
+    def test_non_single_repository_tools_do_not_claim_one_graph(
+        self, tool_name, offloads,
+    ):
         tool = getattr(crg_main, tool_name)
         underlying = getattr(tool, "fn", None) or tool
         source = inspect.getsource(underlying)
@@ -732,8 +736,8 @@ class TestGraphBackedToolProvenanceCoverage:
         # Offloading must not smuggle provenance in through the back door:
         # a tool that spans several repositories, or none, has no single
         # graph whose freshness it could report.
-        if "_offload(" in source:
-            assert "provenance=False" in source
+        assert ("_offload(" in source) is offloads
+        assert ("provenance=False" in source) is offloads
 
 class TestApplyToolFilter:
     """Tests for _apply_tool_filter (``serve --tools`` / ``CRG_TOOLS``).
@@ -818,3 +822,36 @@ class TestApplyToolFilter:
         crg_main._apply_tool_filter(" query_graph_tool , semantic_search_nodes_tool ")
         remaining = await self._tool_names()
         assert remaining == {"query_graph_tool", "semantic_search_nodes_tool"}
+
+
+class TestMainLazyAttrsAndPromptsDirect:
+    def test_resolve_attr_getattr_and_prompts_direct(self, monkeypatch, tmp_path):
+        assert callable(crg_main._resolve_attr("get_docs_section"))
+        assert callable(crg_main.__getattr__("review_changes_prompt"))
+        with pytest.raises(AttributeError):
+            crg_main.__getattr__("nonexistent_main_attr")
+
+        res = asyncio.run(
+            crg_main._offload(
+                "unit_test_tool",
+                lambda: {"status": "ok"},
+                None,
+                provenance=False,
+            )
+        )
+        assert res["status"] == "ok"
+
+        docs_res = crg_main.get_docs_section_tool("usage")
+        assert isinstance(docs_res, dict)
+
+        monkeypatch.setattr(
+            crg_main, "list_repos_func", lambda: {"repos": []}, raising=False
+        )
+        repos_res = crg_main.list_repos_tool()
+        assert repos_res == {"repos": []}
+
+        assert isinstance(crg_main.review_changes(base="HEAD~1"), list)
+        assert isinstance(crg_main.architecture_map(), list)
+        assert isinstance(crg_main.debug_issue(description="bug"), list)
+        assert isinstance(crg_main.onboard_developer(), list)
+        assert isinstance(crg_main.pre_merge_check(base="HEAD~1"), list)

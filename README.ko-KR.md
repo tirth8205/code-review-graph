@@ -62,13 +62,13 @@ code-review-graph install              # detect installed AI coding tools and co
 code-review-graph build                # parse the codebase
 ```
 
-`install`은 설치된 AI 코딩 도구를 찾아 각각에 MCP 서버 항목을 쓰고, 플랫폼이 지원하면 훅과 스킬을 설치하며, 플랫폼의 규칙 파일에 그래프 안내를 추가합니다. MCP 항목은 Poetry나 uv 프로젝트 환경에서는 `poetry run` 또는 `uv run`을, PATH에 `uvx`가 있으면 `uvx code-review-graph serve`를, 그 밖에는 현재 Python 인터프리터를 사용합니다. 실행 후 편집기나 도구를 다시 시작하세요.
+`install`은 설치된 AI 코딩 도구를 찾아 각각에 MCP 서버 항목을 쓰고, 플랫폼이 지원하면 훅과 스킬을 설치하며, 플랫폼의 규칙 파일에 그래프 안내를 추가합니다. MCP 항목은 Poetry나 uv 프로젝트 환경에서는 `poetry run` 또는 `uv run`을, PATH에 `uvx`가 있으면 `uvx code-review-graph serve`를, 그 밖에는 현재 Python 인터프리터를 사용합니다. `install`은 바꿀 파일 목록을 보여 주고 안내 파일에 대한 질문에 답할 때까지 아무것도 쓰지 않습니다. `install --dry-run`은 바뀌는 내용을 파일마다 diff로 보여 주고 아무것도 쓰지 않습니다. 실행 후 편집기나 도구를 다시 시작하세요.
 
 <p align="center">
-  <img src="diagrams/diagram8_supported_platforms.png" alt="한 번의 설치로 모든 플랫폼 지원: Codex, Claude Code, CodeBuddy Code, Cursor, Windsurf, Zed, Continue, OpenCode, Antigravity, Gemini CLI, Qwen, Qoder, Kiro, GitHub Copilot, GitHub Copilot CLI, Hermes Agent를 감지" width="85%" />
+  <img src="diagrams/diagram8_supported_platforms.png" alt="한 번의 설치로 모든 플랫폼 지원: Codex, Claude Code, CodeBuddy Code, Cursor, Windsurf, Zed, Continue, OpenCode, MiMo Code, Antigravity, Gemini CLI, Qwen, Qoder, Kiro, GitHub Copilot, GitHub Copilot CLI, Hermes Agent를 감지" width="85%" />
 </p>
 
-플랫폼 하나만 설정하려면 `--platform`에 `codex`, `claude-code`, `cursor`, `windsurf`, `zed`, `continue`, `opencode`, `antigravity`, `gemini-cli`, `qwen`, `kiro`, `qoder`, `copilot`, `copilot-cli`, `codebuddy`, `hermes` 중 하나를 넘기세요.
+플랫폼 하나만 설정하려면 `--platform`에 `codex`, `claude-code`, `cursor`, `windsurf`, `zed`, `continue`, `opencode`, `mimo`, `antigravity`, `gemini-cli`, `qwen`, `kiro`, `qoder`, `copilot`, `copilot-cli`, `codebuddy`, `hermes`, `dsh` 중 하나를 넘기세요.
 
 ```bash
 code-review-graph install --platform cursor
@@ -76,6 +76,16 @@ code-review-graph install --platform codebuddy
 ```
 
 설정 파일 위치는 [docs/USAGE.md](docs/USAGE.md#supported-platforms)에 있습니다. Python 3.10+가 필요합니다.
+
+`.claude/`, `.mcp.json`처럼 `install`이 쓰는 파일은 팀이 커밋할 수도 있으므로 git에서 계속 보입니다. `install --gitignore`는 그 실행에서 새로 만든 파일을 `.gitignore`의 표시된 블록에 추가하고, `uninstall`은 그 블록을 지웁니다.
+
+Codex의 경우 설치 프로그램은 전역 `code-review-graph` 스킬도
+`$CODEX_HOME/skills/code-review-graph/`(기본값:
+`~/.codex/skills/code-review-graph/`)에 둡니다. 이 스킬은 CRG MCP 도구를 먼저 쓰고,
+MCP를 쓸 수 없을 때는 함께 들어 있는 읽기 전용 CLI로 넘어갑니다. 그래프가 없거나, 비어 있거나,
+오래되었어도 빌드나 업데이트를 몰래 실행하지 않습니다. WSL과 Windows의 Codex
+런타임은 `CODEX_HOME` 디렉터리와 도구 목록이 서로 다르므로, 작업을 실행할 런타임에
+설치하고 갱신하세요.
 
 `uninstall`은 Git 또는 SVN 작업 트리에서 CRG가 만든 파일과 항목을 제거하고, 다른 MCP 서버, 훅, 스킬, JSONC 주석은 건드리지 않습니다. 트리 안 어디에서든 실행할 수 있습니다. 공유 설정 파일은 원자적으로 교체되므로 쓰기가 실패해도 원본은 그대로 남습니다.
 
@@ -96,6 +106,55 @@ Build the code review graph for this project
 
 빌드 시간은 저장소 크기에 비례합니다. 파일이 약 3,000개인 저장소의 콜드 빌드는 약 40초가 걸렸습니다([측정값](docs/REPRODUCING.md#incremental-update-latency)). 그 뒤로는 훅과 watch 모드가 그래프를 최신으로 유지합니다. 일부 파일의 파싱이 실패하면 결과 상태가 `partial`이 되고 요약에 해당 파일이 나열됩니다. CLI는 stderr에 `Warning:` 줄도 출력하며, 그 파일들은 기존 그래프 행을 유지합니다.
 
+
+### Docker 또는 Podman으로 실행하기
+
+프로젝트 저장소의 루트 디렉터리에서 이미지를 빌드합니다.
+
+```bash
+docker build -t code-review-graph:local .
+```
+
+분석할 저장소의 디렉터리에서 다음 명령을 실행합니다.
+
+```bash
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --env HOME=/tmp \
+  --volume "$PWD:/workspace" \
+  code-review-graph:local build
+```
+
+마운트한 저장소에는 쓰기 권한이 있어야 합니다.
+위 명령은 현재 사용자의 사용자 ID와 그룹 ID를 사용하므로,
+생성된 `.code-review-graph/` 디렉터리의 소유권이 현재 사용자에게 유지됩니다.
+호스트에서 root가 아닌 사용자로 이 명령들을 실행하세요.
+
+Podman에서는 같은 Dockerfile을 빌드하고 사용자 매핑을 유지합니다.
+
+```bash
+podman build -t code-review-graph:local .
+podman run --rm \
+  --userns=keep-id \
+  --env HOME=/tmp \
+  --volume "$PWD:/workspace" \
+  code-review-graph:local build
+```
+
+그래프는 마운트한 저장소의 `.code-review-graph/`에 저장되며,
+`/workspace/app.py`와 같은 컨테이너 내부의 절대 경로를 기록합니다.
+`update`와 `detect-changes`는 동일한 `/workspace` 마운트를 사용하여 Docker 또는 Podman으로 실행하세요.
+이 그래프에 대해 호스트에서 `update`를 실행하면 "built with a different repository root"
+오류가 발생할 수 있습니다. 호스트 명령으로 전환하려면 호스트에서
+`code-review-graph build`를 실행하여 호스트 경로로 그래프를 다시 빌드하세요.
+
+저장된 그래프를 확인하려면 `build`를 `status`로 바꾸세요.
+이미지에는 Git이 포함되어 있으며, 기본적으로 root가 아닌 사용자로 실행됩니다.
+이미지를 빌드하는 동안에는 그래프를 생성하지 않습니다.
+
+이 예제들은 macOS/Linux 셸 문법을 사용합니다.
+macOS에서는 실행하기 전에 Docker 호환 엔진 또는 Podman 가상 머신을 시작하세요.
+Fedora처럼 SELinux가 켜진 호스트에서는 마운트에 `:z`를 추가하세요(`"$PWD:/workspace:z"`). 그렇지 않으면 컨테이너가 저장소에 접근할 수 없습니다.
 
 ## 동작 방식
 
@@ -119,7 +178,7 @@ Build the code review graph for this project
 
 ### 증분 업데이트
 
-훅, pre-commit 훅, watch 모드가 증분 업데이트를 실행합니다. 업데이트는 변경된 파일의 diff를 구하고, 그래프의 임포트 엣지와 호출 엣지를 따라 의존 대상을 찾은 뒤, SHA-256 해시가 바뀐 파일만 다시 파싱합니다. 파일이 약 3,000개인 프로젝트(django)에서 파일 두 개를 고치면 훅 경로에서 약 2.5초 만에 재색인되며, 그중 약 1.4초는 프로세스 시작 시간입니다. 바뀐 것이 없으면 그 시작 시간만 듭니다. [증분 업데이트 지연](docs/REPRODUCING.md#incremental-update-latency)을 참고하세요.
+편집기 훅, git 훅(pre-commit, post-checkout, post-merge, post-rewrite), watch 모드가 증분 업데이트를 실행합니다. 업데이트는 변경된 파일의 diff를 구하고, 그래프의 임포트 엣지와 호출 엣지를 따라 의존 대상을 찾은 뒤, SHA-256 해시가 바뀐 파일만 다시 파싱합니다. 파일이 약 3,000개인 프로젝트(django)에서 파일 두 개를 고치면 훅 경로에서 약 2.5초 만에 재색인되며, 그중 약 1.4초는 프로세스 시작 시간입니다. 바뀐 것이 없으면 그 시작 시간만 듭니다. [증분 업데이트 지연](docs/REPRODUCING.md#incremental-update-latency)을 참고하세요.
 
 <p align="center">
   <img src="diagrams/diagram4_incremental_update.png" alt="증분 업데이트 흐름: 훅이나 watch 업데이트가 git diff를 실행하고, 그래프 엣지로 의존 대상을 찾고, SHA-256 해시가 바뀐 파일만 다시 파싱한다" width="90%" />
@@ -139,11 +198,11 @@ Build the code review graph for this project
   <img src="diagrams/diagram9_language_coverage.png" alt="분류별 언어 지원: 웹, 백엔드, 시스템, 모바일, 스크립팅, 셸, 도메인, 기타, 그리고 Jupyter와 Databricks 노트북" width="90%" />
 </p>
 
-파서는 함수, 클래스, 임포트, 호출 지점, 상속, 테스트를 추출합니다. 문법이 있는 곳에서는 Tree-sitter를, 그 밖에는 목적에 맞춘 폴백을 씁니다. 지원: Python, JavaScript/TypeScript/TSX, Go, Rust, Java, C/C++, C#, VB.NET, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, 셸 스크립트, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL, Terraform/OpenTofu(`.tf`. 다른 `.hcl` 파일은 파일 노드만 생성), Ansible YAML(플레이북, 롤, 태스크), Spring Boot 애플리케이션 설정(`application.properties`, `application.yml`, `application.yaml`과 그 `application-<profile>` 변형. 키 이름과 값의 타입만 기록하고 값은 절대 기록하지 않음), Vue/Svelte SFC, Astro 파일(TypeScript 문법으로 파싱), Jupyter와 Databricks 노트북(`.ipynb`), Perl XS 파일(`.xs`). 다른 YAML과 다른 `.properties` 파일은 소스 코드로 취급하지 않습니다.
+파서는 함수, 클래스, 임포트, 호출 지점, 상속, 테스트를 추출합니다. 문법이 있는 곳에서는 Tree-sitter를, 그 밖에는 목적에 맞춘 폴백을 씁니다. 지원: Python, JavaScript/TypeScript/TSX(`.mjs`, `.cjs`, `.mts`, `.cts` 포함), Go, Rust, Java, C/C++, C#, VB.NET, Ruby, Kotlin(`.kt`, `.kts`), Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, 셸 스크립트, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL/PL/SQL(Oracle)과 dbt 모델, Terraform/OpenTofu(`.tf`. 다른 `.hcl` 파일은 파일 노드만 생성), Ansible YAML(플레이북, 롤, 태스크), Spring Boot 애플리케이션 설정(`application.properties`, `application.yml`, `application.yaml`과 그 `application-<profile>` 변형. 키 이름과 값의 타입만 기록하고 값은 절대 기록하지 않음), 값 없이 구조만 담는 일반 YAML(`locales/` 같은 폴더의 번역 파일은 파일 노드만 생성), XSLT 스타일시트(`.xsl`, `.xslt`), 값 없이 구조만 담는 JSON(`.json`. 번역, 테스트, 문서, 예제, 데이터 파일은 파일 노드만 남기고 lock 파일은 건너뜀), Vue/Svelte SFC, HTML 페이지(`.html`, `.htm`. 인라인 스크립트, 그리고 id가 있는 `div`, `section`, `article` 블록을 `DocSection` 노드로), Astro 파일(TypeScript 문법으로 파싱), Jupyter와 Databricks 노트북(`.ipynb`, 그리고 Databricks `.py` 내보내기), Perl XS 파일(`.xs`), Robot Framework 파일(`.robot`, `.resource`), Liquid 템플릿(`.liquid`). 다른 `.properties` 파일은 소스 코드로 취급하지 않습니다.
 
-PHP 프로젝트에는 저장소 범위로 제한된 Composer PSR-4 해석, Blade 템플릿 참조, 그리고 소스에 명시적인 프레임워크 임포트, 모델 상속, 수신자 근거가 드러날 때의 Laravel Route 및 Eloquent 엣지가 추가됩니다.
+PHP 프로젝트에는 저장소 범위로 제한된 Composer PSR-4 해석, Blade 템플릿 참조, 그리고 소스에 명시적인 프레임워크 임포트, 모델 상속, 수신자 근거가 드러날 때의 Laravel Route 및 Eloquent 엣지가 추가됩니다. `routes/*.php`의 정적 Laravel 라우트는 리터럴 그룹 접두사까지 포함해 Endpoint 노드와 컨트롤러로 가는 HANDLES 엣지를 만듭니다.
 
-Java 프로젝트에는 Spring 의존성 주입 호출 해석, 요청 엔드포인트와 WebFlux 라우트, 스케줄 트리거, 애플리케이션 이벤트의 발행자에서 리스너로 가는 엣지, Temporal 워크플로와 액티비티 엣지가 추가됩니다. 각 리졸버는 파싱 이후에 실행되며, 주입된 필드나 발행된 이벤트, 워크플로 스텁이 저장소 안에서 보여야 합니다.
+Java 프로젝트에는 Spring 의존성 주입 호출 해석, 요청 엔드포인트와 WebFlux 라우트, 스케줄 트리거, 애플리케이션 이벤트의 발행자에서 리스너로 가는 엣지, Spring AOP 어드바이스에서 대상으로 가는 엣지, Temporal 워크플로와 액티비티 엣지가 추가됩니다. 각 리졸버는 파싱 이후에 실행되며, 주입된 필드나 발행된 이벤트, 워크플로 스텁이 저장소 안에서 보여야 합니다.
 
 ### 직접 언어 추가하기
 
@@ -163,7 +222,7 @@ call_node_types = ["call"]
 
 ### CI에서의 위험 점수 PR 리뷰(GitHub Action)
 
-같은 분석이 composite GitHub Action으로도 동작합니다. 그래프는 사용자의 CI 러너에서 만들어지고 질의되며, 소스 코드가 외부 서비스로 전송되지 않습니다. 풀 리퀘스트마다 위험 점수가 매겨진 함수, 영향받는 실행 흐름, 테스트 공백을 담은 고정 댓글 하나를 남기고, 푸시할 때마다 그 자리에서 갱신합니다. 선택 입력 `fail-on-risk`를 쓰면 머지 게이트가 됩니다.
+같은 분석이 composite GitHub Action으로도 동작합니다. 그래프는 사용자의 CI 러너에서 만들어지고 질의되며, 소스 코드가 외부 서비스로 전송되지 않습니다. 풀 리퀘스트마다 위험 점수가 매겨진 함수, 영향받는 실행 흐름, 테스트 공백을 담은 고정 댓글 하나를 남기고, 푸시할 때마다 그 자리에서 갱신합니다. 선택 입력 `fail-on-risk`를 쓰면 머지 게이트가 됩니다. 선택 입력 `details`는 그래프 맥락을 더 보여 주며, 접힌 채로 크기도 제한됩니다. 상위 심벌마다 그 점수가 나온 이유, 변경이 닿는 커뮤니티와 허브와 경계를 넘는 연결, 영향 범위, 테스트 없는 핫스팟, 그리고 그래프의 출처를 담습니다.
 
 ```yaml
 # .github/workflows/code-review-graph.yml
@@ -179,7 +238,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: tirth8205/code-review-graph@v2.3.9
+      - uses: tirth8205/code-review-graph@v2.4.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 ```
@@ -219,7 +278,9 @@ jobs:
 >
 > `code-review-graph` 행은 스냅샷이며 현재 측정값이 아닙니다. `84bde354` 이후 저장소가 커져서 코퍼스도 그래프도 오늘은 훨씬 큽니다.
 
-코퍼스 전체 기준선은 실제 에이전트가 치르지 않는 상한입니다. 에이전트는 식별자를 grep하고 가장 잘 맞는 파일을 읽습니다. `agent_baseline` 평가 벤치마크가 바로 그 경우를 측정합니다(순수 파이썬으로 코퍼스를 grep하고, 일치 수 기준 상위 3개 파일을 골라, 그래프 질의 비용과 토큰을 비교). 결과는 `evaluate/results/<repo>_agent_baseline_<date>.csv`에 기록됩니다. 아직 공식 측정값은 공개하지 않았습니다.
+코퍼스 전체 기준선은 실제 에이전트가 치르지 않는 상한입니다. 에이전트는 식별자를 grep하고 가장 잘 맞는 파일을 읽습니다. `agent_baseline` 평가 벤치마크가 바로 그 경우를 측정합니다(순수 파이썬으로 코퍼스를 grep하고, 일치 수 기준 상위 3개 파일을 골라, 그래프 질의 비용과 토큰을 비교). 결과는 `evaluate/results/<repo>_agent_baseline_<date>.csv`에 기록됩니다. 이 현실적인 기준선에 대해 6개 저장소 18개 질문의 중앙값은 **6.65x**입니다(평균 14.8x, 범위 4.2x~72.6x). 2026-09-22 측정은 검색과 이 기준선이 테스트 파일의 순위를 낮추기 전의 것이므로, 다시 측정하기 전까지 `code-review-graph eval --benchmark agent_baseline --embed`의 결과는 이 수치와 다릅니다. 전체 표는 `docs/REPRODUCING.md`의 "Canonical capture, 2026-09-22" 절에 있습니다.
+
+이 비율은 저장소 크기를 따라갑니다. 그래프 응답은 일정하게 유지되는 반면(이번에 측정한 모든 저장소에서 2,432~4,021 토큰) grep 기준선은 코퍼스와 함께 커지기 때문입니다. express는 4.5x, fastapi는 52x였습니다. 두 수치 모두 **검색** 비용, 즉 답을 찾는 데 필요한 토큰을 측정합니다. 에이전트가 그래프가 지목한 파일을 그다음에 연다면 그래프 비용은 대체가 아니라 추가입니다. `semantic_search_nodes_tool(include_source=True)`는 위치와 함께 코드를 반환해 그럴 필요를 없애지만, 이 경로를 종단 간으로 측정하는 일은 남아 있습니다.
 
 공식 `token_efficiency` 벤치마크는 다른 상황을 측정합니다. 커밋의 변경 파일 내용만을 상대로 `get_review_context()` JSON 전체를 비교하며, 응답에 영향 범위 엣지와 소스 조각이 들어 있어 작은 커밋에서는 비율이 1보다 작게 나옵니다. 두 벤치마크는 서로 다른 질문에 답합니다. [`docs/REPRODUCING.md`](docs/REPRODUCING.md#which-benchmark-measures-what)를 보세요.
 
@@ -243,7 +304,9 @@ jobs:
 | gin | 3 | 0.609 | 0.439 | 1.0 |
 | **평균** | **13** | **0.693** | **0.546** | **1.000** |
 
-이 벤치마크는 **동시 변경 모드**도 돌립니다. 예측기에 변경 파일 하나를 주고, 같은 커밋에서 작성자가 함께 고친 다른 파일로 채점하는 방식으로, 근거가 그래프가 아니라 git 이력입니다. 두 모드 모두 결과 CSV에 나옵니다(`ground_truth_mode` 열). 2026-08-02 측정에서 동시 변경 모드는 채점한 모든 커밋에서 `predicted_files = 0`을 돌려주었기 때문에 아직 쓸 만한 측정이 아니며, 동시 변경 수치는 인용하지 않습니다.
+이 표는 아래에서 설명하는 경로 수정 이전에 측정한 2026-08-02 결과입니다. 그 버그는 그래프에서 유도한 정답에서도 실제 이웃 파일을 빠뜨렸으므로, 벤치마크를 다시 돌리면 이 숫자는 바뀝니다.
+
+이 벤치마크는 **동시 변경 모드**도 돌립니다. 예측기에 변경 파일 하나를 주고, 같은 커밋에서 작성자가 함께 고친 다른 파일로 채점하는 방식으로, 근거가 그래프가 아니라 git 이력입니다. 두 모드 모두 결과 CSV에 나옵니다(`ground_truth_mode` 열). 2026-08-02 측정에서 동시 변경 모드는 코드 시드(예: `code_review_graph/cli.py`, gin의 `context.go`)를 포함해 채점한 모든 커밋에서 `predicted_files = 0`을 돌려주었습니다. 원인은 벤치마크의 경로 버그였습니다. `git diff`는 저장소 기준 상대 경로를 주는데 그래프는 절대 경로를 저장하므로, 시드가 어떤 노드와도 맞지 않았습니다. 이 버그는 이제 고쳤지만 벤치마크를 아직 다시 돌리지 않았으므로 동시 변경 수치는 인용하지 않습니다.
 
 </details>
 
@@ -266,7 +329,7 @@ jobs:
 
 ### 한계
 
-- **영향 분석의 "재현율 1.0"은 순환 논리입니다.** 과거 정답이 예측기가 따라가는 바로 그 그래프 엣지에서 나오므로, 구성상 상한일 수밖에 없습니다. 동시 변경 모드는 아직 쓸 만한 측정이 아닙니다.
+- **영향 분석의 "재현율 1.0"은 순환 논리입니다.** 과거 정답이 예측기가 따라가는 바로 그 그래프 엣지에서 나오므로, 구성상 상한일 수밖에 없습니다. 경로 수정을 반영해 벤치마크를 다시 돌릴 때까지 동시 변경 수치는 인용하지 않습니다.
 - **작은 단일 파일 변경.** 사소한 편집에서는 그래프 맥락이 파일을 그냥 읽는 것보다 클 수 있습니다. 그 차이는 여러 파일 분석을 가능하게 하는 구조 메타데이터입니다.
 - **검색 순위.** 키워드 검색은 보통 맞는 결과를 위쪽에 두지만 순위 매기기는 더 손봐야 합니다. 모듈 패턴 명명 때문에 Express 질의는 결과가 없을 수 있습니다.
 - **흐름 탐지.** 진입점 탐지는 Python과 PHP/Laravel에서 가장 강합니다. JavaScript와 Go의 흐름 탐지는 더 손봐야 합니다.
@@ -281,17 +344,17 @@ jobs:
 | **증분 업데이트** | 해시가 바뀐 파일만 다시 파싱합니다. 파일이 약 3,000개인 저장소에서 파일 두 개 편집은 훅 경로로 약 2.5초입니다([측정값](docs/REPRODUCING.md#incremental-update-latency)). |
 | **언어와 노트북 지원** | 위의 [언어 지원](#언어-지원과-노트북)을 보세요. |
 | **프레임워크를 아는 PHP 파싱** | 저장소 범위로 제한된 Composer PSR-4 임포트, Blade 템플릿 참조, 근거에 기반한 Laravel Route에서 컨트롤러로 가는 엣지와 Eloquent 관계 엣지 |
-| **프레임워크를 아는 Java 파싱** | Spring 의존성 주입 호출 해석, 요청 엔드포인트와 WebFlux 라우트, 스케줄 트리거, 애플리케이션 이벤트의 발행자에서 리스너로 가는 엣지, Temporal 워크플로와 액티비티 엣지, 그리고 값 없이 색인되는 Spring Boot 설정 키 |
+| **프레임워크를 아는 Java 파싱** | Spring 의존성 주입 호출 해석, 요청 엔드포인트와 WebFlux 라우트, 스케줄 트리거, 애플리케이션 이벤트의 발행자에서 리스너로 가는 엣지, Spring AOP 어드바이스 엣지, Temporal 워크플로와 액티비티 엣지, 그리고 값 없이 색인되는 Spring Boot 설정 키 |
 | **영향 범위 분석** | 변경으로 영향을 받을 법한 함수, 클래스, 파일 |
-| **자동 업데이트 훅** | 편집기 훅, git pre-commit 훅, watch 모드가 작업 중에 그래프를 갱신 |
+| **자동 업데이트 훅** | 편집기 훅, git 훅(커밋 전, 그리고 checkout, merge, rebase 후), watch 모드가 작업 중에 그래프를 갱신 |
 | **시맨틱 검색** | 선택적 벡터 임베딩. sentence-transformers, Google Gemini, MiniMax, Voyage AI 또는 OpenAI 호환 엔드포인트(OpenAI, Azure, new-api, LiteLLM, vLLM, LocalAI) |
-| **대화형 시각화** | D3.js force-directed 그래프. 검색, 커뮤니티 범례 토글, 차수에 따른 노드 크기 |
+| **대화형 시각화** | D3.js force-directed 그래프. 검색, 커뮤니티 범례 토글, 차수에 따른 노드 크기, 그리고 심벌, 파일, 흐름, 변경에서 시작하는 이웃 보기 |
 | **허브와 브리지 탐지** | 가장 많이 연결된 노드와 병목(매개 중심성) |
 | **의외성 점수** | 예상 밖 결합: 커뮤니티 간, 언어 간, 주변부에서 허브로 가는 엣지 |
-| **지식 공백 분석** | 고립 노드, 테스트 없는 핫스팟, 얇은 커뮤니티 |
+| **지식 공백 분석** | 고립 노드, 테스트 없는 핫스팟, 얇은 커뮤니티, 임포트 순환 |
 | **추천 질문** | 브리지, 허브, 의외의 결합에서 만든 리뷰 질문 |
-| **엣지 신뢰도** | 2단계 신뢰도(EXTRACTED/INFERRED)와 엣지의 실수 점수 |
-| **그래프 순회** | 아무 노드에서 시작하는 BFS/DFS. 깊이와 토큰 예산 설정 가능 |
+| **엣지 신뢰도** | 4단계(EXTRACTED, INFERRED, AMBIGUOUS, UNRESOLVED)와 엣지의 실수 점수. 그래프가 연결하지 못한 호출은 그렇다고 표시 |
+| **그래프 순회** | 아무 노드에서 시작하는 BFS/DFS. 깊이와 토큰 예산 설정 가능. `path_to`는 한 심벌이 다른 심벌에 어떻게 닿는지 보여 주고 가장 약한 홉을 알려 줌 |
 | **내보내기 형식** | GraphML(Gephi/yEd), Neo4j Cypher, Obsidian 볼트, JSON, 그리고 SVG(SVG는 `eval` 엑스트라의 matplotlib 필요) |
 | **토큰 벤치마크** | `code_review_graph/token_benchmark.py`가 질문마다 코퍼스 전체 토큰과 그래프 질의 토큰을 측정 |
 | **맥락 절감 추정치** | 리뷰, 영향 분석, detect-changes, 아키텍처 응답에 붙는 `context_savings` 메타데이터(`estimated`, `saved_tokens`, `saved_percent`) |
@@ -299,7 +362,7 @@ jobs:
 | **실행 흐름** | 진입점에서 이어지는 호출 사슬을 가중 중요도로 정렬 |
 | **커뮤니티 탐지** | 그래프 크기에 맞춰 해상도를 조절하는 Leiden 클러스터링 |
 | **아키텍처 개요** | 커뮤니티 구조 기반 아키텍처 지도와 결합 경고 |
-| **위험 점수 리뷰** | `detect_changes`가 diff를 영향받는 함수, 흐름, 테스트 공백에 대응 |
+| **위험 점수 리뷰** | `detect_changes`가 diff를 영향받는 함수, YAML과 JSON 경로, 흐름, 테스트 공백에 대응 |
 | **사용자 정의 언어** | `.code-review-graph/languages.toml`로 새 언어 추가. 포크 불필요 |
 | **GitHub Action** | CI에서 위험 점수가 매겨진 고정 PR 리뷰 댓글. 선택적 `fail-on-risk` 머지 게이트 |
 | **리팩터링 도구** | 이름 변경 미리보기, 프레임워크를 아는 데드 코드 탐지, 커뮤니티 기반 제안 |
@@ -338,14 +401,19 @@ Qoder에는 이 저장소의 `skills/` 디렉터리에서 `build-graph`, `review
 ```bash
 code-review-graph install          # Detect and configure all platforms
 code-review-graph install --platform <name>  # One platform
+code-review-graph install --steering  # Claude Code: graph context beside each search and read
 code-review-graph uninstall --dry-run  # Preview removal of installed artifacts
 code-review-graph build            # Parse the whole codebase
+code-review-graph build --follow-symlinks  # Also index symlinked folders
 code-review-graph update           # Incremental update (changed files only)
 code-review-graph status           # Graph statistics
 code-review-graph watch            # Update on file changes
 code-review-graph forget <path>    # Drop already-parsed files from the graph
 code-review-graph dead-code        # Functions and classes with no callers or tests
+code-review-graph query path_to <from> --to <to>  # How one symbol reaches another
+code-review-graph impact --detail-level compact  # Blast radius as ranked file paths
 code-review-graph visualize        # Interactive HTML graph
+code-review-graph visualize --seed-symbol <name>  # Neighbourhood of one symbol
 code-review-graph visualize --format json      # Export graph data as JSON
 code-review-graph visualize --format graphml   # Export as GraphML
 code-review-graph visualize --format svg       # Export as SVG (needs matplotlib)
@@ -356,6 +424,8 @@ code-review-graph detect-changes --brief         # Risk panel + token savings (r
 code-review-graph detect-changes --brief --base main  # Against the merge base of main and HEAD
 code-review-graph update --brief                 # Refresh graph + same panel
 code-review-graph detect-changes --brief --verify  # Cross-check against tiktoken
+code-review-graph detect-changes --details all  # Add graph context to the JSON
+code-review-graph context-history  # Trend of the opt-in savings log (CRG_CONTEXT_HISTORY=1)
 code-review-graph register <path>  # Register repo in the multi-repo registry
 code-review-graph unregister <path|alias>  # Remove repo from the registry
 code-review-graph repos            # List registered repositories
@@ -365,6 +435,8 @@ code-review-graph daemon status    # Daemon status and repos
 code-review-graph eval             # Run evaluation benchmarks
 code-review-graph serve            # Start the MCP server (stdio)
 code-review-graph serve --http     # MCP over Streamable HTTP on localhost:5555
+code-review-graph serve --http --multi-repo  # One HTTP server for every registered repo
+code-review-graph serve --multi-worktree  # One child server per linked Git worktree
 ```
 
 이것은 일부만 고른 목록입니다. `code-review-graph --help`가 모든 명령을 보여 주고, [docs/COMMANDS.md](docs/COMMANDS.md)가 각 플래그를 설명합니다.
@@ -401,13 +473,15 @@ JSON 내보내기는 로컬 그래프 데이터 디렉터리에 기록되며, �
 
 같은 `context_savings` 메타데이터가 `get_impact_radius`, `get_review_context`, `detect_changes`, `get_architecture_overview` MCP 도구의 JSON 응답에도 붙습니다.
 
+이 추정치를 시간에 따라 보려면 `CRG_CONTEXT_HISTORY=1`을 설정하세요(기본값은 꺼짐). 추정치마다 `graph.db` 옆의 로컬 로그에 한 줄이 추가되며, 토큰 수와 도구 이름만 담깁니다. `code-review-graph context-history`가 날짜별 또는 도구별로 보여 줍니다. [docs/USAGE.md](docs/USAGE.md#context-history)를 참고하세요.
+
 </details>
 
 <details>
 <summary><strong>다중 저장소 데몬</strong></summary>
 <br>
 
-편집기가 훅을 지원하지 않거나(예: Cursor, OpenCode) 편집기 연동 없이 그래프를 최신으로 두고 싶다면, 데몬이 저장소를 감시하며 그래프를 갱신합니다. `code-review-graph`에 함께 들어 있어 따로 설치할 필요가 없습니다.
+`install`이 편집기에 훅을 넣어 주지 않거나(예: Windsurf, Zed) 편집기 연동 없이 그래프를 최신으로 두고 싶다면, 데몬이 저장소를 감시하며 그래프를 갱신합니다. `code-review-graph`에 함께 들어 있어 따로 설치할 필요가 없습니다.
 
 ```bash
 # 1. Register the repos to watch
@@ -454,9 +528,9 @@ alias = "project-b"
 | `build_or_update_graph_tool` | 그래프 생성 또는 증분 갱신 |
 | `run_postprocess_tool` | 흐름 탐지, 커뮤니티 탐지, FTS 색인 재실행 |
 | `get_minimal_context_tool` | 작은 맥락(약 100 토큰). 이것을 먼저 호출 |
-| `get_impact_radius_tool` | 변경 파일의 영향 범위 |
+| `get_impact_radius_tool` | 변경 파일의 영향 범위. `detail_level="compact"`는 순위를 매긴 파일 경로를 반환 |
 | `get_review_context_tool` | 구조 요약이 붙은 리뷰 맥락 |
-| `query_graph_tool` | 호출자, 피호출자, 테스트, 임포트, 상속 질의 |
+| `query_graph_tool` | 호출자, 피호출자, 테스트, 임포트, 상속, 그리고 두 심벌 사이의 `path_to` 질의 |
 | `traverse_graph_tool` | 아무 노드에서 시작하는 BFS/DFS 순회. 토큰 예산 포함 |
 | `semantic_search_nodes_tool` | 이름이나 의미로 코드 개체 검색 |
 | `embed_graph_tool` | 시맨틱 검색용 벡터 임베딩 계산 |
@@ -472,7 +546,7 @@ alias = "project-b"
 | `detect_changes_tool` | 위험 점수가 매겨진 변경 영향 분석 |
 | `get_hub_nodes_tool` | 가장 많이 연결된 노드 |
 | `get_bridge_nodes_tool` | 매개 중심성 기준 병목 |
-| `get_knowledge_gaps_tool` | 구조적 약점과 테스트 없는 핫스팟 |
+| `get_knowledge_gaps_tool` | 구조적 약점, 테스트 없는 핫스팟, 임포트 순환 |
 | `get_surprising_connections_tool` | 예상 밖의 커뮤니티 간 결합 |
 | `get_suggested_questions_tool` | 분석에서 만든 리뷰 질문 |
 | `refactor_tool` | 이름 변경 미리보기, 데드 코드 탐지, 제안 |
@@ -508,7 +582,7 @@ git 저장소에서는 추적되는 파일만 색인하므로(`git ls-files`) gi
 pip install "code-review-graph[embeddings]"          # Local vector embeddings (sentence-transformers)
 pip install "code-review-graph[google-embeddings]"   # Google Gemini embeddings
 pip install "code-review-graph[communities]"         # Community detection (igraph)
-pip install "code-review-graph[enrichment]"          # Python call-resolution enrichment (Jedi)
+pip install "code-review-graph[enrichment]"          # Python call resolution with Jedi (then build --enrich)
 pip install "code-review-graph[eval]"                # Evaluation benchmarks and SVG export (matplotlib)
 pip install "code-review-graph[wiki]"                # ollama client (not used by the current wiki generator)
 pip install "code-review-graph[all]"                 # All optional dependencies
@@ -521,21 +595,27 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_GIT_TIMEOUT` | Git 작업의 제한 시간(초, build / update / watch) | `30` |
 | `CRG_DISCOVERY_TIMEOUT` | 파일 목록이 주어지지 않았을 때 변경 내용을 찾는 각 Git 명령의 제한 시간(초). 초과하면 오류를 반환하며 '변경 없음'으로 보고하지 않음 | `5`(`CRG_GIT_TIMEOUT`을 직접 설정하면 그 값) |
 | `CRG_DATA_DIR` | 그래프 데이터베이스와 생성물이 놓이는 디렉터리 | - |
-| `CRG_HOOK_WORKTREES` | `1`로 두면 pre-commit 훅이 연결된 git worktree에서도 실행 | - |
+| `CRG_HOOK_WORKTREES` | `1`로 두면 생성된 git 훅이 연결된 git worktree에서도 실행 | - |
 | `CRG_EMBEDDING_MODEL` | 로컬 벡터 임베딩의 기본 모델 | `all-MiniLM-L6-v2` |
 | `CRG_ACCEPT_CLOUD_EMBEDDINGS` | `1`로 두면 클라우드 임베딩 전송 경고를 숨김 | - |
 | `CRG_ALLOW_REMOTE_CODE` | `trust_remote_code=True`가 필요한 HuggingFace 모델 허용 | `0` |
+| `CRG_VECTOR_CACHE` | `1`로 두면 디코딩한 임베딩 벡터를 시맨틱 검색 사이에도 메모리에 유지해, 쿼리마다 SQLite에서 전부 다시 읽지 않음. 대신 RAM(캐시한 인덱스마다 벡터 수 × 차원 수 × 4바이트)과, 캐시한 데이터베이스마다 프로세스가 끝날 때까지 열려 있는 읽기 연결 1개를 사용함. Windows에서는 열려 있는 동안 `graph.db`를 삭제하거나 교체할 수 없음 | - |
 | `CRG_MAX_IMPACT_NODES` | 영향 분석에 넣는 최대 노드 수 | `500` |
 | `CRG_MAX_IMPACT_DEPTH` | 영향 범위 분석의 탐색 깊이 | `2` |
 | `CRG_MAX_BFS_DEPTH` | 그래프 순회의 최대 깊이 | `15` |
 | `CRG_MAX_CHANGED_FUNCS` | 변경 보고 하나에서 분석하는 변경 함수의 최대 수 | `500` |
-| `CRG_MAX_TRANSITIVE_FRONTIER` | 전이적 호출자/피호출자 확장의 최대 프런티어 크기 | `50` |
+| `CRG_MAX_DELETION_FILES` | diff가 삭제한 함수와 클래스를 알려 주려고 변경 보고 하나에서 이전 버전을 읽는 파일의 최대 수 | `100` |
+| `CRG_MAX_CHANGED_YAML_PATHS` | 변경 보고 하나에서 분석하는 변경 YAML 경로의 최대 수. JSON 경로에도 따로 같은 한도가 적용됨 | `200` |
+| `CRG_MAX_TRANSITIVE_FRONTIER` | `tests_for`와 `detect-changes`가 테스트를 찾을 때 홉마다 따라가는 피호출자의 최대 수. 이름순으로 앞의 것을 남기므로 같은 그래프는 언제나 같은 답을 줌 | `50` |
 | `CRG_CALLER_TEST_ROUTE_DEPTH` | 테스트가 없는 변경 심벌에 대해 테스트된 호출자를 찾으며 들어오는 `CALLS`를 거슬러 올라갈 홉 수. 커버리지가 아니라 참고 정보로 보고됩니다 | `2` |
 | `CRG_CALLER_TEST_ROUTE_MAX_CALLERS` | 그 테스트된 호출자를 찾는 동안 검사할 최대 호출자 수 | `500` |
 | `CRG_TOOL_TIMEOUT` | 읽기 전용 MCP 도구의 제한 시간(초. `0`이면 해제). 쓰기 작업(build / postprocess / embed / wiki / apply-refactor)에는 적용되지 않음 | `0` |
 | `CRG_CHURN_WINDOW_DAYS` | `detect-changes --churn`의 커밋 수를 세는 기간 | `90` |
+| `CRG_CONTEXT_HISTORY` | `1`로 설정하면 각 `context_savings` 추정치를 로컬 로그 `.code-review-graph/context-history.jsonl`에 기록합니다. `code-review-graph context-history`로 확인합니다. 토큰 수와 도구 이름만 남기며 외부로 보내지 않습니다 | - |
 | `CRG_LEIDEN_SEED` | Leiden 커뮤니티 탐지의 시드 | `42` |
 | `CRG_RECURSE_SUBMODULES` | `1`, `true`, `yes`일 때 git 서브모듈 포함 | - |
+| `CRG_FOLLOW_SYMLINKS` | `1`, `true`, `yes`, `on`일 때 심볼릭 링크 폴더(저장소 안팎)를 따라감. `--follow-symlinks`와 같음. [심볼릭 링크 폴더](docs/USAGE.md#symlinked-folders) 참고 | - |
+| `CRG_MAX_FOLLOWED_FILES` | 심볼릭 링크 폴더로 가져오는 파일의 최대 수 | `10000` |
 | `CRG_TOOLS` | 서버로 띄울 때 노출할 MCP 도구의 쉼표 구분 허용 목록 | - |
 | `GOOGLE_API_KEY` | Google Gemini 임베딩의 API 키 | - |
 | `MINIMAX_API_KEY` | MiniMax 임베딩의 API 키 | - |
@@ -553,6 +633,8 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_OPENAI_BATCH_SIZE` | OpenAI 호환 요청의 배치 크기 | `100` |
 | `NO_COLOR` | 터미널의 ANSI 색 끄기 | - |
 | `CRG_SERIAL_PARSE` | `1`로 두면 병렬 파싱 끄기(디버깅용) | - |
+| `CRG_ENABLE_ENRICHMENT` | `1`로 두면 build와 update마다 Jedi로 Python 메서드 호출 해석(`enrichment` 추가 기능 필요, Python 파일당 약 1초 추가). `build --enrich`와 같음 | 꺼짐 |
+| `CRG_DISABLE_ENRICHMENT` | `1`로 두면 요청이 있어도 Jedi를 실행하지 않음 | - |
 
 OpenAI 호환 임베딩(OpenAI, Azure 또는 new-api, LiteLLM, vLLM, LocalAI, OpenAI 모드의 Ollama 같은 자체 게이트웨이)에는 추가 설치가 필요 없습니다. 변수를 설정하고 `embed_graph`에 `provider="openai"`를 넘기세요.
 
@@ -664,7 +746,8 @@ pytest
 ```
 
 풀 리퀘스트는 `staging`(기본 브랜치)으로 보내 주세요. 변경은
-`staging` → `testing` → `main` 순으로 올라가고, 릴리스는 `main`에서 태그합니다. 전체 흐름은
+`staging` → `testing` → `main` 순으로 올라가고, 릴리스는 `main`에서 태그합니다. 자동으로
+올라가는 단계는 없으며, 사람이 하나하나 검토하고 머지합니다. 전체 흐름은
 [CONTRIBUTING.md](CONTRIBUTING.md#branching-and-promotion)를 보세요.
 
 내장 언어를 추가하려면 `code_review_graph/parser.py`를 고치세요. 확장자를 `EXTENSION_TO_LANGUAGE`에, 노드 타입 매핑을 `_CLASS_TYPES`, `_FUNCTION_TYPES`, `_IMPORT_TYPES`, `_CALL_TYPES`에 추가하면 됩니다. 테스트 픽스처를 함께 넣어 PR을 보내 주세요. 저장소 하나에서만 필요한 언어라면 대신 [`languages.toml`](docs/CUSTOM_LANGUAGES.md)을 쓰세요.

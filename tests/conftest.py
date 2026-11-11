@@ -9,9 +9,22 @@ not covered here — those tests patch ``Path.home()`` themselves.
 
 from __future__ import annotations
 
+import importlib
 import os
+import pkgutil
 
 import pytest
+
+import code_review_graph.tools
+
+# The tool modules load on first use (#1139). A test that patches a name such
+# as ``code_review_graph.graph.GraphStore`` while one of them loads for the
+# first time leaves its mock bound there for every later test. Load them before
+# any test runs, as importing the package used to.
+for _module in ("incremental", "postprocessing"):
+    importlib.import_module(f"code_review_graph.{_module}")
+for _info in pkgutil.iter_modules(code_review_graph.tools.__path__):
+    importlib.import_module(f"code_review_graph.tools.{_info.name}")
 
 
 @pytest.fixture(autouse=True)
@@ -41,6 +54,18 @@ def isolated_crg_home(tmp_path_factory, monkeypatch):
     # the variable to a temp directory instead of merely clearing it:
     # unset, a miss would be silently destructive; set, it cannot be.
     monkeypatch.setenv("HERMES_HOME", str(tmp_path_factory.mktemp("hermes-home")))
+    # Tests that exercise the Codex default patch Path.home() to a temporary
+    # directory; clear an external override so it cannot escape that scope.
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    # DeepSeek Harness reads ``$DSH_HOME/cordis.patch.yml``, falling back to
+    # ``~/.dsh``. ``skills._dsh_home()`` prefers that variable over a patched
+    # ``Path.home()``, so a suite that only fakes the home would still edit
+    # the developer's real patch layer. Pin it here, exactly as the Hermes
+    # variable above.
+    monkeypatch.setenv("DSH_HOME", str(tmp_path_factory.mktemp("dsh-home")))
+    # A developer who records their own context history (#813) must not
+    # have the suite append lines to every scratch repository it builds.
+    monkeypatch.delenv("CRG_CONTEXT_HISTORY", raising=False)
     return home
 
 
@@ -60,6 +85,15 @@ _OPT_IN_MARKERS = frozenset({
 # Environment escape hatches, for suites that also need to be switchable on
 # without a ``-m`` expression (CI runs them alongside the ordinary suite).
 _OPT_IN_ENV_OVERRIDES = {"packaging": "CRG_RUN_PACKAGING_TESTS"}
+
+
+def pytest_configure(config):
+    # Parent runners (e.g. CLI wrappers) may inject GIT_CONFIG_* variables
+    # (such as diff.external="" or empty core.hooksPath) that break subprocess
+    # Git invocations in test fixtures.
+    for key in list(os.environ):
+        if key.startswith("GIT_CONFIG_"):
+            del os.environ[key]
 
 
 def pytest_collection_modifyitems(config, items):

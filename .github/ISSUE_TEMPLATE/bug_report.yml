@@ -16,7 +16,7 @@ body:
       description: >-
         Output of `pip show code-review-graph` (or the version reported by
         `code-review-graph status`).
-      placeholder: "2.3.5"
+      placeholder: "2.4.0"
     validations:
       required: true
   - type: dropdown

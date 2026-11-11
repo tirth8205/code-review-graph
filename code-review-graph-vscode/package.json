@@ -2,7 +2,7 @@
   "name": "code-review-graph",
   "displayName": "Code Review Graph",
   "description": "Visualize code dependencies, blast radius, and review context from your code-review-graph database directly in VS Code.",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "publisher": "tirth8205",
   "license": "MIT",
   "icon": "media/icons/icon.png",
@@ -171,7 +171,7 @@
           "type": "string",
           "default": "",
           "scope": "machine",
-          "description": "Path to the code-review-graph CLI binary. Leave empty to use the bundled version or the one found on PATH."
+          "description": "Path to the code-review-graph CLI binary. Leave empty to run code-review-graph from your PATH. The extension does not include the CLI, so install it first."
         },
         "codeReviewGraph.autoUpdate": {
           "type": "boolean",

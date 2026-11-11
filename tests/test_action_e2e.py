@@ -557,6 +557,7 @@ def make_runner(
     event_name: str = "pull_request",
     comment: str = "true",
     fail_on_risk: str = "none",
+    details: str = "",
 ) -> Runner:
     root = tmp_path_factory.mktemp(slug)
     workspace = root / "workspace"
@@ -586,6 +587,7 @@ def make_runner(
                 "inputs.comment": comment,
                 "inputs.fail-on-risk": fail_on_risk,
                 "inputs.github-token": "ghs_not_a_real_token",
+                "inputs.details": details,
             }
         ),
     )
@@ -1118,6 +1120,102 @@ def test_trusted_workflow_accepts_the_real_rendered_comment(
     assert wrapped.startswith(MARKER)
     assert HEADING in wrapped
     assert "@" not in wrapped.replace("&#64;", ""), "mentions must be neutralised"
+
+
+# ---------------------------------------------------------------------------
+# The opt-in `details` input (#882)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def detailed_run(
+    opt_in: None, tmp_path_factory: pytest.TempPathFactory
+) -> Iterator[ActionRun]:
+    runner = make_runner(
+        tmp_path_factory, "crg-action-details", comment="false", details="all"
+    )
+    make_scratch_repo(runner.workspace)
+    yield execute(runner)
+
+
+def _crg_argv(run: ActionRun, subcommand: str) -> list[str]:
+    calls = run.runner.calls_to("code-review-graph")
+    return next(argv for argv in calls if len(argv) > 1 and argv[1] == subcommand)
+
+
+def _renderer_argv(run: ActionRun) -> list[str]:
+    return next(
+        argv for argv in run.runner.calls_to("python")
+        if "render_pr_comment.py" in " ".join(argv) and "--quiet" not in argv
+    )
+
+
+def test_details_left_empty_runs_the_commands_of_today(happy: ActionRun):
+    """The default run passes no new flag to either command."""
+    detect = _crg_argv(happy, "detect-changes")
+    assert detect[1:] == ["detect-changes", "--base", "origin/main"], detect
+    render = _renderer_argv(happy)
+    assert "--details" not in render, render
+    assert happy.report is not None and "details" not in happy.report
+    assert "<details>" not in happy.comment
+
+
+def test_details_input_reaches_both_commands(detailed_run: ActionRun):
+    detect = _crg_argv(detailed_run, "detect-changes")
+    assert detect[-2:] == ["--details", "all"], detect
+    render = _renderer_argv(detailed_run)
+    assert render[-2:] == ["--details", "all"], render
+
+
+def test_details_input_adds_bounded_graph_context(detailed_run: ActionRun, happy: ActionRun):
+    assert detailed_run.report is not None
+    details = detailed_run.report["details"]
+    assert details["sections"] == [
+        "risk", "communities", "hubs", "coupling", "impact", "gaps", "graph",
+    ]
+    comment = detailed_run.comment
+    start, end = comment.index("<details>"), comment.index("</details>")
+    block = comment[start:end + len("</details>")]
+    assert len(block.encode("utf-8")) <= 12_000
+    assert "#### Why these risk scores" in block
+    assert "refresh\\_token" in block
+    assert "#### Graph" in block
+    # Everything outside the block is the default comment, apart from the
+    # token-savings estimate, which measures the larger report.
+    def without_savings(text: str) -> str:
+        return "\n".join(
+            line for line in text.splitlines() if not line.startswith("**Token savings:**")
+        )
+    outside = (
+        comment[:start].rstrip("\n") + "\n\n"
+        + comment[end + len("</details>"):].lstrip("\n")
+    )
+    assert without_savings(outside) == without_savings(happy.comment)
+
+
+def test_trusted_workflow_accepts_the_detailed_comment(
+    detailed_run: ActionRun, tmp_path: Path
+):
+    wrapped = run_trusted_validator(tmp_path, detailed_run.comment)
+    assert wrapped.count(MARKER) == 1
+    assert "<details>" in wrapped
+
+
+def test_details_input_is_never_run_as_shell(tmp_path_factory: pytest.TempPathFactory):
+    """A hostile input value is an argument, rejected by name, never a command."""
+    runner = make_runner(
+        tmp_path_factory, "crg-action-details-hostile", comment="false",
+        details="risk,$(touch pwned);touch pwned2",
+    )
+    make_scratch_repo(runner.workspace)
+    steps = action_steps()
+    for name in (STEP_RESOLVE_BASE, STEP_BUILD):
+        runner.run_step(steps[name])
+    result = runner.run_step(steps[STEP_ANALYZE], check=False)
+    assert result.returncode == 2, result.stderr
+    assert "unknown detail section" in result.stderr
+    assert not (runner.workspace / "pwned").exists()
+    assert not (runner.workspace / "pwned2").exists()
 
 
 # ---------------------------------------------------------------------------

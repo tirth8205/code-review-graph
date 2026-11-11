@@ -16,8 +16,9 @@ Claude Code is one supported client among several.
 │  MCP clients              Hooks / watch mode                 │
 │  ├── Codex                └── incremental update             │
 │  ├── Claude Code, CodeBuddy Code                             │
-│  ├── Cursor, Windsurf, Zed, Continue                         │
-│  └── Gemini CLI, Qwen, Qoder, Copilot, OpenCode              │
+│  ├── Cursor, Windsurf, Zed, Continue, Antigravity            │
+│  ├── Gemini CLI, MiMo Code, Qwen, Qoder, Kiro, OpenCode      │
+│  └── Copilot, Copilot CLI, Hermes Agent                      │
 │          │                        │                          │
 │          ▼                        ▼                          │
 │  ┌────────────────────────────────────────────┐              │
@@ -58,27 +59,33 @@ All modules live in `code_review_graph/`.
 | `parser.py` | Tree-sitter multi-language parser plus targeted fallbacks; emits nodes and edges per file |
 | `custom_languages.py` | Config-driven languages from `.code-review-graph/languages.toml` |
 | `graph.py` | `GraphStore`: SQLite storage, queries, impact radius |
-| `migrations.py` | Versioned schema migrations, currently v11 (see `schema.md`) |
+| `migrations.py` | Versioned schema migrations, currently v15 (see `schema.md`) |
 | `incremental.py` | File collection and ignore rules, git/SVN change detection, full and incremental builds, post-build resolvers |
+| `locking.py`, `build_state.py` | The per-repository write lock, and how much of a build finished |
 | `postprocessing.py` | `run_post_processing()`: endpoint resolution, signatures, FTS sync, flows, communities, embedding refresh |
-| `python_resolver.py`, `jedi_resolver.py`, `tsconfig_resolver.py`, `spring_resolver.py`, `event_resolver.py`, `temporal_resolver.py`, `rescript_resolver.py`, `hcl_resolver.py`, `scoped_resolver.py` | Post-build cross-file resolution |
+| `python_resolver.py`, `jedi_resolver.py`, `tsconfig_resolver.py`, `workspace_resolver.py`, `npm_alias_resolver.py`, `spring_resolver.py`, `aop_resolver.py`, `event_resolver.py`, `temporal_resolver.py`, `csharp_resolver.py`, `rescript_resolver.py`, `hcl_resolver.py`, `scoped_resolver.py` | Post-build cross-file resolution |
+| `inheritance.py` | Which class a name means, and which ancestor declares an inherited method |
 | `flows.py` | Execution flow detection and criticality scoring |
 | `communities.py` | Leiden community detection (igraph) with a file-based fallback |
 | `search.py` | Hybrid search: FTS5 BM25 plus vector similarity |
 | `embeddings.py` | Embedding providers and the `embeddings` table |
-| `changes.py`, `refactor.py`, `analysis.py`, `hints.py`, `uncertainty.py`, `context_savings.py` | Change risk analysis, refactoring helpers, hub/bridge/gap analysis, response hints, empty-result markers, savings estimates |
+| `changes.py`, `change_details.py`, `refactor.py`, `analysis.py`, `hints.py`, `uncertainty.py`, `context_savings.py`, `context_history.py` | Change risk analysis, the `detect-changes --details` sections, refactoring helpers, hub/bridge/gap analysis, response hints, uncertainty markers, savings estimates and the opt-in savings log |
 | `tools/` | MCP tool implementations, split by domain |
-| `main.py`, `prompts.py` | FastMCP server (30 tools, 5 prompts) |
-| `cli.py`, `daemon.py`, `daemon_cli.py` | CLI and the multi-repo watch daemon |
-| `visualization.py`, `exports.py`, `wiki.py`, `graph_diff.py`, `memory.py`, `forget.py` | HTML visualisation, export formats, wiki generation, snapshot diffing, Q&A memory, file removal |
-| `skills.py`, `uninstall.py`, `registry.py`, `enrich.py`, `http_origin_guard.py`, `config_keys.py`, `constants.py` | Platform install/uninstall, multi-repo registry, hook enrichment, HTTP Host/Origin checks, shared helpers |
+| `main.py`, `prompts.py` | FastMCP server (30 tools, 5 prompts). Tool modules load on first use |
+| `multi_worktree.py` | `serve --multi-worktree`: one child server per linked Git worktree |
+| `cli.py`, `daemon.py`, `daemon_cli.py`, `errors.py`, `stdio.py` | CLI, the multi-repo watch daemon, one-line CLI errors and text-stream setup |
+| `visualization.py`, `neighbourhood.py`, `exports.py`, `wiki.py`, `graph_diff.py`, `memory.py`, `forget.py` | HTML visualisation, seeded views and paths, export formats, wiki generation, snapshot diffing, Q&A memory, file removal |
+| `skills.py`, `install_plan.py`, `install_gitignore.py`, `codex_skill.py`, `_legacy_instructions.py`, `jsonc.py`, `uninstall.py` | Platform install and uninstall: the plan `--dry-run` shows, the `--gitignore` block, the Codex skill, instruction blocks from older releases, and comment-keeping JSONC edits |
+| `registry.py`, `enrich.py`, `hook_update.py`, `http_origin_guard.py`, `config_keys.py`, `constants.py` | Multi-repo registry, hook enrichment, hook updates for the edited file's repository, HTTP Host/Origin checks, shared helpers |
 | `eval/`, `token_benchmark.py` | Evaluation framework and standalone token benchmark |
 
 ## Data Flow
 
 ### Full build (`incremental.full_build()`)
-1. `collect_all_files()` lists tracked files (`git ls-files` when git is available, so
-   untracked and gitignored files are skipped) and applies `.code-review-graphignore`.
+1. `collect_all_files()` lists Git's tracked files plus untracked files that are not
+   gitignored (SVN's versioned files in an SVN working copy, or a walk of the folder when
+   neither answers) and applies `.code-review-graphignore`. With `--follow-symlinks` it also
+   takes the files in symlinked folders, stored under their path inside the repository.
 2. Each file is read once; the bytes are hashed (SHA-256) and passed to
    `CodeParser.parse_bytes()`, which walks the Tree-sitter tree and emits nodes and edges.
 3. `GraphStore.store_file_nodes_edges()` (or `store_file_batch()`) replaces the file's rows
@@ -90,20 +97,29 @@ All modules live in `code_review_graph/`.
    FTS entries (`search.update_fts_index`); a full build rebuilds the index.
 
 ### Incremental update (`incremental.incremental_update()`)
-1. `get_changed_files()` asks the VCS for changed paths (git diff by default; SVN is
-   supported).
+1. `get_changed_files()` asks the VCS for changed paths (git diff by default, plus
+   untracked files that are not gitignored; SVN is supported).
 2. `find_dependents()` collects files with `IMPORTS_FROM`, `CALLS`, `INHERITS` or
    `IMPLEMENTS` edges into the changed files, up to two hops and 500 files.
-3. Changed and dependent files whose hash differs from the stored one are re-parsed; the
-   rest are skipped.
+3. Changed files whose hash differs from the stored one are re-parsed; the rest are
+   skipped. A dependent is re-parsed too, and when its bytes have not changed only its
+   edges are rewritten.
 4. Only those files' rows are replaced, then post-processing runs as for a full build.
+
+### Write lock (`locking.py`)
+`build`, `update`, `postprocess`, `forget` and `embed` take a per-repository `flock` on
+`<data dir>/write.lock` before they write. A second run reports `status: contended` and
+exits `75` instead of doing the same work again; `--wait` waits for the first to finish.
+`watch` takes the lock for each write and lets go between them. Two repositories never
+block each other.
 
 ### Review context (`tools/review.py: get_review_context()`)
 1. Changed files come from a git diff or an explicit list.
 2. `GraphStore.get_impact_radius()` finds the impacted nodes (see below).
 3. Source snippets are extracted for the changed regions only, within a file budget.
 4. `_generate_review_guidance()` adds warnings: changed functions without `TESTED_BY`
-   edges, more than 20 impacted nodes, and inheritance changes.
+   edges (lifecycle methods such as migration `up` and `down` are left out), more than 20
+   impacted nodes, inheritance changes, and more than 3 impacted files.
 5. `attach_context_savings()` adds an estimate of the tokens saved against reading the
    files, labelled `estimated: true`.
 
@@ -132,8 +148,7 @@ Python-side traversal instead.
 
 One SQLite database, `.code-review-graph/graph.db`, in WAL mode so readers are not blocked
 during updates. Tables: `nodes`, `edges`, `metadata`, `flows`, `flow_memberships`,
-`communities`, `nodes_fts` (FTS5), `nodes_fts_state`, `community_summaries`,
-`flow_snapshots`, `risk_index`, and
+`communities`, `nodes_fts` (FTS5), `nodes_fts_state`, and
 `embeddings` (created by `EmbeddingStore` in the same file). Columns, indexes and the
 migration history are in [schema.md](schema.md).
 
@@ -151,10 +166,101 @@ node type tables (`_CLASS_TYPES`, `_FUNCTION_TYPES` and similar in `parser.py`) 
 3. Import resolution to module paths, refined later by the post-build resolvers.
 
 Languages without a grammar can be added through `.code-review-graph/languages.toml`
-(`docs/CUSTOM_LANGUAGES.md`). Some formats (notebooks, Vue and Svelte SFCs, SQL, Ansible,
-Spring configuration) use targeted parsers instead of Tree-sitter.
+(`docs/CUSTOM_LANGUAGES.md`). Some formats have a parser of their own. For notebooks, Vue,
+Svelte and Blade files, HTML pages, XSLT, JSON and SQL it still uses a Tree-sitter grammar;
+Liquid, Robot Framework, ReScript, VB.NET, generic YAML, Ansible and Spring configuration are
+read without one.
+
+### C# namespace identity and binding
+
+C# declarations include their namespace and complete containing-type path:
+`/repo/Handlers.cs::App.Report.ExportHandler.Run`. `parent_name` contains
+`App.Report.ExportHandler`; `extra.csharp_namespace` separately records `App`.
+This distinguishes types in different namespaces even when they occupy the same
+file. Namespace strings remain metadata, not synthetic graph nodes. The existing
+file-level `csharp_namespaces` list remains available for file import/impact queries.
+
+Parsing records facts; `csharp_resolver.py` binds calls after storage. C# calls and
+imports carry `csharp_scopes`, ordered pairs of namespace names and namespace-body
+byte offsets, innermost first. Compilation-unit scope uses offset `-1`. Reopened
+bodies with the same namespace name have different offsets, so an ordinary using
+cannot leak between them. File-scoped namespaces include all following members,
+including grammars that represent those members as siblings. `source_offset`
+distinguishes both receiver evidence and stored edges on the same source line
+without a schema migration. Calls also retain `csharp_containing_type` so field
+and property initializers keep their lexical context when their graph caller is a File.
+
+The resolver selects a receiver type before looking up its method. It checks
+enclosing types, enclosing namespaces, and imports at their actual lexical scopes;
+it does not use file co-location, short-name uniqueness, or suffix matching as
+visibility evidence. Namespace imports expose types, not child namespaces.
+`global::` qualifications and simple namespace/type aliases retain their meaning.
+`Alias::Type` searches only namespace aliases in the call's lexical scopes; it
+does not select a same-named type, namespace, or local. Unqualified calls can reach
+static methods in enclosing types, using parsed `csharp_static` evidence. Lookup
+stops at a nearer method group, and at a type with a base list, since an inherited
+member the graph does not model may be the one named; `this.Run()` stays within the
+immediate type. A field or property of an enclosing type names its type from the
+type that declares it, not from the nested type where it is used.
+Unqualified calls hidden by recorded local, parameter, field or property bindings
+stay unresolved.
+This follows the lookup order in the C# specification's
+[namespace and type names](https://learn.microsoft.com/en-us/dotnet/csharp/language-reference/language-specification/basic-concepts#78-namespace-and-type-names)
+and [using directives](https://learn.microsoft.com/en-us/dotnet/csharp/language-reference/language-specification/namespaces#146-using-directives).
+
+Explicit global usings are collected across files owned by the nearest single
+`.csproj`, rather than across all projects in the repository. With multiple project
+files in that directory, ownership is unknown and global usings stay local to their
+file. Loose C# files without a project share the review root as one compilation.
+This is a structural approximation: linked/conditional compile items, generated or
+implicit usings, project references and target frameworks require MSBuild evaluation.
+Watch mode passes `.csproj` changes to the update, so a new or removed project file
+rebinds calls without a rebuild.
+
+Every C# call keeps `csharp_raw_target` and receiver evidence after binding. Resolved
+edges are marked `INFERRED`; unresolved edges retain `unresolved_targets` so generic
+graph fallbacks cannot bind them using weaker evidence. Each C# update re-evaluates
+these calls, including unchanged callers. `TESTED_BY` mirrors move with their calls.
+Before deleting a callee file, incoming managed calls return to their raw references
+so recreating a declaration can resolve them again.
+Binding changes persist a `csharp_flows_dirty` marker with the edge update; each
+pass writes its calls, mirrors and marker in one transaction.
+The next full postprocess retraces all flows, including unchanged callers and
+old/new entry points. Deferred postprocessing retains the marker even if a later
+update parses no files; successful full flow replacement clears it atomically.
+This reuses the existing full trace until the binder can provide a complete
+affected set for incremental tracing.
+
+`CSHARP_IDENTITY_VERSION = "5"` upgrades the old namespace-free format, the
+nested-type-only format proposed in #937, and graphs lacking per-call lexical
+context, static/callable evidence, or generic arity. Incremental updates reparse existing C# files
+despite matching hashes.
+The attempted version is recorded together with
+failed file paths; subsequent updates retry those files alone and preserve their
+last stored data until parsing succeeds. This avoids extending #944's repeated
+full-rebuild loop. No SQL migration attempts to reconstruct missing source identity.
+
+A generic declaration is keyed by arity — ``App.Box`1`` — so a constructed
+reference reaches the declaration it names and never a same-named one of another
+arity: `I<int>` binds to `I<T>`, `I` binds to `I`, and `Pair<int>` binds to
+neither when only `Pair<K, V>` exists. The receiver's spelling is retained on the
+call; only the key is derived from it, and the key is built from the syntax rather
+than by scanning for angle brackets, so nested arguments and tuples count
+correctly. A constructed containing type such as `Outer<T>.Inner` carries a second
+arity that one key cannot describe, and stays unresolved.
+
+This remains a structural graph, not a C# compiler. Overload selection, type
+argument substitution and constraints (#943), inherited members, assembly
+accessibility, and unqualified calls imported with `using static` are outside this
+change; unsupported or ambiguous bindings stay unresolved. Inheritance target
+spelling is unchanged.
 
 ## Visualisation
 
 `visualization.py` writes a self-contained HTML file with a D3.js force-directed graph of the
-nodes and edges, with filters by node and edge kind and a search box.
+nodes and edges, with filters by node and edge kind and a search box. Past 3,000 nodes or
+9,000 edges, `auto` mode draws one bubble per community (or per file without communities).
+A seeded view (`--seed-symbol`, `--seed-file`, `--seed-changed`, `--seed-flow`) draws only
+the nodes within `--depth` hops of the seed and reads only that part of the graph;
+`--path-from` and `--path-to` mark the shortest path between two symbols
+(`neighbourhood.py`).

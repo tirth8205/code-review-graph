@@ -26,9 +26,8 @@ They are not sufficient on their own: a snapshot records only
 ``(kind, file, community_id)`` per node and ``source->target:kind`` per edge,
 so it cannot see a node whose line range, signature, params or file hash
 drifted, an edge whose confidence drifted, or any row in ``flows``,
-``flow_memberships``, ``communities``, ``nodes_fts``, ``community_summaries``,
-``flow_snapshots``, ``risk_index`` or ``metadata``. ``diff_snapshots`` also
-truncates its lists to 100 entries. The per-table comparator below covers
+``flow_memberships``, ``communities``, ``nodes_fts`` or ``metadata``.
+``diff_snapshots`` also truncates its lists to 100 entries. The per-table comparator below covers
 what the snapshot cannot.
 """
 
@@ -68,21 +67,11 @@ EDIT_KINDS: tuple[str, ...] = (
 #: its differing rows, and is reported as ``known_failure``. Remove an entry
 #: once the underlying bug is fixed and the regression guard takes over.
 #:
-#: All seven are listed because all seven diverge on this repository (see the
-#: pull request that introduced this benchmark). Three independent defects
-#: produce them:
+#: All seven are listed because all seven diverged on this repository when the
+#: benchmark was introduced. #673 fixed the dangling flow memberships and the
+#: relative-versus-absolute path match behind two of the three defects, so
+#: re-measure before trusting this list. What remains known:
 #:
-#: * ``flow_memberships.node_id`` is a bare integer with no foreign key and no
-#:   cascade. ``GraphStore._replace_file_data`` deletes and re-inserts a
-#:   re-parsed file's nodes, which allocates new ids, so every membership row
-#:   for that file is left dangling. Flows silently get shorter and, because
-#:   ``incremental_trace_flows`` finds affected flows by joining memberships to
-#:   ``nodes``, the dangling rows are invisible to the repair path too.
-#: * ``nodes.community_id`` is not repopulated for a re-parsed file, and
-#:   ``incremental_detect_communities`` / ``incremental_trace_flows`` compare
-#:   ``nodes.file_path`` (absolute) against ``incremental_update``'s
-#:   ``changed_files`` (repo-relative), so both always see zero affected rows
-#:   and skip.
 #: * Edges whose target lived in a deleted or re-parsed file keep the
 #:   qualified name they were resolved to, so a rebuild and an update disagree
 #:   about which call targets are resolved.
@@ -99,9 +88,6 @@ COMPARED_TABLES: tuple[str, ...] = (
     "flows",
     "flow_memberships",
     "nodes_fts",
-    "community_summaries",
-    "flow_snapshots",
-    "risk_index",
     "metadata",
 )
 
@@ -214,7 +200,13 @@ def _incremental_build(tree: Path, db_path: Path, base: str) -> dict[str, Any]:
             result,
             "full",
             full_rebuild=False,
-            changed_files=result.get("changed_files"),
+            changed_files=[
+                *(result.get("changed_files") or []),
+                *(result.get("dependent_files") or []),
+            ],
+            repo_root=str(tree),
+            entry_point_qns=result.get("flow_entry_point_qns"),
+            communities_were_affected=bool(result.get("communities_were_affected")),
         )
         return result
     finally:
@@ -409,63 +401,6 @@ def _project_nodes_fts(conn: sqlite3.Connection) -> Optional[_Projection]:
             pass
 
 
-_SUMMARY_VALUE_COLUMNS = ("name", "purpose", "key_symbols", "risk", "size",
-                          "dominant_language")
-
-
-def _project_community_summaries(conn: sqlite3.Connection) -> _Projection:
-    out: _Projection = {}
-    if not _table_exists(conn, "community_summaries"):
-        return out
-    for row in conn.execute(
-        "SELECT s.name AS name, s.purpose AS purpose, "
-        "s.key_symbols AS key_symbols, s.risk AS risk, s.size AS size, "
-        "s.dominant_language AS dominant_language, c.name AS community_name "
-        "FROM community_summaries s "
-        "LEFT JOIN communities c ON c.id = s.community_id"
-    ):
-        key = _blank(row["community_name"]) or f"<orphan>{_blank(row['name'])}"
-        _add(out, key, _join(row, _SUMMARY_VALUE_COLUMNS))
-    return out
-
-
-_SNAPSHOT_VALUE_COLUMNS = ("name", "entry_point", "critical_path",
-                           "criticality", "node_count", "file_count")
-
-
-def _project_flow_snapshots(conn: sqlite3.Connection) -> _Projection:
-    out: _Projection = {}
-    if not _table_exists(conn, "flow_snapshots"):
-        return out
-    keys = _flow_keys(conn)
-    for row in conn.execute(
-        "SELECT flow_id, name, entry_point, critical_path, criticality, "
-        "node_count, file_count FROM flow_snapshots"
-    ):
-        key = keys.get(
-            int(row["flow_id"]),
-            f"<orphan>{_blank(row['entry_point'])}|{_blank(row['name'])}",
-        )
-        _add(out, key, _join(row, _SNAPSHOT_VALUE_COLUMNS))
-    return out
-
-
-_RISK_VALUE_COLUMNS = ("risk_score", "caller_count", "test_coverage",
-                       "security_relevant")
-
-
-def _project_risk_index(conn: sqlite3.Connection) -> _Projection:
-    out: _Projection = {}
-    if not _table_exists(conn, "risk_index"):
-        return out
-    for row in conn.execute(
-        "SELECT qualified_name, risk_score, caller_count, test_coverage, "
-        "security_relevant FROM risk_index"
-    ):
-        _add(out, row["qualified_name"], _join(row, _RISK_VALUE_COLUMNS))
-    return out
-
-
 def _project_metadata(conn: sqlite3.Connection) -> _Projection:
     out: _Projection = {}
     for row in conn.execute("SELECT key, value FROM metadata"):
@@ -483,9 +418,6 @@ _PROJECTORS: dict[str, Callable[[sqlite3.Connection], Optional[_Projection]]] = 
     "flows": _project_flows,
     "flow_memberships": _project_flow_memberships,
     "nodes_fts": _project_nodes_fts,
-    "community_summaries": _project_community_summaries,
-    "flow_snapshots": _project_flow_snapshots,
-    "risk_index": _project_risk_index,
     "metadata": _project_metadata,
 }
 

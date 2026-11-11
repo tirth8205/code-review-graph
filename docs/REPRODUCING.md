@@ -92,10 +92,9 @@ uv run code-review-graph eval --embed \
   --benchmark token_efficiency,impact_accuracy,agent_baseline,multi_hop_retrieval
 ```
 
-`--embed` is required for `agent_baseline` and `multi_hop_retrieval`; without it their
-natural-language questions hit FTS5 only and return nothing. `code-review-graph eval --help`
-lists the remaining benchmarks (`flow_completeness`, `search_quality`, `build_performance`,
-`incremental_fidelity`) and flags.
+`--embed` is required for `agent_baseline`, `multi_hop_retrieval` and `search_quality`;
+without it their natural-language questions hit FTS5 only and return nothing. `code-review-graph eval --help` lists the remaining benchmarks (`flow_completeness`,
+`search_quality`, `build_performance`, `incremental_fidelity`) and flags.
 
 A thrown tool call is not a measurement. The row stays in the CSV with `status=error` and is
 excluded from every aggregate. Regression tests for this are in `tests/test_eval.py`.
@@ -220,10 +219,13 @@ The predictor over-predicts on some commits. The worst case is flask `fbb6f0bc`:
 flagged for a 10-file change, precision 0.303. That trade-off is deliberate: a missed
 dependency costs more than an extra reviewed file.
 
-The co-change rows are not usable yet: all 11 graded commits came back with
-`predicted_files = 0`, so their F1 of 0.000 measures a harness fault, not the predictor. No
-co-change number is quoted until that is fixed. The two single-file commits (express) are
-recorded with `status=skipped` because there is nothing independent to grade against.
+The co-change rows in this capture are not usable: all 11 graded commits came back with
+`predicted_files = 0`, so their F1 of 0.000 measures a fault in the benchmark, not the
+predictor. `git diff` gives repo-relative paths and the graph stores absolute ones, so the
+seed never matched a node. PR #823 fixed that, and the graph-derived ground truth now counts
+real neighbour files too, so both tables will change when the benchmark is run again. No
+co-change number is quoted until then. The two single-file commits (express) are recorded
+with `status=skipped` because there is nothing independent to grade against.
 
 ### Multi-hop retrieval (`code_review_graph/eval/benchmarks/multi_hop_retrieval.py`)
 
@@ -355,8 +357,48 @@ This benchmark simulates an agent without the graph:
 
 Output: `evaluate/results/<repo>_agent_baseline_<date>.csv` with a `baseline_to_graph_ratio`
 per question. Rows where either side is zero get `status=no_graph_results` or
-`status=no_baseline_match` and are excluded from `agent_baseline.aggregate()`. No canonical
-capture exists yet; numbers will be added above once measured.
+`status=no_baseline_match` and are excluded from `agent_baseline.aggregate()`.
+
+### Canonical capture, 2026-09-22
+
+18 questions, 3 per repo, from the `agent_questions:` lists. Local `all-MiniLM-L6-v2`
+embeddings, clean clones at the pinned SHAs, every row `status=ok`.
+
+| Repo | Questions | avg grep top-3 tokens | avg graph tokens | median ratio |
+|------|----------:|----------------------:|-----------------:|-------------:|
+| fastapi | 3 | 158,560 | 3,439 | **52.1x** |
+| flask | 3 | 27,611 | 2,432 | **11.5x** |
+| gin | 3 | 25,257 | 3,110 | **6.6x** |
+| httpx | 3 | 26,174 | 4,021 | **6.5x** |
+| code-review-graph | 3 | 26,134 | 3,773 | **6.4x** |
+| express | 3 | 17,086 | 3,726 | **4.5x** |
+
+Across all 18 questions: **median 6.65x, mean 14.81x, range 4.2x to 72.6x**.
+
+Run it with:
+
+```bash
+code-review-graph eval --benchmark agent_baseline --embed
+```
+
+This capture predates test-file ranking in `hybrid_search` and `grep_rank`, so a run today
+gives different numbers until the capture is redone. At the code-review-graph pin the grep
+baseline alone moves from 41,674 / 15,028 / 21,701 tokens to 41,586 / 27,764 / 29,207.
+
+Two things this number is not:
+
+- **It is not the whole-corpus ratio.** The standalone benchmark's ~63x compares a graph
+  query against reading every source file, which no agent does. Against a grep-and-read
+  agent the honest figure is the 6.65x above. Quote whichever you mean, and say which.
+- **It is not an end-to-end agent saving.** Both sides here are measured as *retrieval*
+  cost: the tokens needed to locate the answer. A real coding agent may still open the
+  files the graph named, in which case the graph cost is additive rather than a
+  substitute. `semantic_search_nodes_tool(include_source=True)` exists so the agent can
+  answer from the response instead; measuring that path end-to-end is open work.
+
+The ratio tracks repo size, because the graph answer stays flat (2,432 to 4,021 tokens
+here) while the grep baseline grows with the corpus. On a small repo the graph saves
+little; on fastapi it saves a lot.
 
 ## Incremental fidelity (`code_review_graph/eval/benchmarks/incremental_fidelity.py`)
 
@@ -382,7 +424,9 @@ content table behind it.
 ### Results on this repository
 
 323 files, 6,509 nodes, 57,042 edges, 186 flows. Differing rows per table, incremental
-update against clean rebuild:
+update against clean rebuild. Measured at schema v14: `community_summaries`,
+`flow_snapshots` and `risk_index` were removed in v15, as nothing read them, and the
+benchmark no longer compares them.
 
 | Edit | Status | Total | nodes | node_community | edges | communities | flows | flow_memberships | nodes_fts | community_summaries | flow_snapshots | risk_index | metadata | Seconds |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -397,7 +441,9 @@ update against clean rebuild:
 Benchmark wall time 79.1 s (8 clean builds plus 8 incremental updates).
 
 `nodes` and `nodes_fts` match everywhere: node rows and the search index are faithful. Every
-other divergence traces to one of three defects, none of which is fixed here.
+other divergence traces to one of three defects. The table was measured before #673, which
+fixes defects 1 and 2 below (flows and community assignment now follow re-parsed nodes), so
+expect smaller numbers until it is captured again.
 
 **1. `flow_memberships` is orphaned by every re-parse.** `flow_memberships.node_id` is a
 bare integer with no foreign key and no cascade, and `GraphStore._replace_file_data` deletes
@@ -411,10 +457,7 @@ the repair path as well, so a full rebuild is the only way back.
 edit leaves 718 nodes with `community_id IS NULL` against the rebuild's 306.
 `incremental_detect_communities` and `incremental_trace_flows` both match `nodes.file_path`
 (absolute) against `incremental_update`'s `changed_files` (repo-relative), so both always
-count zero affected rows and skip. `community_summaries` inherits the error: after the same
-edit its `key_symbols` for `code-review-graph-name` read
-`["main", "GraphStore", "close", "upsert_node", "commit"]` against the rebuild's
-`["CodeParser", "main", "GraphStore", "close", "NodeInfo"]`.
+count zero affected rows and skip.
 
 **3. Deleting a file silently shortens other files' caller lists.** Deleting
 `code_review_graph/graph.py` leaves the incremental graph with 52,913 edges against the
@@ -423,8 +466,6 @@ has no outgoing `CALLS` edge at all at lines 73 and 100 in the incremental graph
 rebuild has two (`_build_networkx_graph` and `_sanitize_name`). Those edges had been
 resolved into `graph.py`, were removed with it, and `analysis.py` was never re-parsed to
 restore them as bare calls. Two edges still target `graph.py::` names that have no node.
-`risk_index` inherits it: `parser.py::EdgeInfo` reports `caller_count` 268 against the
-rebuild's 267.
 
 The six `edges` rows that differ on every edit are a separate, smaller issue: the
 `ambiguous_targets` list inside an edge's `extra` JSON is ordered by node id, so re-parsing a
@@ -432,8 +473,9 @@ file reorders it. Same set, different order, so the graph is not byte-reproducib
 
 Every edit kind is listed in `incremental_fidelity.KNOWN_FAILURES`, which keeps the run from
 reporting them as unexpected. `tests/test_incremental_fidelity.py` guards against a kind that
-currently passes starting to diverge, and carries two `xfail` tests that document defects 1
-and 2 at the level of the defect.
+currently passes starting to diverge, and pins defects 1 and 2 at the level of the defect.
+Defect 2 has plain tests, one of them for a file that an update adds (#1122). Defect 1's test
+is still marked `xfail` but now passes.
 
 ## Weekly CI run (report-only)
 
@@ -502,10 +544,10 @@ python -m tests.real_repo_corpus --record   # re-record after an intentional cha
 ```
 
 The normal suite skips it: `tests/conftest.py` skips every `corpus`-marked item unless the
-run's `-m` expression names the marker, so neither `pytest tests/` nor CI's `-m "not browser"`
-job pays for it. Clones are shallow single-commit fetches (~115 MB total). A cold run takes
-about 1 minute on a warm network and roughly 40 seconds once the clones are cached; budget a
-few minutes on CI hardware.
+run's `-m` expression names the marker, so neither `pytest tests/` nor CI's
+`-m "not browser and not upgrade"` job pays for it. Clones are shallow single-commit fetches
+(~115 MB total). A cold run takes about 1 minute on a warm network and roughly 40 seconds
+once the clones are cached; budget a few minutes on CI hardware.
 
 `fastapi` and `gin` reuse the pins in `code_review_graph/eval/configs/`, so the project keeps
 one answer to "which commit of fastapi do we measure". `tests/test_real_repo_corpus_guard.py`

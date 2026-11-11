@@ -26,6 +26,9 @@ on ``CONTAINS``; they simply do not act as transit.
 Everything here operates on the already-exported, already-name-resolved data
 produced by :func:`code_review_graph.visualization.export_graph_data`, so a
 neighbourhood is a strict subset of what the whole-repo view would have drawn.
+That function need not read the whole repository to supply it: :func:`extract`
+gives the same answer given the seeds, every edge touching a node it could keep,
+and the graph-wide totals.
 """
 
 from __future__ import annotations
@@ -55,9 +58,11 @@ __all__ = [
     "PATH_EDGE_KINDS",
     "STRUCTURAL_EDGE_KINDS",
     "NeighbourhoodSpec",
+    "ResolvedSeeds",
     "SeedResolutionError",
     "extract",
     "hop_distances",
+    "resolve_seeds",
     "shortest_path",
 ]
 
@@ -465,18 +470,29 @@ def _select_within_budget(
     return (selected, truncated)
 
 
-def extract(data: dict, spec: NeighbourhoodSpec) -> dict:
-    """Reduce exported graph *data* to the neighbourhood described by *spec*.
+@dataclass(frozen=True)
+class ResolvedSeeds:
+    """The nodes a spec seeds, and the answer to its path query if it has one."""
 
-    Returns a payload of the same shape as :func:`export_graph_data` with an
-    extra ``"neighbourhood"`` block describing the seeds, the hop label of
-    every node, the render depth and (for a path query) the highlighted path.
-    Nodes outside the neighbourhood are absent, not dimmed.
+    seeds: list[str]
+    seed_kind: str
+    path: list[str]
+    path_directed: bool
+    path_error: str
+
+
+def resolve_seeds(
+    nodes: Sequence[dict],
+    edges: Sequence[dict],
+    flows: Sequence[dict],
+    spec: NeighbourhoodSpec,
+) -> ResolvedSeeds:
+    """Resolve *spec* against the graph's *nodes*, de-duplicated in first-seen order.
+
+    Each node needs only ``qualified_name``, ``name``, ``file_path`` and ``id``,
+    and *edges* are read only for a path query. Raises
+    :class:`SeedResolutionError` when a seed matches nothing.
     """
-    spec.validate()
-    nodes: list[dict] = data["nodes"]
-    edges: list[dict] = data["edges"]
-
     seeds: list[str] = []
     seed_kind = "symbol"
     path: list[str] = []
@@ -508,10 +524,46 @@ def extract(data: dict, spec: NeighbourhoodSpec) -> dict:
         seeds.extend(resolve_files(nodes, spec.files))
     if spec.flow:
         seed_kind = "flow" if seed_kind == "symbol" else "mixed"
-        seeds.extend(resolve_flow(data.get("flows", []), nodes, spec.flow))
+        seeds.extend(resolve_flow(flows, nodes, spec.flow))
 
     # Preserve first-seen order while de-duplicating.
-    seeds = list(dict.fromkeys(seeds))
+    return ResolvedSeeds(
+        list(dict.fromkeys(seeds)), seed_kind, path, path_directed, path_error,
+    )
+
+
+def extract(
+    data: dict,
+    spec: NeighbourhoodSpec,
+    *,
+    resolved: ResolvedSeeds | None = None,
+    totals: tuple[int, int] | None = None,
+) -> dict:
+    """Reduce exported graph *data* to the neighbourhood described by *spec*.
+
+    Returns a payload of the same shape as :func:`export_graph_data` with an
+    extra ``"neighbourhood"`` block describing the seeds, the hop label of
+    every node, the render depth and (for a path query) the highlighted path.
+    Nodes outside the neighbourhood are absent, not dimmed.
+
+    *data* may be just the part of the graph around the seeds if the caller
+    has already resolved them and passes the whole graph's ``(nodes, edges)``
+    counts as *totals*. It must then hold every edge touching a node within
+    *depth* hops, plus every edge touching a node that contains one of those,
+    and those containing nodes themselves.
+    """
+    spec.validate()
+    nodes: list[dict] = data["nodes"]
+    edges: list[dict] = data["edges"]
+
+    if resolved is None:
+        resolved = resolve_seeds(nodes, edges, data.get("flows", []), spec)
+    seeds = resolved.seeds
+    seed_kind = resolved.seed_kind
+    path = resolved.path
+    path_directed = resolved.path_directed
+    path_error = resolved.path_error
+    total_nodes, total_edges = totals if totals is not None else (len(nodes), len(edges))
 
     # A path query whose own answer does not fit the budget cannot be
     # satisfied at all: say so rather than shipping half a path.
@@ -603,7 +655,7 @@ def extract(data: dict, spec: NeighbourhoodSpec) -> dict:
             "structural_edge_kinds": list(STRUCTURAL_EDGE_KINDS),
             "truncated": truncated,
             "max_nodes": spec.max_nodes,
-            "total_nodes": len(nodes),
-            "total_edges": len(edges),
+            "total_nodes": total_nodes,
+            "total_edges": total_edges,
         },
     }

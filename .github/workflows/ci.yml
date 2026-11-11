@@ -112,6 +112,10 @@ jobs:
         run: >-
           pytest --tb=short -q -m "not browser and not upgrade"
           --cov=code_review_graph --cov-report=term-missing --cov-fail-under=65
+      - name: Check writer locks with real parser processes
+        run: >-
+          pytest tests/test_concurrency_and_daemon.py -m concurrency
+          -k TestSingleFlightWriteLock -q --tb=short
 
   viz-browser:
     name: Visualization browser tests
@@ -185,6 +189,30 @@ jobs:
         env:
           CRG_UPGRADE_TEST: "1"
         run: pytest -m upgrade -q -rxX
+
+  minimum-dependencies:
+    name: Minimum declared dependencies (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install every direct dependency at its declared floor
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]" -r .github/requirements-minimum.txt
+      - name: Check dependency resolution
+        run: python -m pip check
+      - name: Print resolved direct versions
+        run: python scripts/print_minimum_dependencies.py
+      - name: Run tests at dependency floors
+        run: pytest --tb=short -q -m "not browser and not upgrade"
 
   google-embeddings:
     name: Google embeddings (${{ matrix.extra }})
