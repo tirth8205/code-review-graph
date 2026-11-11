@@ -1670,7 +1670,7 @@ function updateLabelVisibility() {
   if (!labelSel) return;
   var s = currentTransform.k;
   labelSel.attr("display", function(d) {
-    if (!showLabels) return "none";
+    if (!showLabels || inHiddenCommunity(d)) return "none";
     if (d.kind === "File") return null;
     if (d.kind === "Class") return s > 0.5 ? null : "none";
     return s > 1.0 ? null : "none";
@@ -1928,6 +1928,8 @@ document.getElementById("btn-community").addEventListener("click", function() {
   var cl = document.getElementById("community-legend");
   if (communityColoringOn) cl.classList.add("visible");
   else cl.classList.remove("visible");
+  // The filter lives in that legend, so it goes and comes back with it.
+  applyCommunityFilter();
 });
 // Build community legend with toggle checkboxes
 (function buildCommunityLegend() {
@@ -1956,25 +1958,13 @@ document.getElementById("btn-community").addEventListener("click", function() {
     }
   );
 })();
+// Labels go through updateLabelVisibility so the zoom rule still holds and
+// clearing the filter brings them back.
 function applyCommunityFilter() {
   nodeGroup.selectAll("g.node-g")
     .attr("display", function(d) { return d._hidden || inHiddenCommunity(d) ? "none" : null; });
-  if (!communityColoringOn || !hiddenCommunities.size) {
-    updateLinks();
-    return;
-  }
-  if (labelSel) labelSel
-    .attr("display", function(d) {
-      var cid = d.community_id;
-      if (cid == null) {
-        cid = nodeToCommunity.get(d.qualified_name);
-      }
-      if (cid != null && hiddenCommunities.has(cid)) {
-        return "none";
-      }
-      return null;
-    });
   updateLinks();
+  updateLabelVisibility();
 }
 var activeFlowQns = null;
 flowSelect.addEventListener("change", function() {

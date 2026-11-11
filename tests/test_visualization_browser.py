@@ -284,7 +284,9 @@ class _Probe:
         ``fx``/``fy`` and resetting the transform to the identity makes the
         geometry exact, keeps every node clear of the fixed panels, and lets the
         clicks below be genuine mouse events with Playwright's full actionability
-        checks rather than synthesised DOM events.
+        checks rather than synthesised DOM events. It waits two frames first,
+        so the ``fitGraph()`` queued when the layout ended has started and the
+        interrupt below stops it, instead of it zooming in afterwards.
         """
         self.page.evaluate(_FREEZE_LAYOUT_JS, CLEAR_BOX)
 
@@ -316,7 +318,8 @@ _LAYOUT_SETTLED_JS = """
 """
 
 _FREEZE_LAYOUT_JS = """
-(box) => {
+async (box) => {
+  await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
   const d3 = window.d3;
   const all = (window.nodes || window.currentNodes || []).slice();
   all.sort((a, b) => (
@@ -507,10 +510,21 @@ def test_legend_edge_toggle_hides_that_edge_type(full_page):
 
 # mod0_func_0 calls into mod1, and mod2_func_0 calls into mod0.
 MOD0_CALLS = 2
+# At zoom 1 only File and Class labels show; Function labels wait for k > 1.
+LABELS_AT_ZOOM_ONE = 2 * FILE_COUNT
 
 _SHOWN_NODE_COUNT_JS = """
 () => Array.from(document.querySelectorAll("#graph-svg g.nodes g.node-g"))
   .filter((g) => g.getAttribute("display") !== "none").length
+"""
+
+_SHOWN_LABEL_COUNT_JS = """
+() => Array.from(document.querySelectorAll("#graph-svg g.labels text.node-label"))
+  .filter((t) => t.getAttribute("display") !== "none").length
+"""
+
+_ZOOM_TO_ONE_JS = """
+() => window.svg.call(window.zoomBehavior.transform, window.d3.zoomIdentity)
 """
 
 
@@ -528,6 +542,32 @@ def test_hiding_a_community_hides_its_edges(full_page):
 
     _community_box(full_page, 0).check()
     assert full_page.edge_lines.count() == TOTAL_EDGES
+    full_page.assert_no_errors()
+
+
+def test_showing_a_community_again_brings_back_its_labels(full_page):
+    """Labels follow the community filter both ways, and zooming keeps it."""
+    full_page.freeze_layout()
+    shown = lambda: full_page.page.evaluate(_SHOWN_LABEL_COUNT_JS)  # noqa: E731
+    assert shown() == LABELS_AT_ZOOM_ONE
+
+    full_page.page.locator("#btn-community").click()
+    _community_box(full_page, 0).uncheck()
+    assert shown() == LABELS_AT_ZOOM_ONE - 2
+    # A zoom redraws the labels; it must not bring back a hidden community's.
+    full_page.page.evaluate(_ZOOM_TO_ONE_JS)
+    assert shown() == LABELS_AT_ZOOM_ONE - 2
+
+    _community_box(full_page, 0).check()
+    assert shown() == LABELS_AT_ZOOM_ONE
+
+    # Turning community colours off hides the checkboxes, so it clears the
+    # filter too: nothing may stay hidden with no way to bring it back.
+    _community_box(full_page, 0).uncheck()
+    full_page.page.locator("#btn-community").click()
+    assert full_page.page.evaluate(_SHOWN_NODE_COUNT_JS) == TOTAL_NODES
+    assert full_page.edge_lines.count() == TOTAL_EDGES
+    assert shown() == LABELS_AT_ZOOM_ONE
     full_page.assert_no_errors()
 
 

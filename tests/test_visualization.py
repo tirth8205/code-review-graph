@@ -675,6 +675,16 @@ def test_edges_of_a_hidden_community_are_not_drawn(store_with_data, tmp_path):
     assert "inHiddenCommunity(d)" in _js_block(script, "function updateNodes(")
 
 
+def test_community_filter_drives_label_visibility(store_with_data, tmp_path):
+    """Labels obey the filter on every redraw, so clearing it brings them back."""
+    script = _full_page_script(store_with_data, tmp_path)
+    assert "inHiddenCommunity(d)" in _js_block(script, "function updateLabelVisibility(")
+    assert "updateLabelVisibility()" in _js_block(script, "function applyCommunityFilter(")
+    # Colours off hides the checkboxes, so it must clear the filter too.
+    toggle = _js_block(script, 'getElementById("btn-community").addEventListener')
+    assert "applyCommunityFilter()" in toggle
+
+
 # ---------------------------------------------------------------------------
 # Phase 9: Visualization Aggregation
 # ---------------------------------------------------------------------------
