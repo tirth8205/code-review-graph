@@ -270,16 +270,15 @@ jobs:
           cache-dependency-path: pyproject.toml
       - name: Install dependencies
         run: pip install -e ".[dev,browser-test]"
-      # The runner's Ubuntu mirror sometimes fails to resolve. Retry, then fall
-      # back to the browser alone: the hosted image already has its libraries.
+      # The browser comes from Playwright's own download. Its extra Ubuntu
+      # packages (mostly fonts) come from the runner's mirror, which sometimes
+      # fails to resolve and then hangs for minutes; the hosted image already
+      # has the libraries Chromium needs, so cap that part and carry on.
       - name: Install Chromium
         run: |
-          for attempt in 1 2 3; do
-            python -m playwright install --with-deps chromium && exit 0
-            echo "::warning::playwright install --with-deps failed (attempt $attempt); retrying"
-            sleep 20
-          done
           python -m playwright install chromium
+          timeout 180 python -m playwright install-deps chromium \
+            || echo "::warning::Ubuntu packages for Chromium did not install; using the image's own"
       # No coverage flag: a handful of end-to-end page tests would fail the
       # 65% floor on their own.
       - name: Run the browser tests
