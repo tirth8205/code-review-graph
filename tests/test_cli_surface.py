@@ -1199,6 +1199,8 @@ NUMERIC_ENV_VARS: tuple[NumericVar, ...] = (
     NumericVar("CRG_MAX_CHANGED_FUNCS", ("detect-changes", "--brief"), "100"),
     NumericVar("CRG_MAX_DELETION_FILES", ("detect-changes", "--brief"), "20"),
     NumericVar("CRG_MAX_TRANSITIVE_FRONTIER", ("detect-changes", "--brief"), "20"),
+    NumericVar("CRG_MAX_CHANGED_YAML_PATHS", ("detect-changes", "--brief"), "50"),
+    NumericVar("CRG_MAX_FOLLOWED_FILES", ("build", "-q", "--follow-symlinks"), "100"),
     NumericVar("CRG_CHURN_WINDOW_DAYS", ("detect-changes", "--brief", "--churn"), "30"),
     NumericVar("CRG_CHURN_TIMEOUT", ("detect-changes", "--brief", "--churn"), "10"),
     NumericVar("CRG_CHURN_MAX_COMMITS", ("detect-changes", "--brief", "--churn"), "500"),
