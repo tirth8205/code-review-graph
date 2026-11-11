@@ -29,7 +29,7 @@ from code_review_graph import cli
     ],
 )
 def test_quiet_build_and_update_suppress_summary_and_info_logs(
-    command, result, capsys, caplog,
+    command, result, capsys, caplog, tmp_path,
 ):
     """``--quiet`` must silence progress logs as well as the final summary."""
 
@@ -37,7 +37,7 @@ def test_quiet_build_and_update_suppress_summary_and_info_logs(
         logging.getLogger("code_review_graph.test_progress").info("parsing progress")
         return result
 
-    argv = ["code-review-graph", command, "--repo", "repo-root", "--quiet"]
+    argv = ["code-review-graph", command, "--repo", str(tmp_path), "--quiet"]
     with caplog.at_level(logging.INFO):
         with patch.object(sys, "argv", argv):
             with patch("code_review_graph.graph.GraphStore", return_value=MagicMock()):

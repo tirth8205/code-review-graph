@@ -424,3 +424,27 @@ IMPORT_CONTEXT_DEFERRED = "deferred"
 #: Python ``from . import sibling``: the edge to the package is only the route to
 #: the sibling, and a file's own package is already loaded before the file is.
 IMPORT_CONTEXT_PARENT_PACKAGE = "parent_package"
+
+#: Every ``query_graph`` pattern and what it finds. The MCP tool and the CLI
+#: ``query`` command both take these, so a new one reaches both.
+QUERY_PATTERNS = {
+    "callers_of": "Find all functions that call a given function",
+    "references_to": "Find all nodes that reference a given symbol",
+    "callees_of": "Find all functions called by a given function",
+    "imports_of": "Find all imports of a given file or module",
+    "importers_of": "Find all files that import a given file or module",
+    "children_of": "Find all nodes contained in a file or class",
+    "tests_for": "Find all tests for a given function or class",
+    "inheritors_of": "Find all classes that inherit from a given class",
+    "triggers_of": "Find methods invoked by a scheduler or other trigger",
+    "triggered_by": "Find schedulers or other triggers that invoke a method",
+    "publishers_of": "Find methods that publish an event",
+    "listeners_of": "Find methods that listen for an event",
+    "advises": "Find methods an AOP advice targets via its pointcut",
+    "advised_by": "Find AOP advice methods that intercept a given method",
+    "handlers_of": "Find methods that handle an endpoint",
+    "endpoints_for": "Find endpoints handled by a method",
+    "consumers_of": "Find classes that consume a Spring configuration property",
+    "file_summary": "Get a summary of all nodes in a file",
+    "path_to": "Find how a given symbol or file reaches another",
+}

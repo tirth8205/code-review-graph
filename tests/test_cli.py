@@ -240,6 +240,12 @@ def test_visualize_json_uses_local_export(tmp_path, capsys):
 
 
 class TestBuildUpdateCommands:
+    @pytest.fixture(autouse=True)
+    def _repo_root_folder(self, tmp_path, monkeypatch):
+        # build and update stop on a --repo path that is not a folder.
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "repo-root").mkdir()
+
     @staticmethod
     def _run_build(result: dict, *extra: str) -> None:
         argv = ["code-review-graph", "build", "--repo", "repo-root", *extra]
@@ -660,7 +666,10 @@ class TestDetectChangesCommand:
                     ):
                         with patch(
                             "code_review_graph.changes.analyze_changes",
-                            return_value={"summary": "summary only"},
+                            return_value={
+                                "summary": "summary only",
+                                "changed_functions": [{"name": "app.f"}],
+                            },
                         ):
                             cli.main()
 

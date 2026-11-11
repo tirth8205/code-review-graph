@@ -282,12 +282,17 @@ def _confirm_yes_no(
     runs the command knows a question was answered for it.
 
     Ctrl-C counts as "no" unless ``cancel_on_interrupt`` is set, in which case
-    it is raised so the caller can stop altogether.
+    it is raised so the caller can stop altogether. The end of input takes the
+    default like a pipe: on Windows, stdin from ``NUL`` says it is a terminal.
     """
-    if not sys.stdin.isatty():
+
+    def take_default() -> bool:
         answer = "yes" if default_yes else "no"
         print(f"No terminal: taking the default ({answer}). {no_terminal_hint}".rstrip())
         return default_yes
+
+    if not sys.stdin.isatty():
+        return take_default()
     suffix = "[Y/n]" if default_yes else "[y/N]"
     try:
         answer = input(f"{prompt} {suffix} ").strip().lower()
@@ -298,7 +303,7 @@ def _confirm_yes_no(
         return False
     except EOFError:
         print()
-        return False
+        return take_default()
     if not answer:
         return default_yes
     return answer in ("y", "yes")
@@ -1255,6 +1260,18 @@ def _open_graph_store(db_path: Path, command: str):
     return open_store(db_path, command)
 
 
+def _require_repo_folder(repo_root: Path) -> None:
+    """Stop with one line when ``--repo`` names no folder.
+
+    The write commands used to make the folder, so a typed path left an
+    empty one behind; stopping is the safer answer.
+    """
+    if not repo_root.is_dir():
+        raise CodeReviewGraphError(
+            f"--repo is not a folder: {repo_root}. Check the path and try again."
+        )
+
+
 def _ensure_project_marker(repo_root: Path) -> None:
     """Let a plain directory pass tool validation, without opening graph.db.
 
@@ -1393,11 +1410,7 @@ def _handle_build_update(args, repo_root: Path, embedding_refresh_kwargs) -> Non
         if getattr(args, "brief", False) and not args.quiet:
             from .changes import analyze_changes
             from .context_history import CallInfo
-            from .context_savings import (
-                attach_context_savings,
-                estimate_file_tokens,
-                format_context_savings_panel,
-            )
+            from .context_savings import attach_context_savings, estimate_file_tokens
             from .incremental import discover_review_changes
 
             # Reuse the base the update actually resolved to (args.base is
@@ -1438,31 +1451,42 @@ def _handle_build_update(args, repo_root: Path, embedding_refresh_kwargs) -> Non
                     summary = impact.get("summary", "")
                     if summary:
                         print(summary)
-                    verified = None
-                    if getattr(args, "verify", False):
-                        from .context_savings import verify_with_tiktoken
-                        verified = verify_with_tiktoken(
-                            repo_root, changed, impact,
-                        )
-                        if verified is None:
-                            print(
-                                "Note: --verify requires tiktoken. "
-                                "Install with `pip install tiktoken`.",
-                            )
-                    panel = format_context_savings_panel(
-                        impact.get("context_savings"),
-                        original_tokens=original_tokens,
-                        response=impact,
-                        verified=verified,
-                    )
-                    if panel:
-                        print(panel)
+                    _print_savings_panel(args, repo_root, changed, impact, original_tokens)
                 finally:
                     try:
                         if store is not None:
                             store.close()
                     finally:
                         brief_lock.release()
+
+
+def _print_savings_panel(
+    args, repo_root: Path, changed: list[str], response: dict, original_tokens: int
+) -> None:
+    """Print the Token Savings panel of a ``--brief`` review.
+
+    With no changed function the response is almost empty, so the panel would
+    claim nearly all of it saved for telling the reader nothing. One plain
+    line says why there is no panel instead.
+    """
+    from .context_savings import format_context_savings_panel, verify_with_tiktoken
+
+    if not response.get("changed_functions"):
+        print("Token Savings: none to show, as no functions changed.")
+        return
+    verified = None
+    if getattr(args, "verify", False):
+        verified = verify_with_tiktoken(repo_root, changed, response)
+        if verified is None:
+            print("Note: --verify requires tiktoken. Install with `pip install tiktoken`.")
+    panel = format_context_savings_panel(
+        response.get("context_savings"),
+        original_tokens=original_tokens,
+        response=response,
+        verified=verified,
+    )
+    if panel:
+        print(panel)
 
 
 def _handle_forget(args, repo_root: Path, db_path: Path, *, legacy: bool = False) -> None:
@@ -2395,19 +2419,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Graph tool wrappers
     query_cmd = sub.add_parser("query", help="Query graph relationships")
+    from .constants import QUERY_PATTERNS
+
     query_cmd.add_argument(
         "pattern",
-        choices=[
-            "callers_of",
-            "callees_of",
-            "imports_of",
-            "importers_of",
-            "children_of",
-            "tests_for",
-            "inheritors_of",
-            "file_summary",
-            "path_to",
-        ],
+        choices=list(QUERY_PATTERNS),
+        metavar="pattern",
+        help="One of: " + ", ".join(QUERY_PATTERNS),
     )
     query_cmd.add_argument("target", help="Node name, qualified name, or file path")
     query_cmd.add_argument(
@@ -3057,6 +3075,9 @@ def _dispatch() -> None:
         watch,
     )
 
+    if args.command in ("build", "update", "postprocess") and args.repo:
+        _require_repo_folder(Path(args.repo))
+
     if args.command == "postprocess":
         repo_root = Path(args.repo) if args.repo else find_project_root()
         _handle_data_dir_option(args, repo_root)
@@ -3524,27 +3545,9 @@ def _dispatch() -> None:
                 )
                 if args.brief:
                     from .changes import format_brief
-                    from .context_savings import (
-                        format_context_savings_panel,
-                        verify_with_tiktoken,
-                    )
+
                     print(format_brief(store, result, repo_root))
-                    verified = None
-                    if getattr(args, "verify", False):
-                        verified = verify_with_tiktoken(repo_root, changed, result)
-                        if verified is None:
-                            print(
-                                "Note: --verify requires tiktoken. "
-                                "Install with `pip install tiktoken`.",
-                            )
-                    panel = format_context_savings_panel(
-                        result.get("context_savings"),
-                        original_tokens=original_tokens,
-                        response=result,
-                        verified=verified,
-                    )
-                    if panel:
-                        print(panel)
+                    _print_savings_panel(args, repo_root, changed, result, original_tokens)
                 else:
                     print(json.dumps(result, indent=2, default=str))
 
