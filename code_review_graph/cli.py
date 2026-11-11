@@ -1845,7 +1845,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--provider",
         choices=["local", "openai", "google", "minimax", "voyage"],
         default=None,
-        help="Embedding provider (default: local, needs code-review-graph[embeddings])",
+        help='Embedding provider (default: local, needs pip install '
+             '"code-review-graph[embeddings]")',
     )
     embed_cmd.add_argument(
         "--model",
@@ -2124,8 +2125,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--embed-provider",
         choices=["local", "openai", "google", "minimax", "voyage"],
         default=None,
-        help="Provider for --embed (default: local, needs "
-             "code-review-graph[embeddings])",
+        help="Provider for --embed (default: local, needs pip install "
+             '"code-review-graph[embeddings]")',
     )
     eval_cmd.add_argument(
         "--embed-model",
