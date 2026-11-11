@@ -92,18 +92,18 @@ def test_reinstall_keeps_every_recorded_file(repo: Path) -> None:
 
 def test_reinstall_with_nothing_new_leaves_the_record_alone(repo: Path) -> None:
     _install(repo)
-    # The second run backs up the settings file it merges into, and records
-    # the backup; after that there is nothing new.
-    _install(repo)
-    assert ".claude/settings.json.bak" in _record(repo)["files"]
     path = install_manifest.manifest_path(repo)
     before = path.read_bytes()
     os.utime(path, (1, 1))
 
+    # The settings file already holds the hooks, so it is neither backed up
+    # nor rewritten, and the record has nothing new to list.
     _install(repo)
 
     assert path.read_bytes() == before
     assert path.stat().st_mtime == 1
+    assert not (repo / ".claude" / "settings.json.bak").exists()
+    assert ".claude/settings.json.bak" not in _record(repo)["files"]
 
 
 def test_declined_instructions_are_not_recorded(repo: Path, monkeypatch) -> None:

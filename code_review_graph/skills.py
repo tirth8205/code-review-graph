@@ -3026,11 +3026,19 @@ def _write_merged_settings(
 ) -> bool:
     """Write merged hook settings, keeping a backup and every comment.
 
-    Returns False when the file was left alone instead. A commented file that
-    already holds these hooks is not touched, so reinstalling neither rewrites it
-    nor replaces the backup of what the user wrote with our own earlier edit.
+    Returns False when the file was left alone instead. A file that already
+    holds these settings is not touched, so reinstalling neither rewrites it nor
+    replaces the backup of what the user wrote with our own earlier edit, nor
+    leaves a backup that is the same as the file.
     """
     spliced: str | None = None
+    if raw.strip() and not jsonc.has_comments(raw):
+        try:
+            unchanged = json.loads(_strip_jsonc(raw)) == merged
+        except (ValueError, RecursionError):
+            unchanged = False
+        if unchanged:
+            return True
     if jsonc.has_comments(raw):
         stripped = _strip_jsonc(raw)
         before = json.loads(stripped) if stripped.strip() else {}
