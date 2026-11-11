@@ -115,6 +115,55 @@
 - `impact --detail-level compact` and `get_impact_radius_tool(detail_level="compact")`
   now write their line to the context-history log when `CRG_CONTEXT_HISTORY=1`,
   as every other answer with `context_savings` does.
+- A yes/no question that gets no input, such as stdin from NUL on Windows, now
+  takes the default and says so, instead of always meaning "no".
+- `build`, `update` and `postprocess` with a `--repo` that is not a folder print
+  one `Error:` line and exit 1, with no traceback.
+- `detect-changes --brief` and `update --brief` no longer show "Saved ~98%" when
+  no functions changed; one line says there is nothing to measure.
+- `code-review-graph query` takes all 19 patterns the MCP tool takes, including
+  `references_to` and the Spring and event ones.
+- The enrich and edit hooks read their input as UTF-8 on Windows, so paths such
+  as `C:\Users\José` work.
+- `update` works in a project that has a graph but no Git, and the OpenCode
+  plugin logs commands that fail.
+- `uninstall` removes the OpenCode entry from both `opencode.jsonc` and
+  `opencode.json`, and the OpenCode plugin goes under `$XDG_CONFIG_HOME` when
+  it is set.
+- The git hook block now runs in a hook you wrote that ends with `exit 0`; a
+  reinstall moves an old block above the `exit`. A hook that ends with a bare
+  `exit` or `exit $?` is left alone, with a warning.
+- `git commit --amend`, even with `--no-verify`, now updates the graph.
+- The plugin hooks no longer say "Not a git repo" in a Git repository with no
+  graph, and the worktree hook no longer builds a graph outside Git.
+- The Codex edit hook never builds a new graph; it only updates one that
+  exists. Run `install` again for the new hook.
+- A reinstall keeps your first `settings.json.bak`, and `uninstall` removes a
+  backup that holds only code-review-graph settings.
+- A Rust call such as `v.map(...)` on a value of unknown type no longer links
+  to a method that just happens to share its file.
+- A PHP or Rust `Class::method` call now links only when the calling file backs
+  it (same file, an import naming the class, the same PHP namespace, or
+  `self`/`Self`), not just because the name is unique.
+- `path_to` no longer follows imports that never run (`if TYPE_CHECKING:`,
+  `import type`).
+- `traverse_graph_tool` works from a symbol whose name is over 256 characters.
+- The graph page: hiding a community hides its edges too, labels come back when
+  you show a community again or turn community colours off, Escape brings the
+  legend back, and a node reached with the keyboard shows its tooltip beside
+  it.
+- `visualize --format obsidian` is much faster when many names clash, such as
+  `__init__`.
+- VS Code extension: the walkthrough's Build Graph says when a build fails;
+  Build Graph, Update Graph, Compute Embeddings and Watch Mode no longer stop
+  after 60 seconds; and seven settings that did nothing are gone
+  (`graphTheme`, `graph.defaultEdges` and the five `treeView.show*`).
+- Two programs opening a new or old graph at the same time no longer fail with
+  `duplicate column name` or `table nodes_fts already exists`.
+- `eval --report` shows only each repository's newest run of each benchmark,
+  not old runs mixed in.
+- The PR comment workflow no longer shows a red run when the PR moved during
+  its analysis; it leaves a notice naming both commits.
 
 ## [2.4.0] - 2026-11-10
 
