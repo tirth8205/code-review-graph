@@ -536,7 +536,7 @@ function registerCommands(
         vscode.window.showInformationMessage("Code Graph: Embeddings computed.");
       } else {
         const msg = result.stderr.includes("not installed")
-          ? "Install embeddings support: pip install code-review-graph[embeddings]"
+          ? "Install embeddings support: pip install \"code-review-graph[embeddings]\""
           : `Embedding failed: ${result.stderr}`;
         vscode.window.showErrorMessage(`Code Graph: ${msg}`);
       }
