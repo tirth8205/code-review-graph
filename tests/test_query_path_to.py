@@ -621,6 +621,30 @@ class TestEndpoints:
         assert minimal["results"][0]["from"] == "a.py"
         assert minimal["results"][0]["to"] == "b.py"
 
+    def test_type_only_import_is_not_a_route(self, tmp_path):
+        """``if TYPE_CHECKING:`` imports never run, as import cycles already know."""
+        root = tmp_path.resolve()
+        (root / ".git").mkdir()
+        (root / "a.py").write_text(
+            "from typing import TYPE_CHECKING\n"
+            "if TYPE_CHECKING:\n"
+            "    from b import Thing\n"
+            "x = 1\n",
+            encoding="utf-8",
+        )
+        (root / "b.py").write_text("class Thing:\n    pass\n", encoding="utf-8")
+        (root / "c.py").write_text("from b import Thing\n", encoding="utf-8")
+        store = GraphStore(get_db_path(root))
+        try:
+            full_build(root, store)
+        finally:
+            store.close()
+
+        assert query_graph("path_to", "a.py", str(root), to="b.py")["result_count"] == 0
+        # A plain import still is one.
+        result = query_graph("path_to", "c.py", str(root), to="b.py")
+        assert result["results"][0]["kind"] == "IMPORTS_FROM"
+
 
 class TestMinimal:
     def test_uses_short_names_and_stays_small(self, tmp_path):
