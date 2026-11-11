@@ -137,7 +137,7 @@ Release highlights by version. The full changelog is in [CHANGELOG.md](../CHANGE
 ## v1.5.3
 - **No git required**: `build`, `status`, `visualize` and `watch` work on any directory.
 - **File organisation**: generated files moved into `.code-review-graph/` (auto-created `.gitignore`, legacy migration).
-- **Visualisation density**: starts collapsed (File nodes only), search bar, clickable edge type toggles, scale-aware layout for large graphs.
+- **Visualisation density**: past 2,000 nodes the page starts collapsed (File nodes only); search bar, clickable edge type toggles, scale-aware layout for large graphs.
 
 ## v1.4.0
 - **`init` command**: automatic `.mcp.json` setup for Claude Code.
