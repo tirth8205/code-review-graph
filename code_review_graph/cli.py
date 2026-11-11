@@ -1155,6 +1155,14 @@ def _enrich_kwargs(args) -> dict:
     return {"enrich": True} if getattr(args, "enrich", False) else {}
 
 
+#: Printed after a build that stored something, so a new user knows what to
+#: try next instead of stopping at a line of counts.
+_BUILD_NEXT_STEP = (
+    "Next: code-review-graph detect-changes --brief, "
+    'or ask your assistant "Review my changes".'
+)
+
+
 def _handle_build_update(args, repo_root: Path, embedding_refresh_kwargs) -> None:
     """Run writers before the generic CLI store initialization."""
     from .incremental import assert_graph_serves_root, get_db_path
@@ -1195,6 +1203,17 @@ def _handle_build_update(args, repo_root: Path, embedding_refresh_kwargs) -> Non
             )
             if result.get("errors"):
                 print(f"Errors: {len(result['errors'])}")
+            if parsed == 0 and not result.get("errors"):
+                # An empty graph is a working build of the wrong folder far
+                # more often than a project with nothing in it.
+                sys.stdout.flush()
+                print(
+                    f"Warning: no source files found under {repo_root}. "
+                    "Is this the project root?",
+                    file=sys.stderr,
+                )
+            elif parsed:
+                print(_BUILD_NEXT_STEP)
 
     elif args.command == "update":
         pp = (
