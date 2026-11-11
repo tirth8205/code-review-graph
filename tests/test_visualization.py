@@ -212,6 +212,53 @@ def test_export_json_failure_preserves_existing_file(
     assert list(tmp_path.glob(".graph.json.*.tmp")) == []
 
 
+def _slugs_the_old_way(nodes: list[dict]) -> dict[str, str]:
+    """The slug loop as it was: right, but it scanned every slug per step."""
+    from code_review_graph.exports import _obsidian_slug
+
+    slugs: dict[str, str] = {}
+    for n in nodes:
+        slug = _obsidian_slug(n.get("name", n["qualified_name"]))
+        base_slug, counter = slug, 1
+        while slug in slugs.values():
+            slug = f"{base_slug}-{counter}"
+            counter += 1
+        slugs[n["qualified_name"]] = slug
+    return slugs
+
+
+def test_obsidian_slugs_match_the_old_collision_rule():
+    """Same names, same order, same slugs as before the loop was made linear."""
+    from code_review_graph.exports import _obsidian_slugs
+
+    names = [
+        "Report", "report", "report-1", "RE_PORT", "report", "re port",
+        "report-1", "report!", "", "unnamed", "!!!", "report-2", "Report",
+    ]
+    nodes = [{"qualified_name": f"m.py::n{i}", "name": nm} for i, nm in enumerate(names)]
+    nodes.append({"qualified_name": "m.py::no_name"})
+    slugs = _obsidian_slugs(nodes)
+    assert slugs == _slugs_the_old_way(nodes)
+    assert len(set(slugs.values())) == len(nodes)
+
+
+def test_obsidian_slugs_stay_linear_when_many_names_collide():
+    """Twenty thousand ``__init__`` methods once meant billions of compares."""
+    import time
+
+    from code_review_graph.exports import _obsidian_slugs
+
+    n = 20_000
+    nodes = [{"qualified_name": f"m{i}.py::C.__init__", "name": "__init__"} for i in range(n)]
+    started = time.perf_counter()
+    slugs = _obsidian_slugs(nodes)
+    elapsed = time.perf_counter() - started
+    assert len(set(slugs.values())) == n
+    assert slugs["m0.py::C.__init__"] == "init"
+    assert slugs[f"m{n - 1}.py::C.__init__"] == f"init-{n - 1}"
+    assert elapsed < 5, f"{n} colliding slugs took {elapsed:.2f}s; looks quadratic"
+
+
 def test_generate_html(store_with_data, tmp_path):
     from code_review_graph.visualization import generate_html
 
@@ -639,6 +686,74 @@ def test_generate_html_includes_focus_visible(store_with_data, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Full-page script: community filter, detail panel, keyboard focus (crg-nf8.1).
+# tests/test_visualization_browser.py drives the same fixes in Chromium.
+# ---------------------------------------------------------------------------
+
+
+def _full_page_script(store, tmp_path) -> str:
+    from code_review_graph.visualization import generate_html
+
+    output_path = tmp_path / "graph.html"
+    generate_html(store, output_path, mode="full")
+    _, inline_scripts = _extract_scripts(output_path.read_text())
+    return next(s for s in inline_scripts if "function updateNodes(" in s)
+
+
+def _js_block(script: str, marker: str) -> str:
+    """Return *marker* through the brace that closes the first ``{`` after it."""
+    start = script.index(marker)
+    depth = 0
+    for i in range(script.index("{", start), len(script)):
+        if script[i] == "{":
+            depth += 1
+        elif script[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return script[start:i + 1]
+    raise AssertionError(f"no closing brace after {marker!r}")
+
+
+def test_edges_of_a_hidden_community_are_not_drawn(store_with_data, tmp_path):
+    """An edge with an end in a hidden community would point at nothing."""
+    script = _full_page_script(store_with_data, tmp_path)
+    assert "inHiddenCommunity(n)" in _js_block(script, "function updateLinks(")
+    # Nodes drawn again later (a File expanded) obey the filter as well.
+    assert "inHiddenCommunity(d)" in _js_block(script, "function updateNodes(")
+
+
+def test_community_filter_drives_label_visibility(store_with_data, tmp_path):
+    """Labels obey the filter on every redraw, so clearing it brings them back."""
+    script = _full_page_script(store_with_data, tmp_path)
+    assert "inHiddenCommunity(d)" in _js_block(script, "function updateLabelVisibility(")
+    assert "updateLabelVisibility()" in _js_block(script, "function applyCommunityFilter(")
+    # Colours off hides the checkboxes, so it must clear the filter too.
+    toggle = _js_block(script, 'getElementById("btn-community").addEventListener')
+    assert "applyCommunityFilter()" in toggle
+
+
+def test_every_way_to_close_the_detail_panel_brings_back_the_legend(
+    store_with_data, tmp_path,
+):
+    """Opening the panel hides the legend; Escape once forgot to show it again."""
+    script = _full_page_script(store_with_data, tmp_path)
+    close = _js_block(script, "function closeDetailPanel(")
+    assert 'getElementById("legend").style.display = ""' in close
+    # Nothing else closes the panel, so no path can skip the legend.
+    assert script.count('detailPanel.classList.remove("visible")') == 1
+    assert 'detailPanel.classList.remove("visible")' in close
+
+
+def test_keyboard_focus_places_the_tooltip_by_the_node(store_with_data, tmp_path):
+    """A FocusEvent has no pageX/pageY, so the tooltip used to land at NaN."""
+    script = _full_page_script(store_with_data, tmp_path)
+    focus = _js_block(script, '.on("focus", function(ev, d)')
+    assert "showTooltip(ev" not in focus
+    assert "showTooltip(tooltipAnchor(this), d)" in focus
+    assert "getBoundingClientRect()" in _js_block(script, "function tooltipAnchor(")
+
+
+# ---------------------------------------------------------------------------
 # Phase 9: Visualization Aggregation
 # ---------------------------------------------------------------------------
 
@@ -803,6 +918,61 @@ def test_file_mode_aggregation(large_store, tmp_path):
         assert e["kind"] == "DEPENDS_ON"
     # Mode should be set
     assert agg["mode"] == "file"
+
+
+class _CountingList(list):
+    """A list that counts how many times it is walked."""
+
+    def __init__(self, items):
+        super().__init__(items)
+        self.walks = 0
+
+    def __iter__(self):
+        self.walks += 1
+        return super().__iter__()
+
+
+def _file_mode_node(qn, kind, fp, cid):
+    return {
+        "qualified_name": qn, "kind": kind, "file_path": fp,
+        "language": "python", "community_id": cid,
+    }
+
+
+def test_file_mode_keeps_the_first_community_found_in_each_file():
+    """Each file takes the community of its first node that has one."""
+    from code_review_graph.visualization import _aggregate_file
+
+    nodes = [
+        _file_mode_node("a.py", "File", "a.py", None),
+        _file_mode_node("a.py::f1", "Function", "a.py", None),
+        _file_mode_node("a.py::f2", "Function", "a.py", 7),
+        _file_mode_node("a.py::f3", "Function", "a.py", 3),
+        _file_mode_node("b.py", "File", "b.py", 5),
+        _file_mode_node("b.py::g", "Function", "b.py", 2),
+        _file_mode_node("c.py::h", "Function", "c.py", None),
+        _file_mode_node("d.py::k", "Function", "d.py", 0),
+    ]
+    agg = _aggregate_file({"nodes": nodes, "edges": [], "stats": {}})
+    by_file = {n["qualified_name"]: n for n in agg["nodes"]}
+    assert {fp: n["community_id"] for fp, n in by_file.items()} == {
+        "a.py": 7, "b.py": 5, "c.py": None, "d.py": 0,
+    }
+    assert {fp: n["symbol_count"] for fp, n in by_file.items()} == {
+        "a.py": 3, "b.py": 1, "c.py": 1, "d.py": 1,
+    }
+
+
+def test_file_mode_walks_the_nodes_once():
+    """Finding each file's community once scanned every node per file."""
+    from code_review_graph.visualization import _aggregate_file
+
+    nodes = _CountingList(
+        _file_mode_node(f"m{i}.py::f", "Function", f"m{i}.py", i) for i in range(200)
+    )
+    agg = _aggregate_file({"nodes": nodes, "edges": [], "stats": {}})
+    assert len(agg["nodes"]) == 200
+    assert nodes.walks == 1
 
 
 def test_auto_mode_switches_at_threshold(large_store, tmp_path):

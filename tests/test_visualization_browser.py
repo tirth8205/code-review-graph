@@ -284,7 +284,9 @@ class _Probe:
         ``fx``/``fy`` and resetting the transform to the identity makes the
         geometry exact, keeps every node clear of the fixed panels, and lets the
         clicks below be genuine mouse events with Playwright's full actionability
-        checks rather than synthesised DOM events.
+        checks rather than synthesised DOM events. It waits two frames first,
+        so the ``fitGraph()`` queued when the layout ended has started and the
+        interrupt below stops it, instead of it zooming in afterwards.
         """
         self.page.evaluate(_FREEZE_LAYOUT_JS, CLEAR_BOX)
 
@@ -316,7 +318,8 @@ _LAYOUT_SETTLED_JS = """
 """
 
 _FREEZE_LAYOUT_JS = """
-(box) => {
+async (box) => {
+  await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
   const d3 = window.d3;
   const all = (window.nodes || window.currentNodes || []).slice();
   all.sort((a, b) => (
@@ -498,6 +501,118 @@ def test_legend_edge_toggle_hides_that_edge_type(full_page):
     assert calls_toggle.get_attribute("aria-pressed") == "true"
     assert full_page.stroke_count(CALLS_STROKE) == TOTAL_CALLS
     assert full_page.edge_lines.count() == TOTAL_EDGES
+    full_page.assert_no_errors()
+
+
+# ---------------------------------------------------------------------------
+# Community filter, detail panel and keyboard focus (crg-nf8.1)
+# ---------------------------------------------------------------------------
+
+# mod0_func_0 calls into mod1, and mod2_func_0 calls into mod0.
+MOD0_CALLS = 2
+# At zoom 1 only File and Class labels show; Function labels wait for k > 1.
+LABELS_AT_ZOOM_ONE = 2 * FILE_COUNT
+
+_SHOWN_NODE_COUNT_JS = """
+() => Array.from(document.querySelectorAll("#graph-svg g.nodes g.node-g"))
+  .filter((g) => g.getAttribute("display") !== "none").length
+"""
+
+_SHOWN_LABEL_COUNT_JS = """
+() => Array.from(document.querySelectorAll("#graph-svg g.labels text.node-label"))
+  .filter((t) => t.getAttribute("display") !== "none").length
+"""
+
+_ZOOM_TO_ONE_JS = """
+() => window.svg.call(window.zoomBehavior.transform, window.d3.zoomIdentity)
+"""
+
+
+def _community_box(probe, cid: int):
+    return probe.page.locator(f'#community-legend input[data-cid="{cid}"]')
+
+
+def test_hiding_a_community_hides_its_edges(full_page):
+    """An edge with a hidden end must go too, or it points at nothing."""
+    full_page.page.locator("#btn-community").click()
+    _community_box(full_page, 0).uncheck()
+
+    assert full_page.page.evaluate(_SHOWN_NODE_COUNT_JS) == TOTAL_NODES - NODES_PER_FILE
+    assert full_page.edge_lines.count() == TOTAL_EDGES - CONTAINS_PER_FILE - MOD0_CALLS
+
+    _community_box(full_page, 0).check()
+    assert full_page.edge_lines.count() == TOTAL_EDGES
+    full_page.assert_no_errors()
+
+
+def test_showing_a_community_again_brings_back_its_labels(full_page):
+    """Labels follow the community filter both ways, and zooming keeps it."""
+    full_page.freeze_layout()
+    shown = lambda: full_page.page.evaluate(_SHOWN_LABEL_COUNT_JS)  # noqa: E731
+    assert shown() == LABELS_AT_ZOOM_ONE
+
+    full_page.page.locator("#btn-community").click()
+    _community_box(full_page, 0).uncheck()
+    assert shown() == LABELS_AT_ZOOM_ONE - 2
+    # A zoom redraws the labels; it must not bring back a hidden community's.
+    full_page.page.evaluate(_ZOOM_TO_ONE_JS)
+    assert shown() == LABELS_AT_ZOOM_ONE - 2
+
+    _community_box(full_page, 0).check()
+    assert shown() == LABELS_AT_ZOOM_ONE
+
+    # Turning community colours off hides the checkboxes, so it clears the
+    # filter too: nothing may stay hidden with no way to bring it back.
+    _community_box(full_page, 0).uncheck()
+    full_page.page.locator("#btn-community").click()
+    assert full_page.page.evaluate(_SHOWN_NODE_COUNT_JS) == TOTAL_NODES
+    assert full_page.edge_lines.count() == TOTAL_EDGES
+    assert shown() == LABELS_AT_ZOOM_ONE
+    full_page.assert_no_errors()
+
+
+def test_escape_closes_the_detail_panel_and_brings_back_the_legend(full_page):
+    """Escape must undo everything opening the panel did, legend included."""
+    full_page.freeze_layout()
+    node = full_page.node_by_qualified_name("src/mod0.py::mod0_func_3")
+    panel = full_page.page.locator("#detail-panel")
+    legend = full_page.page.locator("#legend")
+
+    node.click()
+    assert panel.is_visible()
+    assert not legend.is_visible()
+    full_page.page.keyboard.press("Escape")
+    assert not panel.is_visible()
+    assert legend.is_visible()
+
+    # Escape on a focused node goes through the node's own handler.
+    node.click()
+    assert not legend.is_visible()
+    node.focus()
+    full_page.page.keyboard.press("Escape")
+    assert not panel.is_visible()
+    assert legend.is_visible()
+    full_page.assert_no_errors()
+
+
+def test_keyboard_focus_puts_the_tooltip_beside_the_node(full_page):
+    """A focus event has no pointer position, so the node itself is the anchor."""
+    full_page.freeze_layout()
+    node = full_page.node_by_qualified_name(f"src/mod1.py::{UNIQUE_SYMBOL}")
+    node.focus()
+
+    tooltip = full_page.page.locator("#tooltip")
+    assert "visible" in (tooltip.get_attribute("class") or "")
+    style = full_page.page.evaluate(
+        "() => [document.getElementById('tooltip').style.left,"
+        " document.getElementById('tooltip').style.top]"
+    )
+    assert all(v.endswith("px") and "NaN" not in v for v in style), style
+    box = node.bounding_box()
+    tip = tooltip.bounding_box()
+    node_x = box["x"] + box["width"] / 2
+    node_y = box["y"] + box["height"] / 2
+    assert abs(tip["x"] - node_x) < 60 and abs(tip["y"] - node_y) < 60, (tip, box)
     full_page.assert_no_errors()
 
 
