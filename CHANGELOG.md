@@ -9,6 +9,13 @@
   never drops a file. `uninstall` drops each file it removes or cleans, and
   deletes the record when it is empty. `install --dry-run` shows the record
   like any other file.
+- New `code-review-graph doctor` command. It lists every `code-review-graph`
+  on PATH with its version, the version each MCP entry in the repository's
+  configs runs (read from a `uvx` pin or `uv tool list`, never by starting a
+  download), the graph's schema, whether it was built at HEAD and whether the
+  last build finished, and which git and editor hooks are installed and the
+  version of the copy they run. It changes nothing, exits 1 when a check
+  fails, and takes `--json`.
 
 ### Fixed
 
@@ -57,12 +64,6 @@
   drop out of the review when another file had changed lines.
 - `detect-changes --brief` lists the top three things to review, each with its
   file and line, its risk out of 1.00, its callers and its tests.
-- New `code-review-graph doctor` command. It lists every `code-review-graph`
-  on PATH with its version, the version each MCP entry in the repository's
-  configs runs (read from a `uvx` pin or `uv tool list`, never by starting a
-  download), the graph's schema, whether it was built at HEAD and whether the
-  last build finished, and which git and editor hooks are installed. It
-  changes nothing, exits 1 when a check fails, and takes `--json`.
 - A graph written by a newer copy now names the copy that refused it, its
   version and its folder, and points at `doctor` to find the others.
 - `build` ends with a next step, and warns on stderr when it found no source
