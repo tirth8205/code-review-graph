@@ -2349,14 +2349,17 @@ def traverse_graph_func(
 
     store, root = _get_store(repo_root)
     try:
-        results = hybrid_search(store, query, limit=1)
-        if not results:
+        result_ids: list[int] = []
+        results = hybrid_search(store, query, limit=1, _out_ids=result_ids)
+        # Search cuts a long qualified name, so find the node by its id.
+        start = store.get_node_by_id(result_ids[0]) if result_ids else None
+        if not results or start is None:
             return {
                 "error": f"No node matching '{query}'",
                 "nodes": [],
             }
 
-        start_qn = results[0]["qualified_name"]
+        start_qn = start.qualified_name
         depth = max(1, min(depth, 6))
 
         # BFS / DFS traversal
@@ -2419,7 +2422,7 @@ def traverse_graph_func(
                     queue.append((src, next_depth))
 
         return {
-            "start_node": start_qn,
+            "start_node": _sanitize_name(start_qn),
             "mode": mode,
             "max_depth": depth,
             "token_budget": token_budget,
