@@ -325,10 +325,10 @@ code-review-graph detect-changes --brief
 ```
 
 `install` also appends `post-checkout`, `post-merge` and `post-rewrite` hooks
-that run `code-review-graph update --quiet` after a branch checkout, a merge
-and a rebase. With a hook manager, add that command to the same three hooks;
-run it from `post-checkout` only when its third argument is `1`, and from
-`post-rewrite` only when its first argument is `rebase`. Do the same from an
+that run `code-review-graph update --quiet` after a branch checkout, a merge,
+a rebase and `commit --amend`. With a hook manager, add that command to the
+same three hooks, and run it from `post-checkout` only when its third argument
+is `1`. Do the same from an
 existing hook written in a language other than shell, which `install` leaves
 unchanged.
 
@@ -657,7 +657,7 @@ on first use. Nothing else is needed.
   after each Edit/Write (see *How the hooks work* for which repositories it
   touches), the pre-commit hook runs `update --quiet` before each commit, and
   the post-checkout, post-merge and post-rewrite hooks run it after a branch
-  switch, a merge and a rebase (not in linked worktrees).
+  switch, a merge, a rebase and an amend (not in linked worktrees).
 - `code-review-graph doctor` says whether the graph was built at HEAD, whether
   the last build finished, and which hooks are installed.
 - Run `code-review-graph update`, or ask the assistant to call

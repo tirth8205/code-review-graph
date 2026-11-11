@@ -2518,8 +2518,9 @@ def install_git_hook(repo_root: Path) -> Path | None:
 #   nothing is left to replay, Git never runs post-rewrite, so that checkout
 #   is the final tree and post-checkout updates after all.
 # - post-merge, after a merge or a merge-mode ``git pull``.
-# - post-rewrite, after a rebase has replayed every commit. ``--amend`` also
-#   fires it, but ``pre-commit`` already updated the graph for that commit.
+# - post-rewrite, after a rebase has replayed every commit and after
+#   ``commit --amend``. ``pre-commit`` updates before an amend too, but
+#   ``--no-verify`` skips it.
 #
 # They share the pre-commit block's rules: explicit begin/end markers, appended
 # to an existing hook rather than overwriting it, and skipped in linked
@@ -2537,8 +2538,9 @@ _GIT_SYNC_HOOK_CONDITIONS = {
     # $3 is 1 for a branch checkout and 0 for a file checkout.
     "post-checkout": '[ "$3" = "1" ] && ',
     "post-merge": "",
-    # $1 names the command that rewrote commits: "rebase" or "amend".
-    "post-rewrite": '[ "$1" = "rebase" ] && ',
+    # Git passes "rebase" or "amend" as $1; both update. Up to 2.4.0 it was
+    # '[ "$1" = "rebase" ] && ', and the markers still find that block.
+    "post-rewrite": "",
 }
 
 

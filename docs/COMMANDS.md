@@ -367,10 +367,10 @@ A hook or CI job can tell these apart without reading the message. `75` is
   `CRG_HOOK_WORKTREES=1` is set, so a worktree does not build a second graph
   for another branch.
 - `install` also appends `post-checkout`, `post-merge` and `post-rewrite` Git
-  hooks that run `update --quiet` after a branch switch, a merge and a rebase, with
-  the same worktree rule. An existing hook written in a language other than
-  shell is left alone, `--no-hooks` skips all four, and `uninstall` removes
-  them.
+  hooks that run `update --quiet` after a branch switch, a merge, a rebase and
+  `commit --amend`, with the same worktree rule. An existing hook written in a
+  language other than shell is left alone, `--no-hooks` skips all four, and
+  `uninstall` removes them.
 - For an empty or incomplete graph, run `code-review-graph build`. See
   docs/TROUBLESHOOTING.md, "Empty or incomplete graph".
 - `context-history` reads a log that is off by default. Set

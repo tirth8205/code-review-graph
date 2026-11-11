@@ -168,13 +168,6 @@ def test_rebase_with_commits_to_replay_ignores_its_first_checkout(tmp_path, monk
     assert calls(log) == [f"update --quiet --repo {clone} probe=present"]
 
 
-def test_amend_does_not_update(tmp_path, monkeypatch):
-    _upstream, clone, log = sync_repo(tmp_path, monkeypatch)
-    commit_file(clone, "local.txt")
-    git(clone, "commit", "--amend", "-m", "reworded")
-    assert calls(log) == []
-
-
 def test_conflicted_merge_does_not_update(tmp_path, monkeypatch):
     """post-merge never runs for a merge that stops on a conflict.
 
