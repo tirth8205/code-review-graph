@@ -58,6 +58,12 @@ _ABSOLUTE_PYTHON_RE = re.compile(
     r"""["']?\s+-m\s+code_review_graph\b""",
     re.MULTILINE,
 )
+# ``install`` puts that Python in single quotes, so a folder name may hold spaces.
+_QUOTED_PYTHON_RE = re.compile(
+    r"""'((?:/|[A-Za-z]:[\\/])[^']*pythonw?[0-9.]*(?:\.exe)?)'\s+-m\s+code_review_graph\b""",
+)
+# A hook ``install`` wrote from a ``uvx`` or ``uv tool`` copy runs ``uvx``.
+_UVX_HOOK_RE = re.compile(r"(?:^|[\s;&|({])uvx\s+code-review-graph\b", re.MULTILINE)
 
 _GIT_HOOK_NAMES = ("pre-commit", "post-checkout", "post-merge", "post-rewrite")
 _HOOK_MARKERS = ("code-review-graph", "code_review_graph", "crg-")
@@ -584,8 +590,14 @@ def _ours(text: str) -> bool:
 
 
 def _runners(text: str) -> set[str]:
-    """What a hook runs: full paths it names, or ``PATH`` when it names none."""
-    named = set(_ABSOLUTE_PROGRAM_RE.findall(text)) | set(_ABSOLUTE_PYTHON_RE.findall(text))
+    """What a hook runs: full paths it names, ``uvx``, or ``PATH`` when it names neither."""
+    named = (
+        set(_ABSOLUTE_PROGRAM_RE.findall(text))
+        | set(_ABSOLUTE_PYTHON_RE.findall(text))
+        | set(_QUOTED_PYTHON_RE.findall(text))
+    )
+    if _UVX_HOOK_RE.search(text):
+        named.add("uvx")
     return named or {"PATH"}
 
 
@@ -623,6 +635,35 @@ def _hook_settings_files(root: Path) -> list[tuple[str, Path]]:
         ("Codex", _codex_home() / "hooks.json"),
         ("Cursor", Path.home() / ".cursor" / "hooks.json"),
     ]
+
+
+def _check_uvx_hooks(prober: _Prober, path_copies: list[Copy]) -> list[Finding]:
+    """Check hooks that run ``uvx code-review-graph``, without starting uvx."""
+    if shutil.which("uvx") is None:
+        if path_copies:
+            return []  # the hooks fall back to the copy on PATH, checked above
+        return [Finding(
+            WARN,
+            "The hooks call uvx, or code-review-graph from PATH, but neither is "
+            "on PATH here, so they do nothing.",
+            "Install it where your shell finds it, for example: "
+            "uv tool install code-review-graph",
+        )]
+    version = prober.uv_tool_version()
+    if version is None:
+        return [Finding(
+            WARN,
+            "The hooks run uvx code-review-graph. Version unknown: uvx picks a copy "
+            "when it starts, and finding out could mean a download. To see it, run: "
+            "uvx code-review-graph --version",
+        )]
+    if version != __version__:
+        return [Finding(
+            FAIL,
+            f"The hooks run uvx code-review-graph, which is {version}, not {__version__}.",
+            _mismatch_fix(version, "the copy uvx runs", "uv tool upgrade code-review-graph"),
+        )]
+    return []
 
 
 def check_hooks(
@@ -674,7 +715,9 @@ def check_hooks(
             "Install it where your shell finds it, for example: "
             "uv tool install code-review-graph",
         ))
-    for runner in sorted(r for r in runners if r != "PATH"):
+    if "uvx" in runners:
+        findings.extend(_check_uvx_hooks(prober, path_copies))
+    for runner in sorted(r for r in runners if r not in ("PATH", "uvx")):
         argv = (
             [runner, "-m", "code_review_graph", "--version"]
             if _PYTHON_RE.match(_launcher(runner)) else [runner, "--version"]

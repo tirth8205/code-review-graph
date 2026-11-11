@@ -306,12 +306,20 @@ def test_an_unfinished_build_fails(repo, env, tmp_path, monkeypatch):
 
 
 def _released_git_hook_blocks() -> list[str]:
+    """Every git hook block a release wrote, and the ones that run the copy on PATH."""
     from code_review_graph import skills
 
+    path_program = skills._PATH_HOOK_PROGRAM
     return [
         *skills._LEGACY_GIT_HOOK_BLOCKS,
-        skills._GIT_HOOK_BLOCK,
-        *(skills._git_sync_hook_block(name) for name in skills._GIT_SYNC_HOOK_NAMES),
+        # 2.4.0's marked block.
+        f"{skills._GIT_HOOK_BEGIN_MARKER}\n{skills._GIT_HOOK_NOTE}\n"
+        f"{skills._GIT_HOOK_BODY}{skills._GIT_HOOK_END_MARKER}\n",
+        skills._git_hook_block(path_program),
+        *(
+            skills._git_sync_hook_block(name, path_program)
+            for name in skills._GIT_SYNC_HOOK_NAMES
+        ),
     ]
 
 
@@ -366,6 +374,96 @@ def test_a_hook_that_names_an_older_copy_by_path_fails(repo, env, tmp_path, monk
     report = doctor.diagnose(repo)
 
     assert _with(report, doctor.FAIL, f"The hooks run {old}, which is {OLD}")
+
+
+def _pinned_program(python: Path):
+    from code_review_graph import skills
+
+    exe = skills._sh_single_quote(python.as_posix())
+    return skills._HookProgram(f"[ -x {exe} ]", f"{exe} -m code_review_graph")
+
+
+def test_hooks_install_writes_now_check_the_copy_they_name(repo, env, monkeypatch):
+    """install pins every hook to the Python that ran it; doctor asks that one."""
+    from code_review_graph import skills
+
+    hooks = Path(_git(repo, "rev-parse", "--absolute-git-dir")) / "hooks"
+    hooks.mkdir(exist_ok=True)
+    program = skills._hook_program()
+    (hooks / "pre-commit").write_text(
+        "#!/bin/sh\n" + skills._git_hook_block(program), encoding="utf-8",
+    )
+    (repo / ".claude").mkdir()
+    (repo / ".claude" / "settings.json").write_text(
+        json.dumps(skills.generate_hooks_config(repo)), encoding="utf-8",
+    )
+    asked: list[list[str]] = []
+
+    def run(argv, cwd):
+        asked.append(argv)
+        return doctor._run_quietly(argv, cwd)
+
+    report = doctor.diagnose(repo, run=run)
+
+    assert [h["where"] for h in report.hooks] == ["git", "Claude Code"]
+    assert [sys.executable, "-m", "code_review_graph", "--version"] in asked
+    assert not _with(report, doctor.WARN, "there is none on PATH")
+    assert report.healthy, _statuses(report)
+
+
+def test_a_pinned_hook_with_a_space_in_its_path_is_checked(repo, env, tmp_path, monkeypatch):
+    from code_review_graph import skills
+
+    _set_path(monkeypatch, env, _copy(tmp_path / "bin", __version__).parent)
+    old_python = _program(
+        tmp_path / "old env" / "bin", "python3", f'echo "code-review-graph {OLD}"\n',
+    )
+    hooks = Path(_git(repo, "rev-parse", "--absolute-git-dir")) / "hooks"
+    hooks.mkdir(exist_ok=True)
+    (hooks / "pre-commit").write_text(
+        "#!/bin/sh\n" + skills._git_hook_block(_pinned_program(old_python)),
+        encoding="utf-8",
+    )
+
+    report = doctor.diagnose(repo)
+
+    assert _with(report, doctor.FAIL, f"The hooks run {old_python}, which is {OLD}")
+
+
+def _uvx_hook(repo: Path) -> None:
+    from code_review_graph import skills
+
+    hooks = Path(_git(repo, "rev-parse", "--absolute-git-dir")) / "hooks"
+    hooks.mkdir(exist_ok=True)
+    (hooks / "pre-commit").write_text(
+        "#!/bin/sh\n" + skills._git_hook_block(skills._UVX_HOOK_PROGRAM), encoding="utf-8",
+    )
+
+
+def test_a_uvx_hook_reads_the_uv_tool_version(repo, env, tmp_path, monkeypatch):
+    tools = tmp_path / "uv"
+    _program(tools, "uvx", "exit 1\n")
+    _program(tools, "uv", f'echo "code-review-graph v{OLD}"\necho "- code-review-graph"\n')
+    _set_path(monkeypatch, env, tools, _copy(tmp_path / "bin", __version__).parent)
+    _uvx_hook(repo)
+    asked: list[list[str]] = []
+
+    def run(argv, cwd):
+        asked.append(argv)
+        return doctor._run_quietly(argv, cwd)
+
+    report = doctor.diagnose(repo, run=run)
+
+    assert _with(report, doctor.FAIL, f"uvx code-review-graph, which is {OLD}")
+    assert not [argv for argv in asked if Path(argv[0]).name == "uvx"], "never start uvx"
+
+
+def test_a_uvx_hook_with_nothing_to_run_is_a_warning(repo, env, monkeypatch):
+    _uvx_hook(repo)
+
+    report = doctor.diagnose(repo)
+
+    assert _with(report, doctor.WARN, "but neither is on PATH here")
 
 
 # ---------------------------------------------------------------------------
