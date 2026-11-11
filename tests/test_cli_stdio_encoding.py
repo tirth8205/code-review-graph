@@ -155,7 +155,7 @@ def test_ascii_stream_is_upgraded_and_banner_prints(monkeypatch):
     wrapper.flush()
     out = raw.getvalue().decode("utf-8")
     assert "●──●──●" in out  # box art
-    assert "Commands:" in out
+    assert "Start:" in out
 
 
 def test_errors_replace_stream_round_trips_exactly(monkeypatch):
@@ -198,7 +198,7 @@ def test_subprocess_with_pythonioencoding_cp1252_renders_banner():
     assert result.returncode == 0, result.stderr.decode("utf-8", "replace")
     out = result.stdout.decode("utf-8")
     assert "●──●──●" in out
-    assert "Commands:" in out
+    assert "Start:" in out
 
 
 def test_subprocess_version_flag_with_ascii_encoding():

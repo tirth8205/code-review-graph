@@ -19,6 +19,7 @@ statements and the other process is about to finish.
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import os
 import sqlite3
@@ -26,6 +27,20 @@ import time
 from typing import Callable
 
 logger = logging.getLogger(__name__)
+
+# The level the per-migration progress lines log at. A brand-new database
+# runs every migration on an empty schema, and fifteen lines about that tell
+# the user nothing, so ``run_migrations`` drops them to DEBUG there and logs
+# one line instead. A context variable rather than the logger's own level, so
+# a daemon migrating two graphs on two threads never quietens the other one.
+_progress_level: contextvars.ContextVar[int] = contextvars.ContextVar(
+    "crg_migration_progress_level", default=logging.INFO,
+)
+
+
+def _progress(msg: str, *args: object) -> None:
+    """Log one migration progress line at the current progress level."""
+    logger.log(_progress_level.get(), msg, *args)
 
 # The whole migration set is a few DDL statements; a peer running it holds the
 # write lock for milliseconds.  Retrying is cheaper, and far less confusing,
@@ -210,7 +225,7 @@ def _migrate_v2(conn: sqlite3.Connection) -> None:
             "ALTER TABLE nodes ADD COLUMN signature TEXT",
             what="nodes.signature",
         ):
-            logger.info("Migration v2: added 'signature' column to nodes")
+            _progress("Migration v2: added 'signature' column to nodes")
 
 
 def _migrate_v3(conn: sqlite3.Connection) -> None:
@@ -246,7 +261,7 @@ def _migrate_v3(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_flow_memberships_node ON flow_memberships(node_id)"
     )
-    logger.info("Migration v3: created flows and flow_memberships tables")
+    _progress("Migration v3: created flows and flow_memberships tables")
 
 
 def _migrate_v4(conn: sqlite3.Connection) -> None:
@@ -270,7 +285,7 @@ def _migrate_v4(conn: sqlite3.Connection) -> None:
             "ALTER TABLE nodes ADD COLUMN community_id INTEGER",
             what="nodes.community_id",
         ):
-            logger.info("Migration v4: added 'community_id' column to nodes")
+            _progress("Migration v4: added 'community_id' column to nodes")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_nodes_community ON nodes(community_id)"
     )
@@ -280,7 +295,7 @@ def _migrate_v4(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_communities_cohesion ON communities(cohesion DESC)"
     )
-    logger.info("Migration v4: created communities table")
+    _progress("Migration v4: created communities table")
 
 
 def _migrate_v5(conn: sqlite3.Connection) -> None:
@@ -297,7 +312,7 @@ def _migrate_v5(conn: sqlite3.Connection) -> None:
             """,
             what="nodes_fts",
         ):
-            logger.info("Migration v5: created nodes_fts FTS5 virtual table")
+            _progress("Migration v5: created nodes_fts FTS5 virtual table")
 
 
 def _migrate_v6(conn: sqlite3.Connection) -> None:
@@ -342,7 +357,7 @@ def _migrate_v6(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_risk_index_score "
         "ON risk_index(risk_score DESC)"
     )
-    logger.info("Migration v6: created summary tables "
+    _progress("Migration v6: created summary tables "
                 "(community_summaries, flow_snapshots, risk_index)")
 
 
@@ -356,7 +371,7 @@ def _migrate_v7(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_edges_source_kind "
         "ON edges(source_qualified, kind)"
     )
-    logger.info("Migration v7: added compound edge indexes")
+    _progress("Migration v7: added compound edge indexes")
 
 
 def _migrate_v8(conn: sqlite3.Connection) -> None:
@@ -369,13 +384,13 @@ def _migrate_v8(conn: sqlite3.Connection) -> None:
     refuse to open the graph.
     """
     if not _has_column(conn, "edges", "line"):
-        logger.info("Migration v8: skipped, edges.line is not present")
+        _progress("Migration v8: skipped, edges.line is not present")
         return
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_edges_composite
         ON edges(kind, source_qualified, target_qualified, file_path, line)
     """)
-    logger.info("Migration v8: created composite edge index")
+    _progress("Migration v8: created composite edge index")
 
 
 def _migrate_v9(conn: sqlite3.Connection) -> None:
@@ -392,7 +407,7 @@ def _migrate_v9(conn: sqlite3.Connection) -> None:
             "ALTER TABLE edges ADD COLUMN confidence_tier TEXT DEFAULT 'EXTRACTED'",
             what="edges.confidence_tier",
         )
-    logger.info("Migration v9: added edge confidence columns")
+    _progress("Migration v9: added edge confidence columns")
 
 
 def _migrate_v10(conn: sqlite3.Connection) -> None:
@@ -420,7 +435,7 @@ def _migrate_v10(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_nodes_symbol ON nodes(symbol)"
     )
-    logger.info("Migration v10: added indexed nodes.symbol column")
+    _progress("Migration v10: added indexed nodes.symbol column")
 
 
 # SQL that classifies one CALLS/REFERENCES edge by whether its target names a
@@ -475,7 +490,7 @@ def _migrate_v11(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_edges_kind_target_resolution "
         "ON edges(kind, target_resolution)"
     )
-    logger.info("Migration v11: added indexed edges.target_resolution column")
+    _progress("Migration v11: added indexed edges.target_resolution column")
 
 
 def _migrate_v12(conn: sqlite3.Connection) -> None:
@@ -501,7 +516,7 @@ def _migrate_v12(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_nodes_fts_state_file "
         "ON nodes_fts_state(file_path)"
     )
-    logger.info("Migration v12: added nodes_fts_state index mirror")
+    _progress("Migration v12: added nodes_fts_state index mirror")
 
 
 def _migrate_v13(conn: sqlite3.Connection) -> None:
@@ -574,7 +589,7 @@ def _migrate_v13(conn: sqlite3.Connection) -> None:
         "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
         (FTS_STATE_METADATA_KEY, FTS_STATE_VERSION),
     )
-    logger.info("Migration v13: indexed nodes.docstring and nodes.name_tokens")
+    _progress("Migration v13: indexed nodes.docstring and nodes.name_tokens")
 
 
 def _migrate_v14(conn: sqlite3.Connection) -> None:
@@ -612,7 +627,7 @@ def _migrate_v14(conn: sqlite3.Connection) -> None:
         "WHERE kind = 'File' AND language = 'ruby' "
         "AND file_hash IS NOT NULL AND file_hash != ''",
     ).rowcount
-    logger.info(
+    _progress(
         "Migration v14: invalidated %d Ruby file(s) for re-keying on next update",
         updated,
     )
@@ -644,7 +659,7 @@ def _migrate_v15(conn: sqlite3.Connection) -> None:
         "DROP INDEX IF EXISTS idx_edges_target",
     ):
         conn.execute(statement)
-    logger.info("Migration v15: dropped unread tables and covered indexes")
+    _progress("Migration v15: dropped unread tables and covered indexes")
 
 
 # ---------------------------------------------------------------------------
@@ -669,6 +684,18 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
 }
 
 LATEST_VERSION = max(MIGRATIONS.keys())
+
+#: Schema versions that shipped with parser changes an ``update`` alone does
+#: not apply: it parses only changed files, so new file kinds and fixed
+#: parsers reach the rest of the graph only through a full ``build``.
+#: Crossing one of these on an existing graph logs the hint below once.
+_REBUILD_AFTER: frozenset[int] = frozenset({15})
+
+_REBUILD_HINT = (
+    "Graph upgraded to schema v%d. Run code-review-graph build once (and "
+    "code-review-graph embed if you use embeddings): an update parses only "
+    "changed files, so files this release can newly read stay out until then."
+)
 
 
 def _run_one(conn: sqlite3.Connection, version: int) -> None:
@@ -711,6 +738,19 @@ def _run_one(conn: sqlite3.Connection, version: int) -> None:
     raise last if last is not None else sqlite3.OperationalError("database is locked")
 
 
+def _is_new_database(conn: sqlite3.Connection, current: int) -> bool:
+    """True for a graph that was just created and holds nothing yet.
+
+    ``GraphStore`` creates the base schema and stamps it version 1 before
+    calling :func:`run_migrations`, so a new file reaches here at version 1
+    with an empty ``nodes`` table. An old version-1 graph with no nodes in it
+    is the same thing in every way that matters to the user.
+    """
+    if current > 1 or not _table_exists(conn, "nodes"):
+        return False
+    return conn.execute("SELECT 1 FROM nodes LIMIT 1").fetchone() is None
+
+
 def run_migrations(conn: sqlite3.Connection) -> None:
     """Run all pending migrations in order.
 
@@ -718,17 +758,29 @@ def run_migrations(conn: sqlite3.Connection) -> None:
     peer having already applied it, and lock contention is retried rather
     than raised.  The schema_version metadata entry is updated after each
     successful migration.
+
+    On a brand-new database the per-migration lines log at DEBUG and one
+    INFO line says the graph was created; an upgrade still logs each step.
     """
     current = get_schema_version(conn)
     if current >= LATEST_VERSION:
         return
 
-    logger.info("Schema version %d -> %d: running migrations", current, LATEST_VERSION)
+    new_database = _is_new_database(conn, current)
+    token = _progress_level.set(logging.DEBUG if new_database else logging.INFO)
+    try:
+        _progress("Schema version %d -> %d: running migrations", current, LATEST_VERSION)
 
-    for version in sorted(MIGRATIONS.keys()):
-        if version <= current:
-            continue
-        logger.info("Running migration v%d", version)
-        _run_one(conn, version)
+        for version in sorted(MIGRATIONS.keys()):
+            if version <= current:
+                continue
+            _progress("Running migration v%d", version)
+            _run_one(conn, version)
 
-    logger.info("Migrations complete, now at schema version %d", LATEST_VERSION)
+        _progress("Migrations complete, now at schema version %d", LATEST_VERSION)
+    finally:
+        _progress_level.reset(token)
+    if new_database:
+        logger.info("Created graph database (schema v%d).", LATEST_VERSION)
+    elif any(current < version <= LATEST_VERSION for version in _REBUILD_AFTER):
+        logger.info(_REBUILD_HINT, LATEST_VERSION)

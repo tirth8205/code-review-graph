@@ -850,11 +850,21 @@ def _assert_usable_database(conn: sqlite3.Connection, db_path: Path) -> None:
 
     version = get_schema_version(conn)
     if version > LATEST_VERSION:
+        # Usually two copies are installed and the older one met the graph
+        # the newer one wrote: the MCP entry runs one (often through uvx), the
+        # shell another. Name this copy and where it lives, so "upgrade" says
+        # which one, and point at the command that lists the others.
+        from . import __version__
+
+        here = Path(__file__).resolve().parent
         raise GraphStoreError(
             f"the graph database at {db_path} was written by a newer "
             f"code-review-graph (schema v{version}; this build understands "
-            f"v{LATEST_VERSION}). Upgrade code-review-graph, or delete the file "
-            "and run `code-review-graph build`."
+            f"v{LATEST_VERSION}). This is code-review-graph {__version__} at "
+            f"{here}. Upgrade this copy, or delete the file and run "
+            "`code-review-graph build`. Your MCP entry and hooks may run a "
+            "different copy: `code-review-graph doctor` lists each one and "
+            "its version."
         )
 
 
