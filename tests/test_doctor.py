@@ -271,6 +271,32 @@ def test_a_graph_built_at_another_commit_fails_with_the_update_fix(
     assert report.graph["stale"] is True
 
 
+def test_a_graph_the_pre_commit_hook_updated_counts_as_current(
+    repo, env, tmp_path, monkeypatch,
+):
+    """The hook updates the graph before the commit exists, so it records the
+    parent. get_minimal_context_tool counts that graph as current, and doctor
+    must agree rather than fail every commit."""
+    import hashlib
+
+    _set_path(monkeypatch, env, _copy(tmp_path / "bin", __version__).parent)
+    source = b"def f():\n    return 2\n"
+    (repo / "app.py").write_bytes(source)
+    with GraphStore(repo / ".code-review-graph" / "graph.db") as store:
+        store.upsert_node(NodeInfo(
+            kind="File", name="app.py", file_path=str(repo / "app.py"),
+            line_start=1, line_end=2, language="python",
+        ), file_hash=hashlib.sha256(source).hexdigest())
+        store.commit()
+    _git(repo, "commit", "-qam", "second")
+
+    report = doctor.diagnose(repo)
+
+    assert not _with(report, doctor.FAIL, "but HEAD is")
+    assert _with(report, doctor.OK, "already holds every file changed since")
+    assert report.graph["stale"] is False
+
+
 def test_a_graph_from_a_newer_copy_fails(repo, env, tmp_path, monkeypatch):
     _set_path(monkeypatch, env, _copy(tmp_path / "bin", __version__).parent)
     conn = sqlite3.connect(repo / ".code-review-graph" / "graph.db")

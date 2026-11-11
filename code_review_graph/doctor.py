@@ -487,6 +487,27 @@ def _live_head(root: Path) -> str | None:
     return output.strip().splitlines()[0] if output and output.strip() else None
 
 
+def _holds_commits_since(root: Path, db_path: Path, built: str) -> bool:
+    """Whether the graph holds every file changed between ``built`` and HEAD."""
+    from .incremental import files_hold_commits
+    from .parser import normalize_file_path
+
+    def file_hashes() -> dict[str, str]:
+        conn = sqlite3.connect(_read_only_uri(db_path), uri=True, timeout=2)
+        try:
+            rows = conn.execute(
+                "SELECT file_path, file_hash FROM nodes WHERE kind = ?", ("File",)
+            ).fetchall()
+        finally:
+            conn.close()
+        return {normalize_file_path(path): file_hash or "" for path, file_hash in rows}
+
+    try:
+        return files_hold_commits(root, file_hashes, built)
+    except (sqlite3.Error, OSError):
+        return False
+
+
 def check_graph(root: Path) -> tuple[dict[str, Any], list[Finding]]:
     from .build_state import BUILD_STATE_KEY, INCOMPLETE_BUILD_STATES
     from .incremental import get_db_path
@@ -554,7 +575,17 @@ def check_graph(root: Path) -> tuple[dict[str, Any], list[Finding]]:
     info.update(built_at_sha=built, head_sha=head, updated_at=metadata.get("last_updated"))
     summary = f"Graph: schema v{schema}, {files} files, {nodes} nodes"
     matches = built == head if built and head else None
-    if matches is False:
+    if matches is False and _holds_commits_since(root, db_path, str(built)):
+        # The pre-commit hook updates the graph before the commit exists, so
+        # it records the parent. get_minimal_context_tool counts that graph
+        # as current; doctor must not call it stale.
+        info["stale"] = False
+        findings.append(Finding(
+            OK,
+            f"{summary}, built at {str(built)[:7]}. HEAD is {str(head)[:7]}, but "
+            "the graph already holds every file changed since, so it is current.",
+        ))
+    elif matches is False:
         info["stale"] = True
         findings.append(Finding(
             FAIL,

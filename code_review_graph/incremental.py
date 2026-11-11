@@ -1834,6 +1834,23 @@ def graph_holds_commits(
     Any doubt -- git failing, too many files, a file that cannot be read --
     answers False, which keeps the old "update first" advice.
     """
+    return files_hold_commits(repo_root, store.get_file_hashes, built_at, timeout=timeout)
+
+
+def files_hold_commits(
+    repo_root: Path,
+    file_hashes: Callable[[], dict[str, str]],
+    built_at: str,
+    *,
+    timeout: float | None = None,
+) -> bool:
+    """:func:`graph_holds_commits` for a caller that reads the graph itself.
+
+    ``file_hashes`` returns the graph's ``{file path: SHA-256}`` for File
+    nodes, keyed as :meth:`GraphStore.get_file_hashes` keys them. It is
+    called only once Git has listed the changed files. ``doctor`` uses this
+    with its own read-only connection.
+    """
     if timeout is None:
         timeout = discovery_timeout()
     if not built_at or built_at.startswith("-") or not _SAFE_GIT_REF.fullmatch(built_at):
@@ -1856,7 +1873,7 @@ def graph_holds_commits(
     if len(changed) > _FRESHNESS_FILE_LIMIT:
         return False
 
-    stored_hashes = store.get_file_hashes()
+    stored_hashes = file_hashes()
     parser: CodeParser | None = None
     ignore_patterns: list[str] | None = None
     for rel_path in changed:
