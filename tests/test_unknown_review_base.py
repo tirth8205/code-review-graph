@@ -33,6 +33,7 @@ from code_review_graph.graph import GraphStore
 from code_review_graph.incremental import (
     NO_COMMIT_NOTE,
     ONE_COMMIT_NOTE,
+    SHALLOW_CLONE_NOTE,
     discover_review_changes,
     full_build,
 )
@@ -167,6 +168,23 @@ def test_default_base_with_no_commits_reviews_the_working_tree(tmp_path: Path) -
     assert notes == [NO_COMMIT_NOTE]
     assert len(base) in (40, 64) and set(base) <= set("0123456789abcdef")
     assert set(changed) >= {"staged.py", "loose.py"}
+
+
+def test_default_base_in_a_shallow_clone_says_it_is_shallow(
+    two_commits: Path, tmp_path: Path,
+) -> None:
+    """A CI checkout of depth 1 has history, just not here: "one commit" would be wrong."""
+    clone = tmp_path / "shallow"
+    _git(tmp_path, "clone", "-q", "--depth=1", two_commits.resolve().as_uri(), str(clone))
+    (clone / "app.py").write_text("def handler():\n    return 9\n", encoding="utf-8")
+    notes: list[str] = []
+
+    changed, base = discover_review_changes(clone, notes=notes)
+
+    assert notes == [SHALLOW_CLONE_NOTE]
+    assert "git fetch --deepen=1" in SHALLOW_CLONE_NOTE
+    assert base == "HEAD"
+    assert changed == ["app.py"]
 
 
 def test_cli_one_commit_repo_prints_a_plain_note(one_commit: Path) -> None:

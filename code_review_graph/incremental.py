@@ -1645,6 +1645,29 @@ ONE_COMMIT_NOTE = (
 NO_COMMIT_NOTE = (
     "this repository has no commits yet; reviewing uncommitted and new files instead."
 )
+SHALLOW_CLONE_NOTE = (
+    "HEAD~1 is not in this shallow clone; reviewing uncommitted and new files "
+    "instead. Run `git fetch --deepen=1` to review the last commit."
+)
+
+
+def _git_is_shallow(repo_root: Path, timeout: float) -> bool:
+    """Return whether this clone was cut short, as CI checkouts often are.
+
+    Git before 2.15 does not know the option and echoes it back, which reads
+    as "not shallow", the same answer as before this check existed.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--is-shallow-repository"],
+            capture_output=True,
+            cwd=str(repo_root),
+            timeout=timeout,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise _vcs_unavailable("git", exc, timeout=timeout) from exc
+    return result.returncode == 0 and result.stdout.strip() == b"true"
 
 
 def _git_commit_known(repo_root: Path, ref: str, timeout: float) -> bool | None:
@@ -1703,9 +1726,9 @@ def _usable_review_base(
     A base Git does not know used to fall through to ``git status``, so a
     typo in ``--base`` reviewed the working tree and exited 0. A base the
     caller chose is now an error that says what to do. The default
-    ``HEAD~1`` is different: in a repository with one commit, or none, it
-    can never resolve, so the review covers uncommitted and new files and
-    *notes* says so in plain words.
+    ``HEAD~1`` is different: in a repository with one commit, or none, or a
+    shallow clone that holds only HEAD, it does not resolve, so the review
+    covers uncommitted and new files and *notes* says so in plain words.
     """
     if detect_vcs(repo_root) != "git":
         return resolved_base
@@ -1728,7 +1751,8 @@ def _usable_review_base(
             raise unknown
         if _git_commit_known(repo_root, "HEAD", timeout):
             if notes is not None:
-                notes.append(ONE_COMMIT_NOTE)
+                shallow = _git_is_shallow(repo_root, timeout)
+                notes.append(SHALLOW_CLONE_NOTE if shallow else ONE_COMMIT_NOTE)
             return "HEAD"
         if notes is not None:
             notes.append(NO_COMMIT_NOTE)
