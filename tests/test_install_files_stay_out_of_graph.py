@@ -14,6 +14,7 @@ Found by the gstack developer-experience review of 2.4.0 (product item 3).
 
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 import shutil
@@ -22,6 +23,7 @@ from pathlib import Path
 
 import pytest
 
+from code_review_graph import cli, install_manifest, uninstall
 from code_review_graph.graph import GraphStore
 from code_review_graph.incremental import (
     INSTALL_MANIFEST,
@@ -186,3 +188,56 @@ def test_manifest_paths_are_normalised(tmp_path: Path) -> None:
     _write_manifest(tmp_path, ["./.mcp.json", "hooks//a.sh", "", 3])  # type: ignore[list-item]
 
     assert install_manifest_paths(tmp_path) == frozenset({".mcp.json", "hooks/a.sh"})
+
+
+def test_the_record_install_writes_is_the_one_build_and_review_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A real install, then a real build and review: the two sides agree on the record."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.setenv("HERMES_HOME", str(home / ".hermes"))
+    monkeypatch.setenv("DSH_HOME", str(home / ".dsh"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "Test")
+    _write(repo, ".gitignore", "*.pyc\n")
+    _write(repo, "app.py", "def handler():\n    return 1\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "first")
+    _write(repo, "app.py", "def handler():\n    return 2\n")
+    _git(repo, "commit", "-q", "-am", "second")
+
+    cli._handle_init(argparse.Namespace(
+        repo=str(repo), dry_run=False, platform="claude", yes=True,
+        no_instructions=False, no_skills=False, no_hooks=False,
+    ))
+    _write(repo, "feature.py", "def feature():\n    return 3\n")
+
+    written = set(install_manifest.read(repo))
+    assert {".mcp.json", ".claude/settings.json", "CLAUDE.md"} <= written
+    # Both sides read the same file the same way.
+    assert install_manifest_paths(repo) == frozenset(written)
+
+    tracked = {".gitignore"}  # committed before install edited it
+    left_out = written - tracked
+    files = set(collect_all_files(repo))
+    changed, _ = discover_review_changes(repo)
+    for listed in (files, set(changed)):
+        assert not listed & left_out
+        assert "feature.py" in listed
+        assert not [path for path in listed if path.startswith(".code-review-graph/")]
+    assert ".mcp.json" not in files
+
+    # Once the user commits an install file, it is theirs.
+    _git(repo, "add", ".mcp.json")
+    _git(repo, "commit", "-q", "-m", "share the MCP config")
+    assert ".mcp.json" in collect_all_files(repo)
+
+    uninstall.run(repo=repo, keep_data=True)
+
+    assert not install_manifest.manifest_path(repo).exists()
+    assert install_manifest_paths(repo) == frozenset()
