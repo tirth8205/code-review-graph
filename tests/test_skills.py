@@ -3459,8 +3459,15 @@ class TestInstallSkillsRespectTargetPlatform:
     def test_claude_install_creates_skills(self, tmp_path):
         assert self._run_install(tmp_path, "claude") is True
 
-    def test_all_target_creates_skills(self, tmp_path):
-        assert self._run_install(tmp_path, "all") is True
+    def test_all_target_creates_skills_when_claude_code_is_found(self, tmp_path):
+        with patch.dict(PLATFORMS, {"claude": {**PLATFORMS["claude"], "detect": lambda: True}}):
+            assert self._run_install(tmp_path, "all") is True
+
+    def test_all_target_skips_claude_skills_when_claude_code_is_not_found(self, tmp_path):
+        with patch.dict(
+            PLATFORMS, {"claude": {**PLATFORMS["claude"], "detect": lambda: False}}
+        ):
+            assert self._run_install(tmp_path, "all") is False
 
     def test_codex_install_creates_global_skill(self, tmp_path, monkeypatch):
         codex_home = tmp_path / "codex-home"

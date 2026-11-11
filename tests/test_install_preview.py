@@ -52,6 +52,7 @@ def sandbox(tmp_path_factory, monkeypatch) -> Sandbox:
         ".codex", ".cursor", ".codeium/windsurf", ".continue", ".gemini/antigravity",
         ".qwen", ".kiro", ".copilot", ".config/opencode",
         "Library/Application Support/Zed", ".config/zed",
+        ".claude", ".qoder", ".codebuddy",
     ):
         (home / relative).mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
