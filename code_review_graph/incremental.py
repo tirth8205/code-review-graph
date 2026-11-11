@@ -1606,6 +1606,7 @@ def get_staged_and_unstaged(
             logger.warning("git status failed while discovering working-tree files")
             return []
         files: list[str] = []
+        untracked: set[str] = set()
         prefix = _git_worktree_prefix(repo_root)
         prefix_with_separator = f"{prefix}/" if prefix else ""
         records = result.stdout.split(b"\0")
@@ -1616,12 +1617,18 @@ def get_staged_and_unstaged(
                 status = record[:2]
                 path = os.fsdecode(record[3:])
                 if not prefix or path.startswith(prefix_with_separator):
-                    files.append(path[len(prefix_with_separator):] if prefix else path)
+                    path = path[len(prefix_with_separator):] if prefix else path
+                    files.append(path)
+                    if status == b"??":
+                        untracked.add(path)
                 # With porcelain -z, a rename/copy record stores the
                 # destination first and its source in the following record.
                 if b"R" in status or b"C" in status:
                     index += 1
             index += 1
+        if untracked:
+            kept = set(_without_install_files(repo_root, sorted(untracked)))
+            files = [path for path in files if path not in untracked or path in kept]
         return _utf8_paths(files)
     except (OSError, subprocess.TimeoutExpired) as exc:
         if require_vcs:
@@ -1735,13 +1742,64 @@ def get_all_tracked_files(
         return []
 
 
+#: Where ``install`` lists the files it wrote inside the repository, as
+#: ``{"version": 1, "files": ["<repo-relative POSIX path>", ...]}``.
+INSTALL_MANIFEST = PurePosixPath(".code-review-graph", "install-manifest.json")
+
+
+def install_manifest_paths(repo_root: Path) -> frozenset[str]:
+    """Return the repository paths ``install`` says it wrote.
+
+    Build and change discovery leave these out while Git does not track
+    them, so an install's own ``.mcp.json``, hook scripts and instruction
+    files neither enter the graph nor fill the first review. Once the user
+    commits one, Git tracks it and it is treated like any other file.
+
+    No manifest, or one this release cannot read, means nothing is left out.
+    """
+    path = Path(repo_root) / INSTALL_MANIFEST
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return frozenset()
+    except OSError as exc:
+        logger.warning("Could not read %s: %s", path, exc)
+        return frozenset()
+    try:
+        data = json.loads(raw)
+    except ValueError as exc:
+        logger.warning("Ignoring %s: not valid JSON (%s)", path, exc)
+        return frozenset()
+    files = data.get("files") if isinstance(data, dict) else None
+    if not isinstance(files, list) or data.get("version") != 1:
+        logger.warning("Ignoring %s: not a version 1 install manifest", path)
+        return frozenset()
+    return frozenset(
+        str(PurePosixPath(entry)) for entry in files if isinstance(entry, str) and entry
+    )
+
+
+def _without_install_files(repo_root: Path, untracked: list[str]) -> list[str]:
+    """Drop the files ``install`` wrote from a list Git calls untracked."""
+    if not untracked:
+        return untracked
+    installed = install_manifest_paths(repo_root)
+    if not installed:
+        return untracked
+    return [path for path in untracked if PurePosixPath(path).as_posix() not in installed]
+
+
 def _get_untracked_files(
     repo_root: Path,
     *,
     timeout: float | None = None,
     require_vcs: bool = False,
 ) -> list[str]:
-    """Return Git's untracked, non-ignored files using NUL-delimited paths."""
+    """Return Git's untracked, non-ignored files using NUL-delimited paths.
+
+    Files the install manifest lists are left out: see
+    :func:`install_manifest_paths`.
+    """
     if timeout is None:
         timeout = _GIT_TIMEOUT
     try:
@@ -1760,7 +1818,10 @@ def _get_untracked_files(
                     f"(rc={result.returncode})"
                 )
             return []
-        return _utf8_paths(os.fsdecode(path) for path in result.stdout.split(b"\0") if path)
+        return _without_install_files(
+            repo_root,
+            _utf8_paths(os.fsdecode(path) for path in result.stdout.split(b"\0") if path),
+        )
     except (OSError, subprocess.TimeoutExpired) as exc:
         if require_vcs:
             raise _vcs_unavailable("git", exc, timeout=timeout) from exc
@@ -1846,10 +1907,14 @@ def _inventory_candidates(
     if not candidates:
         # Fallback: walk directory. ``rglob`` never descends into a symlinked
         # folder; the link itself is kept so it can be followed when asked.
+        # No VCS tracks anything here, so the files ``install`` wrote are
+        # left out just as Git's untracked ones are.
+        installed = install_manifest_paths(repo_root)
         candidates = [
             str(p.relative_to(repo_root))
             for p in repo_root.rglob("*")
-            if p.is_file() or p.is_symlink()
+            if (p.is_file() or p.is_symlink())
+            and p.relative_to(repo_root).as_posix() not in installed
         ]
     return candidates
 

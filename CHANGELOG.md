@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- `build` and change discovery leave out the files `install` wrote, as listed in
+  `.code-review-graph/install-manifest.json`, until Git tracks them. Your first
+  review now shows your change, not `.mcp.json` and hook scripts. A file you
+  commit counts like any other.
+
 ## [2.4.0] - 2026-11-10
 
 Two new platforms, MiMo Code and DeepSeek Harness, so `install` now supports
