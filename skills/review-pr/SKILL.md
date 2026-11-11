@@ -10,7 +10,7 @@ Review all commits of a pull request or branch against its base branch.
 
 ## Steps
 
-1. Identify the changes. With a branch name run `git diff --name-only main...<branch>`; otherwise diff the current branch against `main` (or `master`). Use that ref as `base` below.
+1. The graph tools read the files on disk, so check out what you review first: `git switch <branch>`, or for a PR `git fetch origin pull/<n>/head:pr-<n>` then `git switch pr-<n>`, then call `build_or_update_graph_tool()`. Diff it against `main` (or `master`) with `git diff --name-only main...HEAD`, and use that ref as `base` below.
 2. Call `get_minimal_context_tool(task="review PR", base="main")`. If it returns `status: not_ready`, call `build_or_update_graph_tool()` and continue.
 3. Call `detect_changes_tool(base="main", detail_level="minimal")` for risk-scored changed functions, test gaps and affected flows across the whole branch.
 4. For high-risk functions call `query_graph_tool(pattern="callers_of", target="<function>")` and `query_graph_tool(pattern="tests_for", target="<function>")`. Flag public API changes whose callers were not updated.

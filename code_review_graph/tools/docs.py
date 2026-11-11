@@ -55,8 +55,7 @@ def embed_graph(
         provider: Provider name: ``local`` (default), ``openai``, ``google``,
                   ``minimax``, or ``voyage``. ``openai`` requires CRG_OPENAI_BASE_URL +
                   CRG_OPENAI_API_KEY + CRG_OPENAI_MODEL env vars and accepts
-                  any OpenAI-compatible endpoint (real OpenAI, Azure, new-api,
-                  LiteLLM, vLLM, LocalAI, Ollama openai-mode, etc.).
+                  any OpenAI-compatible endpoint.
                   ``voyage`` requires VOYAGE_API_KEY and defaults to
                   voyage-code-3 unless a model arg or CRG_VOYAGE_MODEL is
                   supplied.

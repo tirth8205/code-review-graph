@@ -65,7 +65,7 @@ code-review-graph build                # parse the codebase
 `install` detects which AI coding tools you have, writes an MCP server entry for each, installs hooks and skills where the platform supports them, and adds graph instructions to the platform's rules file. The MCP entry uses `poetry run` or `uv run` inside a Poetry or uv project environment, `uvx code-review-graph serve` when `uvx` is on PATH, and otherwise the current Python interpreter. Nothing is written until `install` has listed the files it will change and you have answered its question about instruction files; `install --dry-run` shows each change as a diff and writes nothing. Restart the editor or tool afterwards.
 
 <p align="center">
-  <img src="diagrams/diagram8_supported_platforms.png" alt="One install, every platform: detects Codex, Claude Code, CodeBuddy Code, Cursor, Windsurf, Zed, Continue, OpenCode, MiMo Code, Antigravity, Gemini CLI, Qwen, Qoder, Kiro, GitHub Copilot, GitHub Copilot CLI, and Hermes Agent" width="85%" />
+  <img src="diagrams/diagram8_supported_platforms.png" alt="One install, every platform: detects Codex, Claude Code, CodeBuddy Code, Cursor, Windsurf, Zed, Continue, OpenCode, MiMo Code, Antigravity, Gemini CLI, Qwen Code, Qoder, Kiro, GitHub Copilot, GitHub Copilot CLI, Hermes Agent and DeepSeek Harness" width="85%" />
 </p>
 
 To configure one platform, pass `--platform` with one of `codex`, `claude-code`, `cursor`, `windsurf`, `zed`, `continue`, `opencode`, `mimo`, `antigravity`, `gemini-cli`, `qwen`, `kiro`, `qoder`, `copilot`, `copilot-cli`, `codebuddy`, `hermes`, or `dsh`:
@@ -195,10 +195,10 @@ Instead of feeding a whole corpus to the model, the graph returns a slice shaped
 ### Language coverage and notebooks
 
 <p align="center">
-  <img src="diagrams/diagram9_language_coverage.png" alt="Language coverage by category: Web, Backend, Systems, Mobile, Scripting, Shells, Domain, and Other, plus Jupyter and Databricks notebooks" width="90%" />
+  <img src="diagrams/diagram9_language_coverage.png" alt="Language coverage by category: Web, Backend, Systems, Mobile, Scripting, Shells, Domain, Config and Other, plus Jupyter and Databricks notebooks" width="90%" />
 </p>
 
-The parser extracts functions, classes, imports, call sites, inheritance and tests, using Tree-sitter where a grammar exists and targeted fallbacks elsewhere. Supported: Python, JavaScript/TypeScript/TSX (including `.mjs`, `.cjs`, `.mts` and `.cts`), Go, Rust, Java, C/C++, C#, VB.NET, Ruby, Kotlin (`.kt`, `.kts`), Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL/PL/SQL (Oracle) and dbt models, Terraform/OpenTofu (`.tf`; other `.hcl` files become file nodes only), Ansible YAML (playbooks, roles, tasks), Spring Boot application config (`application.properties`, `application.yml`, `application.yaml` and their `application-<profile>` variants; key names and value types only, never values), value-free generic YAML structure (translation files in folders such as `locales/` become file nodes only), XSLT stylesheets (`.xsl`, `.xslt`), value-free JSON structure (`.json`; translation, test, docs, example and data files keep only a file node, and lock files are skipped), Vue/Svelte SFCs, HTML pages (`.html`, `.htm`; inline scripts, plus `div`, `section` and `article` blocks with an id as `DocSection` nodes), Astro files (parsed with the TypeScript grammar), Jupyter and Databricks notebooks (`.ipynb`, plus Databricks `.py` exports), Perl XS files (`.xs`), Robot Framework files (`.robot`, `.resource`), and Liquid templates (`.liquid`). Other `.properties` files are not treated as source code.
+The parser extracts functions, classes, imports, call sites, inheritance and tests, using Tree-sitter where a grammar exists and targeted fallbacks elsewhere. Supported: Python, JavaScript/TypeScript/TSX (including `.mjs`, `.cjs`, `.mts` and `.cts`), Go, Rust, Java, C/C++, C#, VB.NET, Ruby, Kotlin (`.kt`, `.kts`), Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL/PL/SQL (Oracle) and dbt models, Terraform/OpenTofu (`.tf`, and Terraform blocks in `.hcl` files; an `.hcl` file with no Terraform blocks keeps only a file node), Ansible YAML (playbooks, roles, tasks), Spring Boot application config (`application.properties`, `application.yml`, `application.yaml` and their `application-<profile>` variants; key names and value types only, never values), value-free generic YAML structure (translation files in folders such as `locales/` become file nodes only), XSLT stylesheets (`.xsl`, `.xslt`), value-free JSON structure (`.json`; translation, test, docs, example and data files keep only a file node, and lock files are skipped), Vue/Svelte SFCs, HTML pages (`.html`, `.htm`; inline scripts, plus `div`, `section` and `article` blocks with an id as `DocSection` nodes), Astro files (parsed with the TypeScript grammar), Jupyter and Databricks notebooks (`.ipynb`, plus Databricks `.py` exports), Perl XS files (`.xs`), Robot Framework files (`.robot`, `.resource`), and Liquid templates (`.liquid`). Other `.properties` files are not treated as source code.
 
 PHP projects also get repository-bounded Composer PSR-4 resolution, Blade template references,
 and Laravel Route and Eloquent edges when the source shows explicit framework imports, model
@@ -350,7 +350,7 @@ From the same 2026-08-02 clean-room build at the pinned SHAs above. Embedding co
 | **Framework-aware Java parsing** | Spring dependency-injection call resolution, request endpoints and WebFlux routes, scheduled triggers, application-event publisher-to-listener edges, Spring AOP advice edges, Temporal workflow and activity edges, and Spring Boot config keys indexed without their values |
 | **Blast-radius analysis** | Which functions, classes and files are likely affected by a change |
 | **Auto-update hooks** | Editor hooks, git hooks (before each commit, after checkout, merge and rebase) and watch mode update the graph as you work |
-| **Semantic search** | Optional vector embeddings via sentence-transformers, Google Gemini, MiniMax, Voyage AI, or any OpenAI-compatible endpoint (OpenAI, Azure, new-api, LiteLLM, vLLM, LocalAI) |
+| **Semantic search** | Optional vector embeddings via sentence-transformers, Google Gemini, MiniMax, Voyage AI, or any OpenAI-compatible endpoint |
 | **Interactive visualisation** | D3.js force-directed graph with search, community legend toggles and degree-scaled nodes, plus a neighbourhood view seeded from a symbol, file, flow or change |
 | **Hub and bridge detection** | Most-connected nodes and chokepoints (betweenness centrality) |
 | **Surprise scoring** | Unexpected coupling: cross-community, cross-language, peripheral-to-hub edges |
@@ -358,7 +358,7 @@ From the same 2026-08-02 clean-room build at the pinned SHAs above. Embedding co
 | **Suggested questions** | Review questions generated from bridges, hubs and surprises |
 | **Edge confidence** | Four tiers (EXTRACTED, INFERRED, AMBIGUOUS, UNRESOLVED) with float scores on edges, so a call the graph could not bind says so |
 | **Graph traversal** | BFS/DFS from any node with configurable depth and token budget; `path_to` shows how one symbol reaches another and names the weakest hop |
-| **Export formats** | GraphML (Gephi/yEd), Neo4j Cypher, Obsidian vault, JSON, and SVG (SVG needs matplotlib from the `eval` extra) |
+| **Export formats** | GraphML, Neo4j Cypher, Obsidian vault, JSON, and SVG (SVG needs matplotlib from the `eval` extra) |
 | **Token benchmarking** | `code_review_graph/token_benchmark.py` measures whole-corpus tokens against graph query tokens per question |
 | **Estimated context savings** | `context_savings` metadata (`estimated`, `saved_tokens`, `saved_percent`) on review, impact, detect-changes and architecture responses |
 | **Community auto-split** | Communities above 25% of the graph are split recursively with Leiden |
@@ -435,7 +435,7 @@ code-review-graph repos            # List registered repositories
 code-review-graph daemon start     # Start the multi-repo watch daemon
 code-review-graph daemon stop      # Stop the daemon
 code-review-graph daemon status    # Daemon status and repos
-code-review-graph eval             # Run evaluation benchmarks
+code-review-graph eval --all       # Run every evaluation benchmark
 code-review-graph serve            # Start the MCP server (stdio)
 code-review-graph serve --http     # MCP over Streamable HTTP on localhost:5555
 code-review-graph serve --http --multi-repo  # One HTTP server for every registered repo
@@ -476,7 +476,7 @@ Add `--verify` to either command to compare the figures with OpenAI's `cl100k_ba
 
 The same `context_savings` metadata is attached to the JSON responses of the `get_impact_radius`, `get_review_context`, `detect_changes` and `get_architecture_overview` MCP tools.
 
-To see these estimates over time, set `CRG_CONTEXT_HISTORY=1` (off by default). Each estimate then adds one line to a local log next to `graph.db`, holding token counts and tool names only, and `code-review-graph context-history` prints it per day or per tool. See [docs/USAGE.md](docs/USAGE.md#context-history).
+To see these estimates over time, set `CRG_CONTEXT_HISTORY=1` (off by default). Each estimate then adds one line to a local log next to `graph.db`, holding token counts, tool names, a timestamp, a detail level and file and depth counts, never file names, paths or source text, and `code-review-graph context-history` prints it per day or per tool. See [docs/USAGE.md](docs/USAGE.md#context-history).
 
 </details>
 
@@ -524,7 +524,7 @@ See [docs/COMMANDS.md](docs/COMMANDS.md#standalone-daemon-cli-crg-daemon) for th
 <summary><strong>30 MCP tools</strong></summary>
 <br>
 
-The assistant uses these once the graph is built.
+The assistant uses these once the graph is built. The 25 tools that only read carry `readOnlyHint: true`, so a client can run them without asking; the five that write (`build_or_update_graph_tool`, `run_postprocess_tool`, `embed_graph_tool`, `apply_refactor_tool`, `generate_wiki_tool`) do not.
 
 | Tool | Description |
 |------|-------------|
@@ -577,7 +577,7 @@ vendor/**
 node_modules/**
 ```
 
-In git repositories only tracked files are indexed (`git ls-files`), so gitignored files are skipped. Use `.code-review-graphignore` to exclude tracked files or when git is not available. The default ignore list is in [docs/USAGE.md](docs/USAGE.md#ignore-patterns).
+In git repositories a build reads tracked files plus untracked files git does not ignore (`git ls-files` and `git ls-files --others --exclude-standard`), so gitignored files are skipped. Use `.code-review-graphignore` to exclude other files or when git is not available. The default ignore list is in [docs/USAGE.md](docs/USAGE.md#ignore-patterns).
 
 Optional dependency groups:
 
@@ -614,7 +614,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_CALLER_TEST_ROUTE_MAX_CALLERS` | Maximum callers examined while looking for that tested caller | `500` |
 | `CRG_TOOL_TIMEOUT` | Timeout in seconds for read-only MCP tools (`0` disables). Does not bound the tools that write: build, postprocess, embed, wiki and apply-refactor | `0` |
 | `CRG_CHURN_WINDOW_DAYS` | Window for `detect-changes --churn` commit counts | `90` |
-| `CRG_CONTEXT_HISTORY` | Set to `1` to keep a local log of each `context_savings` estimate in `.code-review-graph/context-history.jsonl`; read it with `code-review-graph context-history`. Token counts and tool names only, never sent anywhere | - |
+| `CRG_CONTEXT_HISTORY` | Set to `1` to keep a local log of each `context_savings` estimate in `.code-review-graph/context-history.jsonl`; read it with `code-review-graph context-history`. Holds token counts, tool names, a timestamp, a detail level and file and depth counts, never file names, paths or source text, and is never sent anywhere | - |
 | `CRG_LEIDEN_SEED` | Seed for Leiden community detection | `42` |
 | `CRG_RECURSE_SUBMODULES` | Include git submodules when set to `1`, `true` or `yes` | - |
 | `CRG_FOLLOW_SYMLINKS` | Follow symlinked folders, inside or outside the repository, when set to `1`, `true`, `yes` or `on`; same as `--follow-symlinks`. See [Symlinked folders](docs/USAGE.md#symlinked-folders) | - |
@@ -639,7 +639,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_ENABLE_ENRICHMENT` | Set to `1` to resolve Python method calls with Jedi on every build and update (needs the `enrichment` extra; about a second more per Python file). Same as `build --enrich` | off |
 | `CRG_DISABLE_ENRICHMENT` | Set to `1` to never run Jedi, even when asked for | - |
 
-OpenAI-compatible embeddings (OpenAI, Azure, or a self-hosted gateway such as new-api, LiteLLM, vLLM, LocalAI, or Ollama in OpenAI mode) need no extra install. Set the variables and pass `provider="openai"` to `embed_graph`:
+OpenAI-compatible embeddings need no extra install. Set the variables and pass `provider="openai"` to `embed_graph`:
 
 ```bash
 export CRG_OPENAI_BASE_URL=http://127.0.0.1:3000/v1     # or https://api.openai.com/v1
@@ -648,7 +648,6 @@ export CRG_OPENAI_MODEL=text-embedding-3-small          # whatever your gateway 
 # optional:
 export CRG_OPENAI_DIMENSION=1536                        # pin dim (v3 models support reduction)
 export CRG_OPENAI_BATCH_SIZE=100                        # lower for gateways with tight limits
-                                                        # (e.g. Qwen text-embedding-v4 caps at 10)
 ```
 
 The cloud-egress warning is skipped when the base URL points at localhost (`127.0.0.1`, `localhost`, `0.0.0.0`, `::1`).
@@ -661,7 +660,7 @@ export CRG_ACCEPT_CLOUD_EMBEDDINGS=1
 code-review-graph embed --provider voyage --model voyage-code-3
 ```
 
-> **Model selection.** Avoid `-preview`, `-beta` or `-exp` model IDs for an index you plan to keep; preview models can change weights (a different dimension forces a full re-embed) or be withdrawn. Prefer GA releases such as `text-embedding-3-small` / `text-embedding-3-large` (OpenAI), `Qwen/Qwen3-Embedding-8B` (self-hosted vLLM or LocalAI), or `gemini-embedding-001` (native Gemini provider, which needs `GOOGLE_API_KEY`).
+> **Model selection.** Avoid `-preview`, `-beta` or `-exp` model IDs for an index you plan to keep; preview models can change weights (a different dimension forces a full re-embed) or be withdrawn. Prefer GA releases such as `text-embedding-3-small` / `text-embedding-3-large` (OpenAI) or `gemini-embedding-001` (native Gemini provider, which needs `GOOGLE_API_KEY`).
 >
 > The embedding text is identifiers, signatures, structural context, and a bounded first-paragraph docstring or doc-comment summary. Function bodies are not sent. Graphs created before documentation extraction was added need one full `code-review-graph build` before re-embedding. Routine builds never refresh embeddings; to refresh after a build, pass both `--embedding-provider` and `--embedding-model`. Cloud providers receive this source-derived text and may charge for it.
 
@@ -701,7 +700,6 @@ Answers in [docs/FAQ.md](docs/FAQ.md):
 - [vs LSP / language servers](docs/FAQ.md#how-is-this-different-from-lsp-and-language-servers): one persistent cross-language graph instead of per-language daemons; LSP stays more precise per symbol.
 - [vs RAG / embeddings](docs/FAQ.md#isnt-this-just-rag): structural edges parsed from the AST, not similarity chunks; embeddings are optional and only assist search.
 - [vs grep / agentic search](docs/FAQ.md#why-not-just-grep): grep wins on one-hop lookups; the graph wins on multi-hop questions (impact radius, callers-of-callers, tests-for, affected flows).
-- [vs Serena, codegraph, claude-context, repomix](docs/FAQ.md#how-does-it-compare-to-serena-codegraph-claude-context-and-repomix): comparison table.
 - [When not to use it](docs/FAQ.md#when-should-i-not-use-it): small repos, trivial single-file diffs, one-off questions.
 - [Does it phone home?](docs/FAQ.md#does-it-phone-home): no telemetry; cloud embeddings are opt-in.
 - [How do I verify it is working?](docs/FAQ.md#how-do-i-verify-it-is-working): `status`, `detect-changes --brief`, `/mcp`.
@@ -714,7 +712,7 @@ More cases, including Windows/WSL, are in [docs/TROUBLESHOOTING.md](docs/TROUBLE
 
 Installing from a source tree (for example `pipx install .`) needs build dependencies from PyPI. If you see `Could not find a version that satisfies the requirement hatchling` after connection warnings, the Python in that terminal may not be able to open an HTTPS connection to `pypi.org`. This is seen most often in an editor's integrated terminal, and sometimes with a VPN, firewall or proxy.
 
-1. Run the same command from Terminal.app or iTerm instead of the editor's terminal.
+1. Run the same command from a terminal outside the editor, such as Terminal.app.
 2. Install from a checkout with [uv](https://docs.astral.sh/uv/), which uses different download machinery:
 
    ```bash

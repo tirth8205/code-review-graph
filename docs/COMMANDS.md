@@ -2,27 +2,31 @@
 
 ## Skills and Slash Commands
 
-These commands are installed for clients that support project skills or slash commands.
+The skills `build-graph`, `review-delta` and `review-pr` ship in the repository's `skills/` folder. `install --platform qoder` (or the default `--platform all`) copies them, with the four workflow skills below, to `.qoder/skills/`. Other clients do not get these three.
 
-### `/code-review-graph:build-graph`
+### `build-graph`
 Build or update the knowledge graph.
 - First run: full build
 - Later runs: incremental update (changed files only)
 
-### `/code-review-graph:review-delta`
+### `review-delta`
 Review changes since the last commit.
 - Changed files come from `git diff`
 - Blast radius is changed nodes plus 2-hop neighbours
 - Output is a structured review with guidance
 
-### `/code-review-graph:review-pr`
+### `review-pr`
 Review a PR or branch diff.
 - Uses `main` (or `master`) as the base
 - Covers every commit in the PR
 - Output is a structured review with a risk assessment
 
-`install` also writes four workflow skills to `.claude/skills/`: `explore-codebase`,
-`review-changes`, `debug-issue` and `refactor-safely`.
+`install` also writes four workflow skills, `explore-codebase`, `review-changes`,
+`debug-issue` and `refactor-safely`, to `.claude/skills/` for Claude Code,
+`.gemini/skills/` for Gemini CLI, `.codebuddy/skills/` for CodeBuddy and
+`~/.hermes/skills/code-review-graph/` (or `$HERMES_HOME/skills/code-review-graph/`)
+for Hermes Agent. Qoder gets all seven skills in `.qoder/skills/`, and Codex gets
+one global skill. `--no-skills` skips them all.
 
 ## MCP Tools
 
@@ -247,9 +251,10 @@ repo_root: str | None
 model: str | None    # Embedding model name
 provider: str | None # local, openai, google, minimax, voyage
 ```
-Local embeddings need `pip install "code-review-graph[embeddings]"`. Cloud
-providers use the standard library HTTP client and read their keys from
-environment variables (see the README).
+Local embeddings need `pip install "code-review-graph[embeddings]"`, and Google
+needs `pip install "code-review-graph[google-embeddings]"`. The OpenAI-compatible,
+MiniMax and Voyage providers use the standard library HTTP client. Every cloud
+provider reads its key from environment variables (see the README).
 
 #### `list_graph_stats_tool`
 ```
@@ -541,6 +546,7 @@ Run `code-review-graph <command> --help` for the full option list.
 
 ```bash
 # Setup
+code-review-graph --version         # Show the version (or -v)
 code-review-graph install           # Configure detected AI coding platforms (alias: init)
 code-review-graph install --dry-run # Show each file's diff; write nothing
 code-review-graph install --gitignore  # Also add the files this run creates to .gitignore (off by default)
@@ -551,11 +557,17 @@ code-review-graph uninstall                 # Remove CRG configs, hooks, skills,
 code-review-graph uninstall --dry-run       # List what it would remove; change nothing
 code-review-graph uninstall --keep-data     # Remove integrations, keep graph databases
 code-review-graph uninstall --platform codex  # Unbind one platform (keeps graph data and others)
+code-review-graph uninstall --all-repos        # Also clean every repository in the registry
+code-review-graph uninstall --keep-user-configs  # Clean repositories only; leave files in your home folder
+code-review-graph uninstall -y                 # Apply without asking
 
 # Build and update
 code-review-graph build                        # Full build
+code-review-graph build --data-dir /mnt/graphs/myrepo  # Keep graph.db outside the repo (or set CRG_DATA_DIR); also on update,
+                                                #   postprocess, embed, watch, status, context-history, forget, visualize, wiki, dead-code
 code-review-graph build --skip-flows           # Parse + signatures + FTS only
 code-review-graph build --skip-postprocess     # Raw parse only
+code-review-graph build -q                     # No output (-q/--quiet also on update and status)
 code-review-graph build --enrich               # Also resolve Python calls with Jedi (needs [enrichment]);
                                                 #   also on update, or CRG_ENABLE_ENRICHMENT=1. Off by default
 code-review-graph update                       # Incremental update from the last-built commit
@@ -566,6 +578,7 @@ code-review-graph update --wait                # Wait for a running build to fin
 code-review-graph build --follow-symlinks      # Also follow symlinked folders, inside or outside the repo
                                                 #   (off by default; also on update and watch, or CRG_FOLLOW_SYMLINKS=1)
 code-review-graph postprocess                  # Re-run flows, communities, FTS
+code-review-graph postprocess --no-flows       # Skip a step: --no-flows, --no-communities, --no-fts
 code-review-graph forget PATH [PATH ...]       # Drop parsed files from the graph (no full rebuild)
 code-review-graph forget src/legacy --dry-run  # Preview which files would be forgotten
 code-review-graph forget PATH --wait           # Wait for a running write to finish, then forget
@@ -582,6 +595,10 @@ code-review-graph context-history --by tool --days 7  # Per tool, last 7 UTC day
 code-review-graph watch                        # Auto-update on file changes (needs an existing graph)
 code-review-graph visualize                    # Interactive HTML graph (needs an existing graph)
 code-review-graph visualize --format graphml   # Formats: html, json, graphml, cypher, obsidian, svg
+                                                #   Written to the data folder (.code-review-graph/ by default) as
+                                                #   graph.<ext>, or obsidian/. svg needs matplotlib:
+                                                #   pip install "code-review-graph[eval]" (without it: exit 1)
+code-review-graph visualize --mode community   # Modes: auto (default), full, community, file
 code-review-graph visualize --serve            # Serve graph.html on localhost:8765
 
 # Neighbourhood view: draw a symbol's surroundings instead of the repository.
@@ -616,12 +633,13 @@ code-review-graph detect-changes --details all # Add bounded graph context under
                                                 #   Off by default; the GitHub Action's `details` input uses it.
 code-review-graph dead-code                    # Functions/classes with no callers or test references
 code-review-graph dead-code --kind Function --file-pattern src/ --json
+code-review-graph dead-code --limit 20         # 0, the default, means no limit
 
 # Read-only graph queries (CLI mirrors of the MCP tools)
 code-review-graph query callers_of <target>    # Patterns: callers_of, callees_of, imports_of, importers_of,
                                                 #   children_of, tests_for, inheritors_of, file_summary
 code-review-graph query path_to <a> --to <b>  # How a reaches b, hop by hop
-code-review-graph impact [--files F ...] [--depth N] [--base REF] [--detail-level compact] [--max-files N]
+code-review-graph impact [--files F ...] [--depth N] [--max-results N] [--base REF] [--detail-level compact] [--max-files N]
 code-review-graph search <query> [--kind Function] [--limit N]
 code-review-graph flows [--sort criticality] [--limit N] [--kind KIND]
 code-review-graph flow --id ID | --name NAME [--source]
@@ -634,7 +652,8 @@ code-review-graph refactor dead_code [--kind Function] [--path SUBSTR]
 code-review-graph refactor suggest
 
 # Wiki
-code-review-graph wiki                         # Markdown wiki from communities (needs an existing graph)
+code-review-graph wiki                         # Markdown wiki in .code-review-graph/wiki/ (needs an existing graph)
+code-review-graph wiki --force                 # Rewrite every page, even unchanged ones
 
 # Multi-repo
 code-review-graph register <path> [--alias name]  # Register a repository
@@ -651,8 +670,11 @@ code-review-graph daemon add <path> [--alias NAME]  # Add a repo to the daemon c
 code-review-graph daemon remove <path_or_alias>     # Remove a repo from the daemon config
 
 # Evaluation
-code-review-graph eval                         # Run evaluation benchmarks
-code-review-graph eval --benchmark search_quality --embed  # --embed builds vectors; agent_baseline,
+code-review-graph eval --all                   # Run every benchmark on every repo config (bare `eval` runs nothing)
+code-review-graph eval --benchmark token_efficiency --repo flask  # Pick benchmarks and repos (comma-separated); --repo takes config names, not paths
+code-review-graph eval --report                # Write evaluate/reports/summary.md from evaluate/results and print README tables
+                                                #   (--output-dir sets the results folder that runs write and --report reads)
+code-review-graph eval --benchmark search_quality --embed [--embed-provider local|openai|google|minimax|voyage] [--embed-model M]  # --embed builds vectors; agent_baseline,
                                                 #   search_quality and multi_hop_retrieval need it
 
 # Hook entry points (the hooks install writes run these; they read the hook event JSON on stdin)
@@ -662,6 +684,7 @@ code-review-graph enrich                       # Graph context for a search or r
 
 # Server
 code-review-graph serve                        # Start MCP server (stdio)
+code-review-graph serve --auto-watch           # Also watch for file changes while the server runs
 code-review-graph serve --http                 # Streamable HTTP on 127.0.0.1:5555 (--host, --port)
 code-review-graph serve --http --multi-repo    # One HTTP server for every registered repository
 code-review-graph serve --tools query_graph_tool,detect_changes_tool  # Tool allowlist (or CRG_TOOLS)
@@ -697,8 +720,10 @@ is stdio only and cannot be combined with `--http`.
 
 Notes:
 
-- `update` and `detect-changes` need a Git repository. `update` with no `--base`
-  diffs from the commit the graph was last built at; when that commit is
+- `update` and `detect-changes` need a Git repository or an SVN working copy.
+  In SVN, `--base` takes a revision or range such as `r100:HEAD`; with no
+  revision, both commands use the working-copy edits from `svn status`. In Git,
+  `update` with no `--base` diffs from the commit the graph was last built at; when that commit is
   missing (fresh graph, rewritten history, shallow clone) it falls back to a
   full rebuild.
 - `update` prints a `Warning:` line on stderr naming files that failed to
@@ -755,8 +780,9 @@ Notes:
   non-`html` `--format`; `--sidecar` with a non-`html` `--format`;
   `--mode community` or `--mode file` with a seed (they aggregate, which is
   the opposite of a neighbourhood); and a `--render-depth` above `--depth`.
-- `install` appends a Git `pre-commit` hook that updates the graph and prints a
-  risk summary before each commit. The hook skips linked worktrees unless
+- `install` (with `--platform all`, the default, or `claude`, `codex` or `qoder`)
+  appends a Git `pre-commit` hook that updates the graph and prints a risk
+  summary before each commit. The hook skips linked worktrees unless
   `CRG_HOOK_WORKTREES=1` is set, so a worktree does not build a second graph
   for another branch.
 - `install` also appends `post-checkout`, `post-merge` and `post-rewrite` Git
@@ -792,7 +818,7 @@ The daemon reads `~/.code-review-graph/watch.toml` (or `$CRG_HOME/watch.toml`):
 ```toml
 [daemon]
 session_name = "crg-watch"   # logical daemon name
-log_dir = "~/.code-review-graph/logs"
+log_dir = "/home/user/.code-review-graph/logs"   # absolute path; ~ is not expanded (default: ~/.code-review-graph/logs, or $CRG_HOME/logs)
 poll_interval = 2            # seconds between config file polls
 
 [[repos]]

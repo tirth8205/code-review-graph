@@ -35,4 +35,4 @@ uv run mypy code_review_graph/ --ignore-missing-imports --no-strict-optional
 - [ ] Linting passes: `uv run ruff check code_review_graph/`
 - [ ] Type checking passes: `uv run mypy code_review_graph/ --ignore-missing-imports --no-strict-optional`
 - [ ] Lines are at most 100 characters
-- [ ] Docs updated where behavior changed (README, `docs/`, docstrings)
+- [ ] Docs updated where behaviour changed (README, `docs/`, docstrings)

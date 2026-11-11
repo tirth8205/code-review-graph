@@ -18,19 +18,22 @@ Claude Code is one supported client among several.
 │  ├── Claude Code, CodeBuddy Code                             │
 │  ├── Cursor, Windsurf, Zed, Continue, Antigravity            │
 │  ├── Gemini CLI, MiMo Code, Qwen, Qoder, Kiro, OpenCode      │
-│  └── Copilot, Copilot CLI, Hermes Agent                      │
+│  └── Copilot, Copilot CLI, Hermes Agent, DeepSeek Harness    │
 │          │                        │                          │
 │          ▼                        ▼                          │
 │  ┌────────────────────────────────────────────┐              │
 │  │      MCP Server (stdio or localhost HTTP)  │              │
 │  │                                            │              │
 │  │  30 MCP tools + 5 MCP prompts              │              │
-│  │  ├── Core: build, impact, query, review,   │              │
-│  │  │   search, traverse, embed, stats, docs  │              │
+│  │  ├── Core: build, postprocess, impact,     │              │
+│  │  │   query, review, search, traverse,      │              │
+│  │  │   embed, stats, docs, minimal context,  │              │
+│  │  │   large functions                       │              │
 │  │  ├── Flows: list, get, affected            │              │
 │  │  ├── Communities: list, get, architecture  │              │
 │  │  ├── Analysis: detect_changes, refactor,   │              │
-│  │  │   apply_refactor, hubs, bridges, gaps   │              │
+│  │  │   apply_refactor, hubs, bridges, gaps,  │              │
+│  │  │   surprises, suggested questions        │              │
 │  │  ├── Wiki: generate, get_page              │              │
 │  │  └── Multi-repo: list_repos, cross_search  │              │
 │  └────────────────┬───────────────────────────┘              │
@@ -62,7 +65,7 @@ All modules live in `code_review_graph/`.
 | `migrations.py` | Versioned schema migrations, currently v15 (see `schema.md`) |
 | `incremental.py` | File collection and ignore rules, git/SVN change detection, full and incremental builds, post-build resolvers |
 | `locking.py`, `build_state.py` | The per-repository write lock, and how much of a build finished |
-| `postprocessing.py` | `run_post_processing()`: endpoint resolution, signatures, FTS sync, flows, communities, embedding refresh |
+| `postprocessing.py` | `run_post_processing()`: endpoint resolution, signatures, FTS sync, flows, communities, opt-in embedding refresh |
 | `python_resolver.py`, `jedi_resolver.py`, `tsconfig_resolver.py`, `workspace_resolver.py`, `npm_alias_resolver.py`, `spring_resolver.py`, `aop_resolver.py`, `event_resolver.py`, `temporal_resolver.py`, `csharp_resolver.py`, `rescript_resolver.py`, `hcl_resolver.py`, `scoped_resolver.py` | Post-build cross-file resolution |
 | `inheritance.py` | Which class a name means, and which ancestor declares an inherited method |
 | `flows.py` | Execution flow detection and criticality scoring |
@@ -75,7 +78,7 @@ All modules live in `code_review_graph/`.
 | `multi_worktree.py` | `serve --multi-worktree`: one child server per linked Git worktree |
 | `cli.py`, `daemon.py`, `daemon_cli.py`, `errors.py`, `stdio.py` | CLI, the multi-repo watch daemon, one-line CLI errors and text-stream setup |
 | `visualization.py`, `neighbourhood.py`, `exports.py`, `wiki.py`, `graph_diff.py`, `memory.py`, `forget.py` | HTML visualisation, seeded views and paths, export formats, wiki generation, snapshot diffing, Q&A memory, file removal |
-| `skills.py`, `install_plan.py`, `install_gitignore.py`, `codex_skill.py`, `_legacy_instructions.py`, `jsonc.py`, `uninstall.py` | Platform install and uninstall: the plan `--dry-run` shows, the `--gitignore` block, the Codex skill, instruction blocks from older releases, and comment-keeping JSONC edits |
+| `skills.py`, `install_plan.py`, `install_gitignore.py`, `codex_skill.py`, `dsh.py`, `_legacy_instructions.py`, `jsonc.py`, `uninstall.py` | Platform install and uninstall: the plan `--dry-run` shows, the `--gitignore` block, the Codex skill, the DeepSeek Harness patch file, instruction blocks from older releases, and comment-keeping JSONC edits |
 | `registry.py`, `enrich.py`, `hook_update.py`, `http_origin_guard.py`, `config_keys.py`, `constants.py` | Multi-repo registry, hook enrichment, hook updates for the edited file's repository, HTTP Host/Origin checks, shared helpers |
 | `eval/`, `token_benchmark.py` | Evaluation framework and standalone token benchmark |
 
@@ -91,10 +94,14 @@ All modules live in `code_review_graph/`.
 3. `GraphStore.store_file_nodes_edges()` (or `store_file_batch()`) replaces the file's rows
    in one transaction, storing the hash for change detection.
 4. Metadata is written: `last_updated`, `last_build_type`, and the git or SVN head.
-5. Post-build resolvers qualify cross-file targets, then `run_post_processing()` computes
-   signatures, rebuilds the FTS index, traces flows, detects communities and refreshes
-   embeddings, unless skipped. An incremental update rewrites only the changed files'
-   FTS entries (`search.update_fts_index`); a full build rebuilds the index.
+5. Post-build resolvers qualify cross-file targets (Jedi, in `jedi_resolver.py`, runs only
+   with `--enrich` or `CRG_ENABLE_ENRICHMENT=1`), then `run_post_processing()` computes
+   signatures, rebuilds the FTS index, traces flows and detects communities, unless skipped.
+   It refreshes embeddings only when both a provider and a model are given
+   (`--embedding-provider` and `--embedding-model`, or `embedding_provider` and
+   `embedding_model` on the MCP build tools) and the graph already has embeddings. An
+   incremental update rewrites only the changed files' FTS entries
+   (`search.update_fts_index`); a full build rebuilds the index.
 
 ### Incremental update (`incremental.incremental_update()`)
 1. `get_changed_files()` asks the VCS for changed paths (git diff by default, plus
@@ -165,8 +172,8 @@ node type tables (`_CLASS_TYPES`, `_FUNCTION_TYPES` and similar in `parser.py`) 
 2. Call detection inside function bodies.
 3. Import resolution to module paths, refined later by the post-build resolvers.
 
-Languages without a grammar can be added through `.code-review-graph/languages.toml`
-(`docs/CUSTOM_LANGUAGES.md`). Some formats have a parser of their own. For notebooks, Vue,
+Languages that have a bundled Tree-sitter grammar but no built-in parser can be added
+through `.code-review-graph/languages.toml` (`docs/CUSTOM_LANGUAGES.md`). Some formats have a parser of their own. For notebooks, Vue,
 Svelte and Blade files, HTML pages, XSLT, JSON and SQL it still uses a Tree-sitter grammar;
 Liquid, Robot Framework, ReScript, VB.NET, generic YAML, Ansible and Spring configuration are
 read without one.

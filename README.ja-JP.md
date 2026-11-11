@@ -65,7 +65,7 @@ code-review-graph build                # parse the codebase
 `install` は導入済みの AI コーディングツールを検出し、それぞれに MCP サーバーのエントリを書き込み、プラットフォームが対応していればフックとスキルを入れ、プラットフォームのルールファイルにグラフの説明を追加します。MCP エントリは、Poetry や uv のプロジェクト環境では `poetry run` または `uv run` を、PATH に `uvx` があれば `uvx code-review-graph serve` を、それ以外では現在の Python インタプリタを使います。`install` は、変更するファイルを一覧にし、指示ファイルについての質問にあなたが答えるまで、何も書き込みません。`install --dry-run` は各変更を差分で示し、何も書き込みません。実行後はエディタやツールを再起動してください。
 
 <p align="center">
-  <img src="diagrams/diagram8_supported_platforms.png" alt="一度のインストールで全プラットフォーム対応: Codex、Claude Code、CodeBuddy Code、Cursor、Windsurf、Zed、Continue、OpenCode、MiMo Code、Antigravity、Gemini CLI、Qwen、Qoder、Kiro、GitHub Copilot、GitHub Copilot CLI、Hermes Agent を検出" width="85%" />
+  <img src="diagrams/diagram8_supported_platforms.png" alt="一度のインストールで全プラットフォーム対応: Codex、Claude Code、CodeBuddy Code、Cursor、Windsurf、Zed、Continue、OpenCode、MiMo Code、Antigravity、Gemini CLI、Qwen Code、Qoder、Kiro、GitHub Copilot、GitHub Copilot CLI、Hermes Agent、DeepSeek Harness を検出" width="85%" />
 </p>
 
 1 つのプラットフォームだけを設定するには、`--platform` に `codex`、`claude-code`、`cursor`、`windsurf`、`zed`、`continue`、`opencode`、`mimo`、`antigravity`、`gemini-cli`、`qwen`、`kiro`、`qoder`、`copilot`、`copilot-cli`、`codebuddy`、`hermes`、`dsh` のいずれかを渡します。
@@ -102,7 +102,7 @@ Build the code review graph for this project
 
 ### Docker または Podman で実行する
 
-プロジェクトのリポジトリルートからイメージをビルドします。
+リポジトリのルートでイメージをビルドします。
 
 ```bash
 docker build -t code-review-graph:local .
@@ -188,10 +188,10 @@ Fedora など SELinux が有効なホストでは、マウントに `:z` を追�
 ### 対応言語とノートブック
 
 <p align="center">
-  <img src="diagrams/diagram9_language_coverage.png" alt="カテゴリ別の言語カバレッジ: Web、バックエンド、システム、モバイル、スクリプト、シェル、ドメイン、その他、加えて Jupyter と Databricks のノートブック" width="90%" />
+  <img src="diagrams/diagram9_language_coverage.png" alt="カテゴリ別の言語カバレッジ: Web、バックエンド、システム、モバイル、スクリプト、シェル、ドメイン、設定、その他、加えて Jupyter と Databricks のノートブック" width="90%" />
 </p>
 
-パーサーは関数、クラス、インポート、呼び出し箇所、継承、テストを抽出します。文法がある言語では Tree-sitter を、それ以外では的を絞ったフォールバックを使います。対応: Python、JavaScript/TypeScript/TSX（`.mjs`、`.cjs`、`.mts`、`.cts` を含む）、Go、Rust、Java、C/C++、C#、VB.NET、Ruby、Kotlin（`.kt`、`.kts`）、Swift、PHP、Scala、Solidity、Dart、R、Perl、Lua/Luau、Objective-C、シェルスクリプト、Elixir、Zig、PowerShell、Julia、ReScript、GDScript、Nix、Verilog/SystemVerilog、SQL/PL/SQL（Oracle）と dbt モデル、Terraform/OpenTofu（`.tf`。ほかの `.hcl` ファイルはファイルノードのみ）、Ansible YAML（playbook、role、task）、Spring Boot のアプリケーション設定（`application.properties`、`application.yml`、`application.yaml` とその `application-<profile>` 版。キー名と値の型のみを記録し、値は決して記録しません）、値を含まない一般的な YAML の構造（`locales/` などのフォルダにある翻訳ファイルはファイルノードのみ）、XSLT スタイルシート（`.xsl`、`.xslt`）、値を含まない JSON の構造（`.json`。翻訳、テスト、ドキュメント、サンプル、データのファイルはファイルノードのみで、ロックファイルは飛ばします）、Vue/Svelte の SFC、HTML ページ（`.html`、`.htm`。インラインスクリプトと、id を持つ `div`、`section`、`article` のブロックを `DocSection` ノードとして）、Astro ファイル（TypeScript の文法で解析）、Jupyter と Databricks のノートブック（`.ipynb`。加えて Databricks の `.py` エクスポート）、Perl XS ファイル（`.xs`）、Robot Framework のファイル（`.robot`、`.resource`）、Liquid テンプレート（`.liquid`）。ほかの `.properties` ファイルはソースコードとして扱いません。
+パーサーは関数、クラス、インポート、呼び出し箇所、継承、テストを抽出します。文法がある言語では Tree-sitter を、それ以外では的を絞ったフォールバックを使います。対応: Python、JavaScript/TypeScript/TSX（`.mjs`、`.cjs`、`.mts`、`.cts` を含む）、Go、Rust、Java、C/C++、C#、VB.NET、Ruby、Kotlin（`.kt`、`.kts`）、Swift、PHP、Scala、Solidity、Dart、R、Perl、Lua/Luau、Objective-C、シェルスクリプト、Elixir、Zig、PowerShell、Julia、ReScript、GDScript、Nix、Verilog/SystemVerilog、SQL/PL/SQL（Oracle）と dbt モデル、Terraform/OpenTofu（`.tf` と、`.hcl` ファイル内の Terraform ブロック。Terraform ブロックのない `.hcl` ファイルはファイルノードのみ）、Ansible YAML（playbook、role、task）、Spring Boot のアプリケーション設定（`application.properties`、`application.yml`、`application.yaml` とその `application-<profile>` 版。キー名と値の型のみを記録し、値は決して記録しません）、値を含まない一般的な YAML の構造（`locales/` などのフォルダにある翻訳ファイルはファイルノードのみ）、XSLT スタイルシート（`.xsl`、`.xslt`）、値を含まない JSON の構造（`.json`。翻訳、テスト、ドキュメント、サンプル、データのファイルはファイルノードのみで、ロックファイルは飛ばします）、Vue/Svelte の SFC、HTML ページ（`.html`、`.htm`。インラインスクリプトと、id を持つ `div`、`section`、`article` のブロックを `DocSection` ノードとして）、Astro ファイル（TypeScript の文法で解析）、Jupyter と Databricks のノートブック（`.ipynb`。加えて Databricks の `.py` エクスポート）、Perl XS ファイル（`.xs`）、Robot Framework のファイル（`.robot`、`.resource`）、Liquid テンプレート（`.liquid`）。ほかの `.properties` ファイルはソースコードとして扱いません。
 
 PHP プロジェクトではさらに、リポジトリ内に閉じた Composer PSR-4 の解決、Blade テンプレートの参照、そしてソースに明示的なフレームワークのインポート、モデルの継承、レシーバの根拠が現れている場合の Laravel Route と Eloquent のエッジが得られます。`routes/*.php` 内の静的な Laravel ルートは、Endpoint ノードとコントローラへの HANDLES エッジを生成し、リテラルのグループプレフィックスも反映します。
 
@@ -271,7 +271,7 @@ jobs:
 >
 > `code-review-graph` の行はスナップショットであり、現在の計測値ではありません。`84bde354` 以降リポジトリは大きくなっており、コーパスもグラフも今日ではかなり大きくなっています。
 
-コーパス全体のベースラインは、実際のエージェントが払うことのない上限です。エージェントは識別子を grep して、いちばん合致するファイルを読みます。`agent_baseline` の評価ベンチマークはその場合を測ります（純 Python でコーパスを grep し、一致数の多い上位 3 ファイルを取り、グラフ照会のコストとトークン数を比較）。結果は `evaluate/results/<repo>_agent_baseline_<date>.csv` に書かれます。この現実的なベースラインに対する中央値は、6 リポジトリ 18 問で **6.65x** です（平均 14.8x、範囲 4.2x〜72.6x）。2026-09-22 の計測は、検索とこのベースラインがテストファイルの順位を下げるようになる前のものです。計測し直すまで、`code-review-graph eval --benchmark agent_baseline --embed` の結果はこの数字と一致しません。完全な表は `docs/REPRODUCING.md` の「Canonical capture, 2026-09-22」にあります。
+コーパス全体のベースラインは、実際のエージェントが払うことのない上限です。エージェントは識別子を grep して、いちばん合致するファイルを読みます。`agent_baseline` の評価ベンチマークはその場合を測ります（純 Python でコーパスを grep し、一致数の多い上位 3 ファイルを取り、グラフ照会のコストとトークン数を比較）。この現実的なベースラインに対する中央値は、6 リポジトリ 18 問で **6.65x** です（平均 14.8x、範囲 4.2x〜72.6x）。2026-09-22 の計測は、検索とこのベースラインがテストファイルの順位を下げるようになる前のものです。計測し直すまで、`code-review-graph eval --benchmark agent_baseline --embed` の結果はこの数字と一致しません。完全な表は `docs/REPRODUCING.md` の「Canonical capture, 2026-09-22」にあります。
 
 この比はリポジトリの規模に追随します。グラフの応答は一定のまま（今回計測したすべてのリポジトリで 2,432〜4,021 トークン）である一方、grep のベースラインはコーパスとともに増えるためです。express では 4.5x、fastapi では 52x でした。どちらの数字も**検索**のコスト、つまり答えを見つけるのに必要なトークンを測っています。グラフが示したファイルをエージェントがそのうえで開くなら、グラフの分は置き換えではなく上乗せになります。`semantic_search_nodes_tool(include_source=True)` は位置とともにコードを返すのでその必要がなくなりますが、この経路を端から端まで計測することは今後の課題です。
 
@@ -340,7 +340,7 @@ jobs:
 | **フレームワークを理解する Java 解析** | Spring の依存性注入による呼び出し解決、リクエストエンドポイントと WebFlux ルート、スケジュールトリガー、アプリケーションイベントの発行側からリスナーへのエッジ、Spring AOP のアドバイスのエッジ、Temporal のワークフローとアクティビティのエッジ、そして値を含めずにインデックスする Spring Boot の設定キー |
 | **影響範囲の分析** | 変更によって影響を受けそうな関数、クラス、ファイル |
 | **自動更新フック** | エディタのフック、git のフック（コミットの前と、チェックアウト、マージ、リベースの後）、watch モードが作業中にグラフを更新 |
-| **セマンティック検索** | 任意のベクトル埋め込み。sentence-transformers、Google Gemini、MiniMax、Voyage AI、あるいは任意の OpenAI 互換エンドポイント（OpenAI、Azure、new-api、LiteLLM、vLLM、LocalAI） |
+| **セマンティック検索** | 任意のベクトル埋め込み。sentence-transformers、Google Gemini、MiniMax、Voyage AI、あるいは任意の OpenAI 互換エンドポイント |
 | **対話的な可視化** | D3.js の力学モデルグラフ。検索、コミュニティ凡例の切り替え、次数に応じたノードサイズ。加えて、シンボル、ファイル、フロー、変更を起点にした近傍ビュー |
 | **ハブとブリッジの検出** | 最も多く接続されたノードとボトルネック（媒介中心性） |
 | **意外度スコア** | 想定外の結合: コミュニティをまたぐ、言語をまたぐ、周辺からハブへのエッジ |
@@ -348,7 +348,7 @@ jobs:
 | **推奨質問** | ブリッジ、ハブ、意外な結合から生成したレビュー用の質問 |
 | **エッジの信頼度** | 4 段階（EXTRACTED、INFERRED、AMBIGUOUS、UNRESOLVED）とエッジ上の浮動小数点スコア。グラフが結び付けられなかった呼び出しはそうと分かる |
 | **グラフ探索** | 任意のノードからの BFS/DFS。深さとトークン予算を設定可能。`path_to` はあるシンボルが別のシンボルにどう到達するかを示し、最も弱いホップを挙げる |
-| **エクスポート形式** | GraphML（Gephi/yEd）、Neo4j Cypher、Obsidian vault、JSON、そして SVG（SVG には `eval` エクストラの matplotlib が必要） |
+| **エクスポート形式** | GraphML、Neo4j Cypher、Obsidian vault、JSON、そして SVG（SVG には `eval` エクストラの matplotlib が必要） |
 | **トークンのベンチマーク** | `code_review_graph/token_benchmark.py` が、質問ごとにコーパス全体のトークンとグラフ照会のトークンを計測 |
 | **文脈削減量の推定** | レビュー、影響分析、detect-changes、アーキテクチャの応答に付く `context_savings` メタデータ（`estimated`、`saved_tokens`、`saved_percent`） |
 | **コミュニティの自動分割** | グラフの 25% を超えるコミュニティを Leiden で再帰的に分割 |
@@ -425,7 +425,7 @@ code-review-graph repos            # List registered repositories
 code-review-graph daemon start     # Start the multi-repo watch daemon
 code-review-graph daemon stop      # Stop the daemon
 code-review-graph daemon status    # Daemon status and repos
-code-review-graph eval             # Run evaluation benchmarks
+code-review-graph eval --all       # Run every evaluation benchmark
 code-review-graph serve            # Start the MCP server (stdio)
 code-review-graph serve --http     # MCP over Streamable HTTP on localhost:5555
 code-review-graph serve --http --multi-repo  # One HTTP server for every registered repo
@@ -466,7 +466,7 @@ JSON のエクスポートはローカルのグラフデータディレクトリ
 
 同じ `context_savings` メタデータは、`get_impact_radius`、`get_review_context`、`detect_changes`、`get_architecture_overview` の各 MCP ツールの JSON 応答にも付きます。
 
-推定値の推移を見るには `CRG_CONTEXT_HISTORY=1` を設定します（既定ではオフ）。推定値ごとに `graph.db` の隣のローカルログへ 1 行追加され、内容はトークン数とツール名だけです。`code-review-graph context-history` で日別またはツール別に表示できます。[docs/USAGE.md](docs/USAGE.md#context-history) を参照してください。
+推定値の推移を見るには `CRG_CONTEXT_HISTORY=1` を設定します（既定ではオフ）。推定値ごとに `graph.db` の隣のローカルログへ 1 行追加されます。内容はトークン数、ツール名、タイムスタンプ、詳細レベル、ファイル数と深さで、ファイル名、パス、ソースコードは含みません。`code-review-graph context-history` で日別またはツール別に表示できます。[docs/USAGE.md](docs/USAGE.md#context-history) を参照してください。
 
 </details>
 
@@ -514,7 +514,7 @@ alias = "project-b"
 <summary><strong>30 個の MCP ツール</strong></summary>
 <br>
 
-グラフを構築すると、アシスタントはこれらを使います。
+グラフを構築すると、アシスタントはこれらを使います。読むだけの 25 個のツールには `readOnlyHint: true` が付いているので、クライアントは確認なしで実行できます。書き込みを行う 5 個（`build_or_update_graph_tool`、`run_postprocess_tool`、`embed_graph_tool`、`apply_refactor_tool`、`generate_wiki_tool`）には付いていません。
 
 | ツール | 内容 |
 |------|-------------|
@@ -567,7 +567,7 @@ vendor/**
 node_modules/**
 ```
 
-git リポジトリでは追跡されているファイルだけがインデックスされるので（`git ls-files`）、gitignore されたファイルは飛ばされます。追跡されているファイルを除外したいとき、あるいは git が使えないときに `.code-review-graphignore` を使ってください。既定の除外リストは [docs/USAGE.md](docs/USAGE.md#ignore-patterns) にあります。
+git リポジトリでは、ビルドは追跡されているファイルと、git が無視しない未追跡のファイルを読むので（`git ls-files` と `git ls-files --others --exclude-standard`）、gitignore されたファイルは飛ばされます。ほかのファイルを除外したいとき、あるいは git が使えないときは `.code-review-graphignore` を使ってください。既定の除外リストは [docs/USAGE.md](docs/USAGE.md#ignore-patterns) にあります。
 
 任意の依存グループ:
 
@@ -586,7 +586,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | 変数 | 内容 | 既定値 |
 |----------|-------------|---------|
 | `CRG_GIT_TIMEOUT` | Git 操作のタイムアウト（秒。build / update / watch） | `30` |
-| `CRG_DISCOVERY_TIMEOUT` | ファイル一覧が明示されなかったとき、変更内容を特定する各 Git コマンドのタイムアウト（秒）。超過時はエラーを返し、「変更なし」とは報告しない | `5`（`CRG_GIT_TIMEOUT` を明示設定した場合はその値） |
+| `CRG_DISCOVERY_TIMEOUT` | レビューのツールやコマンドにファイル一覧が明示されなかったとき、変更内容を特定する各 Git コマンドのタイムアウト（秒）。超過時はエラーを返し、「変更なし」とは報告しない | `5`（`CRG_GIT_TIMEOUT` を明示設定した場合はその値） |
 | `CRG_DATA_DIR` | グラフのデータベースと生成物を置くディレクトリ | - |
 | `CRG_HOOK_WORKTREES` | `1` にすると、生成された git フックをリンク済みの git worktree でも動かす | - |
 | `CRG_EMBEDDING_MODEL` | ローカルのベクトル埋め込みの既定モデル | `all-MiniLM-L6-v2` |
@@ -604,7 +604,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_CALLER_TEST_ROUTE_MAX_CALLERS` | そのテスト済み呼び出し元を探す際に調べる呼び出し元の最大数 | `500` |
 | `CRG_TOOL_TIMEOUT` | 読み取り専用 MCP ツールのタイムアウト（秒。`0` で無効）。書き込みを行うツール（build / postprocess / embed / wiki / apply-refactor）には適用されない | `0` |
 | `CRG_CHURN_WINDOW_DAYS` | `detect-changes --churn` のコミット数を数える期間 | `90` |
-| `CRG_CONTEXT_HISTORY` | `1` にすると、`context_savings` の推定値を毎回ローカルログ `.code-review-graph/context-history.jsonl` に記録します。`code-review-graph context-history` で表示します。記録するのはトークン数とツール名だけで、外部には送信しません | - |
+| `CRG_CONTEXT_HISTORY` | `1` にすると、`context_savings` の推定値を毎回ローカルログ `.code-review-graph/context-history.jsonl` に記録します。`code-review-graph context-history` で表示します。記録するのはトークン数、ツール名、タイムスタンプ、詳細レベル、ファイル数と深さで、ファイル名、パス、ソースコードは記録せず、外部にも送信しません | - |
 | `CRG_LEIDEN_SEED` | Leiden のコミュニティ検出のシード | `42` |
 | `CRG_RECURSE_SUBMODULES` | `1`、`true`、`yes` のとき git サブモジュールを含める | - |
 | `CRG_FOLLOW_SYMLINKS` | `1`、`true`、`yes`、`on` のとき、シンボリックリンクのフォルダ（リポジトリの内外）をたどる。`--follow-symlinks` と同じ。[シンボリックリンクのフォルダ](docs/USAGE.md#symlinked-folders) を参照 | - |
@@ -629,7 +629,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_ENABLE_ENRICHMENT` | `1` にすると毎回の build と update で Jedi により Python のメソッド呼び出しを解決（`enrichment` エクストラが必要、Python ファイル 1 つにつき約 1 秒増）。`build --enrich` と同じ | オフ |
 | `CRG_DISABLE_ENRICHMENT` | `1` にすると要求があっても Jedi を実行しない | - |
 
-OpenAI 互換の埋め込み（OpenAI、Azure、あるいは new-api、LiteLLM、vLLM、LocalAI、OpenAI モードの Ollama といった自前のゲートウェイ）に追加インストールは要りません。変数を設定し、`embed_graph` に `provider="openai"` を渡します。
+OpenAI 互換の埋め込みに追加インストールは要りません。変数を設定し、`embed_graph` に `provider="openai"` を渡します。
 
 ```bash
 export CRG_OPENAI_BASE_URL=http://127.0.0.1:3000/v1     # or https://api.openai.com/v1
@@ -638,7 +638,6 @@ export CRG_OPENAI_MODEL=text-embedding-3-small          # whatever your gateway 
 # optional:
 export CRG_OPENAI_DIMENSION=1536                        # pin dim (v3 models support reduction)
 export CRG_OPENAI_BATCH_SIZE=100                        # lower for gateways with tight limits
-                                                        # (e.g. Qwen text-embedding-v4 caps at 10)
 ```
 
 ベース URL が localhost（`127.0.0.1`、`localhost`、`0.0.0.0`、`::1`）を指している場合、クラウド送信の警告は出ません。
@@ -651,7 +650,7 @@ export CRG_ACCEPT_CLOUD_EMBEDDINGS=1
 code-review-graph embed --provider voyage --model voyage-code-3
 ```
 
-> **モデルの選び方。** 長く使うインデックスには `-preview`、`-beta`、`-exp` のモデル ID を避けてください。プレビュー版は重みが変わったり（次元が変わると全件の再埋め込みが必要）、取り下げられたりします。`text-embedding-3-small` / `text-embedding-3-large`（OpenAI）、`Qwen/Qwen3-Embedding-8B`（自前の vLLM や LocalAI）、`gemini-embedding-001`（`GOOGLE_API_KEY` が必要なネイティブの Gemini プロバイダ）といった正式リリースを選んでください。
+> **モデルの選び方。** 長く使うインデックスには `-preview`、`-beta`、`-exp` のモデル ID を避けてください。プレビュー版は重みが変わったり（次元が変わると全件の再埋め込みが必要）、取り下げられたりします。`text-embedding-3-small` / `text-embedding-3-large`（OpenAI）や `gemini-embedding-001`（`GOOGLE_API_KEY` が必要なネイティブの Gemini プロバイダ）といった正式リリースを選んでください。
 >
 > 埋め込むテキストは、識別子、シグネチャ、構造上の文脈、そして長さを制限した最初の段落の docstring かドキュメントコメントの要約です。関数の本体は送りません。ドキュメント抽出の追加前に作られたグラフは、再埋め込みの前に `code-review-graph build` を一度通す必要があります。通常のビルドでは埋め込みは更新されません。ビルド後に更新するには `--embedding-provider` と `--embedding-model` の両方を渡してください。クラウドのプロバイダはこのソース由来のテキストを受け取り、課金する場合があります。
 
@@ -691,7 +690,6 @@ CRG_TOOLS=query_graph_tool,semantic_search_nodes_tool code-review-graph serve
 - [LSP / 言語サーバーとの違い](docs/FAQ.md#how-is-this-different-from-lsp-and-language-servers): 言語ごとのデーモンではなく、言語をまたぐ永続的なグラフが 1 つ。シンボル単位の正確さでは LSP が上。
 - [RAG / 埋め込みとの違い](docs/FAQ.md#isnt-this-just-rag): 類似度でのチャンクではなく、AST から解析した構造的なエッジ。埋め込みは任意で、検索の補助にすぎません。
 - [grep / エージェント検索との違い](docs/FAQ.md#why-not-just-grep): 1 ホップの探索なら grep。多ホップの問い（影響範囲、呼び出し元の呼び出し元、tests-for、影響を受けるフロー）ならグラフ。
-- [Serena、codegraph、claude-context、repomix との比較](docs/FAQ.md#how-does-it-compare-to-serena-codegraph-claude-context-and-repomix): 比較表。
 - [使わないほうがよい場合](docs/FAQ.md#when-should-i-not-use-it): 小さなリポジトリ、ささいな単一ファイルの差分、1 回きりの質問。
 - [外部に通信しますか？](docs/FAQ.md#does-it-phone-home): テレメトリはありません。クラウド埋め込みは明示的に有効にした場合だけ。
 - [動いているかどう確かめますか？](docs/FAQ.md#how-do-i-verify-it-is-working): `status`、`detect-changes --brief`、`/mcp`。
@@ -704,7 +702,7 @@ Windows/WSL を含むより多くの事例は [docs/TROUBLESHOOTING.md](docs/TRO
 
 ソースツリーからのインストール（たとえば `pipx install .`）には、PyPI からビルド依存を取る必要があります。接続の警告のあとに `Could not find a version that satisfies the requirement hatchling` が出る場合、その端末の Python が `pypi.org` への HTTPS 接続を開けていない可能性があります。エディタの統合ターミナルで最も多く、VPN、ファイアウォール、プロキシが原因のこともあります。
 
-1. エディタのターミナルではなく、Terminal.app や iTerm から同じコマンドを実行する。
+1. エディタの外のターミナル（Terminal.app など）から同じコマンドを実行する。
 2. ダウンロードの仕組みが異なる [uv](https://docs.astral.sh/uv/) を使って、チェックアウトからインストールする。
 
    ```bash
