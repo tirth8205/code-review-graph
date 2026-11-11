@@ -9,7 +9,12 @@ from pathlib import Path
 from typing import Any
 
 from ..config_keys import normalize_spring_config_key
-from ..constants import IMPORT_SCOPE_KEY, MAX_IMPACT_NODES
+from ..constants import (
+    IMPORT_CONTEXT_KEY,
+    IMPORT_CONTEXT_TYPE_ONLY,
+    IMPORT_SCOPE_KEY,
+    MAX_IMPACT_NODES,
+)
 from ..context_history import CallInfo
 from ..context_savings import attach_context_savings, estimate_file_tokens
 from ..embeddings import EmbeddingStore
@@ -455,6 +460,12 @@ class _RouteGraph:
                 edge
                 for edge in self._store.iter_edges_by_source(qualified_name)
                 if edge.kind in _ROUTE_EDGE_KINDS
+                # ``if TYPE_CHECKING:`` and ``import type`` never run, so they
+                # are no route, as import cycles already hold.
+                and not (
+                    edge.kind == "IMPORTS_FROM"
+                    and edge.extra.get(IMPORT_CONTEXT_KEY) == IMPORT_CONTEXT_TYPE_ONLY
+                )
             ]
         return self._edges[qualified_name]
 
