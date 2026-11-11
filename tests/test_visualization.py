@@ -212,6 +212,53 @@ def test_export_json_failure_preserves_existing_file(
     assert list(tmp_path.glob(".graph.json.*.tmp")) == []
 
 
+def _slugs_the_old_way(nodes: list[dict]) -> dict[str, str]:
+    """The slug loop as it was: right, but it scanned every slug per step."""
+    from code_review_graph.exports import _obsidian_slug
+
+    slugs: dict[str, str] = {}
+    for n in nodes:
+        slug = _obsidian_slug(n.get("name", n["qualified_name"]))
+        base_slug, counter = slug, 1
+        while slug in slugs.values():
+            slug = f"{base_slug}-{counter}"
+            counter += 1
+        slugs[n["qualified_name"]] = slug
+    return slugs
+
+
+def test_obsidian_slugs_match_the_old_collision_rule():
+    """Same names, same order, same slugs as before the loop was made linear."""
+    from code_review_graph.exports import _obsidian_slugs
+
+    names = [
+        "Report", "report", "report-1", "RE_PORT", "report", "re port",
+        "report-1", "report!", "", "unnamed", "!!!", "report-2", "Report",
+    ]
+    nodes = [{"qualified_name": f"m.py::n{i}", "name": nm} for i, nm in enumerate(names)]
+    nodes.append({"qualified_name": "m.py::no_name"})
+    slugs = _obsidian_slugs(nodes)
+    assert slugs == _slugs_the_old_way(nodes)
+    assert len(set(slugs.values())) == len(nodes)
+
+
+def test_obsidian_slugs_stay_linear_when_many_names_collide():
+    """Twenty thousand ``__init__`` methods once meant billions of compares."""
+    import time
+
+    from code_review_graph.exports import _obsidian_slugs
+
+    n = 20_000
+    nodes = [{"qualified_name": f"m{i}.py::C.__init__", "name": "__init__"} for i in range(n)]
+    started = time.perf_counter()
+    slugs = _obsidian_slugs(nodes)
+    elapsed = time.perf_counter() - started
+    assert len(set(slugs.values())) == n
+    assert slugs["m0.py::C.__init__"] == "init"
+    assert slugs[f"m{n - 1}.py::C.__init__"] == f"init-{n - 1}"
+    assert elapsed < 5, f"{n} colliding slugs took {elapsed:.2f}s; looks quadratic"
+
+
 def test_generate_html(store_with_data, tmp_path):
     from code_review_graph.visualization import generate_html
 
