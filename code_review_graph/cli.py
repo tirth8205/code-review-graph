@@ -156,6 +156,7 @@ _BANNER_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         ("install", "Set up the MCP server, hooks and skills for your AI tools"),
         ("init", "Same as install"),
         ("uninstall", "Remove what install added"),
+        ("doctor", "Check which copies run, the graph and the hooks"),
     )),
     ("Build the graph", (
         ("build", "Parse every file into a new graph"),
@@ -934,6 +935,7 @@ _GRAPH_TOOL_COMMANDS = {
 
 _PATH_REPO_COMMANDS = frozenset({
     "context-history",
+    "doctor",
     "install",
     "init",
     "uninstall",
@@ -989,6 +991,21 @@ def _find_explicit_repo_root(start: Path) -> "Path | None":
         if current == current.parent:
             return None
         current = current.parent
+
+
+def _handle_doctor(args) -> None:
+    """Report on the setup, read-only; exit 1 when a check failed."""
+    from .doctor import run_doctor
+    from .incremental import find_project_root
+
+    if args.repo:
+        given = Path(args.repo).expanduser()
+        repo_root = _find_explicit_repo_root(given) or given.resolve()
+    else:
+        repo_root = find_project_root()
+    code = run_doctor(repo_root, as_json=args.json_output)
+    if code:
+        raise SystemExit(code)
 
 
 def _handle_context_history(args) -> None:
@@ -1790,6 +1807,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--yes",
         action="store_true",
         help="Apply without an interactive confirmation",
+    )
+
+    # doctor
+    doctor_cmd = sub.add_parser(
+        "doctor",
+        help="Check which copies run, the graph and the hooks (read-only)",
+        description=(
+            "Check the setup without changing anything: every code-review-graph "
+            "on PATH and its version, the version the MCP entries in this "
+            "repository's configs run, the graph's schema and whether it is "
+            "current, and which hooks are installed. Exit 0 when nothing "
+            "failed, 1 when something did."
+        ),
+    )
+    doctor_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
+    doctor_cmd.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Output one machine-readable JSON object",
     )
 
     # build
@@ -2701,6 +2738,10 @@ def _dispatch() -> None:
 
     if args.command == "context-history":
         _handle_context_history(args)
+        return
+
+    if args.command == "doctor":
+        _handle_doctor(args)
         return
 
     embedding_refresh_kwargs = _embedding_refresh_kwargs(args, ap)

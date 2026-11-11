@@ -545,13 +545,17 @@ LONG_RUNNING: dict[str, list[str]] = {
 
 #: Covered by ``--help`` only. ``daemon start``/``restart`` fork a real
 #: background watcher and ``daemon stop`` reaches for a PID file, so running
-#: them for real is machine state this suite refuses to create.
-HELP_ONLY: tuple[str, ...] = ("daemon start", "daemon restart", "daemon stop", "enrich")
+#: them for real is machine state this suite refuses to create. The three
+#: hook commands read one event from stdin and have their own tests.
+HELP_ONLY: tuple[str, ...] = (
+    "daemon start", "daemon restart", "daemon stop",
+    "enrich", "hook-update", "hook-status",
+)
 
 #: ``embed`` succeeds only where the optional embedding stack is installed and
 #: would otherwise download a model, so it gets its own test that accepts
 #: either a clean success or a clean missing-dependency failure.
-CONDITIONAL: tuple[str, ...] = ("embed",)
+CONDITIONAL: tuple[str, ...] = ("embed", "doctor")
 
 #: Commands whose "nothing to show" case is a user error, not a success:
 #: ``daemon logs`` before a daemon has ever written a log file.
@@ -599,6 +603,24 @@ def test_embed_either_succeeds_or_says_what_is_missing(built_repo, cli_env):
     if result.returncode == 1:
         assert_clean_failure(result)
         assert "pip install" in result.output, result.describe()
+
+
+def test_doctor_reports_cleanly_whatever_the_machine_holds(built_repo, cli_env):
+    """``doctor`` exits 1 when it finds a problem, and this machine may hold one.
+
+    Another ``code-review-graph`` on the developer's PATH is a real finding,
+    not a test failure, so the exit code is asserted only to be 0 or 1. The
+    output must still be the report, with no traceback, and ``--json`` must
+    be one object whose verdict matches the exit code.
+    """
+    result = run_cli("doctor", cwd=built_repo, env=cli_env)
+    assert not result.traceback, result.describe()
+    assert result.returncode in (0, 1), result.describe()
+    assert "code-review-graph doctor:" in result.output, result.describe()
+    as_json = run_cli("doctor", "--json", cwd=built_repo, env=cli_env)
+    assert as_json.returncode in (0, 1), as_json.describe()
+    report = json.loads(as_json.output)
+    assert report["healthy"] is (as_json.returncode == 0), as_json.describe()
 
 
 @pytest.mark.parametrize("command", sorted(LONG_RUNNING))
