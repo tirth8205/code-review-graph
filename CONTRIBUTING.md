@@ -55,7 +55,7 @@ The `minimum-dependencies` job installs every direct dependency at the lowest ve
 1. Fork the repository and create a branch from `staging`: `git checkout -b feature/your-feature origin/staging`.
 2. Make the change and add tests for new behaviour.
 3. Run the tests, ruff and mypy as above.
-4. Update docs where behaviour changed (README, `docs/`, docstrings). README.md has four translations: README.zh-CN.md, README.ja-JP.md, README.ko-KR.md and README.hi-IN.md. If you add or remove a heading, change a code block or a link, or add or remove a table row in README.md, make the same change in all four. `tests/test_readme_parity.py` checks this.
+4. Update docs where behaviour changed (README, `docs/`, docstrings). README.md has four translations: README.zh-CN.md, README.ja-JP.md, README.ko-KR.md and README.hi-IN.md. If you add or remove a heading, change a code block or a link, or add or remove a table row in README.md, make the same change in all four. `tests/test_readme_parity.py` checks this. Add a bullet under `## [Unreleased]` in `CHANGELOG.md` for anything a user will notice, in user terms, not function names. Changes only contributors see (tests, CI, internal names) go under `### Internal`.
 5. Open a pull request against `staging` (the default branch, so GitHub picks it for you). The template asks for the linked issue, what changed and why, and the commands you ran.
 
 ## Branching and promotion
@@ -184,9 +184,13 @@ uv run pytest -m browser -q                           # browser (needs the brows
 uv run pytest -m e2e -q                               # e2e
 ```
 
-**Releases** are cut from `main` only: bump the version, tag `vX.Y.Z`, publish a GitHub
-release, and the `publish` workflow uploads to PyPI. Nothing is ever released from
-`staging` or `testing`.
+**Releases** are cut from `main` only: move the `[Unreleased]` notes in `CHANGELOG.md`
+under the new version, update `docs/FEATURES.md`, bump the version, tag `vX.Y.Z`, publish
+a GitHub release, and the `publish` workflow uploads to PyPI. When
+`SUPPORTED_SCHEMA_VERSION` in the VS Code extension changes, publish the extension in the
+same release and add its row to the Versions table in `code-review-graph-vscode/README.md`:
+the `publish` workflow does not ship it, and an older extension cannot read the new graph.
+Nothing is ever released from `staging` or `testing`.
 
 **Archived branches.** Old branches are not deleted outright. A branch that carried work
 not on `main` is kept as a tag under `archive/<branch-name>` (list them with

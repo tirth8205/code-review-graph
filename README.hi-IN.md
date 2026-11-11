@@ -39,9 +39,12 @@
   <a href="docs/COMMANDS.md">कमांड</a> ·
   <a href="docs/FAQ.md">सामान्य प्रश्न</a> ·
   <a href="docs/TROUBLESHOOTING.md">समस्या निवारण</a> ·
+  <a href="docs/FEATURES.md">नया क्या है</a> ·
+  <a href="CHANGELOG.md">बदलाव सूची</a> ·
   <a href="docs/GITHUB_ACTION.md">GitHub Action</a> ·
   <a href="docs/REPRODUCING.md">बेंचमार्क दोहराना</a> ·
-  <a href="docs/ROADMAP.md">रोडमैप</a>
+  <a href="docs/ROADMAP.md">रोडमैप</a> ·
+  <a href="docs/INDEX.md">सभी दस्तावेज़</a>
 </p>
 
 <br>
@@ -67,18 +70,31 @@
 Python 3.10+ चाहिए।
 
 ```bash
-pip install code-review-graph          # or: pipx install code-review-graph
-code-review-graph install              # detect installed AI coding tools and configure each one
+uv tool install code-review-graph      # or: pipx install / pip install code-review-graph
+code-review-graph install              # set up the AI coding tools found on this machine
 code-review-graph build                # parse the codebase
+code-review-graph detect-changes --brief  # see what your last change touches
 ```
+
+एडिटर या टूल को फिर से शुरू करें, फिर प्रोजेक्ट खोलें और असिस्टेंट से कहें:
+
+```
+Review my changes
+```
+
+`code-review-graph uninstall` से सब कुछ वापस हो जाता है (पहले देखने के लिए `--dry-run`)। अगर कुछ काम न करे, तो `code-review-graph doctor` चलाएँ: यह सेटअप जाँचता है और कुछ नहीं बदलता।
 
 <details>
 <summary><strong><code>install</code> क्या बदलता है, और पहले उसे कैसे देखें</strong></summary>
 <br>
 
-`install` यह पहचानता है कि आपके पास कौन-कौन से AI कोडिंग टूल हैं, हर एक के लिए MCP सर्वर प्रविष्टि लिखता है, जहाँ प्लेटफ़ॉर्म समर्थन करता है वहाँ हुक और स्किल लगाता है, और प्लेटफ़ॉर्म की नियम फ़ाइल में ग्राफ़ संबंधी निर्देश जोड़ता है। Poetry या uv प्रोजेक्ट परिवेश में MCP प्रविष्टि `poetry run` या `uv run` का उपयोग करती है, PATH पर `uvx` होने पर `uvx code-review-graph serve` का, और बाकी स्थितियों में मौजूदा Python इंटरप्रेटर का। जब तक `install` बदली जाने वाली फ़ाइलों की सूची न दिखा दे और आप निर्देश फ़ाइलों वाले उसके प्रश्न का उत्तर न दे दें, तब तक कुछ भी नहीं लिखा जाता; `install --dry-run` हर बदलाव को diff के रूप में दिखाता है और कुछ नहीं लिखता। उसके बाद एडिटर या टूल को फिर से शुरू करें।
+`install` इस मशीन पर AI कोडिंग टूल ढूँढता है और सिर्फ़ उन्हीं को सेट करता है जो उसे मिलते हैं। हर एक के लिए यह MCP सर्वर प्रविष्टि लिखता है, जहाँ टूल समर्थन करता है वहाँ हुक और स्किल लगाता है, और उसकी नियम फ़ाइल में ग्राफ़ संबंधी निर्देश जोड़ता है। फिर यह उन टूल के नाम बताता है जो नहीं मिले; फिर भी कोई जोड़ना हो तो `install --platform NAME` चलाएँ।
 
-`install` जो फ़ाइलें लिखता है, जैसे `.claude/` और `.mcp.json`, वे git को दिखती रहती हैं, ताकि आपकी टीम चाहे तो उन्हें कमिट कर सके। `install --gitignore` उस बार बनाई गई फ़ाइलों को `.gitignore` के एक चिह्नित ब्लॉक में जोड़ता है; `uninstall` वह ब्लॉक हटा देता है।
+जब तक `install` बदली जाने वाली फ़ाइलों की सूची न दिखा दे और आप निर्देश फ़ाइलों वाले उसके प्रश्न का उत्तर न दे दें, तब तक कुछ भी नहीं लिखा जाता। टर्मिनल न होने पर, जैसे जब कोई AI एजेंट इसे चलाता है, यह डिफ़ॉल्ट उत्तर (हाँ) लेता है और यह बताता है; `--no-instructions` उन फ़ाइलों को छोड़ देता है। `install --dry-run` हर बदलाव को diff के रूप में दिखाता है और कुछ नहीं लिखता। उसके बाद एडिटर या टूल को फिर से शुरू करें।
+
+MCP प्रविष्टि और हर हुक code-review-graph की वही कॉपी चलाते हैं जिसने `install` चलाया। Poetry या uv प्रोजेक्ट में MCP प्रविष्टि `poetry run` या `uv run` का उपयोग करती है, जब `install` खुद `uvx` या `uv tool install` से चला हो तो `uvx` का, और बाकी स्थितियों में उस Python का जिसने `install` चलाया। हुक उसी Python (या `uvx`) का नाम लिखते हैं, और वह न रहे तो PATH पर मौजूद `code-review-graph` चलाते हैं। अपग्रेड के बाद `install` फिर से चलाएँ।
+
+`install` जो फ़ाइलें लिखता है, जैसे `.claude/` और `.mcp.json`, वे git को दिखती रहती हैं, ताकि आपकी टीम चाहे तो उन्हें कमिट कर सके। जब तक git उन्हें ट्रैक नहीं करता, `build` और रिव्यू उन्हें छोड़ देते हैं, इसलिए आपके पहले रिव्यू में सिर्फ़ आपका अपना बदलाव दिखता है; `install` उन्हें `.code-review-graph/install-manifest.json` में दर्ज करता है। `install --gitignore` उस बार बनाई गई फ़ाइलों को `.gitignore` के एक चिह्नित ब्लॉक में जोड़ता है; `uninstall` वह ब्लॉक हटा देता है।
 
 Codex के लिए इंस्टॉलर एक वैश्विक `code-review-graph` स्किल भी
 `$CODEX_HOME/skills/code-review-graph/` में रखता है (डिफ़ॉल्ट:
@@ -105,15 +121,15 @@ code-review-graph install --platform cursor
 code-review-graph install --platform codebuddy
 ```
 
-कॉन्फ़िग फ़ाइलों के स्थान [docs/USAGE.md](docs/USAGE.md#supported-platforms) में सूचीबद्ध हैं। Python 3.10+ चाहिए।
+इस तरह नाम दिया गया प्लेटफ़ॉर्म तब भी सेट होता है जब `install` उसे न ढूँढ पाए। कॉन्फ़िग फ़ाइलों के स्थान [docs/USAGE.md](docs/USAGE.md#supported-platforms) में सूचीबद्ध हैं।
 
 </details>
 
 <details>
-<summary><strong><code>uninstall</code> से इसे फिर हटाएँ</strong></summary>
+<summary><strong><code>uninstall</code> के और तरीके</strong></summary>
 <br>
 
-`uninstall` किसी Git या SVN वर्किंग ट्री से CRG की अपनी फ़ाइलें और प्रविष्टियाँ हटाता है और दूसरे MCP सर्वर, हुक, स्किल तथा JSONC टिप्पणियाँ जैसी की तैसी छोड़ देता है। इसे ट्री के भीतर कहीं से भी चलाया जा सकता है। साझा कॉन्फ़िग फ़ाइलें एटॉमिक तरीके से बदली जाती हैं, इसलिए लिखने में विफलता होने पर मूल फ़ाइल सुरक्षित रहती है।
+`uninstall` किसी Git या SVN वर्किंग ट्री से CRG की अपनी फ़ाइलें और प्रविष्टियाँ हटाता है और दूसरे MCP सर्वर, हुक, स्किल तथा JSONC टिप्पणियाँ जैसी की तैसी छोड़ देता है। इसे ट्री के भीतर कहीं से भी चलाया जा सकता है। साझा कॉन्फ़िग फ़ाइलें एटॉमिक तरीके से बदली जाती हैं, इसलिए लिखने में विफलता होने पर मूल फ़ाइल सुरक्षित रहती है। `install` की बनाई कोई कॉन्फ़िग फ़ाइल, जिसे git ट्रैक नहीं करता और जिसमें कुछ और नहीं है, `install` के बनाए खाली फ़ोल्डरों के साथ हटा दी जाती है। टर्मिनल न होने पर यह डिफ़ॉल्ट उत्तर (नहीं) लेता है और `--yes` देने को कहता है।
 
 ```bash
 code-review-graph uninstall --dry-run    # preview only
@@ -126,72 +142,28 @@ code-review-graph uninstall --keep-user-configs --repo .  # this project only
 
 </details>
 
-`install` के बाद एडिटर या टूल को फिर से शुरू करें।
-फिर प्रोजेक्ट खोलें और असिस्टेंट से कहें:
-
-```
-Build the code review graph for this project
-```
-
 <details>
 <summary><strong>बिल्ड में कितना समय लगता है, और अधूरे बिल्ड का क्या मतलब है</strong></summary>
 <br>
 
-बिल्ड का समय रिपॉज़िटरी के आकार के साथ बढ़ता है; लगभग 3,000 फ़ाइलों वाली रिपॉज़िटरी के कोल्ड बिल्ड में लगभग 40 सेकंड लगे ([मापा गया](docs/REPRODUCING.md#incremental-update-latency))। उसके बाद हुक और watch मोड ग्राफ़ को अद्यतन रखते हैं। अगर कुछ फ़ाइलें पार्स नहीं हो पातीं तो परिणाम की स्थिति `partial` होती है और सारांश में उनके नाम आते हैं; CLI stderr पर एक `Warning:` पंक्ति भी छापता है, और उन फ़ाइलों की पुरानी ग्राफ़ पंक्तियाँ बनी रहती हैं।
+बिल्ड का समय रिपॉज़िटरी के आकार के साथ बढ़ता है; लगभग 3,000 फ़ाइलों वाली रिपॉज़िटरी के कोल्ड बिल्ड में लगभग 40 सेकंड लगे ([मापा गया](docs/REPRODUCING.md#incremental-update-latency))। उसके बाद हुक और watch मोड ग्राफ़ को अद्यतन रखते हैं। अगर कुछ फ़ाइलें पार्स नहीं हो पातीं तो परिणाम की स्थिति `partial` होती है और सारांश में उनके नाम आते हैं; CLI stderr पर एक `Warning:` पंक्ति भी छापता है, और उन फ़ाइलों की पुरानी ग्राफ़ पंक्तियाँ बनी रहती हैं। जिस बिल्ड को कोई सोर्स फ़ाइल नहीं मिलती, वह stderr पर चेतावनी देता है और पूछता है कि क्या आप प्रोजेक्ट के मूल फ़ोल्डर में हैं।
 
 </details>
 
-### Docker या Podman से चलाएँ
-
 <details>
-<summary><strong>इमेज बनाएँ, फिर उसे अपनी रिपॉज़िटरी पर चलाएँ</strong></summary>
+<summary><strong>2.3.x से अपग्रेड करना</strong></summary>
 <br>
 
-रिपॉज़िटरी के मूल फ़ोल्डर से इमेज बनाएँ:
-
 ```bash
-docker build -t code-review-graph:local .
+pip install -U code-review-graph     # or: pipx upgrade / uv tool upgrade code-review-graph
+code-review-graph doctor             # every copy, MCP entry and hook, and the version each runs
+code-review-graph install --dry-run  # see what changes, then run install
+code-review-graph build              # once: new file types and fixes reach only re-parsed files
 ```
 
-जिस रिपॉज़िटरी का विश्लेषण करना है, उसके फ़ोल्डर से चलाएँ:
+अपनी हर कॉपी अपग्रेड करें। MCP प्रविष्टि, git और एडिटर हुक और `crg-daemon` हर एक अलग कॉपी चला सकते हैं, और जिस ग्राफ़ को 2.4.0 या बाद वाले ने खोला हो, उसे 2.3.9 की कॉपी पढ़ने से मना कर देती है और उससे पुरानी 2.3.x कॉपी उसे बिगाड़ सकती है। `install` फिर से चलाएँ ताकि प्रविष्टि और हुक नई कॉपी चलाएँ, फिर एडिटर को फिर से शुरू करें (और अगर आप डेमॉन इस्तेमाल करते हैं तो `crg-daemon restart` चलाएँ)।
 
-```bash
-docker run --rm \
-  --user "$(id -u):$(id -g)" \
-  --env HOME=/tmp \
-  --volume "$PWD:/workspace" \
-  code-review-graph:local build
-```
-
-माउंट की गई रिपॉज़िटरी में लिखने की अनुमति होनी चाहिए।
-ऊपर दिया गया कमांड आपके यूज़र और ग्रुप ID का उपयोग करता है,
-जिससे बनाई गई `.code-review-graph/` डायरेक्टरी का स्वामित्व आपके यूज़र के पास रहता है।
-इन कमांड को होस्ट पर गैर-root यूज़र के रूप में चलाएँ।
-
-Podman के लिए, उसी Dockerfile से इमेज बनाएँ और यूज़र मैपिंग बनाए रखें:
-
-```bash
-podman build -t code-review-graph:local .
-podman run --rm \
-  --userns=keep-id \
-  --env HOME=/tmp \
-  --volume "$PWD:/workspace" \
-  code-review-graph:local build
-```
-
-ग्राफ़ माउंट किए गए रिपॉज़िटरी की `.code-review-graph/` डायरेक्टरी में बना रहता है और
-`/workspace/app.py` जैसे कंटेनर के पूर्ण पथ सहेजता है। `update` और `detect-changes` को
-Docker या Podman से उसी `/workspace` माउंट के साथ चलाएँ। इस ग्राफ़ पर होस्ट से `update`
-चलाने पर "built with a different repository root" त्रुटि आ सकती है। होस्ट कमांड पर
-स्विच करने के लिए, होस्ट पर `code-review-graph build` चलाकर होस्ट के पथों के साथ ग्राफ़ फिर से बनाएँ।
-
-सहेजे गए ग्राफ़ को देखने के लिए `build` की जगह `status` लिखें।
-इमेज में Git शामिल है और यह डिफ़ॉल्ट रूप से गैर-root यूज़र के रूप में चलती है।
-इमेज बनाते समय ग्राफ़ नहीं बनाया जाता।
-
-इन उदाहरणों में macOS/Linux शेल सिंटैक्स का उपयोग किया गया है।
-macOS पर इन्हें चलाने से पहले अपना Docker-संगत इंजन या Podman वर्चुअल मशीन शुरू करें।
-Fedora जैसे SELinux चालू वाले होस्ट पर माउंट में `:z` जोड़ें (`"$PWD:/workspace:z"`), नहीं तो कंटेनर को रिपॉज़िटरी तक पहुँच नहीं मिलेगी।
+2.4.0 या बाद वाले का पहला कमांड ग्राफ़ को स्कीमा 15 पर ले जाता है। अगर आप VS Code एक्सटेंशन इस्तेमाल करते हैं, तो उस ग्राफ़ को पढ़ने के लिए उसका 0.4.0 संस्करण चाहिए। पूरी सूची: [अपग्रेड नोट्स](CHANGELOG.md#upgrade-notes)।
 
 </details>
 
@@ -233,7 +205,7 @@ Fedora जैसे SELinux चालू वाले होस्ट पर म
 <summary><strong>सिर्फ़ बदली हुई फ़ाइलें दोबारा पार्स होती हैं (दो फ़ाइलों के संपादन में लगभग 2.5 सेकंड)</strong></summary>
 <br>
 
-एडिटर हुक, git हुक (pre-commit, post-checkout, post-merge, post-rewrite) और watch मोड इंक्रीमेंटल अपडेट चलाते हैं। अपडेट बदली हुई फ़ाइलों का diff लेता है, ग्राफ़ के इम्पोर्ट और कॉल एज से उनके आश्रित ढूँढता है, और सिर्फ़ उन्हीं फ़ाइलों को दोबारा पार्स करता है जिनका SHA-256 हैश बदला है। लगभग 3,000 फ़ाइलों वाले प्रोजेक्ट (django) में दो फ़ाइलों का संपादन हुक वाले रास्ते पर लगभग 2.5 सेकंड में दोबारा इंडेक्स होता है, जिसमें से लगभग 1.4 सेकंड प्रोसेस के शुरू होने का समय है; कुछ न बदलने पर सिर्फ़ वही समय लगता है। देखें [इंक्रीमेंटल अपडेट विलंब](docs/REPRODUCING.md#incremental-update-latency)।
+एडिटर हुक, git हुक (pre-commit, post-checkout, post-merge, post-rewrite) और watch मोड इंक्रीमेंटल अपडेट चलाते हैं। हुक चुपचाप अपडेट करते हैं; हर कमिट पर pre-commit हुक सिर्फ़ `detect-changes --brief` की छोटी समीक्षा छापता है। अपडेट बदली हुई फ़ाइलों का diff लेता है, ग्राफ़ के इम्पोर्ट और कॉल एज से उनके आश्रित ढूँढता है, और सिर्फ़ उन्हीं फ़ाइलों को दोबारा पार्स करता है जिनका SHA-256 हैश बदला है। लगभग 3,000 फ़ाइलों वाले प्रोजेक्ट (django) में दो फ़ाइलों का संपादन हुक वाले रास्ते पर लगभग 2.5 सेकंड में दोबारा इंडेक्स होता है, जिसमें से लगभग 1.4 सेकंड प्रोसेस के शुरू होने का समय है; कुछ न बदलने पर सिर्फ़ वही समय लगता है। देखें [इंक्रीमेंटल अपडेट विलंब](docs/REPRODUCING.md#incremental-update-latency)।
 
 <p align="center">
   <img src="diagrams/diagram4_incremental_update.png" alt="इंक्रीमेंटल अपडेट प्रवाह: हुक या watch अपडेट git diff चलाता है, ग्राफ़ के एज से आश्रित मिलते हैं, और सिर्फ़ वही फ़ाइलें दोबारा पार्स होती हैं जिनका SHA-256 हैश बदला है" width="90%" />
@@ -484,7 +456,7 @@ jobs:
 <summary><strong>स्किल</strong></summary>
 <br>
 
-`install` इन चार स्किल को उन प्लेटफ़ॉर्म पर लिखता है जो इन्हें समर्थित करते हैं (Claude Code, Gemini CLI, CodeBuddy Code, Hermes Agent और Qoder)। इन्हें नाम से बुलाएँ।
+`install` इन चार स्किल को उन प्लेटफ़ॉर्म पर लिखता है जिन्हें वह सेट करता है और जो इन्हें समर्थित करते हैं (Claude Code, Gemini CLI, CodeBuddy Code, Hermes Agent और Qoder)। इन्हें नाम से बुलाएँ।
 
 | स्किल | विवरण |
 |-------|-------------|
@@ -502,10 +474,11 @@ Qoder को इस रिपॉज़िटरी की `skills/` डायर
 <br>
 
 ```bash
-code-review-graph install          # Detect and configure all platforms
+code-review-graph install          # Set up the AI coding tools found on this machine
 code-review-graph install --platform <name>  # One platform
 code-review-graph install --steering  # Claude Code: graph context beside each search and read
 code-review-graph uninstall --dry-run  # Preview removal of installed artifacts
+code-review-graph doctor           # Check copies, MCP entries, graph and hooks; changes nothing
 code-review-graph build            # Parse the whole codebase
 code-review-graph build --follow-symlinks  # Also index symlinked folders
 code-review-graph update           # Incremental update (changed files only)
@@ -523,7 +496,7 @@ code-review-graph visualize --format svg       # Export as SVG (needs matplotlib
 code-review-graph visualize --format obsidian  # Export as Obsidian vault
 code-review-graph visualize --format cypher    # Export as Neo4j Cypher
 code-review-graph wiki             # Markdown wiki from communities
-code-review-graph detect-changes --brief         # Risk panel + token savings (read-only)
+code-review-graph detect-changes --brief         # Top 3 to review, risk + token savings (read-only)
 code-review-graph detect-changes --brief --base main  # Against the merge base of main and HEAD
 code-review-graph update --brief                 # Refresh graph + same panel
 code-review-graph detect-changes --brief --verify  # Cross-check against tiktoken
@@ -542,9 +515,9 @@ code-review-graph serve --http --multi-repo  # One HTTP server for every registe
 code-review-graph serve --multi-worktree  # One child server per linked Git worktree
 ```
 
-यह एक चुनी हुई सूची है। `code-review-graph --help` हर कमांड दिखाता है, और [docs/COMMANDS.md](docs/COMMANDS.md) उनके फ़्लैग बताता है।
+यह एक चुनी हुई सूची है। बिना कमांड के `code-review-graph` चलाने पर हर कमांड समूहों में दिखता है, और [docs/COMMANDS.md](docs/COMMANDS.md) उनके फ़्लैग बताता है। गलत लिखा कमांड exit code 2 के साथ रुकता है और सबसे मिलता-जुलता कमांड सुझाता है।
 
-जब `detect-changes --base` किसी ब्रांच का नाम देता है, तो diff उस ब्रांच और HEAD के मर्ज बेस के मुकाबले चलता है। कमिट हैश और अन्य रिवीज़न जैसे दिए जाते हैं वैसे ही इस्तेमाल होते हैं।
+जब `detect-changes --base` किसी ब्रांच का नाम देता है, तो diff उस ब्रांच और HEAD के मर्ज बेस के मुकाबले चलता है। कमिट हैश और अन्य रिवीज़न जैसे दिए जाते हैं वैसे ही इस्तेमाल होते हैं। जिस बेस को git नहीं जानता, उस पर कमांड exit code 1 के साथ रुकता है और बताता है कि उसे कैसे जाँचें। जिस रिपॉज़िटरी में एक ही कमिट हो या एक भी न हो, वहाँ डिफ़ॉल्ट बेस की जगह बिना कमिट की और नई फ़ाइलों का रिव्यू होता है, और यह बताया जाता है।
 
 `visualize --format svg` के लिए matplotlib चाहिए, जो `eval` एक्स्ट्रा में आता है (`pip install "code-review-graph[eval]"`)। बाकी निर्यात प्रारूपों के लिए कोई अतिरिक्त इंस्टॉल नहीं चाहिए।
 
@@ -556,7 +529,7 @@ JSON निर्यात स्थानीय ग्राफ़ डेटा
 <summary><strong>Token Savings पैनल: <code>detect-changes --brief</code> बनाम <code>update --brief</code></strong></summary>
 <br>
 
-दोनों कमांड एक ही पैनल छापते हैं, जो बताता है कि बदली हुई फ़ाइलें एजेंट को कच्ची देने की तुलना में ग्राफ़ ने कितने टोकन बचाए। इनमें फ़र्क़ सिर्फ़ एक है: ग्राफ़ पहले ताज़ा किया जाता है या नहीं।
+दोनों कमांड एक ही पैनल छापते हैं, जो बताता है कि बदली हुई फ़ाइलें एजेंट को कच्ची देने की तुलना में ग्राफ़ ने कितने टोकन बचाए। इनमें फ़र्क़ सिर्फ़ एक है: ग्राफ़ पहले ताज़ा किया जाता है या नहीं। पैनल के ऊपर `detect-changes --brief` सबसे पहले रिव्यू करने लायक अधिकतम तीन चीज़ें भी दिखाता है, हर एक के साथ उसकी फ़ाइल और पंक्ति, 1.00 में से उसका जोखिम, उसके कॉलर और उसके टेस्ट।
 
 ```text
 ┌─────────────────────── Token Savings ────────────────────────┐
@@ -697,7 +670,8 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 |----------|-------------|---------|
 | `CRG_GIT_TIMEOUT` | Git संक्रियाओं की समय सीमा (सेकंड में; build / update / watch) | `30` |
 | `CRG_DISCOVERY_TIMEOUT` | जब किसी रिव्यू टूल या कमांड को फ़ाइल सूची स्पष्ट रूप से नहीं दी गई हो, तब बदलाव पता करने वाली प्रत्येक Git कमांड की समय सीमा (सेकंड में)। सीमा पार होने पर त्रुटि मिलती है, "कोई बदलाव नहीं" नहीं | `5` (`CRG_GIT_TIMEOUT` स्पष्ट रूप से सेट हो तो वही) |
-| `CRG_DATA_DIR` | ग्राफ़ डेटाबेस और बनी हुई फ़ाइलों की डायरेक्टरी | - |
+| `CRG_DATA_DIR` | ग्राफ़ डेटाबेस और बनी हुई फ़ाइलों की डायरेक्टरी। `install` ने जो फ़ाइलें लिखीं, उनका रिकॉर्ड रिपॉज़िटरी के `.code-review-graph/` में ही रहता है | - |
+| `CRG_HOME` | हर यूज़र की स्थिति वाला फ़ोल्डर: मल्टी-रिपॉज़िटरी रजिस्ट्री (`registry.json`), डेमॉन की `watch.toml`, उसकी pid और स्थिति फ़ाइलें, और `logs/` | `~/.code-review-graph` |
 | `CRG_HOOK_WORKTREES` | `1` करने पर बनाए गए git हुक जुड़े हुए git worktree में भी चलते हैं | - |
 | `CRG_EMBEDDING_MODEL` | स्थानीय वेक्टर एम्बेडिंग का डिफ़ॉल्ट मॉडल | `all-MiniLM-L6-v2` |
 | `CRG_ACCEPT_CLOUD_EMBEDDINGS` | `1` करने पर क्लाउड एम्बेडिंग की बाहर-भेजने वाली चेतावनी दबती है | - |
@@ -720,6 +694,8 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_FOLLOW_SYMLINKS` | `1`, `true`, `yes` या `on` होने पर symlink फ़ोल्डरों में जाएँ, रिपॉज़िटरी के अंदर या बाहर; `--follow-symlinks` जैसा। देखें [Symlink फ़ोल्डर](docs/USAGE.md#symlinked-folders) | - |
 | `CRG_MAX_FOLLOWED_FILES` | symlink फ़ोल्डरों से ली जाने वाली फ़ाइलों की अधिकतम संख्या | `10000` |
 | `CRG_TOOLS` | सर्व करते समय दिखाए जाने वाले MCP टूल की अल्पविराम से अलग सूची | - |
+| `CRG_READ_ONLY` | `1` (या `true`, `yes`, `on`) रखने पर ग्राफ़ सिर्फ़ पढ़ने के लिए खुलता है। डेटा फ़ोल्डर में कुछ नहीं बनता, अपग्रेड नहीं होता या दर्ज नहीं होता, और लिखने वाले कमांड विफल होते हैं। Codex स्किल का read-only CLI इसे सेट करता है | - |
+| `CRG_BIN` | वह `code-review-graph` प्रोग्राम जिसे Codex स्किल का read-only CLI चलाता है, जब उसका नाम अलग हो या वह PATH पर न हो | PATH वाला |
 | `GOOGLE_API_KEY` | Google Gemini एम्बेडिंग की API कुंजी | - |
 | `MINIMAX_API_KEY` | MiniMax एम्बेडिंग की API कुंजी | - |
 | `VOYAGE_API_KEY` | Voyage एम्बेडिंग की API कुंजी | - |
@@ -791,6 +767,62 @@ CRG_TOOLS=query_graph_tool,semantic_search_nodes_tool code-review-graph serve
 
 </details>
 
+### Docker या Podman से चलाएँ
+
+<details>
+<summary><strong>किसी रिलीज़ से इमेज बनाएँ, फिर उसे अपनी रिपॉज़िटरी पर चलाएँ</strong></summary>
+<br>
+
+कोई इमेज प्रकाशित नहीं की गई है। किसी रिलीज़ टैग से इमेज बनाएँ; सीधा क्लोन `staging` ब्रांच देता है, जिसमें ऐसे बदलाव हो सकते हैं जो अभी रिलीज़ नहीं हुए:
+
+```bash
+git clone --branch v2.4.0 https://github.com/tirth8205/code-review-graph.git
+cd code-review-graph
+docker build -t code-review-graph:local .
+```
+
+जिस रिपॉज़िटरी का विश्लेषण करना है, उसके फ़ोल्डर से चलाएँ:
+
+```bash
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --env HOME=/tmp \
+  --volume "$PWD:/workspace" \
+  code-review-graph:local build
+```
+
+माउंट की गई रिपॉज़िटरी में लिखने की अनुमति होनी चाहिए।
+ऊपर दिया गया कमांड आपके यूज़र और ग्रुप ID का उपयोग करता है,
+जिससे बनाई गई `.code-review-graph/` डायरेक्टरी का स्वामित्व आपके यूज़र के पास रहता है।
+इन कमांड को होस्ट पर गैर-root यूज़र के रूप में चलाएँ।
+
+Podman के लिए, उसी क्लोन में उसी Dockerfile से इमेज बनाएँ और यूज़र मैपिंग बनाए रखें:
+
+```bash
+podman build -t code-review-graph:local .
+podman run --rm \
+  --userns=keep-id \
+  --env HOME=/tmp \
+  --volume "$PWD:/workspace" \
+  code-review-graph:local build
+```
+
+ग्राफ़ माउंट किए गए रिपॉज़िटरी की `.code-review-graph/` डायरेक्टरी में बना रहता है और
+`/workspace/app.py` जैसे कंटेनर के पूर्ण पथ सहेजता है। `update` और `detect-changes` को
+Docker या Podman से उसी `/workspace` माउंट के साथ चलाएँ। इस ग्राफ़ पर होस्ट से `update`
+चलाने पर "built with a different repository root" त्रुटि आ सकती है। होस्ट कमांड पर
+स्विच करने के लिए, होस्ट पर `code-review-graph build` चलाकर होस्ट के पथों के साथ ग्राफ़ फिर से बनाएँ।
+
+सहेजे गए ग्राफ़ को देखने के लिए `build` की जगह `status` लिखें।
+इमेज में Git शामिल है और यह डिफ़ॉल्ट रूप से गैर-root यूज़र के रूप में चलती है।
+इमेज बनाते समय ग्राफ़ नहीं बनाया जाता।
+
+इन उदाहरणों में macOS/Linux शेल सिंटैक्स का उपयोग किया गया है।
+macOS पर इन्हें चलाने से पहले अपना Docker-संगत इंजन या Podman वर्चुअल मशीन शुरू करें।
+Fedora जैसे SELinux चालू वाले होस्ट पर माउंट में `:z` जोड़ें (`"$PWD:/workspace:z"`), नहीं तो कंटेनर को रिपॉज़िटरी तक पहुँच नहीं मिलेगी।
+
+</details>
+
 ---
 
 ## सामान्य प्रश्न और तुलना
@@ -811,6 +843,8 @@ CRG_TOOLS=query_graph_tool,semantic_search_nodes_tool code-review-graph serve
 </details>
 
 ## समस्या निवारण
+
+सबसे पहले `code-review-graph doctor` चलाएँ, ख़ासकर जब आपका AI टूल कहे कि ग्राफ़ "written by a newer code-review-graph"। यह PATH पर हर कॉपी, हर MCP प्रविष्टि और हुक जो संस्करण चलाते हैं, और ग्राफ़ की स्थिति दिखाता है। यह कुछ नहीं बदलता, कोई जाँच विफल हो तो exit code 1 के साथ रुकता है, और `--json` लेता है।
 
 Windows/WSL सहित और भी मामले [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) में हैं।
 

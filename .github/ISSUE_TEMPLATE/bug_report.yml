@@ -76,6 +76,17 @@ body:
     validations:
       required: true
   - type: textarea
+    id: doctor-output
+    attributes:
+      label: Output of `code-review-graph doctor`
+      description: >-
+        Run `code-review-graph doctor` in the affected repository and paste the full
+        output. It shows every copy on PATH and the copy your MCP entry and hooks run,
+        and changes nothing. If your version has no `doctor` command, leave this empty.
+      render: shell
+    validations:
+      required: false
+  - type: textarea
     id: repro-steps
     attributes:
       label: Steps to reproduce

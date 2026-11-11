@@ -93,8 +93,8 @@ of grep, read and reasoning:
 The graph also persists. Agentic search re-derives the same structure every
 session.
 
-One caveat on the numbers: the whole-corpus token-reduction figures (about 65x
-median, 36x to 376x range) compare a graph response with reading the whole
+One caveat on the numbers: the whole-corpus token-reduction figures (about 63x
+median, 35x to 358x range) compare a graph response with reading the whole
 corpus, not with a skilled agentic-grep session. Against an agent that greps
 and reads the top 3 files, the median is 6.65x (range 4.2x to 72.6x, across 18
 questions on 6 repositories); see [REPRODUCING.md](REPRODUCING.md) for what
@@ -139,7 +139,17 @@ See [LEGAL.md](LEGAL.md).
 
 ## How do I verify it is working?
 
-1. Check the graph:
+1. Check the setup:
+
+   ```bash
+   code-review-graph doctor
+   ```
+
+   It changes nothing. It checks every copy on your `PATH`, the version each
+   MCP entry and hook runs, and whether the graph is there and built at HEAD.
+   It ends with `All good.`, or names each problem with a fix and exits 1.
+
+2. Check the graph:
 
    ```bash
    code-review-graph status
@@ -149,19 +159,20 @@ See [LEGAL.md](LEGAL.md).
    `No graph found at <path>` instead. Zero nodes means the build did not run
    (`Last updated: never`) or found nothing to parse.
 
-2. See the savings on a real change. Edit something, then:
+3. See the savings on a real change. Edit something, then:
 
    ```bash
    code-review-graph detect-changes --brief
    ```
 
-   This prints the risk summary and the Token Savings panel against the
-   existing graph without re-parsing. Add `--verify` to compare the estimate
-   with the `cl100k_base` tokenizer (`pip install tiktoken`). If the graph may
-   be stale, `code-review-graph update --brief` re-parses changed files first
-   and prints the same panel.
+   This prints the risk summary, the top three things to review, and the
+   Token Savings panel against the existing graph without re-parsing. Add
+   `--verify` to compare the estimate with the `cl100k_base` tokenizer
+   (`pip install tiktoken`). If the graph may be stale,
+   `code-review-graph update --brief` re-parses changed files first and prints
+   the same panel.
 
-3. Check the MCP wiring. In Claude Code run `/mcp` and confirm
+4. Check the MCP wiring. In Claude Code run `/mcp` and confirm
    `code-review-graph` is connected. Ask something structural ("what calls
    `parse_file`?") and watch the assistant call `query_graph_tool` instead of
    grepping.
@@ -175,7 +186,7 @@ If any step fails, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
   response can cost more tokens than it saves (see
   [When should I not use it?](#when-should-i-not-use-it)).
 - A few hundred files and up: the six evaluation repositories (express,
-  fastapi, flask, gin, httpx and code-review-graph) show 36x to 376x reductions
+  fastapi, flask, gin, httpx and code-review-graph) show 35x to 358x reductions
   on whole-corpus questions, with the caveat above about the baseline.
 - Multi-thousand-file repositories and monorepos: the strongest case. No agent
   can read the corpus per question (FastAPI alone is about 950k tokens of

@@ -21,14 +21,16 @@ Visualise code dependencies, blast radius, and review context from your code gra
 
 ### 1. Install the Extension
 
-Install **Code Review Graph** from the VS Code Marketplace.
+Install **Code Review Graph** from the VS Code Marketplace. Then check its
+version under Extensions: it must be new enough for your CLI (see
+[Versions](#versions)).
 
 ### 2. Install the Backend
 
 The extension requires the `code-review-graph` Python CLI to parse your codebase.
 
 ```bash
-pip install code-review-graph          # or: pipx install code-review-graph
+pip install "code-review-graph>=2.4.0"   # or: pipx install "code-review-graph>=2.4.0"
 ```
 
 Requires Python 3.10+.
@@ -69,6 +71,22 @@ The graph database is stored locally at `.code-review-graph/graph.db` and update
 | `codeReviewGraph.graph.maxNodes` | `500` | Max nodes in the graph visualisation (10--5000). |
 
 The graph follows your VS Code theme and shows every edge kind; turn kinds off in its Edges menu.
+
+## Versions
+
+The extension reads `.code-review-graph/graph.db` itself, so it has to know the
+graph's schema. Use the extension that goes with your CLI
+(`code-review-graph --version`):
+
+| Extension | CLI | Schema |
+|---|---|---|
+| 0.4.0 | 2.4.0 | 15 |
+| 0.3.0 | 2.3.9 | 13 |
+
+When the graph is newer than the extension, 0.2.x, 0.3.0 and later show
+"Database was created with a newer version (schema vN). Update the
+extension." 0.1.x makes no check, so it gives no warning: update it before you
+use it with CLI 2.4.0.
 
 ## Requirements
 

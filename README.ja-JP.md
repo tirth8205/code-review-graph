@@ -39,9 +39,12 @@
   <a href="docs/COMMANDS.md">コマンド</a> ·
   <a href="docs/FAQ.md">FAQ</a> ·
   <a href="docs/TROUBLESHOOTING.md">トラブルシューティング</a> ·
+  <a href="docs/FEATURES.md">新機能</a> ·
+  <a href="CHANGELOG.md">変更履歴</a> ·
   <a href="docs/GITHUB_ACTION.md">GitHub Action</a> ·
   <a href="docs/REPRODUCING.md">ベンチマークの再現</a> ·
-  <a href="docs/ROADMAP.md">ロードマップ</a>
+  <a href="docs/ROADMAP.md">ロードマップ</a> ·
+  <a href="docs/INDEX.md">すべてのドキュメント</a>
 </p>
 
 <br>
@@ -67,18 +70,31 @@ AI コーディングツールは、変更をレビューするためにコー�
 Python 3.10+ が必要です。
 
 ```bash
-pip install code-review-graph          # or: pipx install code-review-graph
-code-review-graph install              # detect installed AI coding tools and configure each one
+uv tool install code-review-graph      # or: pipx install / pip install code-review-graph
+code-review-graph install              # set up the AI coding tools found on this machine
 code-review-graph build                # parse the codebase
+code-review-graph detect-changes --brief  # see what your last change touches
 ```
+
+エディタやツールを再起動し、プロジェクトを開いて、アシスタントにこう頼みます。
+
+```
+Review my changes
+```
+
+`code-review-graph uninstall` ですべて元に戻せます（`--dry-run` で先に確認できます）。うまく動かないときは `code-review-graph doctor` を実行してください。設定を調べるだけで、何も変えません。
 
 <details>
 <summary><strong><code>install</code> が変えるものと、先に確かめる方法</strong></summary>
 <br>
 
-`install` は導入済みの AI コーディングツールを検出し、それぞれに MCP サーバーのエントリを書き込み、プラットフォームが対応していればフックとスキルを入れ、プラットフォームのルールファイルにグラフの説明を追加します。MCP エントリは、Poetry や uv のプロジェクト環境では `poetry run` または `uv run` を、PATH に `uvx` があれば `uvx code-review-graph serve` を、それ以外では現在の Python インタプリタを使います。`install` は、変更するファイルを一覧にし、指示ファイルについての質問にあなたが答えるまで、何も書き込みません。`install --dry-run` は各変更を差分で示し、何も書き込みません。実行後はエディタやツールを再起動してください。
+`install` はこのマシンにある AI コーディングツールを探し、見つかったものだけを設定します。それぞれに MCP サーバーのエントリを書き込み、ツールが対応していればフックとスキルを入れ、ルールファイルにグラフの説明を追加します。最後に、見つからなかったツールを示します。それでも追加したいツールは `install --platform NAME` で設定できます。
 
-`install` が書くファイル（`.claude/` や `.mcp.json` など）は、チームでコミットする場合に備えて git から見えるままにしてあります。`install --gitignore` を付けると、その実行で作ったものを `.gitignore` の印付きブロックに追加します。`uninstall` はそのブロックを取り除きます。
+`install` は、変更するファイルを一覧にし、指示ファイルについての質問にあなたが答えるまで、何も書き込みません。AI エージェントが実行する場合のように端末がないときは、既定の答え（はい）を選び、そのことを表示します。`--no-instructions` を付けるとそれらのファイルを書きません。`install --dry-run` は各変更を差分で示し、何も書き込みません。実行後はエディタやツールを再起動してください。
+
+MCP エントリとすべてのフックは、`install` を実行した code-review-graph を動かします。MCP エントリは、Poetry や uv のプロジェクトでは `poetry run` または `uv run` を、`install` 自体が `uvx` か `uv tool install` から動いたときは `uvx` を、それ以外では `install` を実行した Python を使います。フックはその Python（または `uvx`）を名前で指定し、それがなくなっていれば PATH 上の `code-review-graph` を実行します。アップグレードしたら `install` をもう一度実行してください。
+
+`install` が書くファイル（`.claude/` や `.mcp.json` など）は、チームでコミットする場合に備えて git から見えるままにしてあります。git が追跡するまでは `build` とレビューがこれらを除外するので、最初のレビューには自分の変更だけが出ます。`install` はこれらを `.code-review-graph/install-manifest.json` に記録します。`install --gitignore` を付けると、その実行で作ったものを `.gitignore` の印付きブロックに追加します。`uninstall` はそのブロックを取り除きます。
 
 Codex の場合、インストーラはさらにグローバルな `code-review-graph` スキルを `$CODEX_HOME/skills/code-review-graph/`（既定: `~/.codex/skills/code-review-graph/`）に置きます。このスキルは CRG の MCP ツールを優先し、MCP が使えないときは同梱の読み取り専用 CLI に切り替えます。グラフがない、空、または古い場合でも、暗黙にビルドや更新を始めることはありません。WSL と Windows の Codex ランタイムは `CODEX_HOME` ディレクトリとツール一覧がそれぞれ別なので、タスクを実行するランタイムの側でインストールと更新を行ってください。
 
@@ -99,15 +115,15 @@ code-review-graph install --platform cursor
 code-review-graph install --platform codebuddy
 ```
 
-設定ファイルの場所は [docs/USAGE.md](docs/USAGE.md#supported-platforms) にあります。Python 3.10+ が必要です。
+この方法で指定したプラットフォームは、`install` が見つけられなくても設定されます。設定ファイルの場所は [docs/USAGE.md](docs/USAGE.md#supported-platforms) にあります。
 
 </details>
 
 <details>
-<summary><strong><code>uninstall</code> で取り除く</strong></summary>
+<summary><strong><code>uninstall</code> のその他の使い方</strong></summary>
 <br>
 
-`uninstall` は Git または SVN の作業ツリーから CRG が書いたファイルとエントリを取り除き、ほかの MCP サーバー、フック、スキル、JSONC のコメントはそのまま残します。ツリー内のどこからでも実行できます。共有設定ファイルはアトミックに置き換えるので、書き込みに失敗しても元のファイルは壊れません。
+`uninstall` は Git または SVN の作業ツリーから CRG が書いたファイルとエントリを取り除き、ほかの MCP サーバー、フック、スキル、JSONC のコメントはそのまま残します。ツリー内のどこからでも実行できます。共有設定ファイルはアトミックに置き換えるので、書き込みに失敗しても元のファイルは壊れません。`install` が作った設定ファイルで、git が追跡しておらず中身がほかにないものは、`install` が作った空のフォルダーと一緒に削除されます。端末がないときは既定の答え（いいえ）を選び、`--yes` を付けるよう案内します。
 
 ```bash
 code-review-graph uninstall --dry-run    # preview only
@@ -120,73 +136,28 @@ code-review-graph uninstall --keep-user-configs --repo .  # this project only
 
 </details>
 
-`install` のあとは、エディタやツールを再起動してください。
-そのあとプロジェクトを開き、アシスタントにこう頼みます。
-
-```
-Build the code review graph for this project
-```
-
 <details>
 <summary><strong>ビルドにかかる時間と、一部だけのビルドの意味</strong></summary>
 <br>
 
-ビルド時間はリポジトリの規模に比例します。約 3,000 ファイルのリポジトリのコールドビルドで約 40 秒でした（[計測値](docs/REPRODUCING.md#incremental-update-latency)）。その後はフックと watch モードがグラフを更新し続けます。一部のファイルの解析に失敗した場合、結果のステータスは `partial` になり、要約にそのファイル名が入ります。CLI は stderr に `Warning:` の行も出力し、それらのファイルは以前のグラフの行をそのまま保持します。
+ビルド時間はリポジトリの規模に比例します。約 3,000 ファイルのリポジトリのコールドビルドで約 40 秒でした（[計測値](docs/REPRODUCING.md#incremental-update-latency)）。その後はフックと watch モードがグラフを更新し続けます。一部のファイルの解析に失敗した場合、結果のステータスは `partial` になり、要約にそのファイル名が入ります。CLI は stderr に `Warning:` の行も出力し、それらのファイルは以前のグラフの行をそのまま保持します。ソースファイルが 1 つも見つからないビルドは stderr に警告を出し、プロジェクトのルートにいるかどうかを尋ねます。
 
 </details>
 
-### Docker または Podman で実行する
-
 <details>
-<summary><strong>イメージをビルドし、自分のリポジトリで実行する</strong></summary>
+<summary><strong>2.3.x からのアップグレード</strong></summary>
 <br>
 
-リポジトリのルートでイメージをビルドします。
-
 ```bash
-docker build -t code-review-graph:local .
+pip install -U code-review-graph     # or: pipx upgrade / uv tool upgrade code-review-graph
+code-review-graph doctor             # every copy, MCP entry and hook, and the version each runs
+code-review-graph install --dry-run  # see what changes, then run install
+code-review-graph build              # once: new file types and fixes reach only re-parsed files
 ```
 
-解析するリポジトリのディレクトリで、次を実行します。
+手元のすべてのコピーをアップグレードしてください。MCP エントリ、git とエディタのフック、`crg-daemon` は、それぞれ別のコピーを動かすことがあります。2.4.0 以降が一度開いたグラフは、2.3.9 のコピーでは読めず、それより古い 2.3.x のコピーでは壊れることがあります。`install` をもう一度実行してエントリとフックが新しいコピーを動かすようにし、エディタを再起動してください（デーモンを使っている場合は `crg-daemon restart` も実行します）。
 
-```bash
-docker run --rm \
-  --user "$(id -u):$(id -g)" \
-  --env HOME=/tmp \
-  --volume "$PWD:/workspace" \
-  code-review-graph:local build
-```
-
-マウントするリポジトリには書き込み権限が必要です。
-上のコマンドはホストのユーザー ID とグループ ID を使用するため、
-生成される `.code-review-graph/` ディレクトリの所有者は自分のユーザーになります。
-これらのコマンドは、ホスト上の root 以外のユーザーで実行してください。
-
-Podman では、同じ Dockerfile をビルドし、ユーザーマッピングを維持します。
-
-```bash
-podman build -t code-review-graph:local .
-podman run --rm \
-  --userns=keep-id \
-  --env HOME=/tmp \
-  --volume "$PWD:/workspace" \
-  code-review-graph:local build
-```
-
-グラフはマウントしたリポジトリの `.code-review-graph/` に保存され、
-`/workspace/app.py` などのコンテナ内の絶対パスを記録します。
-`update` と `detect-changes` は、同じ `/workspace` マウントを使って Docker または Podman で実行してください。
-このグラフに対してホストで `update` を実行すると、"built with a different repository root"
-というエラーになる場合があります。ホストのコマンドに切り替えるには、ホストで
-`code-review-graph build` を実行し、ホストのパスでグラフを再構築してください。
-
-保存されたグラフを確認するには、`build` を `status` に置き換えます。
-イメージには Git が含まれ、デフォルトでは root 以外のユーザーで実行されます。
-イメージのビルド中にグラフは生成されません。
-
-これらの例は macOS/Linux のシェル構文を使用しています。
-macOS では、実行前に Docker 互換エンジンまたは Podman 仮想マシンを起動してください。
-Fedora など SELinux が有効なホストでは、マウントに `:z` を追加してください（`"$PWD:/workspace:z"`）。追加しないと、コンテナはリポジトリにアクセスできません。
+2.4.0 以降で最初に実行したコマンドが、グラフをスキーマ 15 に移します。VS Code 拡張機能を使っている場合、このグラフを読むにはバージョン 0.4.0 が必要です。全体の一覧: [アップグレードの注意](CHANGELOG.md#upgrade-notes)。
 
 </details>
 
@@ -228,7 +199,7 @@ Fedora など SELinux が有効なホストでは、マウントに `:z` を追�
 <summary><strong>変更したファイルだけを再解析（2 ファイルの編集で約 2.5 秒）</strong></summary>
 <br>
 
-エディタのフック、git のフック（pre-commit、post-checkout、post-merge、post-rewrite）、watch モードが増分更新を起動します。更新では変更ファイルの差分を取り、グラフのインポートエッジと呼び出しエッジから依存先を見つけ、SHA-256 ハッシュが変わったファイルだけを再解析します。約 3,000 ファイルのプロジェクト（django）では、2 ファイルの編集がフックの経路で約 2.5 秒で再インデックスされ、そのうち約 1.4 秒はプロセスの起動時間です。変更がない場合はその起動時間だけで済みます。[増分更新のレイテンシ](docs/REPRODUCING.md#incremental-update-latency)を参照してください。
+エディタのフック、git のフック（pre-commit、post-checkout、post-merge、post-rewrite）、watch モードが増分更新を起動します。フックは静かに更新します。コミットのたびに pre-commit フックが出すのは `detect-changes --brief` の短いレビューだけです。更新では変更ファイルの差分を取り、グラフのインポートエッジと呼び出しエッジから依存先を見つけ、SHA-256 ハッシュが変わったファイルだけを再解析します。約 3,000 ファイルのプロジェクト（django）では、2 ファイルの編集がフックの経路で約 2.5 秒で再インデックスされ、そのうち約 1.4 秒はプロセスの起動時間です。変更がない場合はその起動時間だけで済みます。[増分更新のレイテンシ](docs/REPRODUCING.md#incremental-update-latency)を参照してください。
 
 <p align="center">
   <img src="diagrams/diagram4_incremental_update.png" alt="増分更新の流れ: フックまたは watch の更新が git diff を起動し、グラフのエッジから依存先を見つけ、SHA-256 ハッシュが変わったファイルだけを再解析する" width="90%" />
@@ -479,7 +450,7 @@ jobs:
 <summary><strong>スキル</strong></summary>
 <br>
 
-`install` は、スキルに対応したプラットフォーム（Claude Code、Gemini CLI、CodeBuddy Code、Hermes Agent、Qoder）向けに次の 4 つのスキルを書き込みます。名前で呼び出してください。
+`install` は、設定するプラットフォームのうちスキルに対応したもの（Claude Code、Gemini CLI、CodeBuddy Code、Hermes Agent、Qoder）向けに次の 4 つのスキルを書き込みます。名前で呼び出してください。
 
 | スキル | 内容 |
 |-------|-------------|
@@ -497,10 +468,11 @@ Qoder にはさらに、このリポジトリの `skills/` ディレクトリか
 <br>
 
 ```bash
-code-review-graph install          # Detect and configure all platforms
+code-review-graph install          # Set up the AI coding tools found on this machine
 code-review-graph install --platform <name>  # One platform
 code-review-graph install --steering  # Claude Code: graph context beside each search and read
 code-review-graph uninstall --dry-run  # Preview removal of installed artifacts
+code-review-graph doctor           # Check copies, MCP entries, graph and hooks; changes nothing
 code-review-graph build            # Parse the whole codebase
 code-review-graph build --follow-symlinks  # Also index symlinked folders
 code-review-graph update           # Incremental update (changed files only)
@@ -518,7 +490,7 @@ code-review-graph visualize --format svg       # Export as SVG (needs matplotlib
 code-review-graph visualize --format obsidian  # Export as Obsidian vault
 code-review-graph visualize --format cypher    # Export as Neo4j Cypher
 code-review-graph wiki             # Markdown wiki from communities
-code-review-graph detect-changes --brief         # Risk panel + token savings (read-only)
+code-review-graph detect-changes --brief         # Top 3 to review, risk + token savings (read-only)
 code-review-graph detect-changes --brief --base main  # Against the merge base of main and HEAD
 code-review-graph update --brief                 # Refresh graph + same panel
 code-review-graph detect-changes --brief --verify  # Cross-check against tiktoken
@@ -537,9 +509,9 @@ code-review-graph serve --http --multi-repo  # One HTTP server for every registe
 code-review-graph serve --multi-worktree  # One child server per linked Git worktree
 ```
 
-これは抜粋です。`code-review-graph --help` がすべてのコマンドを並べ、[docs/COMMANDS.md](docs/COMMANDS.md) がそれぞれのフラグを説明します。
+これは抜粋です。コマンドを付けずに `code-review-graph` を実行すると、すべてのコマンドがグループごとに並び、[docs/COMMANDS.md](docs/COMMANDS.md) がそれぞれのフラグを説明します。コマンドを打ち間違えると終了コード 2 で終わり、いちばん近いコマンドを示します。
 
-`detect-changes --base` にブランチ名を渡すと、差分はそのブランチと HEAD のマージベースに対して取られます。コミットハッシュやその他のリビジョンはそのまま使われます。
+`detect-changes --base` にブランチ名を渡すと、差分はそのブランチと HEAD のマージベースに対して取られます。コミットハッシュやその他のリビジョンはそのまま使われます。git が知らないベースを渡すと、終了コード 1 で止まり、確かめ方を示します。コミットが 1 つしかない、または 1 つもないリポジトリでは、既定のベースの代わりに、コミットしていないファイルと新しいファイルをレビューし、そのことを表示します。
 
 `visualize --format svg` には matplotlib が必要で、これは `eval` エクストラに入っています（`pip install "code-review-graph[eval]"`）。ほかのエクスポート形式に追加インストールは要りません。
 
@@ -551,7 +523,7 @@ JSON のエクスポートはローカルのグラフデータディレクトリ
 <summary><strong>Token Savings パネル: <code>detect-changes --brief</code> と <code>update --brief</code></strong></summary>
 <br>
 
-どちらのコマンドも、変更ファイルをそのままエージェントに渡す場合と比べてグラフがどれだけトークンを節約したかを示す同じパネルを表示します。違いは 1 点だけ、先にグラフを更新するかどうかです。
+どちらのコマンドも、変更ファイルをそのままエージェントに渡す場合と比べてグラフがどれだけトークンを節約したかを示す同じパネルを表示します。違いは 1 点だけ、先にグラフを更新するかどうかです。パネルの上には、`detect-changes --brief` が先にレビューすべきものを最大 3 つ並べます。それぞれにファイルと行、1.00 を満点とするリスク、呼び出し元、テストが付きます。
 
 ```text
 ┌─────────────────────── Token Savings ────────────────────────┐
@@ -692,7 +664,8 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 |----------|-------------|---------|
 | `CRG_GIT_TIMEOUT` | Git 操作のタイムアウト（秒。build / update / watch） | `30` |
 | `CRG_DISCOVERY_TIMEOUT` | レビューのツールやコマンドにファイル一覧が明示されなかったとき、変更内容を特定する各 Git コマンドのタイムアウト（秒）。超過時はエラーを返し、「変更なし」とは報告しない | `5`（`CRG_GIT_TIMEOUT` を明示設定した場合はその値） |
-| `CRG_DATA_DIR` | グラフのデータベースと生成物を置くディレクトリ | - |
+| `CRG_DATA_DIR` | グラフのデータベースと生成物を置くディレクトリ。`install` が書いたファイルの記録は、リポジトリの `.code-review-graph/` に残ります | - |
+| `CRG_HOME` | ユーザーごとの状態を置くフォルダ: マルチリポジトリの登録簿（`registry.json`）、デーモンの `watch.toml`、その pid と状態のファイル、`logs/` | `~/.code-review-graph` |
 | `CRG_HOOK_WORKTREES` | `1` にすると、生成された git フックをリンク済みの git worktree でも動かす | - |
 | `CRG_EMBEDDING_MODEL` | ローカルのベクトル埋め込みの既定モデル | `all-MiniLM-L6-v2` |
 | `CRG_ACCEPT_CLOUD_EMBEDDINGS` | `1` にするとクラウド埋め込みの送信警告を抑制 | - |
@@ -715,6 +688,8 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_FOLLOW_SYMLINKS` | `1`、`true`、`yes`、`on` のとき、シンボリックリンクのフォルダ（リポジトリの内外）をたどる。`--follow-symlinks` と同じ。[シンボリックリンクのフォルダ](docs/USAGE.md#symlinked-folders) を参照 | - |
 | `CRG_MAX_FOLLOWED_FILES` | シンボリックリンクのフォルダから取り込むファイルの上限 | `10000` |
 | `CRG_TOOLS` | サーバー起動時に公開する MCP ツールのカンマ区切り許可リスト | - |
+| `CRG_READ_ONLY` | `1`（または `true`、`yes`、`on`）にすると、グラフを読み取り専用で開きます。データフォルダでは何も作らず、移行も記録もせず、書き込むコマンドは失敗します。Codex スキルの読み取り専用 CLI がこれを設定します | - |
+| `CRG_BIN` | Codex スキルの読み取り専用 CLI が実行する `code-review-graph` のプログラム。名前が違う場合や PATH にない場合に使います | PATH 上のもの |
 | `GOOGLE_API_KEY` | Google Gemini 埋め込みの API キー | - |
 | `MINIMAX_API_KEY` | MiniMax 埋め込みの API キー | - |
 | `VOYAGE_API_KEY` | Voyage 埋め込みの API キー | - |
@@ -786,6 +761,63 @@ CRG_TOOLS=query_graph_tool,semantic_search_nodes_tool code-review-graph serve
 
 </details>
 
+### Docker または Podman で実行する
+
+<details>
+<summary><strong>リリースからイメージをビルドし、自分のリポジトリで実行する</strong></summary>
+<br>
+
+公開されたイメージはありません。リリースのタグからビルドしてください。普通にクローンすると `staging` ブランチになり、まだリリースされていない変更を含むことがあります。
+
+```bash
+git clone --branch v2.4.0 https://github.com/tirth8205/code-review-graph.git
+cd code-review-graph
+docker build -t code-review-graph:local .
+```
+
+解析するリポジトリのディレクトリで、次を実行します。
+
+```bash
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --env HOME=/tmp \
+  --volume "$PWD:/workspace" \
+  code-review-graph:local build
+```
+
+マウントするリポジトリには書き込み権限が必要です。
+上のコマンドはホストのユーザー ID とグループ ID を使用するため、
+生成される `.code-review-graph/` ディレクトリの所有者は自分のユーザーになります。
+これらのコマンドは、ホスト上の root 以外のユーザーで実行してください。
+
+Podman では、同じクローンで同じ Dockerfile をビルドし、ユーザーマッピングを維持します。
+
+```bash
+podman build -t code-review-graph:local .
+podman run --rm \
+  --userns=keep-id \
+  --env HOME=/tmp \
+  --volume "$PWD:/workspace" \
+  code-review-graph:local build
+```
+
+グラフはマウントしたリポジトリの `.code-review-graph/` に保存され、
+`/workspace/app.py` などのコンテナ内の絶対パスを記録します。
+`update` と `detect-changes` は、同じ `/workspace` マウントを使って Docker または Podman で実行してください。
+このグラフに対してホストで `update` を実行すると、"built with a different repository root"
+というエラーになる場合があります。ホストのコマンドに切り替えるには、ホストで
+`code-review-graph build` を実行し、ホストのパスでグラフを再構築してください。
+
+保存されたグラフを確認するには、`build` を `status` に置き換えます。
+イメージには Git が含まれ、デフォルトでは root 以外のユーザーで実行されます。
+イメージのビルド中にグラフは生成されません。
+
+これらの例は macOS/Linux のシェル構文を使用しています。
+macOS では、実行前に Docker 互換エンジンまたは Podman 仮想マシンを起動してください。
+Fedora など SELinux が有効なホストでは、マウントに `:z` を追加してください（`"$PWD:/workspace:z"`）。追加しないと、コンテナはリポジトリにアクセスできません。
+
+</details>
+
 ---
 
 ## FAQ と比較
@@ -806,6 +838,8 @@ CRG_TOOLS=query_graph_tool,semantic_search_nodes_tool code-review-graph serve
 </details>
 
 ## トラブルシューティング
+
+まず `code-review-graph doctor` を実行してください。AI ツールがグラフについて "written by a newer code-review-graph" と言うときは特にです。PATH 上のすべてのコピー、各 MCP エントリと各フックが動かすバージョン、グラフの状態を示します。何も変えず、失敗したチェックがあれば終了コード 1 で終わり、`--json` も使えます。
 
 Windows/WSL を含むより多くの事例は [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) にあります。
 

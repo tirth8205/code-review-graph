@@ -39,9 +39,12 @@
   <a href="docs/COMMANDS.md">Commands</a> ·
   <a href="docs/FAQ.md">FAQ</a> ·
   <a href="docs/TROUBLESHOOTING.md">Troubleshooting</a> ·
+  <a href="docs/FEATURES.md">What's new</a> ·
+  <a href="CHANGELOG.md">Changelog</a> ·
   <a href="docs/GITHUB_ACTION.md">GitHub Action</a> ·
   <a href="docs/REPRODUCING.md">Reproducing the benchmarks</a> ·
-  <a href="docs/ROADMAP.md">Roadmap</a>
+  <a href="docs/ROADMAP.md">Roadmap</a> ·
+  <a href="docs/INDEX.md">All docs</a>
 </p>
 
 <br>
@@ -67,18 +70,31 @@ AI coding tools often re-read large parts of a codebase to review a change. `cod
 Requires Python 3.10+.
 
 ```bash
-pip install code-review-graph          # or: pipx install code-review-graph
-code-review-graph install              # detect installed AI coding tools and configure each one
+uv tool install code-review-graph      # or: pipx install / pip install code-review-graph
+code-review-graph install              # set up the AI coding tools found on this machine
 code-review-graph build                # parse the codebase
+code-review-graph detect-changes --brief  # see what your last change touches
 ```
+
+Restart the editor or tool, then open the project and ask the assistant:
+
+```
+Review my changes
+```
+
+Undo everything with `code-review-graph uninstall` (preview with `--dry-run`). If something does not work, run `code-review-graph doctor`: it checks the setup and changes nothing.
 
 <details>
 <summary><strong>What <code>install</code> changes, and how to preview it first</strong></summary>
 <br>
 
-`install` detects which AI coding tools you have, writes an MCP server entry for each, installs hooks and skills where the platform supports them, and adds graph instructions to the platform's rules file. The MCP entry uses `poetry run` or `uv run` inside a Poetry or uv project environment, `uvx code-review-graph serve` when `uvx` is on PATH, and otherwise the current Python interpreter. Nothing is written until `install` has listed the files it will change and you have answered its question about instruction files; `install --dry-run` shows each change as a diff and writes nothing. Restart the editor or tool afterwards.
+`install` looks for AI coding tools on this machine and sets up only the ones it finds. For each it writes an MCP server entry, installs hooks and skills where the tool supports them, and adds graph instructions to its rules file. It then names the tools it did not find; add one anyway with `install --platform NAME`.
 
-The files `install` writes, such as `.claude/` and `.mcp.json`, stay visible to git in case your team commits them. `install --gitignore` adds the ones that run created to a marked block in `.gitignore`; `uninstall` removes the block.
+Nothing is written until `install` has listed the files it will change and you have answered its question about instruction files. With no terminal, as when an AI agent runs it, it takes the default answer, yes, and says so; `--no-instructions` skips those files. `install --dry-run` shows each change as a diff and writes nothing. Restart the editor or tool afterwards.
+
+The MCP entry and every hook run the copy of code-review-graph that ran `install`. The MCP entry uses `poetry run` or `uv run` inside a Poetry or uv project, `uvx` when `install` itself ran from `uvx` or `uv tool install`, and otherwise the Python that ran `install`. Hooks name that Python (or `uvx`), and run the `code-review-graph` on PATH if it is gone. After an upgrade, run `install` again.
+
+The files `install` writes, such as `.claude/` and `.mcp.json`, stay visible to git in case your team commits them. Until git tracks them, `build` and reviews leave them out, so your first review shows your own change; `install` lists them in `.code-review-graph/install-manifest.json`. `install --gitignore` adds the ones that run created to a marked block in `.gitignore`; `uninstall` removes the block.
 
 For Codex, the installer also places a global `code-review-graph` Skill under
 `$CODEX_HOME/skills/code-review-graph/` (default:
@@ -105,15 +121,15 @@ code-review-graph install --platform cursor
 code-review-graph install --platform codebuddy
 ```
 
-Config file locations are listed in [docs/USAGE.md](docs/USAGE.md#supported-platforms). Requires Python 3.10+.
+A platform named this way is set up even when `install` does not find it. Config file locations are listed in [docs/USAGE.md](docs/USAGE.md#supported-platforms).
 
 </details>
 
 <details>
-<summary><strong>Remove it again with <code>uninstall</code></strong></summary>
+<summary><strong>More ways to <code>uninstall</code></strong></summary>
 <br>
 
-`uninstall` removes CRG-owned files and entries from a Git or SVN working tree and leaves other MCP servers, hooks, skills and JSONC comments alone. Run it from anywhere inside the tree. Shared config files are replaced atomically, so a failed write leaves the original intact.
+`uninstall` removes CRG-owned files and entries from a Git or SVN working tree and leaves other MCP servers, hooks, skills and JSONC comments alone. Run it from anywhere inside the tree. Shared config files are replaced atomically, so a failed write leaves the original intact. A config file `install` made, which git does not track and which holds nothing else, is removed along with the empty folders `install` made. With no terminal it takes the default answer, no, and says to pass `--yes`.
 
 ```bash
 code-review-graph uninstall --dry-run    # preview only
@@ -126,73 +142,28 @@ code-review-graph uninstall --keep-user-configs --repo .  # this project only
 
 </details>
 
-Restart the editor or tool after `install`.
-Then open the project and ask the assistant:
-
-```
-Build the code review graph for this project
-```
-
 <details>
 <summary><strong>How long a build takes, and what a partial build means</strong></summary>
 <br>
 
-Build time scales with repository size; a cold build of a ~3,000-file repository took about 40 seconds ([measured](docs/REPRODUCING.md#incremental-update-latency)). After that, hooks and watch mode keep the graph updated. If some files fail to parse, the result has status `partial` and names them in its summary; the CLI also prints a `Warning:` line on stderr, and those files keep their previous graph rows.
+Build time scales with repository size; a cold build of a ~3,000-file repository took about 40 seconds ([measured](docs/REPRODUCING.md#incremental-update-latency)). After that, hooks and watch mode keep the graph updated. If some files fail to parse, the result has status `partial` and names them in its summary; the CLI also prints a `Warning:` line on stderr, and those files keep their previous graph rows. A build that finds no source files warns on stderr and asks whether you are in the project root.
 
 </details>
 
-### Run with Docker or Podman
-
 <details>
-<summary><strong>Build the image, then run it on your repository</strong></summary>
+<summary><strong>Upgrading from 2.3.x</strong></summary>
 <br>
 
-Build the image from the repository root:
-
 ```bash
-docker build -t code-review-graph:local .
+pip install -U code-review-graph     # or: pipx upgrade / uv tool upgrade code-review-graph
+code-review-graph doctor             # every copy, MCP entry and hook, and the version each runs
+code-review-graph install --dry-run  # see what changes, then run install
+code-review-graph build              # once: new file types and fixes reach only re-parsed files
 ```
 
-From the repository you want to analyse, run:
+Upgrade every copy you have. The MCP entry, the git and editor hooks and `crg-daemon` can each run a different one, and once 2.4.0 or later has opened the graph, a 2.3.9 copy refuses it and an older 2.3.x copy can break it. Run `install` again so the entry and the hooks run the new copy, then restart the editor (and run `crg-daemon restart` if you use the daemon).
 
-```bash
-docker run --rm \
-  --user "$(id -u):$(id -g)" \
-  --env HOME=/tmp \
-  --volume "$PWD:/workspace" \
-  code-review-graph:local build
-```
-
-The mounted repository must be writable. The command above uses your
-user and group IDs so the generated `.code-review-graph/` directory
-remains owned by your user. Run these commands as a non-root host user.
-
-For Podman, build the same Dockerfile and preserve your user mapping:
-
-```bash
-podman build -t code-review-graph:local .
-podman run --rm \
-  --userns=keep-id \
-  --env HOME=/tmp \
-  --volume "$PWD:/workspace" \
-  code-review-graph:local build
-```
-
-The graph persists in `.code-review-graph/` in the mounted repository and stores
-absolute container paths such as `/workspace/app.py`. Run `update` and
-`detect-changes` through Docker or Podman with the same `/workspace` mount.
-A host `update` on this graph can fail with "built with a different repository
-root". To switch to host commands, run `code-review-graph build` on the host
-to rebuild the graph with host paths.
-
-Replace `build` with `status` to inspect the saved graph.
-The image includes Git and defaults to a non-root user.
-No graph is generated during image construction.
-
-These examples use macOS/Linux shell syntax. On macOS, start your
-Docker-compatible engine or Podman machine before running them. On a host with
-SELinux on, such as Fedora, add `:z` to the mount (`"$PWD:/workspace:z"`), or
-the container is refused access to the repository.
+The first command of 2.4.0 or later moves the graph to schema 15. If you use the VS Code extension, it needs version 0.4.0 to read that graph. Full list: [upgrade notes](CHANGELOG.md#upgrade-notes).
 
 </details>
 
@@ -234,7 +205,7 @@ When a file changes, the graph traces every caller, dependent and test that coul
 <summary><strong>Only changed files are parsed again (about 2.5 s for a two-file edit)</strong></summary>
 <br>
 
-Editor hooks, git hooks (pre-commit, post-checkout, post-merge, post-rewrite) and watch mode trigger incremental updates. The update diffs changed files, finds their dependents through the graph's import and call edges, and re-parses only the files whose SHA-256 hash changed. On a ~3,000-file project (django) a two-file edit re-indexes in about 2.5 seconds on the path the hooks use, of which ~1.4 s is process start-up; a no-op update costs only that start-up. See [Incremental update latency](docs/REPRODUCING.md#incremental-update-latency).
+Editor hooks, git hooks (pre-commit, post-checkout, post-merge, post-rewrite) and watch mode trigger incremental updates. The hooks update quietly; on each commit the pre-commit hook prints only the short review from `detect-changes --brief`. The update diffs changed files, finds their dependents through the graph's import and call edges, and re-parses only the files whose SHA-256 hash changed. On a ~3,000-file project (django) a two-file edit re-indexes in about 2.5 seconds on the path the hooks use, of which ~1.4 s is process start-up; a no-op update costs only that start-up. See [Incremental update latency](docs/REPRODUCING.md#incremental-update-latency).
 
 <p align="center">
   <img src="diagrams/diagram4_incremental_update.png" alt="Incremental update flow: a hook or watch update triggers a git diff, dependents are found through graph edges, and only files whose SHA-256 hash changed are re-parsed" width="90%" />
@@ -488,7 +459,7 @@ Your assistant uses the graph by itself once it is built. Open a part below for 
 <summary><strong>Skills</strong></summary>
 <br>
 
-`install` writes these four skills for the platforms that support them (Claude Code, Gemini CLI, CodeBuddy Code, Hermes Agent and Qoder). Ask for one by name.
+`install` writes these four skills for the platforms it sets up that support them (Claude Code, Gemini CLI, CodeBuddy Code, Hermes Agent and Qoder). Ask for one by name.
 
 | Skill | Description |
 |-------|-------------|
@@ -506,10 +477,11 @@ Qoder also gets `build-graph`, `review-delta` and `review-pr` from the repositor
 <br>
 
 ```bash
-code-review-graph install          # Detect and configure all platforms
+code-review-graph install          # Set up the AI coding tools found on this machine
 code-review-graph install --platform <name>  # One platform
 code-review-graph install --steering  # Claude Code: graph context beside each search and read
 code-review-graph uninstall --dry-run  # Preview removal of installed artifacts
+code-review-graph doctor           # Check copies, MCP entries, graph and hooks; changes nothing
 code-review-graph build            # Parse the whole codebase
 code-review-graph build --follow-symlinks  # Also index symlinked folders
 code-review-graph update           # Incremental update (changed files only)
@@ -527,7 +499,7 @@ code-review-graph visualize --format svg       # Export as SVG (needs matplotlib
 code-review-graph visualize --format obsidian  # Export as Obsidian vault
 code-review-graph visualize --format cypher    # Export as Neo4j Cypher
 code-review-graph wiki             # Markdown wiki from communities
-code-review-graph detect-changes --brief         # Risk panel + token savings (read-only)
+code-review-graph detect-changes --brief         # Top 3 to review, risk + token savings (read-only)
 code-review-graph detect-changes --brief --base main  # Against the merge base of main and HEAD
 code-review-graph update --brief                 # Refresh graph + same panel
 code-review-graph detect-changes --brief --verify  # Cross-check against tiktoken
@@ -546,9 +518,9 @@ code-review-graph serve --http --multi-repo  # One HTTP server for every registe
 code-review-graph serve --multi-worktree  # One child server per linked Git worktree
 ```
 
-This is a selection. `code-review-graph --help` lists every command, and [docs/COMMANDS.md](docs/COMMANDS.md) documents their flags.
+This is a selection. `code-review-graph` with no command lists every command, in groups, and [docs/COMMANDS.md](docs/COMMANDS.md) documents their flags. A mistyped command exits 2 and suggests the closest one.
 
-When `detect-changes --base` names a branch, the diff runs against the merge base of that branch and HEAD. Commit hashes and other revisions are used as given.
+When `detect-changes --base` names a branch, the diff runs against the merge base of that branch and HEAD. Commit hashes and other revisions are used as given. A base git does not know stops with exit code 1 and says how to check it. In a repository with one commit or none, the default base reviews uncommitted and new files instead, and says so.
 
 `visualize --format svg` needs matplotlib, which ships in the `eval` extra (`pip install "code-review-graph[eval]"`). The other export formats need no extra install.
 
@@ -560,7 +532,7 @@ JSON exports are written inside the local graph data directory, which Git ignore
 <summary><strong>Token Savings panel: <code>detect-changes --brief</code> vs <code>update --brief</code></strong></summary>
 <br>
 
-Both commands print the same panel showing how many tokens the graph saved compared with handing the changed files to an agent raw. They differ in one thing: whether the graph is refreshed first.
+Both commands print the same panel showing how many tokens the graph saved compared with handing the changed files to an agent raw. They differ in one thing: whether the graph is refreshed first. Above the panel, `detect-changes --brief` also lists up to three things to review first, each with its file and line, its risk out of 1.00, its callers and its tests.
 
 ```text
 ┌─────────────────────── Token Savings ────────────────────────┐
@@ -701,7 +673,8 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 |----------|-------------|---------|
 | `CRG_GIT_TIMEOUT` | Timeout in seconds for Git operations (build, update, watch) | `30` |
 | `CRG_DISCOVERY_TIMEOUT` | Timeout in seconds for each Git command that discovers what changed, when a review tool or command was not given an explicit file list. Running out reports an error, never "no changes" | `5`, or `CRG_GIT_TIMEOUT` when you set that explicitly |
-| `CRG_DATA_DIR` | Directory for graph databases and generated artefacts | - |
+| `CRG_DATA_DIR` | Directory for graph databases and generated artefacts. `install`'s record of the files it wrote stays in `.code-review-graph/` in the repository | - |
+| `CRG_HOME` | Folder for per-user state: the multi-repo registry (`registry.json`), the daemon's `watch.toml`, its pid and state files, and `logs/` | `~/.code-review-graph` |
 | `CRG_HOOK_WORKTREES` | Set to `1` to let the generated git hooks run in linked git worktrees | - |
 | `CRG_EMBEDDING_MODEL` | Default model for local vector embeddings | `all-MiniLM-L6-v2` |
 | `CRG_ACCEPT_CLOUD_EMBEDDINGS` | Set to `1` to suppress the cloud embedding egress warning | - |
@@ -724,6 +697,8 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_FOLLOW_SYMLINKS` | Follow symlinked folders, inside or outside the repository, when set to `1`, `true`, `yes` or `on`; same as `--follow-symlinks`. See [Symlinked folders](docs/USAGE.md#symlinked-folders) | - |
 | `CRG_MAX_FOLLOWED_FILES` | Most files taken through followed symlinked folders | `10000` |
 | `CRG_TOOLS` | Comma-separated allowlist of MCP tools to expose when serving | - |
+| `CRG_READ_ONLY` | Set to `1` (or `true`, `yes`, `on`) to open the graph read-only. Nothing in the data folder is created, upgraded or logged, and commands that write fail. The Codex skill's read-only CLI sets it | - |
+| `CRG_BIN` | The `code-review-graph` program the Codex skill's read-only CLI runs, when it has another name or is not on PATH | the one on PATH |
 | `GOOGLE_API_KEY` | API key for Google Gemini embeddings | - |
 | `MINIMAX_API_KEY` | API key for MiniMax embeddings | - |
 | `VOYAGE_API_KEY` | API key for Voyage embeddings | - |
@@ -795,6 +770,63 @@ The flag takes precedence over the variable. When neither is set, all tools are 
 
 </details>
 
+### Run with Docker or Podman
+
+<details>
+<summary><strong>Build the image from a release, then run it on your repository</strong></summary>
+<br>
+
+No image is published. Build one from a release tag; a plain clone gives the `staging` branch, which can hold changes not yet released:
+
+```bash
+git clone --branch v2.4.0 https://github.com/tirth8205/code-review-graph.git
+cd code-review-graph
+docker build -t code-review-graph:local .
+```
+
+From the repository you want to analyse, run:
+
+```bash
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --env HOME=/tmp \
+  --volume "$PWD:/workspace" \
+  code-review-graph:local build
+```
+
+The mounted repository must be writable. The command above uses your
+user and group IDs so the generated `.code-review-graph/` directory
+remains owned by your user. Run these commands as a non-root host user.
+
+For Podman, build the same Dockerfile from the same clone and preserve your user mapping:
+
+```bash
+podman build -t code-review-graph:local .
+podman run --rm \
+  --userns=keep-id \
+  --env HOME=/tmp \
+  --volume "$PWD:/workspace" \
+  code-review-graph:local build
+```
+
+The graph persists in `.code-review-graph/` in the mounted repository and stores
+absolute container paths such as `/workspace/app.py`. Run `update` and
+`detect-changes` through Docker or Podman with the same `/workspace` mount.
+A host `update` on this graph can fail with "built with a different repository
+root". To switch to host commands, run `code-review-graph build` on the host
+to rebuild the graph with host paths.
+
+Replace `build` with `status` to inspect the saved graph.
+The image includes Git and defaults to a non-root user.
+No graph is generated during image construction.
+
+These examples use macOS/Linux shell syntax. On macOS, start your
+Docker-compatible engine or Podman machine before running them. On a host with
+SELinux on, such as Fedora, add `:z` to the mount (`"$PWD:/workspace:z"`), or
+the container is refused access to the repository.
+
+</details>
+
 ---
 
 ## FAQ and comparisons
@@ -815,6 +847,8 @@ Answers in [docs/FAQ.md](docs/FAQ.md):
 </details>
 
 ## Troubleshooting
+
+Start with `code-review-graph doctor`, above all when your AI tool says the graph was "written by a newer code-review-graph". It lists every copy on PATH, the version each MCP entry and hook runs, and the state of the graph. It changes nothing, exits 1 when a check fails, and takes `--json`.
 
 More cases, including Windows/WSL, are in [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 

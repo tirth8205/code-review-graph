@@ -39,9 +39,12 @@
   <a href="docs/COMMANDS.md">命令</a> ·
   <a href="docs/FAQ.md">常见问题</a> ·
   <a href="docs/TROUBLESHOOTING.md">故障排查</a> ·
+  <a href="docs/FEATURES.md">新功能</a> ·
+  <a href="CHANGELOG.md">更新日志</a> ·
   <a href="docs/GITHUB_ACTION.md">GitHub Action</a> ·
   <a href="docs/REPRODUCING.md">复现基准测试</a> ·
-  <a href="docs/ROADMAP.md">路线图</a>
+  <a href="docs/ROADMAP.md">路线图</a> ·
+  <a href="docs/INDEX.md">全部文档</a>
 </p>
 
 <br>
@@ -67,18 +70,31 @@ AI 编码工具为了审查一次改动，常常要重新读取代码库的大�
 需要 Python 3.10+。
 
 ```bash
-pip install code-review-graph          # or: pipx install code-review-graph
-code-review-graph install              # detect installed AI coding tools and configure each one
+uv tool install code-review-graph      # or: pipx install / pip install code-review-graph
+code-review-graph install              # set up the AI coding tools found on this machine
 code-review-graph build                # parse the codebase
+code-review-graph detect-changes --brief  # see what your last change touches
 ```
+
+重启编辑器或工具，然后打开项目，对助手说：
+
+```
+Review my changes
+```
+
+用 `code-review-graph uninstall` 可以全部撤销（加 `--dry-run` 先预览）。如果有问题，运行 `code-review-graph doctor`：它检查当前设置，不做任何改动。
 
 <details>
 <summary><strong><code>install</code> 会改动什么，以及如何先预览</strong></summary>
 <br>
 
-`install` 会检测你安装了哪些 AI 编码工具，为每个工具写入一条 MCP 服务器配置，在平台支持的地方安装钩子和技能，并把图谱说明加入平台的规则文件。在 Poetry 或 uv 项目环境中，MCP 配置使用 `poetry run` 或 `uv run`；当 PATH 上有 `uvx` 时使用 `uvx code-review-graph serve`；否则使用当前的 Python 解释器。`install` 会先列出要改动的文件，并在你回答它关于说明文件的问题之后才写入任何内容；`install --dry-run` 把每处改动显示为 diff，什么都不写。安装后请重启编辑器或工具。
+`install` 会查找这台机器上的 AI 编码工具，只配置找到的那些。它为每个工具写入一条 MCP 服务器配置，在工具支持的地方安装钩子和技能，并把图谱说明加入它的规则文件。之后它会列出没有找到的工具；仍想配置某个工具，用 `install --platform NAME`。
 
-`install` 写入的文件（例如 `.claude/` 和 `.mcp.json`）对 git 仍然可见，以便你的团队提交它们。`install --gitignore` 会把本次运行新建的文件加入 `.gitignore` 中一个带标记的块；`uninstall` 会移除这个块。
+`install` 会先列出要改动的文件，并在你回答它关于说明文件的问题之后才写入任何内容。没有终端时（例如由 AI 智能体运行），它采用默认答案“是”，并会说明这一点；`--no-instructions` 可跳过这些文件。`install --dry-run` 把每处改动显示为 diff，什么都不写。安装后请重启编辑器或工具。
+
+MCP 配置和每个钩子都运行执行 `install` 的那一份 code-review-graph。在 Poetry 或 uv 项目中，MCP 配置使用 `poetry run` 或 `uv run`；当 `install` 本身由 `uvx` 或 `uv tool install` 运行时使用 `uvx`；否则使用运行 `install` 的那个 Python。钩子写明这个 Python（或 `uvx`），它不在了时就运行 PATH 上的 `code-review-graph`。升级之后请再运行一次 `install`。
+
+`install` 写入的文件（例如 `.claude/` 和 `.mcp.json`）对 git 仍然可见，以便你的团队提交它们。在 git 跟踪它们之前，`build` 和审查都会跳过它们，所以你的第一次审查只显示你自己的改动；`install` 把它们记在 `.code-review-graph/install-manifest.json` 中。`install --gitignore` 会把本次运行新建的文件加入 `.gitignore` 中一个带标记的块；`uninstall` 会移除这个块。
 
 对于 Codex，安装程序还会在 `$CODEX_HOME/skills/code-review-graph/`（默认：
 `~/.codex/skills/code-review-graph/`）放置一个全局的 `code-review-graph` Skill。它优先使用 CRG MCP 工具，
@@ -103,15 +119,15 @@ code-review-graph install --platform cursor
 code-review-graph install --platform codebuddy
 ```
 
-配置文件的位置列在 [docs/USAGE.md](docs/USAGE.md#supported-platforms) 中。需要 Python 3.10+。
+这样指定的平台即使 `install` 没有找到也会被配置。配置文件的位置列在 [docs/USAGE.md](docs/USAGE.md#supported-platforms) 中。
 
 </details>
 
 <details>
-<summary><strong>用 <code>uninstall</code> 再次移除</strong></summary>
+<summary><strong><code>uninstall</code> 的更多用法</strong></summary>
 <br>
 
-`uninstall` 会从 Git 或 SVN 工作树中移除 CRG 自己写入的文件和配置项，不动其他 MCP 服务器、钩子、技能和 JSONC 注释。在工作树内的任意位置运行即可。共享配置文件采用原子替换，写入失败时原文件保持完整。
+`uninstall` 会从 Git 或 SVN 工作树中移除 CRG 自己写入的文件和配置项，不动其他 MCP 服务器、钩子、技能和 JSONC 注释。在工作树内的任意位置运行即可。共享配置文件采用原子替换，写入失败时原文件保持完整。`install` 创建的配置文件如果 git 没有跟踪、里面也没有别的内容，会连同 `install` 创建的空文件夹一起被删除。没有终端时，它采用默认答案“否”，并提示你加上 `--yes`。
 
 ```bash
 code-review-graph uninstall --dry-run    # preview only
@@ -124,70 +140,28 @@ code-review-graph uninstall --keep-user-configs --repo .  # this project only
 
 </details>
 
-运行 `install` 后请重启编辑器或工具。
-然后打开项目，对助手说：
-
-```
-Build the code review graph for this project
-```
-
 <details>
 <summary><strong>构建需要多久，以及部分构建是什么意思</strong></summary>
 <br>
 
-构建时间随仓库规模增长；一个约 3,000 个文件的仓库冷构建约需 40 秒（[实测](docs/REPRODUCING.md#incremental-update-latency)）。之后由钩子和 watch 模式保持图谱更新。如果部分文件解析失败，结果状态为 `partial` 并在摘要中列出这些文件；CLI 还会在 stderr 上打印一行 `Warning:`，这些文件保留原有的图谱记录。
+构建时间随仓库规模增长；一个约 3,000 个文件的仓库冷构建约需 40 秒（[实测](docs/REPRODUCING.md#incremental-update-latency)）。之后由钩子和 watch 模式保持图谱更新。如果部分文件解析失败，结果状态为 `partial` 并在摘要中列出这些文件；CLI 还会在 stderr 上打印一行 `Warning:`，这些文件保留原有的图谱记录。如果构建没有找到任何源文件，它会在 stderr 上发出警告，并问你是否在项目根目录。
 
 </details>
 
-### 使用 Docker 或 Podman 运行
-
 <details>
-<summary><strong>构建镜像，然后在你的仓库上运行</strong></summary>
+<summary><strong>从 2.3.x 升级</strong></summary>
 <br>
 
-在本仓库根目录构建镜像：
-
 ```bash
-docker build -t code-review-graph:local .
+pip install -U code-review-graph     # or: pipx upgrade / uv tool upgrade code-review-graph
+code-review-graph doctor             # every copy, MCP entry and hook, and the version each runs
+code-review-graph install --dry-run  # see what changes, then run install
+code-review-graph build              # once: new file types and fixes reach only re-parsed files
 ```
 
-在要分析的仓库目录中运行：
+升级你所有的副本。MCP 配置、git 和编辑器钩子以及 `crg-daemon` 可能各自运行不同的副本，而图谱一旦被 2.4.0 或更高版本打开过，2.3.9 的副本会拒绝读取它，更早的 2.3.x 副本则可能把它弄坏。再运行一次 `install`，让配置和钩子运行新副本，然后重启编辑器（如果你用守护进程，再运行 `crg-daemon restart`）。
 
-```bash
-docker run --rm \
-  --user "$(id -u):$(id -g)" \
-  --env HOME=/tmp \
-  --volume "$PWD:/workspace" \
-  code-review-graph:local build
-```
-
-挂载的仓库必须可写。上述命令使用你的用户 ID 和组 ID，
-使生成的 `.code-review-graph/` 目录仍归你的用户所有。
-请以非 root 主机用户运行这些命令。
-
-使用 Podman 时，构建同一个 Dockerfile 并保留用户映射：
-
-```bash
-podman build -t code-review-graph:local .
-podman run --rm \
-  --userns=keep-id \
-  --env HOME=/tmp \
-  --volume "$PWD:/workspace" \
-  code-review-graph:local build
-```
-
-图会保存在挂载仓库的 `.code-review-graph/` 中，并记录 `/workspace/app.py` 等容器内的绝对路径。
-请通过 Docker 或 Podman 使用相同的 `/workspace` 挂载路径运行 `update` 和 `detect-changes`。
-在宿主机上对该图运行 `update` 可能会报错 "built with a different repository root"。
-如需改用宿主机命令，请先在宿主机上运行 `code-review-graph build`，使用宿主机路径重新构建图。
-
-将 `build` 替换为 `status` 可查看已保存的图。
-镜像包含 Git，默认以非 root 用户运行。
-构建镜像时不会生成图。
-
-这些示例使用 macOS/Linux shell 语法。在 macOS 上，
-运行前请启动兼容 Docker 的容器引擎或 Podman 虚拟机。
-在启用 SELinux 的主机（如 Fedora）上，请在挂载中加上 `:z`（`"$PWD:/workspace:z"`），否则容器无法访问仓库。
+2.4.0 或更高版本运行的第一条命令会把图谱升级到 schema 15。如果你使用 VS Code 扩展，它需要 0.4.0 版才能读取这个图谱。完整列表：[升级说明](CHANGELOG.md#upgrade-notes)。
 
 </details>
 
@@ -229,7 +203,7 @@ podman run --rm \
 <summary><strong>只重新解析变更的文件（修改两个文件约 2.5 秒）</strong></summary>
 <br>
 
-编辑器钩子、git 钩子（pre-commit、post-checkout、post-merge、post-rewrite）和 watch 模式都会触发增量更新。更新时对变更文件做 diff，沿图谱的导入边和调用边找出依赖方，并只重新解析 SHA-256 哈希发生变化的文件。在一个约 3,000 个文件的项目（django）上，修改两个文件后沿钩子路径重新索引约需 2.5 秒，其中约 1.4 秒是进程启动；空更新只花这段启动时间。参见[增量更新延迟](docs/REPRODUCING.md#incremental-update-latency)。
+编辑器钩子、git 钩子（pre-commit、post-checkout、post-merge、post-rewrite）和 watch 模式都会触发增量更新。钩子会安静地更新；每次提交时，pre-commit 钩子只打印 `detect-changes --brief` 的简短审查结果。更新时对变更文件做 diff，沿图谱的导入边和调用边找出依赖方，并只重新解析 SHA-256 哈希发生变化的文件。在一个约 3,000 个文件的项目（django）上，修改两个文件后沿钩子路径重新索引约需 2.5 秒，其中约 1.4 秒是进程启动；空更新只花这段启动时间。参见[增量更新延迟](docs/REPRODUCING.md#incremental-update-latency)。
 
 <p align="center">
   <img src="diagrams/diagram4_incremental_update.png" alt="增量更新流程：钩子或 watch 更新触发 git diff，通过图谱的边找到依赖方，只重新解析 SHA-256 哈希发生变化的文件" width="90%" />
@@ -480,7 +454,7 @@ jobs:
 <summary><strong>技能</strong></summary>
 <br>
 
-`install` 会为支持技能的平台（Claude Code、Gemini CLI、CodeBuddy Code、Hermes Agent 和 Qoder）写入以下四个技能。按名字调用即可。
+`install` 会为它所配置的、支持技能的平台（Claude Code、Gemini CLI、CodeBuddy Code、Hermes Agent 和 Qoder）写入以下四个技能。按名字调用即可。
 
 | 技能 | 说明 |
 |-------|-------------|
@@ -498,10 +472,11 @@ Qoder 还会从本仓库的 `skills/` 目录得到 `build-graph`、`review-delta
 <br>
 
 ```bash
-code-review-graph install          # Detect and configure all platforms
+code-review-graph install          # Set up the AI coding tools found on this machine
 code-review-graph install --platform <name>  # One platform
 code-review-graph install --steering  # Claude Code: graph context beside each search and read
 code-review-graph uninstall --dry-run  # Preview removal of installed artifacts
+code-review-graph doctor           # Check copies, MCP entries, graph and hooks; changes nothing
 code-review-graph build            # Parse the whole codebase
 code-review-graph build --follow-symlinks  # Also index symlinked folders
 code-review-graph update           # Incremental update (changed files only)
@@ -519,7 +494,7 @@ code-review-graph visualize --format svg       # Export as SVG (needs matplotlib
 code-review-graph visualize --format obsidian  # Export as Obsidian vault
 code-review-graph visualize --format cypher    # Export as Neo4j Cypher
 code-review-graph wiki             # Markdown wiki from communities
-code-review-graph detect-changes --brief         # Risk panel + token savings (read-only)
+code-review-graph detect-changes --brief         # Top 3 to review, risk + token savings (read-only)
 code-review-graph detect-changes --brief --base main  # Against the merge base of main and HEAD
 code-review-graph update --brief                 # Refresh graph + same panel
 code-review-graph detect-changes --brief --verify  # Cross-check against tiktoken
@@ -538,9 +513,9 @@ code-review-graph serve --http --multi-repo  # One HTTP server for every registe
 code-review-graph serve --multi-worktree  # One child server per linked Git worktree
 ```
 
-这是一份精选列表。`code-review-graph --help` 会列出全部命令，[docs/COMMANDS.md](docs/COMMANDS.md) 记录了它们的参数。
+这是一份精选列表。不带命令运行 `code-review-graph` 会分组列出全部命令，[docs/COMMANDS.md](docs/COMMANDS.md) 记录了它们的参数。命令拼错时会以退出码 2 结束，并给出最接近的命令。
 
-当 `detect-changes --base` 指定的是一个分支时，diff 会针对该分支与 HEAD 的合并基做。提交哈希和其他 revision 按原样使用。
+当 `detect-changes --base` 指定的是一个分支时，diff 会针对该分支与 HEAD 的合并基做。提交哈希和其他 revision 按原样使用。如果 git 不认识这个基准，命令会以退出码 1 结束，并说明如何检查。在只有一个提交或没有提交的仓库中，默认基准会改为审查未提交的文件和新文件，并说明这一点。
 
 `visualize --format svg` 需要 matplotlib，它随 `eval` 附加依赖提供（`pip install "code-review-graph[eval]"`）。其他导出格式无需额外安装。
 
@@ -552,7 +527,7 @@ JSON 导出写在本地图谱数据目录中，该目录默认被 Git 忽略。�
 <summary><strong>Token Savings 面板：<code>detect-changes --brief</code> 对比 <code>update --brief</code></strong></summary>
 <br>
 
-两个命令打印同一个面板，显示相比把变更文件原样交给智能体，图谱节省了多少 token。它们只有一点不同：是否先刷新图谱。
+两个命令打印同一个面板，显示相比把变更文件原样交给智能体，图谱节省了多少 token。它们只有一点不同：是否先刷新图谱。在面板上方，`detect-changes --brief` 还会列出最多三项最该先审查的内容，每项附带文件和行号、满分 1.00 的风险分、调用者和测试。
 
 ```text
 ┌─────────────────────── Token Savings ────────────────────────┐
@@ -693,7 +668,8 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 |----------|-------------|---------|
 | `CRG_GIT_TIMEOUT` | Git 操作的超时秒数（build / update / watch） | `30` |
 | `CRG_DISCOVERY_TIMEOUT` | 审查工具或命令未显式给出文件清单时，用于识别变更的每个 Git 命令的超时秒数。超时会返回错误，而不会报告“没有变更” | `5`（显式设置 `CRG_GIT_TIMEOUT` 时取该值） |
-| `CRG_DATA_DIR` | 存放图谱数据库和生成产物的目录 | - |
+| `CRG_DATA_DIR` | 存放图谱数据库和生成产物的目录。`install` 对其所写文件的记录仍放在仓库的 `.code-review-graph/` 中 | - |
+| `CRG_HOME` | 存放每个用户状态的文件夹：多仓库注册表（`registry.json`）、守护进程的 `watch.toml`、它的 pid 和状态文件，以及 `logs/` | `~/.code-review-graph` |
 | `CRG_HOOK_WORKTREES` | 设为 `1` 时允许生成的 git 钩子在链接的 git worktree 中运行 | - |
 | `CRG_EMBEDDING_MODEL` | 本地向量嵌入的默认模型 | `all-MiniLM-L6-v2` |
 | `CRG_ACCEPT_CLOUD_EMBEDDINGS` | 设为 `1` 可抑制云端嵌入的出网警告 | - |
@@ -716,6 +692,8 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_FOLLOW_SYMLINKS` | 设为 `1`、`true`、`yes` 或 `on` 时跟随符号链接文件夹（仓库内外均可），与 `--follow-symlinks` 相同。见 [符号链接文件夹](docs/USAGE.md#symlinked-folders) | - |
 | `CRG_MAX_FOLLOWED_FILES` | 通过符号链接文件夹最多读取的文件数 | `10000` |
 | `CRG_TOOLS` | 提供服务时暴露的 MCP 工具白名单，逗号分隔 | - |
+| `CRG_READ_ONLY` | 设为 `1`（或 `true`、`yes`、`on`）时以只读方式打开图谱。数据文件夹中不会新建、升级或记录任何内容，需要写入的命令会失败。Codex 技能的只读 CLI 会设置它 | - |
+| `CRG_BIN` | Codex 技能的只读 CLI 所运行的 `code-review-graph` 程序，用于它名字不同或不在 PATH 上的情况 | PATH 上的那个 |
 | `GOOGLE_API_KEY` | Google Gemini 嵌入的 API 密钥 | - |
 | `MINIMAX_API_KEY` | MiniMax 嵌入的 API 密钥 | - |
 | `VOYAGE_API_KEY` | Voyage 嵌入的 API 密钥 | - |
@@ -787,6 +765,60 @@ CRG_TOOLS=query_graph_tool,semantic_search_nodes_tool code-review-graph serve
 
 </details>
 
+### 使用 Docker 或 Podman 运行
+
+<details>
+<summary><strong>从发布版本构建镜像，然后在你的仓库上运行</strong></summary>
+<br>
+
+没有发布现成的镜像。请从发布标签构建；直接克隆得到的是 `staging` 分支，其中可能有尚未发布的改动：
+
+```bash
+git clone --branch v2.4.0 https://github.com/tirth8205/code-review-graph.git
+cd code-review-graph
+docker build -t code-review-graph:local .
+```
+
+在要分析的仓库目录中运行：
+
+```bash
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --env HOME=/tmp \
+  --volume "$PWD:/workspace" \
+  code-review-graph:local build
+```
+
+挂载的仓库必须可写。上述命令使用你的用户 ID 和组 ID，
+使生成的 `.code-review-graph/` 目录仍归你的用户所有。
+请以非 root 主机用户运行这些命令。
+
+使用 Podman 时，在同一个克隆中构建同一个 Dockerfile，并保留用户映射：
+
+```bash
+podman build -t code-review-graph:local .
+podman run --rm \
+  --userns=keep-id \
+  --env HOME=/tmp \
+  --volume "$PWD:/workspace" \
+  code-review-graph:local build
+```
+
+图会保存在挂载仓库的 `.code-review-graph/` 中，并记录 `/workspace/app.py` 等容器内的绝对路径。
+请通过 Docker 或 Podman 使用相同的 `/workspace` 挂载路径运行 `update` 和 `detect-changes`。
+在宿主机上对该图运行 `update` 可能会报错 "built with a different repository root"。
+如需改用宿主机命令，请先在宿主机上运行 `code-review-graph build`，使用宿主机路径重新构建图。
+
+将 `build` 替换为 `status` 可查看已保存的图。
+镜像包含 Git，默认以非 root 用户运行。
+构建镜像时不会生成图。
+
+这些示例使用 macOS/Linux shell 语法。在 macOS 上，
+运行前请启动兼容 Docker 的容器引擎或 Podman 虚拟机。
+在启用 SELinux 的主机（如 Fedora）上，请在挂载中加上 `:z`（`"$PWD:/workspace:z"`），否则容器无法访问仓库。
+
+</details>
+
 ---
 
 ## 常见问题与对比
@@ -807,6 +839,8 @@ CRG_TOOLS=query_graph_tool,semantic_search_nodes_tool code-review-graph serve
 </details>
 
 ## 故障排查
+
+先运行 `code-review-graph doctor`，尤其是当你的 AI 工具说图谱 "written by a newer code-review-graph" 时。它列出 PATH 上的每一份副本、每条 MCP 配置和每个钩子运行的版本，以及图谱的状态。它不做任何改动，有检查失败时以退出码 1 结束，并支持 `--json`。
 
 更多情况，包括 Windows/WSL，见 [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)。
 
