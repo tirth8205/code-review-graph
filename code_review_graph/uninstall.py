@@ -513,6 +513,12 @@ def _legacy_repo_hook_commands(repo_root: Path) -> set[str]:
     path_copy = _commands(
         skills.generate_hooks_config(repo_root, program=skills._PATH_HOOK_PROGRAM)
     )
+    # Its session hook also said "Not a git repo" when ``status`` failed.
+    path_copy.add(
+        skills._claude_session_hook_command(
+            skills._PATH_HOOK_PROGRAM, skills._legacy_session_status_body
+        )
+    )
     # v2.3.7 - v2.3.9 resolved the repository from the session's directory,
     # which #311 replaced with the edited file's repository.
     from_cwd = (

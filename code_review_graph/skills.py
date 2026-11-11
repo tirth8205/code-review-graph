@@ -1921,6 +1921,21 @@ def _hook_chain(
 
 
 def _session_status_body(cli: str) -> str:
+    """Print the graph status in a Git checkout, and say so outside one."""
+    return (
+        "if git rev-parse --git-dir >/dev/null 2>&1; then"
+        f" {cli} status"
+        " --repo \"$(git rev-parse --show-toplevel 2>/dev/null)\" || true;"
+        " else echo 'Not a git repo, skipping'; fi"
+    )
+
+
+def _legacy_session_status_body(cli: str) -> str:
+    """The body up to 2.4.0, kept so hooks that carry it are still ours.
+
+    A failing ``status``, as in a Git repo with no graph, also printed
+    "Not a git repo".
+    """
     return (
         "git rev-parse --git-dir >/dev/null 2>&1"
         f" && {cli} status"
@@ -1944,14 +1959,22 @@ def _claude_update_hook_command(program: _HookProgram) -> str:
     )
 
 
-def _claude_session_hook_command(program: _HookProgram) -> str:
+def _claude_session_hook_command(
+    program: _HookProgram, body: Callable[[str], str] = _session_status_body
+) -> str:
     """The session hook: print the graph status of the repository it starts in."""
     if program == _PATH_HOOK_PROGRAM:
-        return (
-            f"cat >/dev/null || true; {_PATH_GUARD} || exit 0; "
-            + _session_status_body("code-review-graph")
-        )
-    return "cat >/dev/null || true; " + _hook_chain(_session_status_body, program)
+        return f"cat >/dev/null || true; {_PATH_GUARD} || exit 0; " + body("code-review-graph")
+    return "cat >/dev/null || true; " + _hook_chain(body, program)
+
+
+# The plugin's hook for a worktree Claude Code enters: build its graph in the
+# background, but only in a Git checkout, so no other folder gets a graph.
+_PLUGIN_WORKTREE_BUILD_COMMAND = (
+    f"cat >/dev/null || true; {_PATH_GUARD} || exit 0; "
+    "if git rev-parse --git-dir >/dev/null 2>&1; then"
+    " code-review-graph build >/dev/null 2>&1 & fi"
+)
 
 
 def _codex_hook_command(subcommand: str, program: _HookProgram | None = None) -> str:
@@ -2029,6 +2052,26 @@ def generate_hooks_config(
                     ],
                 },
             ],
+        }
+    }
+
+
+def generate_plugin_hooks_config() -> dict[str, Any]:
+    """Return what ``hooks/hooks.json``, the Claude Code plugin's hooks, holds.
+
+    The plugin cannot know which copy a user has, so its hooks run the one on
+    PATH. Beside the hooks ``install`` writes, it builds a graph in a
+    worktree Claude Code enters.
+    """
+    hooks = generate_hooks_config(Path("."), program=_PATH_HOOK_PROGRAM)["hooks"]
+    worktree = {
+        "matcher": "EnterWorktree",
+        "hooks": [{"type": "command", "command": _PLUGIN_WORKTREE_BUILD_COMMAND}],
+    }
+    return {
+        "hooks": {
+            "SessionStart": hooks["SessionStart"],
+            "PostToolUse": [worktree, *hooks["PostToolUse"]],
         }
     }
 
@@ -2782,6 +2825,7 @@ _PINNED_PROJECT_HOOK_COMMAND_RES = tuple(
     for text in (
         _claude_update_hook_command(_PINNED_SENTINEL),
         _claude_session_hook_command(_PINNED_SENTINEL),
+        _claude_session_hook_command(_PINNED_SENTINEL, _legacy_session_status_body),
     )
 )
 _PINNED_CODEX_HOOK_COMMAND_RES = tuple(
