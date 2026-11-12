@@ -3683,6 +3683,7 @@ class GraphStore:
                     "unresolved_targets_truncated",
                 ):
                     extra.pop(key, None)
+                candidates = sorted(candidates)
                 extra.update({
                     "cpp_scoped_target": target,
                     "ambiguous_targets": candidates[:20],
@@ -4207,6 +4208,8 @@ class GraphStore:
                     f"{other}_targets_truncated",
                 ):
                     desired_extra.pop(key, None)
+                # Sorted so the stored list does not depend on file order.
+                resolution_candidates = sorted(resolution_candidates)
                 desired_extra.update({
                     f"{resolution}_targets": resolution_candidates[:20],
                     f"{resolution}_target_count": len(resolution_candidates),
