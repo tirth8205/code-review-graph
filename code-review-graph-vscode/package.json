@@ -240,7 +240,7 @@
     "@types/d3": "^7.4.3",
     "@types/node": "^20.11.0",
     "@types/vscode": "^1.85.0",
-    "@vscode/vsce": "^2.22.0",
+    "@vscode/vsce": "^4.1.0",
     "esbuild": "^0.20.0",
     "typescript": "^5.3.3"
   },
