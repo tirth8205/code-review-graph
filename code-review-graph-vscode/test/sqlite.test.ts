@@ -7,6 +7,7 @@
  */
 
 import * as assert from 'assert';
+import { after, before, describe, it } from 'node:test';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';

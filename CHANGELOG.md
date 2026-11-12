@@ -2,6 +2,169 @@
 
 ## [Unreleased]
 
+### Added
+
+- `install` keeps a record of the files it writes inside the repository, in
+  `.code-review-graph/install-manifest.json`, even when `--data-dir` or
+  `CRG_DATA_DIR` keeps the graph somewhere else. Each install adds to it and
+  never drops a file. `uninstall` drops each file it removes or cleans, and
+  deletes the record when it is empty. `install --dry-run` shows the record
+  like any other file.
+- New `code-review-graph doctor` command. It lists every `code-review-graph`
+  on PATH with its version, the version each MCP entry in the repository's
+  configs runs (read from a `uvx` pin or `uv tool list`, never by starting a
+  download), the graph's schema, whether it is current with HEAD (a graph the
+  pre-commit hook updated counts as current) and whether the last build
+  finished, and which git and editor hooks are installed and the version of
+  the copy they run. It changes nothing, exits 1 when a check
+  fails, and takes `--json`.
+
+### Changed
+
+- The reference that `get_docs_section_tool` serves no longer sets a budget of
+  800 tokens per task, and says that `detail_level="minimal"` drops source, so
+  a search with `include_source=True` stays at standard. It now also covers
+  `removed_symbols` in a change review, `resolution="direct"` on
+  `query_graph_tool`, `import_cycles` in `get_knowledge_gaps_tool`, the
+  `stale_graph` reason, the new `doctor` command and the CLI exit codes.
+- The skills `install` writes for Claude Code, Gemini CLI, CodeBuddy Code,
+  Hermes Agent and Qoder say the same: no 800-token budget, and
+  `detail_level="minimal"` drops source, so a search with
+  `include_source=True` and `get_review_context_tool` stay at standard. Run
+  `install` again for the new text.
+
+### Fixed
+
+- The MCP entry and every hook `install` writes now run the copy of
+  code-review-graph that ran `install`. The MCP entry used `uvx` whenever it
+  was on PATH, and hooks ran the first copy on PATH, so an older copy could
+  answer and refuse a newer graph. Inside a Poetry or uv project the entry
+  still uses `poetry run` or `uv run`; `uvx` is now used only when `install`
+  itself runs from `uvx` or a `uv tool` install; otherwise it is the Python
+  that ran `install`. A hook whose copy is gone, as on a collaborator's
+  machine, runs the copy on PATH. Run `install` again to update the entry and
+  the hooks.
+- The git pre-commit hook runs `update --quiet`, so a commit shows only the
+  short review from `detect-changes --brief`, not the update log.
+- `install` (and `install --platform all`) writes MCP entries, skills, hooks
+  and instruction files only for the tools it finds on this machine. Claude
+  Code, OpenCode, Qoder and CodeBuddy Code used to count as found everywhere,
+  and Gemini CLI skills and hooks, Codex hooks and all nine instruction files
+  were written whatever was found. Claude Code counts as found by `claude` on
+  PATH, `~/.claude` or `~/.claude.json`, OpenCode by `opencode` on PATH,
+  `~/.opencode` or its config or data folder, and Codex also by `codex` on
+  PATH. `install` now lists the tools it did not find; add one anyway with
+  `install --platform NAME`.
+- `install` writes each git hook once, so each one is reported once, and
+  shows paths relative to the repository or with `~`. Outside Git it says once,
+  not four times, that there is no hooks folder.
+- With no terminal, as when an AI agent runs it, `install` says it took the
+  default answer (yes) to its question about instruction files, and how to
+  skip them; `uninstall` says it took no and how to go ahead. At a terminal,
+  `install` says that Ctrl-C at the question stops it before anything is
+  written.
+- `uninstall` and `uninstall --dry-run` word every planned action as "would
+  remove …" and every action they took as "removed …". Most planned actions
+  read "would removed …", and a few that were taken read "remove …".
+- `uninstall` removes a config file `install` made, such as `.mcp.json`,
+  `.vscode/mcp.json` or `.claude/settings.json`, when nothing else is left in
+  it, and the empty folders `install` made, instead of leaving
+  `{"mcpServers": {}}` and the like behind. It does so only for a file on the
+  install record that Git does not track and that has no comments; any other
+  file keeps everything but our entries, as before.
+- A second `install` that changes nothing no longer backs up a settings file
+  that already holds the hooks, so it writes nothing at all.
+- `build` and change discovery leave out the files `install` wrote, as listed in
+  `.code-review-graph/install-manifest.json`, until Git tracks them. Your first
+  review now shows your change, not `.mcp.json` and hook scripts. A file you
+  commit counts like any other.
+- `get_minimal_context_tool` no longer says `stale_graph` right after a commit the
+  pre-commit hook updated. When every file changed since the graph's commit has
+  the same content in the graph, the graph counts as current.
+- `next_tool_suggestions` give the names the server registers, which end in
+  `_tool`, such as `build_or_update_graph_tool`. Some answers gave names no
+  client could call.
+- `detect-changes --base` with a revision Git does not know exits 1 with one line
+  saying how to check it. It used to review the working tree and exit 0. The MCP
+  review tools answer `status: error`. In a repository with one commit, or none,
+  the default base prints a plain note and reviews uncommitted and new files,
+  with no Git error text. In a shallow clone, as in many CI jobs, the note says
+  the clone is shallow and how to fetch the last commit.
+- The review tools review a new file Git does not track as a whole. It used to
+  drop out of the review when another file had changed lines.
+- `detect-changes --brief` lists the top three things to review, each with its
+  file and line, its risk out of 1.00, its callers and its tests, and gives the
+  overall score out of 1.00 with its level, as in `Overall risk score: 0.80 of
+  1.00 (high)`.
+- A graph written by a newer copy now names the copy that refused it, its
+  version and its folder, and points at `doctor` to find the others.
+- `build` ends with a next step, and warns on stderr when it found no source
+  files ("Is this the project root?").
+- A first build logs one line, `Created graph database (schema v15).`,
+  instead of every migration step. The Spring event resolver and the Python
+  import resolver are quiet when they found nothing, and a missing igraph is
+  now a tip naming `pip install "code-review-graph[communities]"`. Upgrading
+  an existing graph to schema 15 logs one line asking for a `build` once.
+- The banner lists every command, in groups, with a start line. `--help`
+  shows `<command>` instead of a list of every name and leaves out the
+  hook-only `enrich`, `hook-update` and `hook-status`, which still run. A
+  mistyped command exits 2 with "Did you mean ...?". Help text uses British
+  spelling.
+- Every `pip install` hint for an extra quotes it, so it works in zsh. This
+  includes the VS Code extension's hint for embeddings.
+- `impact --detail-level compact` and `get_impact_radius_tool(detail_level="compact")`
+  now write their line to the context-history log when `CRG_CONTEXT_HISTORY=1`,
+  as every other answer with `context_savings` does.
+- A yes/no question that gets no input, such as stdin from NUL on Windows, now
+  takes the default and says so, instead of always meaning "no".
+- `build`, `update` and `postprocess` with a `--repo` that is not a folder print
+  one `Error:` line and exit 1, with no traceback.
+- `detect-changes --brief` and `update --brief` no longer show "Saved ~98%" when
+  no functions changed; one line says there is nothing to measure.
+- `code-review-graph query` takes all 19 patterns the MCP tool takes, including
+  `references_to` and the Spring and event ones.
+- The enrich and edit hooks read their input as UTF-8 on Windows, so paths such
+  as `C:\Users\José` work.
+- `update` works in a project that has a graph but no Git, and the OpenCode
+  plugin logs commands that fail.
+- `uninstall` removes the OpenCode entry from both `opencode.jsonc` and
+  `opencode.json`, and the OpenCode plugin goes under `$XDG_CONFIG_HOME` when
+  it is set.
+- The git hook block now runs in a hook you wrote that ends with `exit 0`; a
+  reinstall moves an old block above the `exit`. A hook that ends with a bare
+  `exit` or `exit $?` is left alone, with a warning.
+- `git commit --amend`, even with `--no-verify`, now updates the graph.
+- The plugin hooks no longer say "Not a git repo" in a Git repository with no
+  graph, and the worktree hook no longer builds a graph outside Git.
+- The Codex edit hook never builds a new graph; it only updates one that
+  exists. Run `install` again for the new hook.
+- A reinstall keeps your first `settings.json.bak`, and `uninstall` removes a
+  backup that holds only code-review-graph settings.
+- A Rust call such as `v.map(...)` on a value of unknown type no longer links
+  to a method that just happens to share its file.
+- A PHP or Rust `Class::method` call now links only when the calling file backs
+  it (same file, an import naming the class, the same PHP namespace, or
+  `self`/`Self`), not just because the name is unique.
+- `path_to` no longer follows imports that never run (`if TYPE_CHECKING:`,
+  `import type`).
+- `traverse_graph_tool` works from a symbol whose name is over 256 characters.
+- The graph page: hiding a community hides its edges too, labels come back when
+  you show a community again or turn community colours off, Escape brings the
+  legend back, and a node reached with the keyboard shows its tooltip beside
+  it.
+- `visualize --format obsidian` is much faster when many names clash, such as
+  `__init__`.
+- VS Code extension: the walkthrough's Build Graph says when a build fails;
+  Build Graph, Update Graph, Compute Embeddings and Watch Mode no longer stop
+  after 60 seconds; and seven settings that did nothing are gone
+  (`graphTheme`, `graph.defaultEdges` and the five `treeView.show*`).
+- Two programs opening a new or old graph at the same time no longer fail with
+  `duplicate column name` or `table nodes_fts already exists`.
+- `eval --report` shows only each repository's newest run of each benchmark,
+  not old runs mixed in.
+- The PR comment workflow no longer shows a red run when the PR moved during
+  its analysis; it leaves a notice naming both commits.
+
 ## [2.4.0] - 2026-11-10
 
 Two new platforms, MiMo Code and DeepSeek Harness, so `install` now supports
@@ -11,8 +174,8 @@ imports and tests more carefully: a call it could not check no longer looks
 like a real link, every call edge says how sure it is, calls to inherited
 methods and imports of workspace packages are followed, and `tests_for` finds
 Java, Ruby and PHP tests. The graph schema moves from 13 to 15. Several new
-settings are off unless you turn them on. Read *Upgrade notes* at the end of
-this section before you upgrade.
+settings are off unless you turn them on. Read the
+[Upgrade notes](#upgrade-notes) at the end of this section before you upgrade.
 
 ### Added
 
@@ -186,7 +349,7 @@ this section before you upgrade.
   below, so a run today gives different numbers until it is redone. The
   per-repo CSVs are in `evaluate/results/`; the 2026-05-25 `impact_accuracy`
   CSVs are removed, as the 2026-08-02 captures replace them.
-- Codex installs a global CRG skill with MCP-first guidance and a read-only CLI fallback (#841).
+- Codex installs a global code-review-graph skill with MCP-first guidance and a read-only CLI fallback (#841).
 - `install` also writes `post-checkout`, `post-merge` and `post-rewrite` git
   hooks that run `update`, so the graph follows a branch switch, a merge or a
   `git pull` (merge or rebase mode) instead of waiting for the next commit.
@@ -202,7 +365,9 @@ this section before you upgrade.
 - Robot Framework `.robot` and `.resource` files are indexed (#967, #963).
 - Static Laravel routes produce `Endpoint` nodes and `HANDLES` edges at parse time (#1072, part of #851).
 - Spring AOP advice reaches its targets through `@annotation` and `execution` pointcuts (#916, #592).
-- `serve` has an opt-in mode for parallel graph access across Git worktrees (#1063).
+  The new `advises` and `advised_by` query patterns follow those links.
+- `serve --multi-worktree` serves every linked Git worktree from one MCP entry, with one
+  child server per worktree (#1063).
 - Read-only MCP tools carry `readOnlyHint`, so clients can skip the approval prompt (#1124, #1123).
 - The troubleshooting guide explains the local-checkout workaround for Zed SSH projects (#1130).
 - `.json` files are indexed; before, they gave no nodes at all (part of #436).
@@ -676,9 +841,11 @@ this section before you upgrade.
   builtin names such as `events` never resolve to a workspace member, a name
   two members share resolves to neither, probes are case-exact on every
   platform, and a target the build would not index keeps the bare specifier.
-- The Claude Code plugin's hooks load again. `hooks/hooks.json` held a bare
-  event map, which current Claude Code rejects with "hooks.json must have
-  `hooks` (the hook matchers) or `modules` (hooks modules), or both", so the
+- The Claude Code plugin hooks in the repository's `hooks/hooks.json` load
+  again. No plugin is published, so this matters only to a local copy of the
+  folder. The file held a bare event map, which current Claude Code rejects
+  with "hooks.json must have `hooks` (the hook matchers) or `modules` (hooks
+  modules), or both", so the
   SessionStart and PostToolUse hooks never ran. The events now sit under a
   top-level `"hooks"` key, the shape the plugins reference documents. The hooks
   carry the same guards as the ones `install` writes, so a missing
@@ -717,24 +884,11 @@ this section before you upgrade.
   `from .impl import helper`) resolves to the defining file. The resolver
   required the name at the top level of the receiver's own module, so the
   call stayed unresolved.
-- `_strip_plsql_noise` tracked string-literal state per line and stripped
-  `/* */` comments over the raw text in a separate first pass, so a
-  string literal spanning multiple lines (or containing an unterminated
-  `/*`) could desynchronize the rest of the file: an `END name;`-shaped
-  substring inside a multi-line string terminated a block early, an
-  Oracle `q'[...]'`/`Q'<...>'` quoted string (which allows unescaped `'`
-  inside it) confused the plain `'...'` state machine the same way, and
-  an unterminated `/*` inside one string literal could pair up with an
-  unrelated `*/` inside a later string and blank out everything between
-  them — including a whole `CREATE PROCEDURE` statement that happened to
-  fall in that span, which also regressed plain (non-Oracle) SQL files.
-  It now tracks string and comment state in one pass over the whole file.
-  `_plsql_block_end`'s terminator search also ran unbounded to
-  end-of-file, so a package body member using a bare `END;` could match
-  an unrelated, later package body's same-named member's `END name;`
-  instead of its own, and the unbounded search was quadratic on a file
-  with many members (~4s for 4,000). It now takes a `limit`, bounding a
-  member's search to its own enclosing package body (PR #785 review).
+- PL/SQL and plain SQL files no longer lose procedures when a string runs over
+  several lines, uses Oracle's `q'[...]'` quoting or holds `/*`. A package
+  member that ends with a bare `END;` no longer takes its end from a member of
+  the same name in a later package. Large package bodies parse much faster;
+  4,000 members used to take about 4 s (PR #785 review).
 - An incremental update now keeps flows and communities in step with the
   graph. A new entry point gets its flow, a re-parsed file's flows follow its
   nodes to their new IDs, and a deleted file leaves no empty community behind.
@@ -759,7 +913,7 @@ this section before you upgrade.
   Forked parse workers close inherited lock handles, so killing their parent
   releases the lock even while workers remain alive. A filesystem without
   `flock` support logs a warning and runs unlocked rather than reporting a
-  competing writer. Invoke protected CRG commands directly; external `flock`
+  competing writer. Run code-review-graph commands directly; external `flock`
   wrappers are for other writers.
 - An explicit embedding refresh (`--embedding-provider` with
   `--embedding-model`, or the `embedding_provider` and `embedding_model`
@@ -872,6 +1026,18 @@ this section before you upgrade.
 
 ### Upgrade notes
 
+- **Upgrade every copy, then restart.** The git and editor hooks and
+  `crg-daemon` each run the first `code-review-graph` on PATH, and the MCP entry
+  may run `uvx`, so any of them may not be the one you upgraded. An MCP entry of `uvx code-review-graph serve`
+  runs the copy `uv tool install` put there. A 2.3.9 copy refuses a v15 graph,
+  so once any 2.4.0 command has opened the graph, even `status`, a 2.3.9
+  pre-commit hook prints that error on every commit and leaves the graph as it
+  was. A 2.3.9 copy also has no `hook-update`, so the new edit hook does
+  nothing and says nothing. Upgrade each copy
+  (`pip install -U code-review-graph`, `pipx upgrade code-review-graph` or
+  `uv tool upgrade code-review-graph`). `which -a code-review-graph` lists every
+  copy on PATH; each one's `--version`, and `uvx code-review-graph --version`,
+  should say 2.4.0. Then restart the editor and run `crg-daemon restart`.
 - **Schema version: 13 → 15.** Two migrations run by themselves the first time
   any command opens the graph. Both are quick, as neither rewrites a table:
   - v14 clears the stored hash of every Ruby file, so the next `update` parses
@@ -886,31 +1052,38 @@ this section before you upgrade.
   graph with "was written by a newer code-review-graph (schema v15; this build
   understands v13)", so to go back, delete `.code-review-graph/graph.db` and
   run `code-review-graph build` with the older release.
-- **The VS Code extension has to be updated as well.** 0.3.0 accepts v13 and
-  answers a v15 database with "Database was created with a newer version
-  (schema v15). Update the extension." This repository now carries 0.4.0,
-  which accepts v15. The extension is published apart from the Python package,
-  so until a 0.4.0 `.vsix` is built and installed, the Code Graph panel shows
-  that error once the CLI has moved the graph to v15.
+- **The VS Code extension has to be updated as well.** 0.2.x and 0.3.0 answer
+  a v15 database with "Database was created with a newer version (schema v15).
+  Update the extension." 0.1.x, the build on the VS Code Marketplace, makes no
+  check, so it gives no warning. This repository now carries 0.4.0, which
+  accepts v15. The extension is published apart from the Python package, so
+  until 0.4.0 is installed, the Code Graph panel cannot be trusted once the CLI
+  has moved the graph to v15. `code-review-graph-vscode/README.md` lists which
+  extension goes with which CLI.
 - **Run `code-review-graph build` once.** `update` only parses files that
-  changed, so most fixes in this release reach a file only when it is parsed
-  again: the new file types (HTML, XSLT, Liquid, JSON, plain YAML, `.cjs` and
-  `.kts`), translation files losing their key nodes, `vendor/` folders that
-  hold source, workspace and npm alias imports, tsconfig `baseUrl` and
-  `extends`, `extra.import_context` on import edges, the call and test fixes
-  (#984, inherited methods, `tests_for` for Java, Ruby and PHP) and the
-  confidence tiers. Ruby files (v14 above), files with nested classes and C#
+  changed, so right after the upgrade it reports 0 files updated, and nothing
+  tells you that the new file types are still missing. Most fixes in this
+  release reach a file only when it is parsed again: the new file types (HTML,
+  XSLT, Liquid, JSON, plain YAML, `.cjs` and `.kts`), translation files losing
+  their key nodes, `vendor/` folders that hold source, workspace and npm alias
+  imports, tsconfig `baseUrl` and `extends`, `extra.import_context` on import
+  edges, the call and test fixes (#984, inherited methods, `tests_for` for
+  Java, Ruby and PHP) and the confidence tiers. Ruby files (v14 above), files with nested classes and C#
   files are the exception: the next `update` parses them again by itself. If
-  the graph has embeddings, run `code-review-graph embed` after that, because
-  renamed C# nodes leave their old vectors behind.
+  the graph has embeddings, run `code-review-graph embed` after the build: the
+  new nodes have no vectors yet, and renamed C# nodes leave their old vectors
+  behind.
 - **Upgrade the package, then run `code-review-graph install` again.** The
   hooks and instruction blocks an earlier release wrote do not update
   themselves. Install now also writes `post-checkout`, `post-merge` and
   `post-rewrite` git hooks; the edit hook for Claude Code, Qoder and CodeBuddy,
   and the Codex hooks, call the new `hook-update` and `hook-status` commands;
   and the instruction block has new search guidance. Upgrade first: an older
-  CLI has no `hook-update`, so the new edit hook would do nothing. Install and
-  uninstall still recognise everything 2.3.9 and earlier releases wrote.
+  CLI has no `hook-update`, so the new edit hook would do nothing. With the
+  new git hooks, each branch checkout, merge and `git pull` runs an `update`,
+  which can take a while on a large repository; `install --no-hooks` leaves out
+  every hook, these included. Install and uninstall still recognise everything
+  2.3.9 and earlier releases wrote.
 - **New settings are off by default.** Nothing changes unless you turn them on:
   `--enrich` or `CRG_ENABLE_ENRICHMENT=1` (needs the `enrichment` extra),
   `install --steering`, `install --gitignore`, `--follow-symlinks` or
@@ -927,6 +1100,25 @@ this section before you upgrade.
   `schema15`, so the first run after upgrading restores no graph cache and
   builds from scratch. Self-hosted runners can delete the old
   `code-review-graph-schema13-*` entries.
+- **Changes that can trip a script or a CI gate.**
+  - `fail-on-risk` now counts deleted code that is still used. Removing a
+    function that still has callers is scored like a change to it (click's
+    `echo`, with 20 callers, scores 0.65), so a pull request that only deletes
+    code can now reach the `high` (0.70) or `critical` (0.85) gate. Pinning the
+    Action to `@v2.3.9` does not avoid this, because the Action installs the
+    newest package (`docs/GITHUB_ACTION.md`, *Pinning*).
+  - `vendor/` is skipped only when the root has `composer.json`, `go.mod`,
+    `go.work`, `Gemfile`, `Rakefile`, `Cargo.toml` or a `*.gemspec`. Otherwise
+    it is now indexed; add `vendor/` to `.code-review-graphignore` to keep it
+    out.
+  - `build`, `update`, `postprocess`, `forget` and `embed` exit `75` when
+    another write holds the lock. Pass `--wait`, or treat 75 as "skipped".
+  - On `find_large_functions_tool`, `semantic_search_nodes_tool` and
+    `traverse_graph_tool`, `limit` and `token_budget` reject 0, negatives and
+    booleans. `refactor_tool(mode="rename")` answers `not_found` for part of a
+    name instead of guessing.
+  - Search ranks tests and JSON below code, and shows Liquid `Output` nodes
+    only with `kind="Output"`.
 
 ## [2.3.9] - 2026-09-18
 

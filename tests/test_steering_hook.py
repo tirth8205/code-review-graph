@@ -335,13 +335,19 @@ class TestHookNeverBlocksTheToolCall:
     def _shell(self, tmp_path: Path, script: str | None) -> subprocess.CompletedProcess:
         bin_dir = tmp_path / "bin"
         bin_dir.mkdir()
+        stub = bin_dir / "code-review-graph"
         if script is not None:
-            stub = bin_dir / "code-review-graph"
             stub.write_text(f"#!/bin/sh\ncat >/dev/null\n{script}\n", encoding="utf-8")
             stub.chmod(0o755)
-        env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}/usr/bin{os.pathsep}/bin"}
+        # The hook names the copy that ran install; here that is the stub.
+        quoted = skills._sh_single_quote(str(stub))
+        program = skills._HookProgram(f"[ -x {quoted} ]", quoted)
+        command = skills.generate_steering_hooks_config(program)["hooks"]["PreToolUse"][0][
+            "hooks"
+        ][0]["command"]
+        env = {**os.environ, "PATH": f"/usr/bin{os.pathsep}/bin"}
         return subprocess.run(
-            ["sh", "-c", STEERING_COMMAND],
+            ["sh", "-c", command],
             input='{"tool_name": "Grep"}', capture_output=True, text=True, env=env,
         )
 

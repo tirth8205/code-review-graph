@@ -261,7 +261,10 @@ which runs the local `action.yml` without write permissions and uploads the
 rendered report. The trusted
 [`pr-review-comment.yml`](../.github/workflows/pr-review-comment.yml) workflow
 validates that artifact and posts the sticky comment without checking out or
-executing PR-controlled code.
+executing PR-controlled code. If the pull request gained a commit while its
+analysis ran, it posts nothing and leaves a notice naming the analysed commit
+and the new head. The run still passes: the analysis of the new head posts
+the comment instead.
 
 ## Rendering script
 

@@ -33,6 +33,9 @@ from .parser import CodeParser, NodeInfo, _repo_relative_path, is_test_file, nor
 
 logger = logging.getLogger(__name__)
 
+# The summary's score line; ``format_brief`` finds it to add the scale.
+_OVERALL_RISK_LINE = "  - Overall risk score: {:.2f}"
+
 
 # Lifecycle and construction methods are exercised implicitly by every test
 # that touches their class, so listing them as test gaps is noise that
@@ -170,6 +173,64 @@ def parse_git_diff_ranges(
         return {}
 
     return _parse_unified_diff(result.stdout)
+
+
+#: Paths per ``git ls-files`` call, well under every platform's command limit.
+_LS_FILES_CHUNK = 200
+
+
+def _untracked_among(repo_root: str, rel_paths: list[str]) -> set[str]:
+    """Return the paths in *rel_paths* that Git does not track.
+
+    ``git diff`` never lists a file Git does not track, so a new file has no
+    changed lines however much of it is new. Asking ``ls-files`` about only
+    these paths is cheap. Any failure answers "none", which keeps a review
+    to the lines the diff gave.
+    """
+    if not rel_paths or (Path(repo_root) / ".svn").exists():
+        return set()
+    tracked: set[str] = set()
+    for start in range(0, len(rel_paths), _LS_FILES_CHUNK):
+        chunk = rel_paths[start:start + _LS_FILES_CHUNK]
+        try:
+            result = subprocess.run(
+                ["git", "--literal-pathspecs", "ls-files", "-z", "--", *chunk],
+                capture_output=True,
+                cwd=repo_root,
+                timeout=_GIT_TIMEOUT,
+                stdin=subprocess.DEVNULL,
+            )
+        except (OSError, subprocess.SubprocessError):
+            logger.debug("git ls-files failed while looking for new files", exc_info=True)
+            return set()
+        if result.returncode != 0:
+            return set()
+        tracked.update(os.fsdecode(path) for path in result.stdout.split(b"\0") if path)
+    return {path for path in rel_paths if path not in tracked}
+
+
+def _new_files_without_ranges(
+    repo_root: str,
+    changed_files: list[str],
+    changed_ranges: dict[str, list[tuple[int, int]]],
+) -> list[str]:
+    """The changed files Git does not track, which the diff cannot describe.
+
+    *changed_files* and the keys of *changed_ranges* are the graph's absolute
+    paths. Returns them in the same spelling.
+    """
+    deletions = getattr(changed_ranges, "deletions", {})
+    root = Path(repo_root)
+    by_rel: dict[str, str] = {}
+    for path in changed_files:
+        if path in changed_ranges or path in deletions:
+            continue
+        try:
+            by_rel[Path(path).relative_to(root).as_posix()] = path
+        except ValueError:
+            continue
+    untracked = _untracked_among(repo_root, list(by_rel))
+    return [by_rel[rel] for rel in by_rel if rel in untracked]
 
 
 def parse_svn_diff_ranges(
@@ -1547,6 +1608,17 @@ def analyze_changes(
         for fp in changed_files:
             changed_nodes.extend(store.get_nodes_by_file(fp))
 
+    if changed_ranges and repo_root is not None:
+        # A file Git does not track has no lines in the diff, so with other
+        # files' lines in hand a brand-new file used to drop out of the
+        # review. All of it is new, so all of it counts as changed.
+        seen_new = {node.qualified_name for node in changed_nodes}
+        for fp in _new_files_without_ranges(repo_root, changed_files, changed_ranges):
+            for node in store.get_nodes_by_file(fp):
+                if node.qualified_name not in seen_new:
+                    seen_new.add(node.qualified_name)
+                    changed_nodes.append(node)
+
     # RTL declarations are stored as Function nodes for compatibility but
     # are not callable/testable functions.
     changed_funcs = [
@@ -1714,7 +1786,7 @@ def analyze_changes(
         *_removed_summary_lines(deletion_review),
         f"  - {affected['total']} affected flow(s)",
         gap_line,
-        f"  - Overall risk score: {overall_risk:.2f}",
+        _OVERALL_RISK_LINE.format(overall_risk),
     ]
 
     # Dedup by bare name in the human summary. The underlying test_gaps list
@@ -1828,3 +1900,93 @@ def analyze_changes(
         "diff_ranges_unavailable": ranges_unavailable,
         "churn_status": churn_status,
     }
+
+
+# ---------------------------------------------------------------------------
+# 6. detect-changes --brief
+# ---------------------------------------------------------------------------
+
+#: How many review priorities ``detect-changes --brief`` names.
+BRIEF_PRIORITIES = 3
+
+
+def risk_label(score: float) -> str:
+    """Name a 0.00 - 1.00 risk score: high above 0.70, medium above 0.40."""
+    return "high" if score > 0.7 else "medium" if score > 0.4 else "low"
+
+
+def _short_name(qualified_name: str) -> str:
+    """The part of a qualified name after the file, for one line of text."""
+    return _sanitize_name(qualified_name.rsplit("::", 1)[-1])
+
+
+def _name_list(names: list[str], limit: int = 2) -> str:
+    """``a, b`` or ``a, b and 3 more``, with repeats dropped."""
+    unique = list(dict.fromkeys(name for name in names if name))
+    shown = ", ".join(unique[:limit])
+    extra = len(unique) - limit
+    return f"{shown} and {extra} more" if extra > 0 else shown
+
+
+def _brief_priority_line(
+    store: GraphStore, priority: dict[str, Any], repo_root: str | None,
+) -> str:
+    """One line: name, file:line, risk out of 1.00, callers, tests."""
+    name = _sanitize_name(str(priority.get("name") or priority.get("qualified_name", "")))
+    file_path = str(priority.get("file_path") or "")
+    if repo_root and file_path:
+        try:
+            file_path = Path(file_path).relative_to(Path(repo_root)).as_posix()
+        except ValueError:
+            pass
+    where = f"{file_path}:{priority['line_start']}" if priority.get("line_start") else file_path
+    score = float(priority.get("risk_score") or 0.0)
+    parts = [name, where, f"risk {score:.2f} ({risk_label(score)})"]
+
+    qualified_name = str(priority.get("qualified_name") or "")
+    callers: list[str] = []
+    tests: list[str] = []
+    if qualified_name:
+        found_tests = store.get_transitive_tests(
+            qualified_name, include_helper_routes=False,
+        )
+        tests = [_sanitize_name(str(test.get("name", ""))) for test in found_tests]
+        test_qns = {str(test.get("qualified_name", "")) for test in found_tests}
+        # A test that calls the symbol is named once, under "tested by".
+        callers = [
+            _short_name(edge.source_qualified)
+            for edge in store.get_edges_by_target(qualified_name)
+            if edge.kind == "CALLS" and edge.source_qualified not in test_qns
+        ]
+    parts.append(f"called by {_name_list(callers)}" if callers else "no callers found")
+    parts.append(f"tested by {_name_list(tests)}" if tests else "no tests found")
+    return "  ".join(parts)
+
+
+def format_brief(
+    store: GraphStore,
+    analysis: dict[str, Any],
+    repo_root: str | Path | None = None,
+    limit: int = BRIEF_PRIORITIES,
+) -> str:
+    """The text ``detect-changes --brief`` prints before the savings panel.
+
+    The summary counts what changed; the lines after it say where to look
+    first: the top *limit* review priorities, each with its file and line,
+    its risk out of 1.00, its callers and the tests that reach it.
+    """
+    summary = str(analysis.get("summary") or "No summary available.")
+    score = analysis.get("risk_score")
+    if isinstance(score, (int, float)):
+        overall = _OVERALL_RISK_LINE.format(score)
+        summary = summary.replace(overall, f"{overall} of 1.00 ({risk_label(score)})", 1)
+    priorities = [
+        p for p in analysis.get("review_priorities") or [] if isinstance(p, dict)
+    ][:limit]
+    if not priorities:
+        return summary
+    root = str(repo_root) if repo_root is not None else None
+    lines = [summary, "", "Review first (risk out of 1.00):"]
+    for index, priority in enumerate(priorities, 1):
+        lines.append(f"  {index}. {_brief_priority_line(store, priority, root)}")
+    return "\n".join(lines)

@@ -14,21 +14,23 @@ Visualise code dependencies, blast radius, and review context from your code gra
 - **Interactive Graph** -- Force-directed D3.js visualisation of your code dependencies
 - **Live Search** -- Fuzzy search across your entire code graph with instant results
 - **Compute Embeddings** -- Generate vector embeddings for semantic search
-- **Watch Mode** -- Runs `code-review-graph watch` for up to 60 seconds; for updates that keep going, run `code-review-graph watch` in a terminal
+- **Watch Mode** -- Runs `code-review-graph watch` to keep the graph up to date until you stop it
 - **Auto-Update** -- Graph rebuilds in the background when you save files
 
 ## Quick Start
 
 ### 1. Install the Extension
 
-Install **Code Review Graph** from the VS Code Marketplace.
+Install **Code Review Graph** from the VS Code Marketplace. Then check its
+version under Extensions: it must be new enough for your CLI (see
+[Versions](#versions)).
 
 ### 2. Install the Backend
 
 The extension requires the `code-review-graph` Python CLI to parse your codebase.
 
 ```bash
-pip install code-review-graph          # or: pipx install code-review-graph
+pip install "code-review-graph>=2.4.0"   # or: pipx install "code-review-graph>=2.4.0"
 ```
 
 Requires Python 3.10+.
@@ -36,8 +38,6 @@ Requires Python 3.10+.
 ### 3. Build Your Graph
 
 Open the Command Palette (`Ctrl+Shift+P`) and run **Code Graph: Build Graph**.
-
-The extension stops the build after 60 seconds. For a large repository, run `code-review-graph build` in a terminal instead.
 
 The graph database is stored locally at `.code-review-graph/graph.db` and updates automatically on file save.
 
@@ -57,7 +57,7 @@ The graph database is stored locally at `.code-review-graph/graph.db` and update
 | `Code Graph: Search` | Search the code graph |
 | `Code Graph: Show Graph` | Open the interactive graph visualisation |
 | `Code Graph: Compute Embeddings` | Generate vector embeddings for semantic search |
-| `Code Graph: Watch Mode` | Run `code-review-graph watch` (stops after 60 seconds) |
+| `Code Graph: Watch Mode` | Start `code-review-graph watch`; run it again to stop |
 
 ## Settings
 
@@ -69,6 +69,22 @@ The graph database is stored locally at `.code-review-graph/graph.db` and update
 | `codeReviewGraph.graph.maxNodes` | `500` | Max nodes in the graph visualisation (10--5000). |
 
 The graph follows your VS Code theme and shows every edge kind; turn kinds off in its Edges menu.
+
+## Versions
+
+The extension reads `.code-review-graph/graph.db` itself, so it has to know the
+graph's schema. Use the extension that goes with your CLI
+(`code-review-graph --version`):
+
+| Extension | CLI | Schema |
+|---|---|---|
+| 0.4.0 | 2.4.0 | 15 |
+| 0.3.0 | 2.3.9 | 13 |
+
+When the graph is newer than the extension, 0.2.x, 0.3.0 and later show
+"Database was created with a newer version (schema vN). Update the
+extension." 0.1.x makes no check, so it gives no warning: update it before you
+use it with CLI 2.4.0.
 
 ## Requirements
 

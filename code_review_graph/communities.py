@@ -860,7 +860,7 @@ def detect_communities(
     # Gather all nodes (exclude File nodes to focus on code entities)
     unique_nodes = store.get_all_nodes(exclude_files=True)
 
-    logger.info(
+    logger.debug(
         "Loaded %d unique nodes, %d edges",
         len(unique_nodes), len(all_edges),
     )
@@ -870,7 +870,10 @@ def detect_communities(
         results = _detect_leiden(unique_nodes, all_edges, min_size)
         detector = DETECTOR_LEIDEN
     else:
-        logger.info("igraph not available, using file-based community detection")
+        logger.info(
+            'Tip: pip install "code-review-graph[communities]" for finer communities '
+            "(grouping by file for now)."
+        )
         results = _detect_file_based(unique_nodes, all_edges, min_size)
         detector = DETECTOR_FILE
 

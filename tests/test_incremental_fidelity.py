@@ -319,20 +319,11 @@ def test_known_failures_only_names_real_edit_kinds():
 
 
 # ---------------------------------------------------------------------------
-# What the benchmark found. These document the defects at the level of the
-# defect rather than at the level of the whole-graph diff; they are xfail so
-# the pull request that fixes each one turns them green without editing them.
+# What the benchmark found. These pin each defect at the level of the defect
+# rather than at the level of the whole-graph diff, so a fixed one stays fixed.
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason=(
-        "flow_memberships.node_id has no foreign key or cascade, and "
-        "GraphStore._replace_file_data re-inserts a re-parsed file's nodes "
-        "with fresh ids, so every membership row for that file is orphaned"
-    ),
-    strict=False,
-)
 def test_incremental_update_leaves_no_dangling_flow_memberships(tmp_path):
     import sqlite3
 

@@ -32,7 +32,7 @@ Release highlights by version. The full changelog is in [CHANGELOG.md](../CHANGE
 - **Registry-scoped cross-repo search**: `cross_repo_search_tool` takes `repos`, a list of registry aliases or folder names, and reports names that matched nothing in `unknown` and ambiguous ones in `ambiguous`.
 - **Automatic `staging` → `testing` promotion**: `.github/workflows/auto-promote.yml` opens and merges the promotion pull request once a day when every required check is green. Promotion to `main` is never automatic. Removed after 2.3.9: a person now reviews and merges every promotion.
 
-## v2.3.8
+## v2.3.6 to v2.3.8
 - **Bounded MCP responses**: #849 found `get_affected_flows` returning ~247k tokens inside a workflow documented as "5 tool calls, 800 tokens total". A sweep of the other 29 tools found the same bug in ten more places: `list_communities` returned 206k tokens with default arguments, `get_community` 134k, `get_architecture_overview` 625k in standard mode. All are now capped under one contract: `total` (or a per-list `*_total`) reports the untruncated count, `truncated` marks a cut, and the summary says how many of how many are shown. Cap parameters reject values below 1 and reject booleans. `detail_level="minimal"` was added to the analysis and refactor tools. `tests/test_token_budget.py` pins the per-tool budget table so a removed cap fails CI. Four query tools (`get_impact_radius`, `find_large_functions`, `traverse_graph`, `semantic_search_nodes`) were still unbounded in the worst case (#888). After 2.3.9, `find_large_functions`, `traverse_graph` and `semantic_search_nodes` got hard ceilings and `CRG_MAX_IMPACT_NODES` reaches `get_impact_radius` (#895). See [COMMANDS.md](COMMANDS.md#result-bounds).
 - **Framework-aware PHP parsing**: traits, enums, object creation and base clauses are indexed. Composer PSR-4 resolution is longest-prefix, multi-directory, cached and bounded to the repository. Blade references ignore comments and escaped directives. Laravel Route and Eloquent edges require explicit framework, import or receiver evidence.
 - **Custom languages without forking**: a `.code-review-graph/languages.toml` file indexes any grammar shipped by tree-sitter-language-pack (extension map plus node-type lists, validated and capped). Built-in languages always win. See [CUSTOM_LANGUAGES.md](CUSTOM_LANGUAGES.md).
@@ -137,7 +137,7 @@ Release highlights by version. The full changelog is in [CHANGELOG.md](../CHANGE
 ## v1.5.3
 - **No git required**: `build`, `status`, `visualize` and `watch` work on any directory.
 - **File organisation**: generated files moved into `.code-review-graph/` (auto-created `.gitignore`, legacy migration).
-- **Visualisation density**: starts collapsed (File nodes only), search bar, clickable edge type toggles, scale-aware layout for large graphs.
+- **Visualisation density**: past 2,000 nodes the page starts collapsed (File nodes only); search bar, clickable edge type toggles, scale-aware layout for large graphs.
 
 ## v1.4.0
 - **`init` command**: automatic `.mcp.json` setup for Claude Code.

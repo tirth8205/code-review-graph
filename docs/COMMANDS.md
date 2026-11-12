@@ -1,32 +1,426 @@
 # All Available Commands
 
-## Skills and Slash Commands
+- [CLI commands](#cli-commands)
+  - [Exit codes](#exit-codes)
+  - [Notes](#notes)
+- [Standalone daemon CLI (`crg-daemon`)](#standalone-daemon-cli-crg-daemon)
+- [MCP tools](#mcp-tools)
+- [Result bounds](#result-bounds)
+- [MCP prompts](#mcp-prompts-5-workflow-templates)
+- [Skills and slash commands](#skills-and-slash-commands)
 
-The skills `build-graph`, `review-delta` and `review-pr` ship in the repository's `skills/` folder. `install --platform qoder` (or the default `--platform all`) copies them, with the four workflow skills below, to `.qoder/skills/`. Other clients do not get these three.
+## CLI Commands
 
-### `build-graph`
-Build or update the knowledge graph.
-- First run: full build
-- Later runs: incremental update (changed files only)
+Start with `code-review-graph install && code-review-graph build`, then
+`code-review-graph detect-changes --brief`. `code-review-graph` on its own
+prints every command in groups. Run `code-review-graph <command> --help` for the
+full option list. A mistyped command exits 2 and suggests the closest one:
 
-### `review-delta`
-Review changes since the last commit.
-- Changed files come from `git diff`
-- Blast radius is changed nodes plus 2-hop neighbours
-- Output is a structured review with guidance
+```
+code-review-graph: error: unknown command 'biuld'. Did you mean build? Run code-review-graph --help to see every command.
+```
 
-### `review-pr`
-Review a PR or branch diff.
-- Uses `main` (or `master`) as the base
-- Covers every commit in the PR
-- Output is a structured review with a risk assessment
+```bash
+# Setup
+code-review-graph --version         # Show the version (or -v)
+code-review-graph install           # Set up the AI coding tools found on this machine (alias: init)
+code-review-graph install --dry-run # Show each file's diff; write nothing
+code-review-graph install --gitignore  # Also add the files this run creates to .gitignore (off by default)
+code-review-graph install --platform codex  # Set up one tool, found here or not: Codex MCP, hooks, and global Skill
+code-review-graph install --no-hooks        # Skip hooks (also --no-skills, --no-instructions)
+code-review-graph install -y                # Answer yes to the question about instruction files
+code-review-graph install --steering        # Opt in: graph context beside Claude Code searches and reads
+code-review-graph install --no-steering     # Remove only that hook
+code-review-graph doctor                    # Check every copy, the MCP entries, the graph and the hooks (read-only)
+code-review-graph doctor --json             # The same report as one JSON object (--repo PATH for another repo)
+code-review-graph uninstall                 # Remove CRG configs, hooks, skills, and data
+code-review-graph uninstall --dry-run       # List what it would remove; change nothing
+code-review-graph uninstall --keep-data     # Remove integrations, keep graph databases
+code-review-graph uninstall --platform codex  # Unbind one platform (keeps graph data and others)
+code-review-graph uninstall --all-repos        # Also clean every repository in the registry
+code-review-graph uninstall --keep-user-configs  # Clean repositories only; leave files in your home folder
+code-review-graph uninstall -y                 # Apply without asking
 
-`install` also writes four workflow skills, `explore-codebase`, `review-changes`,
-`debug-issue` and `refactor-safely`, to `.claude/skills/` for Claude Code,
-`.gemini/skills/` for Gemini CLI, `.codebuddy/skills/` for CodeBuddy and
-`~/.hermes/skills/code-review-graph/` (or `$HERMES_HOME/skills/code-review-graph/`)
-for Hermes Agent. Qoder gets all seven skills in `.qoder/skills/`, and Codex gets
-one global skill. `--no-skills` skips them all.
+# Build and update
+code-review-graph build                        # Full build
+code-review-graph build --data-dir /mnt/graphs/myrepo  # Keep graph.db outside the repo (or set CRG_DATA_DIR); also on update,
+                                                #   postprocess, embed, watch, status, context-history, forget, visualize, wiki, dead-code
+code-review-graph build --skip-flows           # Parse + signatures + FTS only
+code-review-graph build --skip-postprocess     # Raw parse only
+code-review-graph build -q                     # No output (-q/--quiet also on update and status)
+code-review-graph build --enrich               # Also resolve Python calls with Jedi (needs [enrichment]);
+                                                #   also on update, or CRG_ENABLE_ENRICHMENT=1. Off by default
+code-review-graph update                       # Incremental update from the last-built commit
+code-review-graph update --base origin/main    # Custom base ref
+code-review-graph update --brief               # Update graph, then show the risk panel
+code-review-graph update --brief --verify      # ...and cross-check against tiktoken
+code-review-graph update --wait                # Wait for a running build to finish, then update
+code-review-graph build --follow-symlinks      # Also follow symlinked folders, inside or outside the repo
+                                                #   (off by default; also on update and watch, or CRG_FOLLOW_SYMLINKS=1)
+code-review-graph postprocess                  # Re-run flows, communities, FTS
+code-review-graph postprocess --no-flows       # Skip a step: --no-flows, --no-communities, --no-fts
+code-review-graph forget PATH [PATH ...]       # Drop parsed files from the graph (no full rebuild)
+code-review-graph forget src/legacy --dry-run  # Preview which files would be forgotten
+code-review-graph forget PATH --wait           # Wait for a running write to finish, then forget
+code-review-graph embed --provider local       # Compute vector embeddings for semantic search
+code-review-graph embed --wait                 # Wait for a running write to finish, then embed
+code-review-graph update --embedding-provider local --embedding-model all-MiniLM-L6-v2
+                                                # Refresh an existing embedding index (default: off)
+
+# Monitor and inspect
+code-review-graph status                       # Graph statistics (no graph: exit 1, no DB created)
+code-review-graph status --json                # One JSON object
+code-review-graph context-history              # Per-day trend of the opt-in context savings log
+code-review-graph context-history --by tool --days 7  # Per tool, last 7 UTC days (--json for JSON)
+code-review-graph watch                        # Auto-update on file changes (needs an existing graph)
+code-review-graph visualize                    # Interactive HTML graph (needs an existing graph)
+code-review-graph visualize --format graphml   # Formats: html, json, graphml, cypher, obsidian, svg
+                                                #   Written to the data folder (.code-review-graph/ by default) as
+                                                #   graph.<ext>, or obsidian/. svg needs matplotlib:
+                                                #   pip install "code-review-graph[eval]" (without it: exit 1)
+code-review-graph visualize --mode community   # Modes: auto (default), full, community, file
+code-review-graph visualize --serve            # Serve graph.html on localhost:8765
+
+# Neighbourhood view: draw a symbol's surroundings instead of the repository.
+# The whole-repo page collapses to one bubble per community past 3000 nodes or
+# 9000 edges; a seeded page ships only the nodes within --depth hops.
+code-review-graph visualize --seed-symbol login             # depth 2 by default
+code-review-graph visualize --seed-symbol login --depth 3   # more context
+code-review-graph visualize --seed-file src/auth.py         # a file and its symbols
+code-review-graph visualize --seed-changed                  # the files in this review
+code-review-graph visualize --seed-changed --seed-changed-base origin/main
+code-review-graph visualize --seed-flow "login request"     # an execution flow
+code-review-graph visualize --path-from login --path-to audit_log
+code-review-graph visualize --seed-symbol login --render-depth 0  # expand on click
+code-review-graph visualize --seed-symbol login --max-nodes 300  # hard cap
+code-review-graph visualize --seed-symbol login --sidecar   # payload in graph.data.js
+
+# Analysis
+code-review-graph detect-changes               # Risk-scored change analysis (read-only): the last commit
+                                                #   (HEAD~1) plus uncommitted and new files
+code-review-graph detect-changes --base HEAD~3 # Custom base revision (one Git does not know: exit 1)
+code-review-graph detect-changes --base origin/main # Branch refs use their merge base with HEAD
+code-review-graph detect-changes --brief       # Summary, the top three things to review, and the token-savings panel
+code-review-graph detect-changes --brief --verify  # ...and cross-check against tiktoken
+code-review-graph detect-changes --churn       # Add opt-in change-frequency risk (CRG_CHURN_WINDOW_DAYS, default 90)
+                                                #   The MCP tools (detect_changes_tool, get_minimal_context_tool) always include it.
+                                                #   Cached per commit; CRG_CHURN_TIMEOUT (5s) and CRG_CHURN_MAX_COMMITS
+                                                #   (2000) bound the git log. A repository that cannot answer in time is
+                                                #   recorded as unavailable for the life of the process, so the timeout is
+                                                #   paid once, and the response says so: `churn_status` is "unavailable"
+                                                #   and the summary carries a "Degraded" line.
+code-review-graph detect-changes --details all # Add bounded graph context under "details" (JSON only):
+                                                #   risk, communities, hubs, coupling, impact, gaps, graph.
+                                                #   Off by default; the GitHub Action's `details` input uses it.
+code-review-graph dead-code                    # Functions/classes with no callers or test references
+code-review-graph dead-code --kind Function --file-pattern src/ --json
+code-review-graph dead-code --limit 20         # 0, the default, means no limit
+
+# Read-only graph queries (CLI mirrors of the MCP tools)
+code-review-graph query callers_of <target>    # Takes every query_graph_tool pattern: callers_of,
+                                                #   references_to, callees_of, imports_of, importers_of,
+                                                #   children_of, tests_for, inheritors_of, triggers_of,
+                                                #   triggered_by, publishers_of, listeners_of, advises,
+                                                #   advised_by, handlers_of, endpoints_for, consumers_of,
+                                                #   file_summary, path_to
+code-review-graph query path_to <a> --to <b>  # How a reaches b, hop by hop
+code-review-graph impact [--files F ...] [--depth N] [--max-results N] [--base REF] [--detail-level compact] [--max-files N]
+code-review-graph search <query> [--kind Function] [--limit N]
+code-review-graph flows [--sort criticality] [--limit N] [--kind KIND]
+code-review-graph flow --id ID | --name NAME [--source]
+code-review-graph communities [--sort size] [--min-size N]
+code-review-graph community --id ID | --name NAME [--members]
+code-review-graph architecture [--detail-level minimal|standard]
+code-review-graph large-functions [--min-lines N] [--kind Function] [--path SUBSTR] [--limit N]
+code-review-graph refactor rename --old-name A --new-name B
+code-review-graph refactor dead_code [--kind Function] [--path SUBSTR]
+code-review-graph refactor suggest
+
+# Wiki
+code-review-graph wiki                         # Markdown wiki in .code-review-graph/wiki/ (needs an existing graph)
+code-review-graph wiki --force                 # Rewrite every page, even unchanged ones
+
+# Multi-repo
+code-review-graph register <path> [--alias name]  # Register a repository
+code-review-graph unregister <path_or_alias>       # Remove from registry
+code-review-graph repos                            # List registered repositories
+
+# Daemon (multi-repo watcher), installed with the package
+code-review-graph daemon start [--foreground]       # Start the watch daemon
+code-review-graph daemon stop                       # Stop the daemon
+code-review-graph daemon restart [--foreground]     # Restart the daemon
+code-review-graph daemon status                     # Daemon status and repos
+code-review-graph daemon logs [--repo ALIAS] [--follow] [--lines N]  # Daemon or per-repo logs (default 50 lines)
+code-review-graph daemon add <path> [--alias NAME]  # Add a repo to the daemon config
+code-review-graph daemon remove <path_or_alias>     # Remove a repo from the daemon config
+
+# Evaluation
+code-review-graph eval --all                   # Run every benchmark on every repo config (bare `eval` runs nothing)
+code-review-graph eval --benchmark token_efficiency --repo flask  # Pick benchmarks and repos (comma-separated); --repo takes config names, not paths
+code-review-graph eval --report                # Write evaluate/reports/summary.md from evaluate/results and print README tables
+                                                #   (only each repo's newest run of each benchmark)
+                                                #   (--output-dir sets the results folder that runs write and --report reads)
+code-review-graph eval --benchmark search_quality --embed [--embed-provider local|openai|google|minimax|voyage] [--embed-model M]  # --embed builds vectors; agent_baseline,
+                                                #   search_quality and multi_hop_retrieval need it
+
+# Hook entry points (the hooks install writes run these; they read the hook event JSON on stdin).
+# --help and the command list leave them out, but they still run.
+code-review-graph hook-update                  # Update the graph of the repo that holds the edited file
+code-review-graph hook-update --existing-only  # The same, but never build a new graph (the Codex hook)
+code-review-graph hook-status                  # Graph status for the event's cwd
+code-review-graph enrich                       # Graph context for a search or read (the --steering hook)
+
+# Server
+code-review-graph serve                        # Start MCP server (stdio)
+code-review-graph serve --auto-watch           # Also watch for file changes while the server runs
+code-review-graph serve --http                 # Streamable HTTP on 127.0.0.1:5555 (--host, --port)
+code-review-graph serve --http --multi-repo    # One HTTP server for every registered repository
+code-review-graph serve --tools query_graph_tool,detect_changes_tool  # Tool allowlist (or CRG_TOOLS)
+code-review-graph serve --multi-worktree --repo /path/to/repo  # One stdio session, one child per linked worktree
+code-review-graph mcp                          # Alias for serve; accepts --repo, --auto-watch and --multi-worktree
+```
+
+`--multi-repo` lets one `serve --http` process serve several repositories, so
+the embedding model is loaded once. It serves the repositories in the registry
+(`code-review-graph register <path>`), read again on every call, so `register`
+and `unregister` take effect without a restart. Every tool call must pass
+`repo_root`, the absolute path of a registered repository; `list_repos_tool`
+lists them. A call with no `repo_root`, a relative path or a path that is not
+registered is refused with a message saying so. It never falls back to `--repo`
+or the server's working directory. The usual project-root check still applies.
+`--multi-repo` needs `--http` and cannot be combined with `--repo`,
+`--auto-watch`, `--multi-worktree` or `CRG_DATA_DIR`. To keep several graphs
+current, run the daemon (`code-review-graph daemon`). Without `--multi-repo`,
+`serve --http` keeps the old fallback.
+
+`--multi-worktree` is an opt-in stdio mode for parallel reviews. The server
+starts one regular `serve --repo <root>` child lazily for the primary checkout
+and each linked worktree requested through `repo_root`. Only paths reported by
+`git worktree list` for the same Git common directory are accepted. Each child
+uses its worktree's normal `.code-review-graph/graph.db` or its per-repository
+Registry `data_dir`, so graphs from different commits cannot be mixed.
+
+The mode rejects a process-wide `CRG_DATA_DIR`, because that would force all
+worktrees into one database. Configure external storage with a separate,
+non-overlapping Registry `data_dir` entry per worktree instead; the router
+rejects two worktrees that resolve to the same graph database. `--multi-worktree`
+is stdio only and cannot be combined with `--http`.
+
+### Exit codes
+
+| Code | Meaning | Examples |
+|------|---------|----------|
+| `0` | Done, including when there was nothing to do. | `No changes detected.`; `uninstall` answered no (`Aborted.`) |
+| `1` | It failed, and one `Error:` line (or a line saying what is missing) on stderr says why. | no graph yet; an unusable `graph.db`; git missing or too slow; a `--base` Git does not know; `--repo` that is not a project root; `doctor` found a problem |
+| `2` | The command line is wrong, so nothing ran. | an unknown command (with "Did you mean ...?"); an unknown flag; flags that cannot go together, such as `detect-changes --details all --brief`; a `visualize` seed it cannot find |
+| `75` | Another write to this repository's graph is running, so this one did nothing. | `build`, `update`, `postprocess`, `forget` or `embed` without `--wait` |
+| `130` | Stopped with Ctrl-C. | Ctrl-C at `install`'s question; nothing was written |
+
+A hook or CI job can tell these apart without reading the message. `75` is
+"skipped", not "failed": the running write covers the same work.
+
+### Notes
+
+- `update` and `detect-changes` need a Git repository or an SVN working copy.
+  In SVN, `--base` takes a revision or range such as `r100:HEAD`; with no
+  revision, both commands use the working-copy edits from `svn status`. In Git,
+  `update` with no `--base` diffs from the commit the graph was last built at; when that commit is
+  missing (fresh graph, rewritten history, shallow clone) it falls back to a
+  full rebuild.
+- `update` prints a `Warning:` line on stderr naming files that failed to
+  parse. Those files keep their previous graph rows.
+- `detect-changes --brief` is read-only against the existing graph and takes
+  about a second. `update --brief` re-parses changed files first, then prints
+  the same summary and panel. Use `update --brief` after a rebase or a large
+  change set, or when the graph may be stale.
+- `detect-changes --brief` scores risk from 0.00 to 1.00 (high above 0.70,
+  medium above 0.40) and lists up to three things to review first, each with
+  its file and line, its callers and its tests:
+
+  ```
+    - Overall risk score: 0.80 of 1.00 (high)
+
+  Review first (risk out of 1.00):
+    1. check_password  app/auth.py:1  risk 0.80 (high)  called by login  no tests found
+    2. login  app/auth.py:7  risk 0.80 (high)  called by handle_login  tested by test_login_ok
+  ```
+- With no `--base`, `detect-changes` diffs against `HEAD~1`, so it reviews the
+  last commit plus uncommitted and new files. A new file Git does not track is
+  reviewed whole. In a repository with one commit, `HEAD~1` does not exist, so
+  it prints this on stderr and reviews uncommitted and new files:
+
+  ```
+  Note: this repository has one commit; reviewing uncommitted and new files instead.
+  ```
+
+  With no commits at all, the note says `this repository has no commits yet`.
+
+  In a shallow clone, as many CI jobs make, the note says the clone is shallow
+  and that `git fetch --deepen=1` brings the last commit back.
+- A `--base` Git does not know exits 1 instead of reviewing the working tree.
+  The MCP review tools answer `status: "error"` with the same words:
+
+  ```
+  Error: base 'nope' is not a known revision. Check it with `git branch -a`, or run `git fetch origin <branch>` in a shallow clone.
+  ```
+- `status`, `detect-changes`, `visualize`, `wiki`, `watch`, `forget`,
+  `dead-code` and the read-only graph queries (`query` to `refactor` above)
+  exit 1 when no graph exists and do not create one. `status`,
+  `detect-changes`, `visualize`, `wiki`, `watch`, `forget` and `dead-code`
+  still move a legacy top-level `.code-review-graph.db` into
+  `.code-review-graph/graph.db` before running.
+- One write runs per repository at a time. `build`, `update`, `postprocess`,
+  `forget` and `embed` take a lock on `write.lock` next to `graph.db`; if
+  another one holds it, they say so, do nothing and exit 75. Pass `--wait` to
+  wait for it instead. `watch` takes the lock for each write and keeps its
+  changes to retry if the lock is held.
+- `install` with no `--platform` (the same as `--platform all`) writes MCP
+  entries, skills, hooks and instruction files only for the tools it finds on
+  this machine, then names the rest:
+
+  ```
+  Not found here, so not set up: cursor, windsurf, zed, ...
+  Add one anyway with: code-review-graph install --platform NAME
+  ```
+
+  `install --platform NAME` sets that tool up whether it is found or not.
+- `install` lists the files it will change and asks about the instruction
+  files (`CLAUDE.md`, `AGENTS.md` and the rest) before it writes anything;
+  `-y` answers yes. Ctrl-C at the question stops with nothing written (exit
+  130). With no terminal, as when an AI agent runs it, it takes the default
+  and says so; `uninstall` with no terminal takes no:
+
+  ```
+  No terminal: taking the default (yes). Use --no-instructions to skip them.
+  No terminal: taking the default (no). Use --yes to go ahead.
+  ```
+- The MCP entry and every hook run the copy of code-review-graph that ran
+  `install`: `poetry run code-review-graph` or `uv run code-review-graph`
+  inside a Poetry or uv project, `uvx code-review-graph` only when `install`
+  itself ran from `uvx` or a `uv tool` install, and otherwise
+  `<python> -m code_review_graph`, with the full path of the Python that ran
+  `install`. Hooks name that Python (or `uvx`) and fall back to
+  `code-review-graph` on PATH when it is gone, as on a teammate's machine.
+  Run `install` again after you move or upgrade the package.
+- `install` keeps a record of the files it writes inside the repository in
+  `.code-review-graph/install-manifest.json`, also with `--data-dir` or
+  `CRG_DATA_DIR`. `build` and every review leave out the listed files while
+  Git does not track them, so your first review shows your change, not
+  `.mcp.json` and hook scripts. Once you commit one, it counts like any other
+  file. `uninstall` takes each file it removes or edits off the record, and
+  deletes the record when it is empty. A listed file Git does not track that
+  holds nothing once our entries are gone, such as `{"mcpServers": {}}`, is
+  removed with the empty folders `install` made, not left behind.
+- `doctor` changes nothing. It checks every `code-review-graph` on PATH and its
+  version, the version each MCP entry in this repository's config files runs
+  (read from a `uvx` pin or `uv tool list`, never by starting `uvx`), the
+  graph's schema, whether it was built at HEAD and whether the last build
+  finished, and the git and editor hooks and the copy each one runs. Each
+  failed check has a `Fix:` line. It ends with `All good.` (exit 0) or a count
+  such as `1 problem found.` (exit 1), so it also fails when there is no graph
+  yet.
+  See [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
+- `build` ends with a next step. A build that finds no files prints a warning
+  on stderr instead:
+
+  ```
+  Next: code-review-graph detect-changes --brief, or ask your assistant "Review my changes".
+  Warning: no source files found under <root>. Is this the project root?
+  ```
+
+  A new graph logs one line, `Created graph database (schema v15).`, not
+  every migration step. Upgrading an older graph logs each step, and one
+  coming from below schema 15 then logs one line asking for one `build`.
+- `visualize` without a seed exports the whole repository, and falls back to
+  community (or file) bubbles once the rendered graph passes 3000 nodes or
+  9000 edges. With `--seed-symbol`, `--seed-file`, `--seed-changed`,
+  `--seed-flow` or `--path-from/--path-to` it exports a neighbourhood instead:
+  the nodes within `--depth` hops of the seed and the edges among them, with
+  everything else left out of the payload rather than drawn dimmed. A seeded
+  page always uses the full renderer and never aggregates.
+- A hop is any edge other than `CONTAINS`, such as `CALLS`, `IMPORTS_FROM`,
+  `INHERITS`, `REFERENCES` or `TESTED_BY`. `CONTAINS` is structural and is not a hop, so a
+  depth-2 neighbourhood of one function does not swallow its whole module; the
+  containing `File` nodes are still shipped so clustering and collapse work.
+- `--render-depth` (default 1) is how many hops are drawn on open. Clicking a
+  node on the edge of what is drawn reveals its next ring, `+1 hop` reveals a
+  whole ring, and both read from the payload already in the page.
+- `--path-from A --path-to B` highlights the shortest path through `CALLS`,
+  `IMPORTS_FROM` and `INHERITS`, following edge direction where one exists and
+  falling back to an undirected route otherwise. The page says which it used.
+- The default output is still a single self-contained `graph.html` you can
+  email. `--sidecar` moves the payload into `graph.data.js` next to it, which
+  is only worth it for a large neighbourhood.
+- `--max-nodes` (default 1500) is a hard cap on the nodes in the payload, not
+  a hint. The outermost hop goes first; once the outer hops are gone the seed
+  set itself is trimmed, best-connected first by whole-graph degree, ties
+  broken by name so two runs of the same command agree. A `--seed-changed`
+  run over a large review is exactly the case where the seed set is the large
+  thing, so the command prints how many seed nodes it dropped and the page
+  says so too. The nodes on a `--path-from/--path-to` answer are placed
+  first and are never dropped; a `--max-nodes` below the path length is
+  refused rather than half-answered.
+- Flag combinations that cannot mean anything are refused, not ignored:
+  `--seed-changed-base` without `--seed-changed`; `--depth`, `--render-depth`
+  or `--max-nodes` without a seed; any seed or tuning flag with a
+  non-`html` `--format`; `--sidecar` with a non-`html` `--format`;
+  `--mode community` or `--mode file` with a seed (they aggregate, which is
+  the opposite of a neighbourhood); and a `--render-depth` above `--depth`.
+- `install` (with `--platform all`, the default, or `claude-code`, `codex` or
+  `qoder`) appends a Git `pre-commit` hook that runs `update --quiet` and then
+  `detect-changes --brief` before each commit, so a commit shows only the risk
+  summary. The hook skips linked worktrees unless
+  `CRG_HOOK_WORKTREES=1` is set, so a worktree does not build a second graph
+  for another branch.
+- `install` also appends `post-checkout`, `post-merge` and `post-rewrite` Git
+  hooks that run `update --quiet` after a branch switch, a merge, a rebase and
+  `commit --amend`, with the same worktree rule. An existing hook written in a
+  language other than shell is left alone, `--no-hooks` skips all four, and
+  `uninstall` removes them.
+- For an empty or incomplete graph, run `code-review-graph build`. See
+  docs/TROUBLESHOOTING.md, "Empty or incomplete graph".
+- `context-history` reads a log that is off by default. Set
+  `CRG_CONTEXT_HISTORY=1` where the MCP server or the CLI runs to turn it on.
+  See [USAGE.md](USAGE.md#context-history).
+
+## Standalone Daemon CLI (`crg-daemon`)
+
+`crg-daemon` is installed with `code-review-graph` and mirrors the
+`code-review-graph daemon` subcommands:
+
+```bash
+crg-daemon start [--foreground]       # Start the multi-repo watch daemon
+crg-daemon stop                       # Stop the daemon and all watcher processes
+crg-daemon restart [--foreground]     # Restart (stop + start)
+crg-daemon status                     # Daemon status, repos, and process liveness
+crg-daemon logs [--repo ALIAS] [-f] [-n N]  # Tail daemon or per-repo log files
+crg-daemon add <path> [--alias NAME]  # Add a repository to watch.toml
+crg-daemon remove <path_or_alias>     # Remove a repository from watch.toml
+```
+
+### Configuration
+
+The daemon reads `~/.code-review-graph/watch.toml` (or `$CRG_HOME/watch.toml`):
+
+```toml
+[daemon]
+session_name = "crg-watch"   # logical daemon name
+log_dir = "/home/user/.code-review-graph/logs"   # absolute path; ~ is not expanded (default: ~/.code-review-graph/logs, or $CRG_HOME/logs)
+poll_interval = 2            # seconds between config file polls
+
+[[repos]]
+path = "/home/user/project-a"
+alias = "project-a"
+
+[[repos]]
+path = "/home/user/project-b"
+alias = "project-b"
+```
+
+The daemon spawns one `code-review-graph watch` child process per repo with
+`subprocess.Popen`. It polls the config file and starts or stops children as
+repos are added or removed. A health check every 30 seconds restarts dead
+watchers. No tmux or screen is needed.
 
 ## MCP Tools
 
@@ -85,6 +479,15 @@ changed_files: list[str] | None      # Auto-detected from VCS when omitted
 repo_root: str | None
 base: str = "HEAD~1"
 ```
+Answers `status: "not_ready"` with `reason` `missing_graph`, `empty_graph` or
+`stale_graph`, and suggests `build_or_update_graph_tool`. `stale_graph` means
+the graph was built at another commit and differs from it. A graph the
+pre-commit hook updated just before a commit counts as current: when every file
+changed since the graph's commit has the same content in the graph, nothing is
+stale.
+
+Every `next_tool_suggestions` list, here and in the other tools, names tools as
+the server registers them, ending in `_tool`.
 
 #### `get_impact_radius_tool`
 ```
@@ -540,297 +943,31 @@ PR readiness check with risk scoring, test gaps and dead code detection.
 base: str = "HEAD~1"
 ```
 
-## CLI Commands
+## Skills and Slash Commands
 
-Run `code-review-graph <command> --help` for the full option list.
+The skills `build-graph`, `review-delta` and `review-pr` ship in the repository's `skills/` folder. `install --platform qoder` (or the default `--platform all`, when Qoder is found on this machine) copies them, with the four workflow skills below, to `.qoder/skills/`. Other clients do not get these three.
 
-```bash
-# Setup
-code-review-graph --version         # Show the version (or -v)
-code-review-graph install           # Configure detected AI coding platforms (alias: init)
-code-review-graph install --dry-run # Show each file's diff; write nothing
-code-review-graph install --gitignore  # Also add the files this run creates to .gitignore (off by default)
-code-review-graph install --platform codex  # Configure Codex MCP, hooks, and global Skill
-code-review-graph install --steering        # Opt in: graph context beside Claude Code searches and reads
-code-review-graph install --no-steering     # Remove only that hook
-code-review-graph uninstall                 # Remove CRG configs, hooks, skills, and data
-code-review-graph uninstall --dry-run       # List what it would remove; change nothing
-code-review-graph uninstall --keep-data     # Remove integrations, keep graph databases
-code-review-graph uninstall --platform codex  # Unbind one platform (keeps graph data and others)
-code-review-graph uninstall --all-repos        # Also clean every repository in the registry
-code-review-graph uninstall --keep-user-configs  # Clean repositories only; leave files in your home folder
-code-review-graph uninstall -y                 # Apply without asking
+### `build-graph`
+Build or update the knowledge graph.
+- First run: full build
+- Later runs: incremental update (changed files only)
 
-# Build and update
-code-review-graph build                        # Full build
-code-review-graph build --data-dir /mnt/graphs/myrepo  # Keep graph.db outside the repo (or set CRG_DATA_DIR); also on update,
-                                                #   postprocess, embed, watch, status, context-history, forget, visualize, wiki, dead-code
-code-review-graph build --skip-flows           # Parse + signatures + FTS only
-code-review-graph build --skip-postprocess     # Raw parse only
-code-review-graph build -q                     # No output (-q/--quiet also on update and status)
-code-review-graph build --enrich               # Also resolve Python calls with Jedi (needs [enrichment]);
-                                                #   also on update, or CRG_ENABLE_ENRICHMENT=1. Off by default
-code-review-graph update                       # Incremental update from the last-built commit
-code-review-graph update --base origin/main    # Custom base ref
-code-review-graph update --brief               # Update graph, then show the risk panel
-code-review-graph update --brief --verify      # ...and cross-check against tiktoken
-code-review-graph update --wait                # Wait for a running build to finish, then update
-code-review-graph build --follow-symlinks      # Also follow symlinked folders, inside or outside the repo
-                                                #   (off by default; also on update and watch, or CRG_FOLLOW_SYMLINKS=1)
-code-review-graph postprocess                  # Re-run flows, communities, FTS
-code-review-graph postprocess --no-flows       # Skip a step: --no-flows, --no-communities, --no-fts
-code-review-graph forget PATH [PATH ...]       # Drop parsed files from the graph (no full rebuild)
-code-review-graph forget src/legacy --dry-run  # Preview which files would be forgotten
-code-review-graph forget PATH --wait           # Wait for a running write to finish, then forget
-code-review-graph embed --provider local       # Compute vector embeddings for semantic search
-code-review-graph embed --wait                 # Wait for a running write to finish, then embed
-code-review-graph update --embedding-provider local --embedding-model all-MiniLM-L6-v2
-                                                # Refresh an existing embedding index (default: off)
+### `review-delta`
+Review the last commit plus uncommitted and new files.
+- Changed files come from `git diff` against `HEAD~1`
+- Blast radius is changed nodes plus 2-hop neighbours
+- Output is a structured review with guidance
 
-# Monitor and inspect
-code-review-graph status                       # Graph statistics (no graph: exit 1, no DB created)
-code-review-graph status --json                # One JSON object
-code-review-graph context-history              # Per-day trend of the opt-in context savings log
-code-review-graph context-history --by tool --days 7  # Per tool, last 7 UTC days (--json for JSON)
-code-review-graph watch                        # Auto-update on file changes (needs an existing graph)
-code-review-graph visualize                    # Interactive HTML graph (needs an existing graph)
-code-review-graph visualize --format graphml   # Formats: html, json, graphml, cypher, obsidian, svg
-                                                #   Written to the data folder (.code-review-graph/ by default) as
-                                                #   graph.<ext>, or obsidian/. svg needs matplotlib:
-                                                #   pip install "code-review-graph[eval]" (without it: exit 1)
-code-review-graph visualize --mode community   # Modes: auto (default), full, community, file
-code-review-graph visualize --serve            # Serve graph.html on localhost:8765
+### `review-pr`
+Review a PR or branch diff.
+- Uses `main` (or `master`) as the base
+- Covers every commit in the PR
+- Output is a structured review with a risk assessment
 
-# Neighbourhood view: draw a symbol's surroundings instead of the repository.
-# The whole-repo page collapses to one bubble per community past 3000 nodes or
-# 9000 edges; a seeded page ships only the nodes within --depth hops.
-code-review-graph visualize --seed-symbol login             # depth 2 by default
-code-review-graph visualize --seed-symbol login --depth 3   # more context
-code-review-graph visualize --seed-file src/auth.py         # a file and its symbols
-code-review-graph visualize --seed-changed                  # the files in this review
-code-review-graph visualize --seed-changed --seed-changed-base origin/main
-code-review-graph visualize --seed-flow "login request"     # an execution flow
-code-review-graph visualize --path-from login --path-to audit_log
-code-review-graph visualize --seed-symbol login --render-depth 0  # expand on click
-code-review-graph visualize --seed-symbol login --max-nodes 300  # hard cap
-code-review-graph visualize --seed-symbol login --sidecar   # payload in graph.data.js
-
-# Analysis
-code-review-graph detect-changes               # Risk-scored change analysis (read-only)
-code-review-graph detect-changes --base HEAD~3 # Custom base revision
-code-review-graph detect-changes --base origin/main # Branch refs use their merge base with HEAD
-code-review-graph detect-changes --brief       # Compact panel with token-savings estimate
-code-review-graph detect-changes --brief --verify  # ...and cross-check against tiktoken
-code-review-graph detect-changes --churn       # Add opt-in change-frequency risk (CRG_CHURN_WINDOW_DAYS, default 90)
-                                                #   The MCP tools (detect_changes, get_minimal_context) always include it.
-                                                #   Cached per commit; CRG_CHURN_TIMEOUT (5s) and CRG_CHURN_MAX_COMMITS
-                                                #   (2000) bound the git log. A repository that cannot answer in time is
-                                                #   recorded as unavailable for the life of the process, so the timeout is
-                                                #   paid once, and the response says so: `churn_status` is "unavailable"
-                                                #   and the summary carries a "Degraded" line.
-code-review-graph detect-changes --details all # Add bounded graph context under "details" (JSON only):
-                                                #   risk, communities, hubs, coupling, impact, gaps, graph.
-                                                #   Off by default; the GitHub Action's `details` input uses it.
-code-review-graph dead-code                    # Functions/classes with no callers or test references
-code-review-graph dead-code --kind Function --file-pattern src/ --json
-code-review-graph dead-code --limit 20         # 0, the default, means no limit
-
-# Read-only graph queries (CLI mirrors of the MCP tools)
-code-review-graph query callers_of <target>    # Patterns: callers_of, callees_of, imports_of, importers_of,
-                                                #   children_of, tests_for, inheritors_of, file_summary
-code-review-graph query path_to <a> --to <b>  # How a reaches b, hop by hop
-code-review-graph impact [--files F ...] [--depth N] [--max-results N] [--base REF] [--detail-level compact] [--max-files N]
-code-review-graph search <query> [--kind Function] [--limit N]
-code-review-graph flows [--sort criticality] [--limit N] [--kind KIND]
-code-review-graph flow --id ID | --name NAME [--source]
-code-review-graph communities [--sort size] [--min-size N]
-code-review-graph community --id ID | --name NAME [--members]
-code-review-graph architecture [--detail-level minimal|standard]
-code-review-graph large-functions [--min-lines N] [--kind Function] [--path SUBSTR] [--limit N]
-code-review-graph refactor rename --old-name A --new-name B
-code-review-graph refactor dead_code [--kind Function] [--path SUBSTR]
-code-review-graph refactor suggest
-
-# Wiki
-code-review-graph wiki                         # Markdown wiki in .code-review-graph/wiki/ (needs an existing graph)
-code-review-graph wiki --force                 # Rewrite every page, even unchanged ones
-
-# Multi-repo
-code-review-graph register <path> [--alias name]  # Register a repository
-code-review-graph unregister <path_or_alias>       # Remove from registry
-code-review-graph repos                            # List registered repositories
-
-# Daemon (multi-repo watcher), installed with the package
-code-review-graph daemon start [--foreground]       # Start the watch daemon
-code-review-graph daemon stop                       # Stop the daemon
-code-review-graph daemon restart [--foreground]     # Restart the daemon
-code-review-graph daemon status                     # Daemon status and repos
-code-review-graph daemon logs [--repo ALIAS] [--follow] [--lines N]  # Daemon or per-repo logs (default 50 lines)
-code-review-graph daemon add <path> [--alias NAME]  # Add a repo to the daemon config
-code-review-graph daemon remove <path_or_alias>     # Remove a repo from the daemon config
-
-# Evaluation
-code-review-graph eval --all                   # Run every benchmark on every repo config (bare `eval` runs nothing)
-code-review-graph eval --benchmark token_efficiency --repo flask  # Pick benchmarks and repos (comma-separated); --repo takes config names, not paths
-code-review-graph eval --report                # Write evaluate/reports/summary.md from evaluate/results and print README tables
-                                                #   (--output-dir sets the results folder that runs write and --report reads)
-code-review-graph eval --benchmark search_quality --embed [--embed-provider local|openai|google|minimax|voyage] [--embed-model M]  # --embed builds vectors; agent_baseline,
-                                                #   search_quality and multi_hop_retrieval need it
-
-# Hook entry points (the hooks install writes run these; they read the hook event JSON on stdin)
-code-review-graph hook-update                  # Update the graph of the repo that holds the edited file
-code-review-graph hook-status                  # Graph status for the event's cwd
-code-review-graph enrich                       # Graph context for a search or read (the --steering hook)
-
-# Server
-code-review-graph serve                        # Start MCP server (stdio)
-code-review-graph serve --auto-watch           # Also watch for file changes while the server runs
-code-review-graph serve --http                 # Streamable HTTP on 127.0.0.1:5555 (--host, --port)
-code-review-graph serve --http --multi-repo    # One HTTP server for every registered repository
-code-review-graph serve --tools query_graph_tool,detect_changes_tool  # Tool allowlist (or CRG_TOOLS)
-code-review-graph serve --multi-worktree --repo /path/to/repo  # One stdio session, one child per linked worktree
-code-review-graph mcp                          # Alias for serve; accepts --repo, --auto-watch and --multi-worktree
-```
-
-`--multi-repo` lets one `serve --http` process serve several repositories, so
-the embedding model is loaded once. It serves the repositories in the registry
-(`code-review-graph register <path>`), read again on every call, so `register`
-and `unregister` take effect without a restart. Every tool call must pass
-`repo_root`, the absolute path of a registered repository; `list_repos_tool`
-lists them. A call with no `repo_root`, a relative path or a path that is not
-registered is refused with a message saying so. It never falls back to `--repo`
-or the server's working directory. The usual project-root check still applies.
-`--multi-repo` needs `--http` and cannot be combined with `--repo`,
-`--auto-watch`, `--multi-worktree` or `CRG_DATA_DIR`. To keep several graphs
-current, run the daemon (`code-review-graph daemon`). Without `--multi-repo`,
-`serve --http` keeps the old fallback.
-
-`--multi-worktree` is an opt-in stdio mode for parallel reviews. The server
-starts one regular `serve --repo <root>` child lazily for the primary checkout
-and each linked worktree requested through `repo_root`. Only paths reported by
-`git worktree list` for the same Git common directory are accepted. Each child
-uses its worktree's normal `.code-review-graph/graph.db` or its per-repository
-Registry `data_dir`, so graphs from different commits cannot be mixed.
-
-The mode rejects a process-wide `CRG_DATA_DIR`, because that would force all
-worktrees into one database. Configure external storage with a separate,
-non-overlapping Registry `data_dir` entry per worktree instead; the router
-rejects two worktrees that resolve to the same graph database. `--multi-worktree`
-is stdio only and cannot be combined with `--http`.
-
-Notes:
-
-- `update` and `detect-changes` need a Git repository or an SVN working copy.
-  In SVN, `--base` takes a revision or range such as `r100:HEAD`; with no
-  revision, both commands use the working-copy edits from `svn status`. In Git,
-  `update` with no `--base` diffs from the commit the graph was last built at; when that commit is
-  missing (fresh graph, rewritten history, shallow clone) it falls back to a
-  full rebuild.
-- `update` prints a `Warning:` line on stderr naming files that failed to
-  parse. Those files keep their previous graph rows.
-- `detect-changes --brief` is read-only against the existing graph and takes
-  about a second. `update --brief` re-parses changed files first, then prints
-  the same panel. Use `update --brief` after a rebase or a large change set,
-  or when the graph may be stale.
-- `status`, `detect-changes`, `visualize`, `wiki`, `watch`, `forget`,
-  `dead-code` and the read-only graph queries (`query` to `refactor` above)
-  exit 1 when no graph exists and do not create one. `forget` and
-  `dead-code` still move a legacy top-level `.code-review-graph.db` into
-  `.code-review-graph/graph.db` before running.
-- One write runs per repository at a time. `build`, `update`, `postprocess`,
-  `forget` and `embed` take a lock on `write.lock` next to `graph.db`; if
-  another one holds it, they say so, do nothing and exit 75. Pass `--wait` to
-  wait for it instead. `watch` takes the lock for each write and keeps its
-  changes to retry if the lock is held.
-- `install` lists the files it will change and asks about the instruction
-  files (`CLAUDE.md`, `AGENTS.md` and the rest) before it writes anything;
-  `-y` answers yes. Ctrl-C at the question stops with nothing written.
-- `visualize` without a seed exports the whole repository, and falls back to
-  community (or file) bubbles once the rendered graph passes 3000 nodes or
-  9000 edges. With `--seed-symbol`, `--seed-file`, `--seed-changed`,
-  `--seed-flow` or `--path-from/--path-to` it exports a neighbourhood instead:
-  the nodes within `--depth` hops of the seed and the edges among them, with
-  everything else left out of the payload rather than drawn dimmed. A seeded
-  page always uses the full renderer and never aggregates.
-- A hop is any edge other than `CONTAINS`, such as `CALLS`, `IMPORTS_FROM`,
-  `INHERITS`, `REFERENCES` or `TESTED_BY`. `CONTAINS` is structural and is not a hop, so a
-  depth-2 neighbourhood of one function does not swallow its whole module; the
-  containing `File` nodes are still shipped so clustering and collapse work.
-- `--render-depth` (default 1) is how many hops are drawn on open. Clicking a
-  node on the edge of what is drawn reveals its next ring, `+1 hop` reveals a
-  whole ring, and both read from the payload already in the page.
-- `--path-from A --path-to B` highlights the shortest path through `CALLS`,
-  `IMPORTS_FROM` and `INHERITS`, following edge direction where one exists and
-  falling back to an undirected route otherwise. The page says which it used.
-- The default output is still a single self-contained `graph.html` you can
-  email. `--sidecar` moves the payload into `graph.data.js` next to it, which
-  is only worth it for a large neighbourhood.
-- `--max-nodes` (default 1500) is a hard cap on the nodes in the payload, not
-  a hint. The outermost hop goes first; once the outer hops are gone the seed
-  set itself is trimmed, best-connected first by whole-graph degree, ties
-  broken by name so two runs of the same command agree. A `--seed-changed`
-  run over a large review is exactly the case where the seed set is the large
-  thing, so the command prints how many seed nodes it dropped and the page
-  says so too. The nodes on a `--path-from/--path-to` answer are placed
-  first and are never dropped; a `--max-nodes` below the path length is
-  refused rather than half-answered.
-- Flag combinations that cannot mean anything are refused, not ignored:
-  `--seed-changed-base` without `--seed-changed`; `--depth`, `--render-depth`
-  or `--max-nodes` without a seed; any seed or tuning flag with a
-  non-`html` `--format`; `--sidecar` with a non-`html` `--format`;
-  `--mode community` or `--mode file` with a seed (they aggregate, which is
-  the opposite of a neighbourhood); and a `--render-depth` above `--depth`.
-- `install` (with `--platform all`, the default, or `claude`, `codex` or `qoder`)
-  appends a Git `pre-commit` hook that updates the graph and prints a risk
-  summary before each commit. The hook skips linked worktrees unless
-  `CRG_HOOK_WORKTREES=1` is set, so a worktree does not build a second graph
-  for another branch.
-- `install` also appends `post-checkout`, `post-merge` and `post-rewrite` Git
-  hooks that run `update` after a branch switch, a merge and a rebase, with
-  the same worktree rule. An existing hook written in a language other than
-  shell is left alone, `--no-hooks` skips all four, and `uninstall` removes
-  them.
-- For an empty or incomplete graph, run `code-review-graph build`. See
-  docs/TROUBLESHOOTING.md, "Empty or incomplete graph".
-- `context-history` reads a log that is off by default. Set
-  `CRG_CONTEXT_HISTORY=1` where the MCP server or the CLI runs to turn it on.
-  See [USAGE.md](USAGE.md#context-history).
-
-## Standalone Daemon CLI (`crg-daemon`)
-
-`crg-daemon` is installed with `code-review-graph` and mirrors the
-`code-review-graph daemon` subcommands:
-
-```bash
-crg-daemon start [--foreground]       # Start the multi-repo watch daemon
-crg-daemon stop                       # Stop the daemon and all watcher processes
-crg-daemon restart [--foreground]     # Restart (stop + start)
-crg-daemon status                     # Daemon status, repos, and process liveness
-crg-daemon logs [--repo ALIAS] [-f] [-n N]  # Tail daemon or per-repo log files
-crg-daemon add <path> [--alias NAME]  # Add a repository to watch.toml
-crg-daemon remove <path_or_alias>     # Remove a repository from watch.toml
-```
-
-### Configuration
-
-The daemon reads `~/.code-review-graph/watch.toml` (or `$CRG_HOME/watch.toml`):
-
-```toml
-[daemon]
-session_name = "crg-watch"   # logical daemon name
-log_dir = "/home/user/.code-review-graph/logs"   # absolute path; ~ is not expanded (default: ~/.code-review-graph/logs, or $CRG_HOME/logs)
-poll_interval = 2            # seconds between config file polls
-
-[[repos]]
-path = "/home/user/project-a"
-alias = "project-a"
-
-[[repos]]
-path = "/home/user/project-b"
-alias = "project-b"
-```
-
-The daemon spawns one `code-review-graph watch` child process per repo with
-`subprocess.Popen`. It polls the config file and starts or stops children as
-repos are added or removed. A health check every 30 seconds restarts dead
-watchers. No tmux or screen is needed.
+`install` also writes four workflow skills, `explore-codebase`, `review-changes`,
+`debug-issue` and `refactor-safely`, to `.claude/skills/` for Claude Code,
+`.gemini/skills/` for Gemini CLI, `.codebuddy/skills/` for CodeBuddy and
+`~/.hermes/skills/code-review-graph/` (or `$HERMES_HOME/skills/code-review-graph/`)
+for Hermes Agent. Qoder gets all seven skills in `.qoder/skills/`, and Codex gets
+one global skill. With no `--platform`, each is written only when that tool is
+found on this machine. `--no-skills` skips them all.

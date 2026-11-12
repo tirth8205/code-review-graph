@@ -880,13 +880,10 @@ def test_step3_preexisting_user_config_survives(sandbox: Sandbox, key: str) -> N
 # ---------------------------------------------------------------------------
 
 
-CONTENT_LEFTOVER_XFAIL = {
-    "gemini-cli": (
-        "install_gemini_cli_hooks copies .gemini/settings.json to "
-        "settings.json.bak, and uninstall never removes the backup, so a full "
-        "copy of the code-review-graph MCP registration stays on disk"
-    ),
-}
+# Known leftovers, by platform. Gemini CLI's settings.json.bak, a copy of our
+# server entry, was one until uninstall removed a backup holding only ours
+# (crg-n8n).
+CONTENT_LEFTOVER_XFAIL: dict[str, str] = {}
 
 HUSK_XFAIL = (
     "uninstall strips the entry but leaves behind the config file the "
@@ -1013,10 +1010,21 @@ def test_step4b_qoder_uninstall_removes_every_skill_file_install_wrote(
     assert not report.errors, f"qoder: uninstall reported errors {report.errors}"
 
 
+# Platforms whose config file lives in the repository. install records it,
+# so uninstall removes it when nothing else is left in it and Git does not
+# track it. A config in the home folder is not on that record and stays.
+HUSK_FIXED = frozenset(
+    {"claude", "codebuddy", "copilot", "gemini-cli", "kiro", "mimo", "opencode", "qoder"}
+)
+
+
 @pytest.mark.parametrize(
     "key",
-    [pytest.param(k, marks=[pytest.mark.xfail(strict=True, reason=HUSK_XFAIL)])
-     for k in PLATFORM_KEYS],
+    [
+        k if k in HUSK_FIXED
+        else pytest.param(k, marks=[pytest.mark.xfail(strict=True, reason=HUSK_XFAIL)])
+        for k in PLATFORM_KEYS
+    ],
 )
 def test_step4c_uninstall_leaves_no_empty_config_husk(sandbox: Sandbox, key: str) -> None:
     """A config file the installer created should not outlive the uninstall."""

@@ -6,15 +6,20 @@ Applies to code-review-graph 2.4.0.
 
 ```bash
 pip install code-review-graph
-code-review-graph install    # detect installed AI coding tools and configure each one
+code-review-graph install    # set up the AI coding tools found on this machine
 code-review-graph build      # parse the codebase
+code-review-graph doctor     # optional: check the copies, the graph and the hooks
 ```
 
-`install` detects which AI coding tools you have, writes an MCP server entry for each, installs hooks and skills where the platform supports them, and adds graph instructions to the platform's rules file (`CLAUDE.md`, `AGENTS.md`, and others). `--no-hooks`, `--no-skills` and `--no-instructions` skip those steps. `--dry-run` shows what each file would become, as one diff per file, and writes nothing. Without it, `install` lists the files it will change and asks about the instruction files before it writes anything; `--yes` answers yes for you. Restart the editor or tool afterwards.
+`install` finds which AI coding tools are on this machine and sets up only those: an MCP server entry for each, hooks and skills where the platform supports them, and graph instructions in the platform's rules file (`CLAUDE.md`, `AGENTS.md`, and others). It then names the tools it did not find (`Not found here, so not set up: ...`); `install --platform NAME` sets one up anyway. `--no-hooks`, `--no-skills` and `--no-instructions` skip those steps. `--dry-run` shows what each file would become, as one diff per file, and writes nothing. Without it, `install` lists the files it will change and asks about the instruction files before it writes anything; `--yes` answers yes for you, and Ctrl-C at the question stops with nothing written. With no terminal, as when an AI agent runs it, it takes the default answer, yes, and says so. Restart the editor or tool afterwards.
+
+The MCP entry and the hooks run the copy of code-review-graph that ran `install`. Inside a Poetry or uv project that is `poetry run code-review-graph` or `uv run code-review-graph`. When `install` itself ran from `uvx` or a `uv tool` install, it is `uvx code-review-graph`. Otherwise it is the full path of the Python that ran `install`, with `-m code_review_graph`. Hooks name that Python (or `uvx`) and fall back to `code-review-graph` on PATH when it is gone, as on a teammate's machine. So run `install` from the environment you want to use, and again after you move or upgrade the package. `code-review-graph doctor` shows which copy each one runs and exits 1 when one is out of step; see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
 `--steering` is off by default and only for Claude Code. It adds a hook that puts graph context, such as callers, callees, flows and tests, beside each `Grep`, `Glob`, `grep` or `rg` command and `Read`. That steers the model towards the graph, but it changes what the model sees on every one of those calls: on Flask, about 0.12 seconds and up to about 220 tokens each. `--no-steering` removes only that hook, and `uninstall` removes it too. A failed lookup never stops the tool call.
 
 `install` always adds `.code-review-graph/` to `.gitignore`. The other files it writes, such as `.claude/`, `.mcp.json` and `CLAUDE.md`, stay visible to git, because a team may want to commit them. Pass `--gitignore` to ignore them as well. It adds a block marked `# >>> code-review-graph install files >>>` that lists only the files and folders that run created and git does not track. A file that was already there, tracked or not, is never listed, and a folder the run created is listed whole. Running install again adds to the same block. `uninstall` removes the block and nothing else; to keep a listed file, delete its line.
+
+`install` also keeps a record of the files it writes inside the repository, in `.code-review-graph/install-manifest.json` (there even with `--data-dir` or `CRG_DATA_DIR`). Until Git tracks them, `build` and every review leave those files out, so your first review shows your change and not `.mcp.json` or hook scripts. Commit a file and it counts like any other. `uninstall` takes each file it removes or edits off the record, and deletes the record when it is empty. A listed file Git does not track that holds nothing once our entries are gone is removed, with the empty folders `install` made.
 
 To configure one platform only:
 
@@ -77,18 +82,19 @@ MiMo Code reads `.mimocode/mimocode.json` and then `.mimocode/mimocode.jsonc`.
 
 ### Git pre-commit hook
 
-For Codex, Claude Code and Qoder, `install` also appends a `pre-commit` hook in
-the repository's hooks directory (found with `git rev-parse --git-path hooks`,
-so `core.hooksPath` setups work). The hook runs `update` and
-`detect-changes --brief` before each commit. It skips linked worktrees, so an
+`install` (with no `--platform`, or with `claude-code`, `codex` or `qoder`) also
+appends a `pre-commit` hook in the repository's hooks directory (found with
+`git rev-parse --git-path hooks`, so `core.hooksPath` setups work). The hook
+runs `update --quiet` and `detect-changes --brief` before each commit, so a
+commit shows only the risk summary. It skips linked worktrees, so an
 implicit update does not build a second graph for another branch; set
 `CRG_HOOK_WORKTREES=1` to run it there too. `--no-hooks` skips the hook.
 
 The same `install` also appends `post-checkout`, `post-merge` and
-`post-rewrite` hooks that run `update` after a branch switch, a merge or a
+`post-rewrite` hooks that run `update --quiet` after a branch switch, a merge or a
 rebase, including `git pull` in either mode, so the graph follows the checked
-out code between commits. A file checkout and `commit --amend` do not trigger
-an update, and the checkout a rebase makes before replaying local commits is
+out code between commits. `commit --amend` updates too, even with
+`--no-verify`. A file checkout does not trigger an update, and the checkout a rebase makes before replaying local commits is
 skipped in favour of a single update when the rebase finishes; a rebase with
 nothing left to replay updates at that checkout instead. They share the
 pre-commit hook's worktree rule and `--no-hooks` switch. An existing hook
@@ -110,7 +116,14 @@ graph does not update on its own there.
 code-review-graph build
 ```
 Or ask your assistant: "Build the code review graph for this project".
-Parses the whole codebase. Build time scales with repository size; a cold build of a ~3,000-file repository took about 40 seconds on the machine described in [REPRODUCING.md](REPRODUCING.md#incremental-update-latency).
+Parses the whole codebase. Build time scales with repository size; a cold build of a ~3,000-file repository took about 40 seconds on the machine described in [REPRODUCING.md](REPRODUCING.md#incremental-update-latency). It ends like this:
+
+```text
+Full build: 4 files, 8 nodes, 11 edges (postprocess=full)
+Next: code-review-graph detect-changes --brief, or ask your assistant "Review my changes".
+```
+
+If it finds no source files, it prints `Warning: no source files found under <root>. Is this the project root?` on stderr instead; run it from the project root, or pass `--repo`.
 
 If some files fail to parse, the build or update result has status `partial` and its summary names the files. Their previous graph rows are kept. The CLI also prints a `Warning:` line for them on stderr.
 
@@ -119,13 +132,28 @@ If some files fail to parse, the build or update result has status `partial` and
 code-review-graph detect-changes --brief
 ```
 Or ask your assistant: "Review my changes". Where `install` wrote skills, this uses the `review-changes` skill.
-Reviews the files changed since the last commit plus their graph-derived impact radius. Review and impact responses carry a compact `context_savings` estimate. Across the 6 benchmark repositories, graph queries use about 63x fewer tokens per question (median; range 35x to 358x) than reading the whole corpus. That baseline is an upper bound: against an agent that greps and reads the top 3 files, the median is 6.65x (range 4.2x to 72.6x). See the [README benchmarks](../README.md#benchmarks) and [REPRODUCING.md](REPRODUCING.md).
+Reviews your last commit plus your uncommitted and new files (the default base is `HEAD~1`), and their graph-derived impact radius. A new file Git does not track is reviewed whole. The files `install` wrote are left out until you commit them. In a repository with one commit it prints `Note: this repository has one commit; reviewing uncommitted and new files instead.` on stderr (with no commits, the note says `no commits yet`); in a shallow clone the note says so and how to fetch the last commit. The output looks like this:
+
+```text
+Analyzed 1 changed file(s):
+  - 2 changed function(s)/class(es)
+  - 1 affected flow(s)
+  - 1 test gap(s) (0 with no tested caller found, 1 reached only through a caller)
+  - Overall risk score: 0.80 of 1.00 (high)
+  - Reached only through a caller: check_password
+
+Review first (risk out of 1.00):
+  1. check_password  app/auth.py:1  risk 0.80 (high)  called by login  no tests found
+  2. login  app/auth.py:7  risk 0.80 (high)  called by handle_login  tested by test_login_ok
+```
+
+A boxed `Token Savings` panel follows (see [Context Savings](#context-savings)). Review and impact responses carry a compact `context_savings` estimate. Across the 6 benchmark repositories, graph queries use about 63x fewer tokens per question (median; range 35x to 358x) than reading the whole corpus. That baseline is an upper bound: against an agent that greps and reads the top 3 files, the median is 6.65x (range 4.2x to 72.6x). See the [README benchmarks](../README.md#benchmarks) and [REPRODUCING.md](REPRODUCING.md).
 
 ### 3. Review a PR
 ```bash
 code-review-graph detect-changes --brief --base main
 ```
-Structural review of a branch diff with blast-radius analysis.
+Structural review of a branch diff with blast-radius analysis. A `--base` Git does not know stops with exit 1 and `Error: base 'main' is not a known revision. ...`; in a shallow clone, run `git fetch origin main` first.
 
 ### 4. Watch mode (optional)
 ```bash
@@ -136,7 +164,7 @@ Updates the graph on every file save.
 ### 5. Visualize the graph (optional)
 ```bash
 code-review-graph visualize
-open .code-review-graph/graph.html
+open .code-review-graph/graph.html    # macOS; on Linux: xdg-open .code-review-graph/graph.html
 ```
 Interactive D3.js force-directed graph. Past 2,000 nodes it starts collapsed (File nodes only); click a file to expand its children. Past 3,000 nodes or 9,000 edges, the default `--mode auto` draws one node per community instead, or per file when there are no communities. `--seed-symbol`, `--seed-file`, `--seed-changed` and `--seed-flow` draw only the part of the graph around a symbol, file, change or flow. Use the search bar to filter and click legend edge types to toggle them. `--format json|graphml|svg|obsidian|cypher` writes other formats.
 
@@ -170,7 +198,7 @@ code-review-graph detect-changes --brief              # against HEAD~1
 code-review-graph detect-changes --brief --base main
 ```
 
-When `--base` names a branch, the diff runs against the merge base of that branch and HEAD, which is the file set GitHub shows for a pull request. Commit hashes and other revisions are used as given. `detect-changes` is read-only; use `update --brief` when the graph may be stale.
+When `--base` names a branch, the diff runs against the merge base of that branch and HEAD, which is the file set GitHub shows for a pull request. Commit hashes and other revisions are used as given. A revision Git does not know is an error (exit 1), never a quiet review of the working tree; the MCP review tools answer `status: "error"`. `detect-changes` is read-only; use `update --brief` when the graph may be stale. Exit codes for every command are in [COMMANDS.md](COMMANDS.md#exit-codes).
 
 ### 8. Explore architecture
 Ask your MCP client: "Show me the architecture of this project". This calls `get_architecture_overview_tool`, which returns a community-based architecture map with coupling warnings.
@@ -208,7 +236,7 @@ paths match the graph. Their `unmatched_files` field and summary identify missin
 For a mix of indexed and missing files, risk describes the indexed subset; check the
 missing paths or rebuild the graph before treating that result as complete.
 
-Review and impact responses include compact `context_savings` metadata (`estimated`, `saved_tokens`, `saved_percent`). The CLI shows the same figures as a boxed `Token Savings` panel on `detect-changes --brief` and `update --brief`, with a breakdown (Functions / Tests / Risk / Other) that sums to the graph response size. Add `--verify` to compare against OpenAI's `cl100k_base` tokenizer (needs `pip install tiktoken`). The figures are labelled estimated because they use a `chars / 4` approximation; the calibration in [REPRODUCING.md](REPRODUCING.md#calibration-table) puts the aggregate estimate within about 1% of real tokens. A small single-file change can use more context than the raw file, because the graph metadata has a fixed overhead.
+Review and impact responses include compact `context_savings` metadata (`estimated`, `saved_tokens`, `saved_percent`). The CLI shows the same figures as a boxed `Token Savings` panel on `detect-changes --brief` and `update --brief`, with a breakdown (Functions / Tests / Risk / Other) that sums to the graph response size. Add `--verify` to compare against OpenAI's `cl100k_base` tokenizer (needs `pip install tiktoken`). The figures are labelled estimated because they use a `chars / 4` approximation; the calibration in [REPRODUCING.md](REPRODUCING.md#calibration-table) puts the aggregate estimate within about 1% of real tokens. A small single-file change can use more context than the raw file, because the graph metadata has a fixed overhead. A change with no changed functions, such as a docs edit, gets one line instead of the panel, as there is nothing to measure.
 
 ### Context history
 
@@ -219,10 +247,11 @@ off by default:
 export CRG_CONTEXT_HISTORY=1     # or set it in the "env" of your MCP server config
 ```
 
-Each response that carries `context_savings` (from `get_impact_radius`,
-`get_review_context`, `detect_changes`, the compact `get_architecture_overview`,
-`detect-changes`, `update --brief`, `impact` and `architecture`) then adds one
-line to `context-history.jsonl` next to `graph.db`:
+Each response that carries `context_savings` (from `get_impact_radius_tool`,
+`get_review_context_tool`, `detect_changes_tool`, the minimal
+`get_architecture_overview_tool`, `detect-changes`, `update --brief`, `impact`
+and `architecture`) then adds one line to `context-history.jsonl` next to
+`graph.db`:
 
 ```json
 {"v":1,"ts":"2026-11-09T18:59:01Z","tool":"detect_changes_tool","baseline_tokens":12932,"returned_tokens":773,"saved_tokens":12159,"detail_level":"minimal","files":3,"depth":2}

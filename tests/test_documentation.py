@@ -176,3 +176,24 @@ def test_release_version_is_current_everywhere_it_is_written_down():
         assert text in content, f"{name} does not say {text!r}"
     features = (ROOT / "docs/FEATURES.md").read_text(encoding="utf-8")
     assert features.count("(Current)") == 1, "docs/FEATURES.md marks more than one Current"
+
+
+def test_releasing_doc_names_every_file_a_release_moves():
+    """docs/RELEASING.md is the release checklist (crg-4eb.3). It must name
+    each file the version check above reads, and be reachable from the
+    contributor guide and the docs index."""
+    releasing = (ROOT / "docs/RELEASING.md").read_text(encoding="utf-8")
+    for name in (
+        "pyproject.toml",
+        "code_review_graph/__init__.py",
+        "uv.lock",
+        "CHANGELOG.md",
+        "docs/FEATURES.md",
+        "docs/USAGE.md",
+        "docs/GITHUB_ACTION.md",
+        "README.md",
+        ".github/ISSUE_TEMPLATE/bug_report.yml",
+    ):
+        assert f"`{name}`" in releasing, f"docs/RELEASING.md does not name {name}"
+    assert "(docs/RELEASING.md)" in (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    assert "(RELEASING.md)" in (ROOT / "docs/INDEX.md").read_text(encoding="utf-8")

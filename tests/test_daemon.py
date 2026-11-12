@@ -513,8 +513,17 @@ class TestPidAliveWindows:
 
 class TestWatchDaemon:
     @pytest.fixture()
-    def daemon_env(self, tmp_path):
+    def daemon_env(self, tmp_path, monkeypatch):
         """Set up a WatchDaemon with temp repos and graph.db stubs."""
+        # start() watches the config file. The native observer (FSEvents on
+        # macOS) can crash with SIGBUS when tests start and stop it back to
+        # back, so use the polling one, which needs no native code.
+        from watchdog.observers.polling import PollingObserver
+
+        monkeypatch.setattr(
+            "watchdog.observers.Observer", lambda: PollingObserver(timeout=0.05)
+        )
+
         repo_a = tmp_path / "repo-a"
         repo_a.mkdir()
         (repo_a / ".git").mkdir()
@@ -571,6 +580,27 @@ class TestWatchDaemon:
 
         assert exc_info.value.code == 0
         stop.assert_called_once_with()
+
+    @patch("code_review_graph.daemon.subprocess.Popen")
+    @patch("code_review_graph.registry.Registry")
+    def test_start_watches_the_config_with_the_polling_observer(
+        self, mock_registry_cls, mock_popen, daemon_env
+    ):
+        """The native observer (FSEvents on macOS) crashed the suite with
+        SIGBUS when tests started and stopped it back to back (crg-799)."""
+        from watchdog.observers.polling import PollingObserver
+
+        mock_proc = MagicMock()
+        mock_proc.pid = 12345
+        mock_proc.poll.return_value = None
+        mock_popen.return_value = mock_proc
+
+        daemon = daemon_env["daemon"]
+        daemon.start()
+        try:
+            assert isinstance(daemon._config_watcher._observer, PollingObserver)
+        finally:
+            daemon.stop()
 
     @patch("code_review_graph.daemon.subprocess.Popen")
     @patch("code_review_graph.registry.Registry")

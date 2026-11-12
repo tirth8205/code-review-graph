@@ -347,7 +347,7 @@ def test_every_released_hook_body_is_still_recognised(body: str) -> None:
     upgraded = skills._upgrade_git_hook_block(hook)
     assert upgraded is not None
     assert body not in upgraded
-    assert skills._GIT_HOOK_BLOCK in upgraded
+    assert skills._git_hook_block() in upgraded
     assert "echo user-hook" in upgraded and "echo trailing" in upgraded
 
     stripped, removed = uninstall._strip_git_hook_blocks(hook)

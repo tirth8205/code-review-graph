@@ -39,9 +39,12 @@
   <a href="docs/COMMANDS.md">명령어</a> ·
   <a href="docs/FAQ.md">FAQ</a> ·
   <a href="docs/TROUBLESHOOTING.md">문제 해결</a> ·
+  <a href="docs/FEATURES.md">새 기능</a> ·
+  <a href="CHANGELOG.md">변경 기록</a> ·
   <a href="docs/GITHUB_ACTION.md">GitHub Action</a> ·
   <a href="docs/REPRODUCING.md">벤치마크 재현</a> ·
-  <a href="docs/ROADMAP.md">로드맵</a>
+  <a href="docs/ROADMAP.md">로드맵</a> ·
+  <a href="docs/INDEX.md">모든 문서</a>
 </p>
 
 <br>
@@ -67,18 +70,31 @@ AI 코딩 도구는 변경 하나를 리뷰하려고 코드베이스의 많은 �
 Python 3.10+가 필요합니다.
 
 ```bash
-pip install code-review-graph          # or: pipx install code-review-graph
-code-review-graph install              # detect installed AI coding tools and configure each one
+uv tool install code-review-graph      # or: pipx install / pip install code-review-graph
+code-review-graph install              # set up the AI coding tools found on this machine
 code-review-graph build                # parse the codebase
+code-review-graph detect-changes --brief  # see what your last change touches
 ```
+
+편집기나 도구를 다시 시작한 뒤 프로젝트를 열고 어시스턴트에게 이렇게 요청하세요.
+
+```
+Review my changes
+```
+
+`code-review-graph uninstall`로 모두 되돌릴 수 있습니다(`--dry-run`으로 먼저 미리 보기). 잘 안 되면 `code-review-graph doctor`를 실행하세요. 설정을 확인만 하고 아무것도 바꾸지 않습니다.
 
 <details>
 <summary><strong><code>install</code>이 바꾸는 것과 먼저 미리 보는 방법</strong></summary>
 <br>
 
-`install`은 설치된 AI 코딩 도구를 찾아 각각에 MCP 서버 항목을 쓰고, 플랫폼이 지원하면 훅과 스킬을 설치하며, 플랫폼의 규칙 파일에 그래프 안내를 추가합니다. MCP 항목은 Poetry나 uv 프로젝트 환경에서는 `poetry run` 또는 `uv run`을, PATH에 `uvx`가 있으면 `uvx code-review-graph serve`를, 그 밖에는 현재 Python 인터프리터를 사용합니다. `install`은 바꿀 파일 목록을 보여 주고 안내 파일에 대한 질문에 답할 때까지 아무것도 쓰지 않습니다. `install --dry-run`은 바뀌는 내용을 파일마다 diff로 보여 주고 아무것도 쓰지 않습니다. 실행 후 편집기나 도구를 다시 시작하세요.
+`install`은 이 컴퓨터에 있는 AI 코딩 도구를 찾아, 찾은 도구만 설정합니다. 각 도구에 MCP 서버 항목을 쓰고, 도구가 지원하면 훅과 스킬을 설치하며, 규칙 파일에 그래프 안내를 추가합니다. 그런 다음 찾지 못한 도구를 알려 줍니다. 그래도 추가하려면 `install --platform NAME`을 쓰세요.
 
-`.claude/`, `.mcp.json`처럼 `install`이 쓰는 파일은 팀이 커밋할 수도 있으므로 git에서 계속 보입니다. `install --gitignore`는 그 실행에서 새로 만든 파일을 `.gitignore`의 표시된 블록에 추가하고, `uninstall`은 그 블록을 지웁니다.
+`install`은 바꿀 파일 목록을 보여 주고 안내 파일에 대한 질문에 답할 때까지 아무것도 쓰지 않습니다. AI 에이전트가 실행할 때처럼 터미널이 없으면 기본 답(예)을 고르고 그렇다고 알려 줍니다. `--no-instructions`를 주면 그 파일들을 건너뜁니다. `install --dry-run`은 바뀌는 내용을 파일마다 diff로 보여 주고 아무것도 쓰지 않습니다. 실행 후 편집기나 도구를 다시 시작하세요.
+
+MCP 항목과 모든 훅은 `install`을 실행한 code-review-graph를 실행합니다. MCP 항목은 Poetry나 uv 프로젝트에서는 `poetry run` 또는 `uv run`을, `install` 자체가 `uvx`나 `uv tool install`에서 실행되었으면 `uvx`를, 그 밖에는 `install`을 실행한 Python을 사용합니다. 훅은 그 Python(또는 `uvx`)을 직접 적어 두고, 그것이 없어지면 PATH에 있는 `code-review-graph`를 실행합니다. 업그레이드한 뒤에는 `install`을 다시 실행하세요.
+
+`.claude/`, `.mcp.json`처럼 `install`이 쓰는 파일은 팀이 커밋할 수도 있으므로 git에서 계속 보입니다. git이 추적하기 전까지는 `build`와 리뷰가 이 파일들을 빼므로, 첫 리뷰에는 내 변경만 나옵니다. `install`은 이 파일들을 `.code-review-graph/install-manifest.json`에 기록합니다. `install --gitignore`는 그 실행에서 새로 만든 파일을 `.gitignore`의 표시된 블록에 추가하고, `uninstall`은 그 블록을 지웁니다.
 
 Codex의 경우 설치 프로그램은 전역 `code-review-graph` 스킬도
 `$CODEX_HOME/skills/code-review-graph/`(기본값:
@@ -105,15 +121,15 @@ code-review-graph install --platform cursor
 code-review-graph install --platform codebuddy
 ```
 
-설정 파일 위치는 [docs/USAGE.md](docs/USAGE.md#supported-platforms)에 있습니다. Python 3.10+가 필요합니다.
+이렇게 지정한 플랫폼은 `install`이 찾지 못해도 설정됩니다. 설정 파일 위치는 [docs/USAGE.md](docs/USAGE.md#supported-platforms)에 있습니다.
 
 </details>
 
 <details>
-<summary><strong><code>uninstall</code>로 다시 제거하기</strong></summary>
+<summary><strong><code>uninstall</code>의 다른 사용법</strong></summary>
 <br>
 
-`uninstall`은 Git 또는 SVN 작업 트리에서 CRG가 만든 파일과 항목을 제거하고, 다른 MCP 서버, 훅, 스킬, JSONC 주석은 건드리지 않습니다. 트리 안 어디에서든 실행할 수 있습니다. 공유 설정 파일은 원자적으로 교체되므로 쓰기가 실패해도 원본은 그대로 남습니다.
+`uninstall`은 Git 또는 SVN 작업 트리에서 CRG가 만든 파일과 항목을 제거하고, 다른 MCP 서버, 훅, 스킬, JSONC 주석은 건드리지 않습니다. 트리 안 어디에서든 실행할 수 있습니다. 공유 설정 파일은 원자적으로 교체되므로 쓰기가 실패해도 원본은 그대로 남습니다. `install`이 만든 설정 파일 중 git이 추적하지 않고 다른 내용이 없는 파일은 `install`이 만든 빈 폴더와 함께 삭제됩니다. 터미널이 없으면 기본 답(아니요)을 고르고 `--yes`를 주라고 알려 줍니다.
 
 ```bash
 code-review-graph uninstall --dry-run    # preview only
@@ -126,73 +142,28 @@ code-review-graph uninstall --keep-user-configs --repo .  # this project only
 
 </details>
 
-`install` 뒤에는 편집기나 도구를 다시 시작하세요.
-그런 다음 프로젝트를 열고 어시스턴트에게 이렇게 요청하세요.
-
-```
-Build the code review graph for this project
-```
-
 <details>
 <summary><strong>빌드에 걸리는 시간과 부분 빌드의 뜻</strong></summary>
 <br>
 
-빌드 시간은 저장소 크기에 비례합니다. 파일이 약 3,000개인 저장소의 콜드 빌드는 약 40초가 걸렸습니다([측정값](docs/REPRODUCING.md#incremental-update-latency)). 그 뒤로는 훅과 watch 모드가 그래프를 최신으로 유지합니다. 일부 파일의 파싱이 실패하면 결과 상태가 `partial`이 되고 요약에 해당 파일이 나열됩니다. CLI는 stderr에 `Warning:` 줄도 출력하며, 그 파일들은 기존 그래프 행을 유지합니다.
+빌드 시간은 저장소 크기에 비례합니다. 파일이 약 3,000개인 저장소의 콜드 빌드는 약 40초가 걸렸습니다([측정값](docs/REPRODUCING.md#incremental-update-latency)). 그 뒤로는 훅과 watch 모드가 그래프를 최신으로 유지합니다. 일부 파일의 파싱이 실패하면 결과 상태가 `partial`이 되고 요약에 해당 파일이 나열됩니다. CLI는 stderr에 `Warning:` 줄도 출력하며, 그 파일들은 기존 그래프 행을 유지합니다. 소스 파일을 하나도 찾지 못한 빌드는 stderr에 경고를 내고, 프로젝트 루트에 있는지 묻습니다.
 
 </details>
 
-### Docker 또는 Podman으로 실행하기
-
 <details>
-<summary><strong>이미지를 빌드한 뒤 저장소에서 실행하기</strong></summary>
+<summary><strong>2.3.x에서 업그레이드하기</strong></summary>
 <br>
 
-저장소 루트에서 이미지를 빌드합니다.
-
 ```bash
-docker build -t code-review-graph:local .
+pip install -U code-review-graph     # or: pipx upgrade / uv tool upgrade code-review-graph
+code-review-graph doctor             # every copy, MCP entry and hook, and the version each runs
+code-review-graph install --dry-run  # see what changes, then run install
+code-review-graph build              # once: new file types and fixes reach only re-parsed files
 ```
 
-분석할 저장소의 디렉터리에서 다음 명령을 실행합니다.
+가지고 있는 모든 사본을 업그레이드하세요. MCP 항목, git과 편집기 훅, `crg-daemon`은 각각 다른 사본을 실행할 수 있고, 2.4.0 이상이 한 번 연 그래프는 2.3.9 사본이 읽기를 거부하고, 그보다 오래된 2.3.x 사본은 망가뜨릴 수 있습니다. `install`을 다시 실행해 항목과 훅이 새 사본을 실행하게 한 뒤 편집기를 다시 시작하세요(데몬을 쓴다면 `crg-daemon restart`도 실행하세요).
 
-```bash
-docker run --rm \
-  --user "$(id -u):$(id -g)" \
-  --env HOME=/tmp \
-  --volume "$PWD:/workspace" \
-  code-review-graph:local build
-```
-
-마운트한 저장소에는 쓰기 권한이 있어야 합니다.
-위 명령은 현재 사용자의 사용자 ID와 그룹 ID를 사용하므로,
-생성된 `.code-review-graph/` 디렉터리의 소유권이 현재 사용자에게 유지됩니다.
-호스트에서 root가 아닌 사용자로 이 명령들을 실행하세요.
-
-Podman에서는 같은 Dockerfile을 빌드하고 사용자 매핑을 유지합니다.
-
-```bash
-podman build -t code-review-graph:local .
-podman run --rm \
-  --userns=keep-id \
-  --env HOME=/tmp \
-  --volume "$PWD:/workspace" \
-  code-review-graph:local build
-```
-
-그래프는 마운트한 저장소의 `.code-review-graph/`에 저장되며,
-`/workspace/app.py`와 같은 컨테이너 내부의 절대 경로를 기록합니다.
-`update`와 `detect-changes`는 동일한 `/workspace` 마운트를 사용하여 Docker 또는 Podman으로 실행하세요.
-이 그래프에 대해 호스트에서 `update`를 실행하면 "built with a different repository root"
-오류가 발생할 수 있습니다. 호스트 명령으로 전환하려면 호스트에서
-`code-review-graph build`를 실행하여 호스트 경로로 그래프를 다시 빌드하세요.
-
-저장된 그래프를 확인하려면 `build`를 `status`로 바꾸세요.
-이미지에는 Git이 포함되어 있으며, 기본적으로 root가 아닌 사용자로 실행됩니다.
-이미지를 빌드하는 동안에는 그래프를 생성하지 않습니다.
-
-이 예제들은 macOS/Linux 셸 문법을 사용합니다.
-macOS에서는 실행하기 전에 Docker 호환 엔진 또는 Podman 가상 머신을 시작하세요.
-Fedora처럼 SELinux가 켜진 호스트에서는 마운트에 `:z`를 추가하세요(`"$PWD:/workspace:z"`). 그렇지 않으면 컨테이너가 저장소에 접근할 수 없습니다.
+2.4.0 이상에서 처음 실행한 명령이 그래프를 스키마 15로 옮깁니다. VS Code 확장을 쓴다면 이 그래프를 읽으려면 0.4.0 버전이 필요합니다. 전체 목록: [업그레이드 참고 사항](CHANGELOG.md#upgrade-notes).
 
 </details>
 
@@ -234,7 +205,7 @@ Fedora처럼 SELinux가 켜진 호스트에서는 마운트에 `:z`를 추가하
 <summary><strong>바뀐 파일만 다시 파싱합니다(파일 두 개 편집에 약 2.5초)</strong></summary>
 <br>
 
-편집기 훅, git 훅(pre-commit, post-checkout, post-merge, post-rewrite), watch 모드가 증분 업데이트를 실행합니다. 업데이트는 변경된 파일의 diff를 구하고, 그래프의 임포트 엣지와 호출 엣지를 따라 의존 대상을 찾은 뒤, SHA-256 해시가 바뀐 파일만 다시 파싱합니다. 파일이 약 3,000개인 프로젝트(django)에서 파일 두 개를 고치면 훅 경로에서 약 2.5초 만에 재색인되며, 그중 약 1.4초는 프로세스 시작 시간입니다. 바뀐 것이 없으면 그 시작 시간만 듭니다. [증분 업데이트 지연](docs/REPRODUCING.md#incremental-update-latency)을 참고하세요.
+편집기 훅, git 훅(pre-commit, post-checkout, post-merge, post-rewrite), watch 모드가 증분 업데이트를 실행합니다. 훅은 조용히 업데이트합니다. 커밋할 때마다 pre-commit 훅은 `detect-changes --brief`의 짧은 리뷰만 출력합니다. 업데이트는 변경된 파일의 diff를 구하고, 그래프의 임포트 엣지와 호출 엣지를 따라 의존 대상을 찾은 뒤, SHA-256 해시가 바뀐 파일만 다시 파싱합니다. 파일이 약 3,000개인 프로젝트(django)에서 파일 두 개를 고치면 훅 경로에서 약 2.5초 만에 재색인되며, 그중 약 1.4초는 프로세스 시작 시간입니다. 바뀐 것이 없으면 그 시작 시간만 듭니다. [증분 업데이트 지연](docs/REPRODUCING.md#incremental-update-latency)을 참고하세요.
 
 <p align="center">
   <img src="diagrams/diagram4_incremental_update.png" alt="증분 업데이트 흐름: 훅이나 watch 업데이트가 git diff를 실행하고, 그래프 엣지로 의존 대상을 찾고, SHA-256 해시가 바뀐 파일만 다시 파싱한다" width="90%" />
@@ -485,7 +456,7 @@ jobs:
 <summary><strong>스킬</strong></summary>
 <br>
 
-`install`은 스킬을 지원하는 플랫폼(Claude Code, Gemini CLI, CodeBuddy Code, Hermes Agent, Qoder)에 다음 네 가지 스킬을 씁니다. 이름으로 불러 쓰세요.
+`install`은 설정하는 플랫폼 중 스킬을 지원하는 플랫폼(Claude Code, Gemini CLI, CodeBuddy Code, Hermes Agent, Qoder)에 다음 네 가지 스킬을 씁니다. 이름으로 불러 쓰세요.
 
 | 스킬 | 내용 |
 |-------|-------------|
@@ -503,10 +474,11 @@ Qoder에는 이 저장소의 `skills/` 디렉터리에서 `build-graph`, `review
 <br>
 
 ```bash
-code-review-graph install          # Detect and configure all platforms
+code-review-graph install          # Set up the AI coding tools found on this machine
 code-review-graph install --platform <name>  # One platform
 code-review-graph install --steering  # Claude Code: graph context beside each search and read
 code-review-graph uninstall --dry-run  # Preview removal of installed artifacts
+code-review-graph doctor           # Check copies, MCP entries, graph and hooks; changes nothing
 code-review-graph build            # Parse the whole codebase
 code-review-graph build --follow-symlinks  # Also index symlinked folders
 code-review-graph update           # Incremental update (changed files only)
@@ -524,7 +496,7 @@ code-review-graph visualize --format svg       # Export as SVG (needs matplotlib
 code-review-graph visualize --format obsidian  # Export as Obsidian vault
 code-review-graph visualize --format cypher    # Export as Neo4j Cypher
 code-review-graph wiki             # Markdown wiki from communities
-code-review-graph detect-changes --brief         # Risk panel + token savings (read-only)
+code-review-graph detect-changes --brief         # Top 3 to review, risk + token savings (read-only)
 code-review-graph detect-changes --brief --base main  # Against the merge base of main and HEAD
 code-review-graph update --brief                 # Refresh graph + same panel
 code-review-graph detect-changes --brief --verify  # Cross-check against tiktoken
@@ -543,9 +515,9 @@ code-review-graph serve --http --multi-repo  # One HTTP server for every registe
 code-review-graph serve --multi-worktree  # One child server per linked Git worktree
 ```
 
-이것은 일부만 고른 목록입니다. `code-review-graph --help`가 모든 명령을 보여 주고, [docs/COMMANDS.md](docs/COMMANDS.md)가 각 플래그를 설명합니다.
+이것은 일부만 고른 목록입니다. 명령 없이 `code-review-graph`를 실행하면 모든 명령을 묶음별로 보여 주고, [docs/COMMANDS.md](docs/COMMANDS.md)가 각 플래그를 설명합니다. 명령을 잘못 입력하면 종료 코드 2로 끝나고 가장 가까운 명령을 알려 줍니다.
 
-`detect-changes --base`에 브랜치 이름을 주면 diff는 그 브랜치와 HEAD의 머지 베이스를 기준으로 실행됩니다. 커밋 해시와 그 밖의 리비전은 준 그대로 쓰입니다.
+`detect-changes --base`에 브랜치 이름을 주면 diff는 그 브랜치와 HEAD의 머지 베이스를 기준으로 실행됩니다. 커밋 해시와 그 밖의 리비전은 준 그대로 쓰입니다. git이 모르는 기준을 주면 종료 코드 1로 멈추고 확인하는 방법을 알려 줍니다. 커밋이 하나뿐이거나 없는 저장소에서는 기본 기준 대신 커밋하지 않은 파일과 새 파일을 리뷰하고, 그렇다고 알려 줍니다.
 
 `visualize --format svg`에는 matplotlib이 필요하며, `eval` 엑스트라에 들어 있습니다(`pip install "code-review-graph[eval]"`). 다른 내보내기 형식에는 추가 설치가 필요 없습니다.
 
@@ -557,7 +529,7 @@ JSON 내보내기는 로컬 그래프 데이터 디렉터리에 기록되며, �
 <summary><strong>Token Savings 패널: <code>detect-changes --brief</code>와 <code>update --brief</code></strong></summary>
 <br>
 
-두 명령 모두, 변경 파일을 에이전트에게 그대로 넘길 때와 비교해 그래프가 토큰을 얼마나 아꼈는지 보여 주는 같은 패널을 출력합니다. 차이는 한 가지, 그래프를 먼저 갱신하는지 여부입니다.
+두 명령 모두, 변경 파일을 에이전트에게 그대로 넘길 때와 비교해 그래프가 토큰을 얼마나 아꼈는지 보여 주는 같은 패널을 출력합니다. 차이는 한 가지, 그래프를 먼저 갱신하는지 여부입니다. 패널 위에는 `detect-changes --brief`가 먼저 리뷰할 것을 최대 세 개까지 보여 줍니다. 각각에 파일과 줄, 1.00 만점의 위험도, 호출자, 테스트가 붙습니다.
 
 ```text
 ┌─────────────────────── Token Savings ────────────────────────┐
@@ -698,7 +670,8 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 |----------|-------------|---------|
 | `CRG_GIT_TIMEOUT` | Git 작업의 제한 시간(초, build / update / watch) | `30` |
 | `CRG_DISCOVERY_TIMEOUT` | 리뷰 도구나 명령에 파일 목록이 주어지지 않았을 때 변경 내용을 찾는 각 Git 명령의 제한 시간(초). 초과하면 오류를 반환하며 '변경 없음'으로 보고하지 않음 | `5`(`CRG_GIT_TIMEOUT`을 직접 설정하면 그 값) |
-| `CRG_DATA_DIR` | 그래프 데이터베이스와 생성물이 놓이는 디렉터리 | - |
+| `CRG_DATA_DIR` | 그래프 데이터베이스와 생성물이 놓이는 디렉터리. `install`이 쓴 파일의 기록은 저장소의 `.code-review-graph/`에 남습니다 | - |
+| `CRG_HOME` | 사용자별 상태를 두는 폴더: 다중 저장소 등록부(`registry.json`), 데몬의 `watch.toml`, 데몬의 pid와 상태 파일, `logs/` | `~/.code-review-graph` |
 | `CRG_HOOK_WORKTREES` | `1`로 두면 생성된 git 훅이 연결된 git worktree에서도 실행 | - |
 | `CRG_EMBEDDING_MODEL` | 로컬 벡터 임베딩의 기본 모델 | `all-MiniLM-L6-v2` |
 | `CRG_ACCEPT_CLOUD_EMBEDDINGS` | `1`로 두면 클라우드 임베딩 전송 경고를 숨김 | - |
@@ -721,6 +694,8 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_FOLLOW_SYMLINKS` | `1`, `true`, `yes`, `on`일 때 심볼릭 링크 폴더(저장소 안팎)를 따라감. `--follow-symlinks`와 같음. [심볼릭 링크 폴더](docs/USAGE.md#symlinked-folders) 참고 | - |
 | `CRG_MAX_FOLLOWED_FILES` | 심볼릭 링크 폴더로 가져오는 파일의 최대 수 | `10000` |
 | `CRG_TOOLS` | 서버로 띄울 때 노출할 MCP 도구의 쉼표 구분 허용 목록 | - |
+| `CRG_READ_ONLY` | `1`(또는 `true`, `yes`, `on`)로 두면 그래프를 읽기 전용으로 엽니다. 데이터 폴더에서는 아무것도 만들거나 업그레이드하거나 기록하지 않으며, 쓰는 명령은 실패합니다. Codex 스킬의 읽기 전용 CLI가 이 값을 설정합니다 | - |
+| `CRG_BIN` | Codex 스킬의 읽기 전용 CLI가 실행하는 `code-review-graph` 프로그램. 이름이 다르거나 PATH에 없을 때 씁니다 | PATH에 있는 것 |
 | `GOOGLE_API_KEY` | Google Gemini 임베딩의 API 키 | - |
 | `MINIMAX_API_KEY` | MiniMax 임베딩의 API 키 | - |
 | `VOYAGE_API_KEY` | Voyage 임베딩의 API 키 | - |
@@ -792,6 +767,63 @@ CRG_TOOLS=query_graph_tool,semantic_search_nodes_tool code-review-graph serve
 
 </details>
 
+### Docker 또는 Podman으로 실행하기
+
+<details>
+<summary><strong>릴리스에서 이미지를 빌드한 뒤 저장소에서 실행하기</strong></summary>
+<br>
+
+공개된 이미지는 없습니다. 릴리스 태그에서 빌드하세요. 그냥 클론하면 `staging` 브랜치가 되는데, 여기에는 아직 릴리스되지 않은 변경이 있을 수 있습니다.
+
+```bash
+git clone --branch v2.4.0 https://github.com/tirth8205/code-review-graph.git
+cd code-review-graph
+docker build -t code-review-graph:local .
+```
+
+분석할 저장소의 디렉터리에서 다음 명령을 실행합니다.
+
+```bash
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --env HOME=/tmp \
+  --volume "$PWD:/workspace" \
+  code-review-graph:local build
+```
+
+마운트한 저장소에는 쓰기 권한이 있어야 합니다.
+위 명령은 현재 사용자의 사용자 ID와 그룹 ID를 사용하므로,
+생성된 `.code-review-graph/` 디렉터리의 소유권이 현재 사용자에게 유지됩니다.
+호스트에서 root가 아닌 사용자로 이 명령들을 실행하세요.
+
+Podman에서는 같은 클론에서 같은 Dockerfile을 빌드하고 사용자 매핑을 유지합니다.
+
+```bash
+podman build -t code-review-graph:local .
+podman run --rm \
+  --userns=keep-id \
+  --env HOME=/tmp \
+  --volume "$PWD:/workspace" \
+  code-review-graph:local build
+```
+
+그래프는 마운트한 저장소의 `.code-review-graph/`에 저장되며,
+`/workspace/app.py`와 같은 컨테이너 내부의 절대 경로를 기록합니다.
+`update`와 `detect-changes`는 동일한 `/workspace` 마운트를 사용하여 Docker 또는 Podman으로 실행하세요.
+이 그래프에 대해 호스트에서 `update`를 실행하면 "built with a different repository root"
+오류가 발생할 수 있습니다. 호스트 명령으로 전환하려면 호스트에서
+`code-review-graph build`를 실행하여 호스트 경로로 그래프를 다시 빌드하세요.
+
+저장된 그래프를 확인하려면 `build`를 `status`로 바꾸세요.
+이미지에는 Git이 포함되어 있으며, 기본적으로 root가 아닌 사용자로 실행됩니다.
+이미지를 빌드하는 동안에는 그래프를 생성하지 않습니다.
+
+이 예제들은 macOS/Linux 셸 문법을 사용합니다.
+macOS에서는 실행하기 전에 Docker 호환 엔진 또는 Podman 가상 머신을 시작하세요.
+Fedora처럼 SELinux가 켜진 호스트에서는 마운트에 `:z`를 추가하세요(`"$PWD:/workspace:z"`). 그렇지 않으면 컨테이너가 저장소에 접근할 수 없습니다.
+
+</details>
+
 ---
 
 ## FAQ와 비교
@@ -812,6 +844,8 @@ CRG_TOOLS=query_graph_tool,semantic_search_nodes_tool code-review-graph serve
 </details>
 
 ## 문제 해결
+
+먼저 `code-review-graph doctor`를 실행하세요. 특히 AI 도구가 그래프가 "written by a newer code-review-graph"라고 말할 때 그렇습니다. PATH에 있는 모든 사본, 각 MCP 항목과 훅이 실행하는 버전, 그래프 상태를 보여 줍니다. 아무것도 바꾸지 않고, 실패한 검사가 있으면 종료 코드 1로 끝나며, `--json`도 받습니다.
 
 Windows/WSL을 포함한 더 많은 사례는 [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)에 있습니다.
 

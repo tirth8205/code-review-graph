@@ -1,11 +1,16 @@
-import { execFile } from 'child_process';
+import { ChildProcess, execFile, spawn } from 'child_process';
 import { promisify } from 'util';
 import * as vscode from 'vscode';
 
 const execFileAsync = promisify(execFile);
 
 const CLI_TIMEOUT_MS = 60_000;
+// Build, update and embed can take many minutes on a large repository, so
+// they run with no time limit (0 means none).
+const NO_TIMEOUT = 0;
 const INSTALL_TIMEOUT_MS = 120_000;
+// How much of the end of watch's stderr to keep for an error message.
+const WATCH_STDERR_TAIL = 2_000;
 
 export interface CliResult {
     success: boolean;
@@ -15,6 +20,7 @@ export interface CliResult {
 
 export class CliWrapper {
     private readonly cliPath: string;
+    private watchProcess: ChildProcess | undefined;
 
     constructor() {
         this.cliPath = this.getCliPath();
@@ -68,7 +74,7 @@ export class CliWrapper {
                 title: 'Code Review Graph: Building graph\u2026',
                 cancellable: false,
             },
-            () => this.exec(args, workspaceRoot),
+            () => this.exec(args, workspaceRoot, NO_TIMEOUT),
         );
     }
 
@@ -76,14 +82,60 @@ export class CliWrapper {
      * Incrementally update the graph database for a workspace.
      */
     async updateGraph(workspaceRoot: string): Promise<CliResult> {
-        return this.exec(['update'], workspaceRoot);
+        return this.exec(['update'], workspaceRoot, NO_TIMEOUT);
+    }
+
+    /** True while `code-review-graph watch` started by watchGraph() runs. */
+    isWatching(): boolean {
+        return this.watchProcess !== undefined;
     }
 
     /**
-     * Start the watch daemon for continuous file monitoring.
+     * Run `code-review-graph watch` with no time limit. It keeps going until
+     * stopWatch() is called or it exits by itself. The promise settles when
+     * it ends; a stop asked for by stopWatch() counts as success.
      */
-    async watchGraph(workspaceRoot: string): Promise<CliResult> {
-        return this.exec(['watch'], workspaceRoot);
+    watchGraph(workspaceRoot: string): Promise<CliResult> {
+        return new Promise((resolve) => {
+            // stdout is not read, so drop it: a full pipe would block watch.
+            const child = spawn(this.cliPath, ['watch'], {
+                cwd: workspaceRoot,
+                stdio: ['ignore', 'ignore', 'pipe'],
+            });
+            this.watchProcess = child;
+
+            let stderr = '';
+            child.stderr?.setEncoding('utf8');
+            child.stderr?.on('data', (chunk: string) => {
+                stderr = (stderr + chunk).slice(-WATCH_STDERR_TAIL);
+            });
+
+            child.on('error', (err) => {
+                if (this.watchProcess === child) {
+                    this.watchProcess = undefined;
+                }
+                resolve(toCliResult(err));
+            });
+
+            child.on('close', (code) => {
+                const stopped = this.watchProcess !== child;
+                if (!stopped) {
+                    this.watchProcess = undefined;
+                }
+                resolve({
+                    success: stopped || code === 0,
+                    stdout: '',
+                    stderr: stderr.trim(),
+                });
+            });
+        });
+    }
+
+    /** Stop the watch started by watchGraph(). Safe to call when none runs. */
+    stopWatch(): void {
+        const child = this.watchProcess;
+        this.watchProcess = undefined;
+        child?.kill();
     }
 
     /**
@@ -96,7 +148,7 @@ export class CliWrapper {
                 title: 'Code Review Graph: Computing embeddings\u2026',
                 cancellable: false,
             },
-            () => this.exec(['embed'], workspaceRoot),
+            () => this.exec(['embed'], workspaceRoot, NO_TIMEOUT),
         );
     }
 
@@ -166,11 +218,15 @@ export class CliWrapper {
     /**
      * Execute the CLI with the given arguments inside `cwd`.
      */
-    private async exec(args: string[], cwd?: string): Promise<CliResult> {
+    private async exec(
+        args: string[],
+        cwd?: string,
+        timeout: number = CLI_TIMEOUT_MS,
+    ): Promise<CliResult> {
         try {
             const { stdout, stderr } = await execFileAsync(this.cliPath, args, {
                 cwd,
-                timeout: CLI_TIMEOUT_MS,
+                timeout,
             });
             return { success: true, stdout, stderr };
         } catch (err: unknown) {

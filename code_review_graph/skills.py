@@ -20,7 +20,7 @@ import subprocess
 import sys
 from importlib import resources
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Iterable, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Iterable, NamedTuple, Sequence
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     # Moved to importlib.resources.abc in 3.11 and removed from importlib.abc
@@ -130,6 +130,82 @@ def _copilot_vscode_detected() -> bool:
     return False
 
 
+def _xdg_config_home() -> Path:
+    """Return ``$XDG_CONFIG_HOME``, or ``~/.config`` when it is not set."""
+    xdg = os.environ.get("XDG_CONFIG_HOME", "").strip()
+    return Path(xdg) if xdg else Path.home() / ".config"
+
+
+def _app_data_dirs(app: str) -> list[Path]:
+    """Return where a desktop app keeps its user data on this OS."""
+    system = platform.system()
+    if system == "Darwin":
+        return [Path.home() / "Library" / "Application Support" / app]
+    if system == "Windows":
+        appdata = os.environ.get("APPDATA", "").strip()
+        return [Path(appdata) / app] if appdata else []
+    return [_xdg_config_home() / app]
+
+
+def _xdg_data_home() -> Path:
+    """Return ``$XDG_DATA_HOME``, or ``~/.local/share`` when it is not set."""
+    xdg = os.environ.get("XDG_DATA_HOME", "").strip()
+    return Path(xdg) if xdg else Path.home() / ".local" / "share"
+
+
+def _claude_code_detected() -> bool:
+    """Return whether Claude Code is on this machine, or this runs inside it."""
+    if os.environ.get("CLAUDECODE", "").strip():
+        return True
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    if config_dir and Path(config_dir).expanduser().exists():
+        return True
+    home = Path.home()
+    return (
+        bool(shutil.which("claude"))
+        or (home / ".claude").exists()
+        or (home / ".claude.json").exists()
+    )
+
+
+def _opencode_detected() -> bool:
+    """Return whether OpenCode is on PATH or has left a folder in the home folder.
+
+    Its install script puts the program in ``~/.opencode/bin``, which a shell
+    started before the install has not added to PATH yet, and OpenCode keeps
+    its config and its data in the XDG folders on every OS.
+    """
+    if shutil.which("opencode"):
+        return True
+    return any(
+        folder.exists()
+        for folder in (
+            Path.home() / ".opencode",
+            _xdg_config_home() / "opencode",
+            _xdg_data_home() / "opencode",
+        )
+    )
+
+
+def _qoder_detected() -> bool:
+    """Return whether the Qoder editor or its CLI is on this machine."""
+    if shutil.which("qoder") or shutil.which("qodercli"):
+        return True
+    if (Path.home() / ".qoder").exists():
+        return True
+    if platform.system() == "Darwin" and any(
+        (folder / "Qoder.app").exists()
+        for folder in (Path("/Applications"), Path.home() / "Applications")
+    ):
+        return True
+    return any(folder.exists() for folder in _app_data_dirs("Qoder"))
+
+
+def _codebuddy_detected() -> bool:
+    """Return whether CodeBuddy Code is on PATH or has a user config folder."""
+    return bool(shutil.which("codebuddy")) or (Path.home() / ".codebuddy").exists()
+
+
 def _hermes_home() -> Path:
     """Return the Hermes Agent home directory.
 
@@ -169,10 +245,14 @@ def _dsh_config_path() -> Path:
     return _dsh_home() / "cordis.patch.yml"
 
 
+def _opencode_config_paths(repo_root: Path) -> tuple[Path, Path]:
+    """Return both OpenCode project configs. OpenCode loads each one."""
+    return repo_root / "opencode.jsonc", repo_root / "opencode.json"
+
+
 def _opencode_config_path(repo_root: Path) -> Path:
     """Return OpenCode's existing project config, preferring JSONC."""
-    for name in ("opencode.jsonc", "opencode.json"):
-        path = repo_root / name
+    for path in _opencode_config_paths(repo_root):
         if path.exists():
             return path
     return repo_root / "opencode.jsonc"
@@ -188,8 +268,7 @@ def _mimo_config_home() -> Path:
     mimo_home = os.environ.get("MIMOCODE_HOME", "").strip()
     if mimo_home and os.path.isabs(mimo_home):
         return Path(mimo_home) / "config"
-    xdg = os.environ.get("XDG_CONFIG_HOME", "").strip()
-    return (Path(xdg) if xdg else Path.home() / ".config") / "mimocode"
+    return _xdg_config_home() / "mimocode"
 
 
 def _mimo_config_paths(repo_root: Path) -> tuple[Path, Path]:
@@ -216,8 +295,12 @@ PLATFORMS: dict[str, dict[str, Any]] = {
         "name": "Codex",
         "config_path": lambda root: _codex_home() / "config.toml",
         "key": "mcp_servers",
+        # ``codex`` on PATH counts too: Codex makes its home folder only on its
+        # first run, and install now writes Codex's hooks and skill only when
+        # it finds Codex.
         "detect": lambda: bool(os.environ.get("CODEX_HOME", "").strip())
-        or _codex_home().exists(),
+        or _codex_home().exists()
+        or bool(shutil.which("codex")),
         "format": "toml",
         "needs_type": True,
     },
@@ -225,7 +308,7 @@ PLATFORMS: dict[str, dict[str, Any]] = {
         "name": "Claude Code",
         "config_path": lambda root: root / ".mcp.json",
         "key": "mcpServers",
-        "detect": lambda: True,
+        "detect": _claude_code_detected,
         "format": "object",
         "needs_type": True,
     },
@@ -264,8 +347,10 @@ PLATFORMS: dict[str, dict[str, Any]] = {
     "opencode": {
         "name": "OpenCode",
         "config_path": _opencode_config_path,
+        # Every file install may have written. Uninstall cleans each one.
+        "config_paths": _opencode_config_paths,
         "key": "mcp",
-        "detect": lambda: True,
+        "detect": _opencode_detected,
         "format": "object",
         "needs_type": False,
     },
@@ -315,7 +400,7 @@ PLATFORMS: dict[str, dict[str, Any]] = {
         "name": "Qoder",
         "config_path": lambda root: root / ".qoder" / "mcp.json",
         "key": "mcpServers",
-        "detect": lambda: True,
+        "detect": _qoder_detected,
         "format": "object",
         "needs_type": True,
     },
@@ -362,7 +447,7 @@ PLATFORMS: dict[str, dict[str, Any]] = {
         "name": "CodeBuddy Code",
         "config_path": lambda root: root / ".mcp.json",
         "key": "mcpServers",
-        "detect": lambda: True,
+        "detect": _codebuddy_detected,
         "format": "object",
         "needs_type": True,
     },
@@ -418,44 +503,62 @@ def _in_uv_project() -> bool:
     return False
 
 
-def _detect_serve_command() -> tuple[str, list[str]]:
-    """Return ``(command, args)`` that correctly launches ``code-review-graph serve``.
+# uvx runs a tool it has not installed from a folder in uv's cache, named
+# ``archive-v0`` or ``builds-v0`` after the cache layout version.
+_UV_CACHE_ENV_RE = re.compile(r"\A(?:archive|builds)-v[0-9]+\Z")
 
-    Detection priority
-    ------------------
-    1. **Poetry** – ``POETRY_ACTIVE=1`` OR ``VIRTUAL_ENV`` contains ``"pypoetry"``
-       (covers both ``poetry shell`` and ``poetry run``) and ``poetry`` is on PATH
-       → ``poetry run code-review-graph serve``
-    2. **uv project** – ``UV_PROJECT_ENVIRONMENT`` is set, or a ``uv.lock``
-       ancestor is found alongside ``sys.executable``, and ``uv`` is on PATH
-       → ``uv run code-review-graph serve``
-    3. **uvx** – ``uvx`` is available on PATH (existing behaviour, unchanged)
-       → ``uvx code-review-graph serve``
-    4. **Fallback** – use the absolute path of the running Python interpreter
-       → ``sys.executable -m code_review_graph serve``
 
-    The fallback is always safe: ``sys.executable`` is the exact interpreter
-    that is currently running, so it resolves correctly inside any virtual
-    environment, conda env, or system installation.
+def _running_from_uv_tool() -> bool:
+    """Return True when this copy was started by ``uvx`` or installed by ``uv tool``.
+
+    ``uv tool install`` leaves a ``uv-receipt.toml`` in the tool's environment.
+    ``uvx`` without an installed tool runs from a folder in uv's cache. Either
+    way, ``uvx code-review-graph`` starts this same copy again.
     """
-    # 1. Poetry (poetry shell or poetry run)
-    if _in_poetry_project():
-        poetry = shutil.which("poetry")
-        if poetry:
-            return ("poetry", ["run", "code-review-graph", "serve"])
+    prefix = Path(sys.prefix)
+    if (prefix / "uv-receipt.toml").is_file():
+        return True
+    return bool(_UV_CACHE_ENV_RE.match(prefix.parent.name))
 
-    # 2. uv managed project environment
-    if os.environ.get("UV_PROJECT_ENVIRONMENT") or _in_uv_project():
-        uv = shutil.which("uv")
-        if uv:
-            return ("uv", ["run", "code-review-graph", "serve"])
 
-    # 3. uvx global tool runner (existing behaviour, unchanged)
-    if shutil.which("uvx"):
-        return ("uvx", ["code-review-graph", "serve"])
+def _detect_cli_launcher() -> list[str]:
+    """Return the command line that runs the copy of ``code-review-graph`` running now.
 
-    # 4. Absolute-path fallback using the running interpreter
-    return (sys.executable, ["-m", "code_review_graph", "serve"])
+    The MCP entry and every hook ``install`` writes start with it, so they
+    all run the copy that ran ``install``, not whichever one is first on PATH.
+
+    1. **Poetry** – ``POETRY_ACTIVE=1`` or ``VIRTUAL_ENV`` contains ``"pypoetry"``
+       (``poetry shell`` and ``poetry run``), and ``poetry`` is on PATH
+       → ``poetry run code-review-graph``
+    2. **uv project** – ``UV_PROJECT_ENVIRONMENT`` is set, or a ``uv.lock``
+       is found above ``sys.executable``, and ``uv`` is on PATH
+       → ``uv run code-review-graph``
+    3. **uvx or a uv tool** – this copy runs from ``uvx`` or ``uv tool install``,
+       and ``uvx`` is on PATH → ``uvx code-review-graph``
+    4. **Anything else** – the interpreter running now
+       → ``sys.executable -m code_review_graph``
+
+    Step 4 is always safe: ``sys.executable`` is the exact interpreter running
+    this copy, in any virtual environment, conda env or system Python. Up to
+    2.4.0 step 3 picked ``uvx`` whenever it was on PATH, which could start an
+    older ``uv tool`` copy than the one ``pip`` had just installed.
+    """
+    if _in_poetry_project() and shutil.which("poetry"):
+        return ["poetry", "run", "code-review-graph"]
+    if (os.environ.get("UV_PROJECT_ENVIRONMENT") or _in_uv_project()) and shutil.which("uv"):
+        return ["uv", "run", "code-review-graph"]
+    if _running_from_uv_tool() and shutil.which("uvx"):
+        return ["uvx", "code-review-graph"]
+    return [sys.executable, "-m", "code_review_graph"]
+
+
+def _detect_serve_command() -> tuple[str, list[str]]:
+    """Return ``(command, args)`` that launches ``code-review-graph serve``.
+
+    It is :func:`_detect_cli_launcher` followed by ``serve``.
+    """
+    launcher = _detect_cli_launcher()
+    return launcher[0], [*launcher[1:], "serve"]
 
 
 def _build_server_entry(
@@ -1148,10 +1251,22 @@ def platforms_for_target(repo_root: Path, target: str) -> dict[str, dict[str, An
     return {}
 
 
+def selected_platforms(repo_root: Path, target: str) -> frozenset[str]:
+    """Return the platform keys ``install`` writes anything for.
+
+    A named platform is written whether or not it is found here. ``"all"``
+    means the platforms found on this machine (see :func:`platforms_for_target`).
+    Skills, hooks and instruction files follow the same selection as the MCP
+    entries, so nothing is written for a tool that is not there.
+    """
+    return frozenset(platforms_for_target(repo_root, target))
+
+
 def install_platform_configs(
     repo_root: Path,
     target: str = "all",
     dry_run: bool = False,
+    platforms: Iterable[str] | None = None,
 ) -> list[str]:
     """Install MCP config for one or all detected platforms.
 
@@ -1161,17 +1276,21 @@ def install_platform_configs(
         dry_run: If True, print what would be done without writing. Inside an
             active :func:`install_plan.planning` block the would-be writes go
             into that plan, so the caller can show them.
+        platforms: With ``target="all"``, the keys already worked out by
+            :func:`selected_platforms`, so detection runs once per install.
 
     Returns:
         List of platform names that were configured.
     """
     if dry_run and install_plan.active() is None:
         with install_plan.planning():
-            return _install_platform_configs(repo_root, target, dry_run=True)
-    return _install_platform_configs(repo_root, target, dry_run=dry_run)
+            return _install_platform_configs(repo_root, target, True, platforms)
+    return _install_platform_configs(repo_root, target, dry_run, platforms)
 
 
-def _install_platform_configs(repo_root: Path, target: str, dry_run: bool) -> list[str]:
+def _install_platform_configs(
+    repo_root: Path, target: str, dry_run: bool, platforms: Iterable[str] | None = None
+) -> list[str]:
     """Do the work of :func:`install_platform_configs`.
 
     Writes go through :mod:`install_plan`, so under a dry run (always inside a
@@ -1179,7 +1298,11 @@ def _install_platform_configs(repo_root: Path, target: str, dry_run: bool) -> li
     """
     shared_aliases: dict[str, tuple[str, ...]] = {}
     if target == "all":
-        platforms_to_install = platforms_for_target(repo_root, target)
+        if platforms is None:
+            platforms_to_install = platforms_for_target(repo_root, target)
+        else:
+            chosen = set(platforms)
+            platforms_to_install = {k: v for k, v in PLATFORMS.items() if k in chosen}
 
         # Claude Code and CodeBuddy intentionally share the official project
         # .mcp.json/mcpServers contract. Process that exact pair once, but do
@@ -1214,6 +1337,7 @@ def _install_platform_configs(repo_root: Path, target: str, dry_run: bool) -> li
         if key == "opencode":
             _warn_legacy_opencode_config(repo_root)
         config_path: Path = plat["config_path"](repo_root)
+        shown = install_plan.display_path(config_path, repo_root)
         server_key = plat["key"]
         server_entry = _build_server_entry(plat, key=key, repo_root=repo_root)
 
@@ -1237,13 +1361,13 @@ def _install_platform_configs(repo_root: Path, target: str, dry_run: bool) -> li
                 # Refused to avoid data loss; the reason was already printed.
                 continue
             if not changed:
-                print(f"  {plat['name']}: already configured in {config_path}")
+                print(f"  {plat['name']}: already configured in {shown}")
                 _record_configured(key, plat)
                 continue
             if dry_run:
-                print(f"  [dry-run] {plat['name']}: would write {config_path}")
+                print(f"  [dry-run] {plat['name']}: would write {shown}")
             else:
-                print(f"  {plat['name']}: configured {config_path}")
+                print(f"  {plat['name']}: configured {shown}")
             _record_configured(key, plat)
             continue
 
@@ -1314,7 +1438,7 @@ def _install_platform_configs(repo_root: Path, target: str, dry_run: bool) -> li
                     _report_user_owned_entry(config_path, plat["name"])
                     continue
                 if len(ours) == 1 and current == arr_entry:
-                    print(f"  {plat['name']}: already configured in {config_path}")
+                    print(f"  {plat['name']}: already configured in {shown}")
                     _record_configured(key, plat)
                     continue
                 # Replace the first registration and drop any duplicates an
@@ -1354,7 +1478,7 @@ def _install_platform_configs(repo_root: Path, target: str, dry_run: bool) -> li
                 if not migrated:
                     continue
             elif current == server_entry and not migrated:
-                print(f"  {plat['name']}: already configured in {config_path}")
+                print(f"  {plat['name']}: already configured in {shown}")
                 _record_configured(key, plat)
                 continue
             else:
@@ -1389,9 +1513,9 @@ def _install_platform_configs(repo_root: Path, target: str, dry_run: bool) -> li
             else json.dumps(existing, indent=2, ensure_ascii=False) + "\n",
         )
         if dry_run:
-            print(f"  [dry-run] {plat['name']}: would write {config_path}")
+            print(f"  [dry-run] {plat['name']}: would write {shown}")
         else:
-            print(f"  {plat['name']}: configured {config_path}")
+            print(f"  {plat['name']}: configured {shown}")
 
         if wrote_entry:
             _record_configured(key, plat)
@@ -1424,10 +1548,11 @@ _SKILLS: dict[str, dict[str, str]] = {
             "6. Call `list_graph_stats_tool` only when you need node, edge and language counts.\n\n"
             "## Token Efficiency Rules\n"
             '- Call `get_minimal_context_tool(task="<your task>")` before any other graph tool.\n'
-            '- Pass `detail_level="minimal"` wherever a tool accepts it. Use "standard" only when '
-            "minimal is not enough.\n"
+            '- Pass `detail_level="minimal"` unless it is not enough. Minimal drops source, so '
+            "leave `semantic_search_nodes_tool(include_source=True)` and "
+            "`get_review_context_tool` at standard.\n"
             "- Prefer a targeted `query_graph_tool` call over a broad listing call.\n"
-            "- Budget: about five tool calls and 800 tokens of graph output per task.\n"
+            "- Budget: about five tool calls per task. Source snippets stand in for file reads.\n"
             "- Read the implementation and its tests before changing code. The graph narrows "
             "scope; it does not replace the source."
         ),
@@ -1453,10 +1578,11 @@ _SKILLS: dict[str, dict[str, str]] = {
             "recommendation.\n\n"
             "## Token Efficiency Rules\n"
             '- Call `get_minimal_context_tool(task="<your task>")` before any other graph tool.\n'
-            '- Pass `detail_level="minimal"` wherever a tool accepts it. Use "standard" only when '
-            "minimal is not enough.\n"
+            '- Pass `detail_level="minimal"` unless it is not enough. Minimal drops source, so '
+            "leave `semantic_search_nodes_tool(include_source=True)` and "
+            "`get_review_context_tool` at standard.\n"
             "- Prefer a targeted `query_graph_tool` call over a broad listing call.\n"
-            "- Budget: about five tool calls and 800 tokens of graph output per task.\n"
+            "- Budget: about five tool calls per task. Source snippets stand in for file reads.\n"
             "- Read the implementation and its tests before changing code. The graph narrows "
             "scope; it does not replace the source."
         ),
@@ -1478,10 +1604,11 @@ _SKILLS: dict[str, dict[str, str]] = {
             "affect.\n\n"
             "## Token Efficiency Rules\n"
             '- Call `get_minimal_context_tool(task="<your task>")` before any other graph tool.\n'
-            '- Pass `detail_level="minimal"` wherever a tool accepts it. Use "standard" only when '
-            "minimal is not enough.\n"
+            '- Pass `detail_level="minimal"` unless it is not enough. Minimal drops source, so '
+            "leave `semantic_search_nodes_tool(include_source=True)` and "
+            "`get_review_context_tool` at standard.\n"
             "- Prefer a targeted `query_graph_tool` call over a broad listing call.\n"
-            "- Budget: about five tool calls and 800 tokens of graph output per task.\n"
+            "- Budget: about five tool calls per task. Source snippets stand in for file reads.\n"
             "- Read the implementation and its tests before changing code. The graph narrows "
             "scope; it does not replace the source."
         ),
@@ -1505,10 +1632,11 @@ _SKILLS: dict[str, dict[str, str]] = {
             "plan.\n\n"
             "## Token Efficiency Rules\n"
             '- Call `get_minimal_context_tool(task="<your task>")` before any other graph tool.\n'
-            '- Pass `detail_level="minimal"` wherever a tool accepts it. Use "standard" only when '
-            "minimal is not enough.\n"
+            '- Pass `detail_level="minimal"` unless it is not enough. Minimal drops source, so '
+            "leave `semantic_search_nodes_tool(include_source=True)` and "
+            "`get_review_context_tool` at standard.\n"
             "- Prefer a targeted `query_graph_tool` call over a broad listing call.\n"
-            "- Budget: about five tool calls and 800 tokens of graph output per task.\n"
+            "- Budget: about five tool calls per task. Source snippets stand in for file reads.\n"
             "- Read the implementation and its tests before changing code. The graph narrows "
             "scope; it does not replace the source."
         ),
@@ -1724,17 +1852,162 @@ def generate_documentary_skills(repo_root: Path, skills_dir: Path | None = None)
     return skills_dir
 
 
-# The edit hook hands the event JSON to ``hook-update``, then drains whatever
-# was left unread, so a large payload never meets a closed pipe (#493). It never
-# fails the edit: not when the CLI is missing, not when an older CLI has no
-# ``hook-update``, not when the update itself fails.
-_CLAUDE_UPDATE_HOOK_COMMAND = (
-    "command -v code-review-graph >/dev/null 2>&1"
-    " && code-review-graph hook-update; cat >/dev/null || true"
+# --- Which copy a hook runs ---------------------------------------------------
+#
+# Every hook runs the copy of code-review-graph that ran ``install``, so a hook
+# never reaches an older copy that happens to be first on PATH. When that copy
+# is gone (a deleted virtual environment, or a committed settings file on a
+# collaborator's machine) the hook falls back to the one on PATH, as hooks did
+# up to 2.4.0, and does nothing when there is none.
+
+
+class _HookProgram(NamedTuple):
+    """How a hook starts code-review-graph: a shell test, then the words that run it."""
+
+    guard: str
+    command: str
+
+
+_PATH_GUARD = "command -v code-review-graph >/dev/null 2>&1"
+
+# Hooks up to 2.4.0 ran whatever ``code-review-graph`` PATH found. The plugin
+# hooks shipped in ``hooks/hooks.json`` still do, because they cannot know
+# which copy a user has.
+_PATH_HOOK_PROGRAM = _HookProgram(_PATH_GUARD, "code-review-graph")
+
+_UVX_HOOK_PROGRAM = _HookProgram("command -v uvx >/dev/null 2>&1", "uvx code-review-graph")
+
+
+def _sh_single_quote(value: str) -> str:
+    """Quote ``value`` as one POSIX shell word, always in single quotes."""
+    return "'" + value.replace("'", "'\"'\"'") + "'"
+
+
+def _hook_launcher() -> list[str]:
+    """Return the command line hooks use to start the copy running now.
+
+    ``uvx`` when :func:`_detect_cli_launcher` picks it. Otherwise the running
+    interpreter by its absolute path, also inside a Poetry or uv project: a
+    hook can run in any folder, where ``poetry run`` or ``uv run`` would find
+    another project, or none.
+    """
+    if _detect_cli_launcher()[0] == "uvx":
+        return ["uvx", "code-review-graph"]
+    return [sys.executable, "-m", "code_review_graph"]
+
+
+def _hook_program() -> _HookProgram:
+    """Return :func:`_hook_launcher` as the shell test and words a hook uses."""
+    launcher = _hook_launcher()
+    if launcher[0] == "uvx":
+        return _UVX_HOOK_PROGRAM
+    # Forward slashes, which the POSIX shells that run hooks on Windows accept.
+    exe = _sh_single_quote(Path(launcher[0]).as_posix())
+    return _HookProgram(f"[ -x {exe} ]", f"{exe} -m code_review_graph")
+
+
+def _hook_chain(
+    body: Callable[[str], str], program: _HookProgram, otherwise: str = ""
+) -> str:
+    """Run ``body`` with ``program``, else with the copy on PATH, else ``otherwise``.
+
+    ``body`` takes the words that start code-review-graph.
+    """
+    tail = f" else {otherwise};" if otherwise else ""
+    return (
+        f"if {program.guard}; then {body(program.command)}; "
+        f"elif {_PATH_GUARD}; then {body(_PATH_HOOK_PROGRAM.command)};{tail} fi"
+    )
+
+
+def _session_status_body(cli: str) -> str:
+    """Print the graph status in a Git checkout, and say so outside one."""
+    return (
+        "if git rev-parse --git-dir >/dev/null 2>&1; then"
+        f" {cli} status"
+        " --repo \"$(git rev-parse --show-toplevel 2>/dev/null)\" || true;"
+        " else echo 'Not a git repo, skipping'; fi"
+    )
+
+
+def _legacy_session_status_body(cli: str) -> str:
+    """The body up to 2.4.0, kept so hooks that carry it are still ours.
+
+    A failing ``status``, as in a Git repo with no graph, also printed
+    "Not a git repo".
+    """
+    return (
+        "git rev-parse --git-dir >/dev/null 2>&1"
+        f" && {cli} status"
+        " --repo \"$(git rev-parse --show-toplevel 2>/dev/null)\""
+        " || echo 'Not a git repo, skipping'"
+    )
+
+
+def _claude_update_hook_command(program: _HookProgram) -> str:
+    """The edit hook: hand the event JSON to ``hook-update``, then drain the rest.
+
+    Draining means a large payload never meets a closed pipe (#493). It never
+    fails the edit: not when the CLI is missing, not when an older CLI has no
+    ``hook-update``, not when the update itself fails.
+    """
+    if program == _PATH_HOOK_PROGRAM:
+        return f"{_PATH_GUARD} && code-review-graph hook-update; cat >/dev/null || true"
+    return (
+        _hook_chain(lambda cli: f"{cli} hook-update", program)
+        + "; cat >/dev/null || true"
+    )
+
+
+def _claude_session_hook_command(
+    program: _HookProgram, body: Callable[[str], str] = _session_status_body
+) -> str:
+    """The session hook: print the graph status of the repository it starts in."""
+    if program == _PATH_HOOK_PROGRAM:
+        return f"cat >/dev/null || true; {_PATH_GUARD} || exit 0; " + body("code-review-graph")
+    return "cat >/dev/null || true; " + _hook_chain(body, program)
+
+
+# The plugin's hook for a worktree Claude Code enters: build its graph in the
+# background, but only in a Git checkout, so no other folder gets a graph.
+_PLUGIN_WORKTREE_BUILD_COMMAND = (
+    f"cat >/dev/null || true; {_PATH_GUARD} || exit 0; "
+    "if git rev-parse --git-dir >/dev/null 2>&1; then"
+    " code-review-graph build >/dev/null 2>&1 & fi"
 )
 
 
-def generate_hooks_config(repo_root: Path) -> dict[str, Any]:
+def _codex_hook_command(subcommand: str, program: _HookProgram | None = None) -> str:
+    """Forward the event JSON to a payload-scoped subcommand when the CLI exists."""
+    program = program or _hook_program()
+    if program == _PATH_HOOK_PROGRAM:
+        return (
+            f"cat | {{ if {_PATH_GUARD}; "
+            f"then code-review-graph {subcommand}; else cat >/dev/null; fi; }}"
+        )
+    chain = _hook_chain(lambda cli: f"{cli} {subcommand}", program, "cat >/dev/null")
+    return f"cat | {{ {chain}; }}"
+
+
+def _shell_cli_function(name: str, program: _HookProgram, indent: str = "") -> str:
+    """Define shell function ``name``: ``program`` if it is there, else the copy on PATH.
+
+    Hook scripts call it in place of ``code-review-graph``. When neither copy
+    is there it fails with 127, as a missing command would.
+    """
+    return (
+        f"{indent}{name}() {{\n"
+        f"{indent}    if {program.guard}; then {program.command} \"$@\"\n"
+        f"{indent}    elif {_PATH_GUARD}; then code-review-graph \"$@\"\n"
+        f"{indent}    else return 127\n"
+        f"{indent}    fi\n"
+        f"{indent}}}\n"
+    )
+
+
+def generate_hooks_config(
+    repo_root: Path, program: _HookProgram | None = None
+) -> dict[str, Any]:
     """Generate Claude Code hooks configuration.
 
     Hooks use the v1.x+ schema: each entry needs a ``matcher`` and a nested
@@ -1742,14 +2015,17 @@ def generate_hooks_config(repo_root: Path) -> dict[str, Any]:
     Claude Code event — pre-commit checks are handled by ``install_git_hook``.
 
     The ``repo_root`` parameter is retained for backward compatibility but is
-    not embedded in hook commands, so ``settings.json`` is shareable across
-    collaborators with different checkout paths. The edit hook passes the
-    event JSON to ``hook-update``, which updates the repository that holds
-    the edited file rather than the one the session started in (#311). The
-    session hook resolves its repository with ``git rev-parse --show-toplevel``.
-    A PATH guard ensures the hook exits silently when the binary is not on
-    ``$PATH`` (e.g. installed in a project venv).
+    not embedded in hook commands. The edit hook passes the event JSON to
+    ``hook-update``, which updates the repository that holds the edited file
+    rather than the one the session started in (#311). The session hook
+    resolves its repository with ``git rev-parse --show-toplevel``.
+
+    ``program`` is the copy the hooks run, by default the one running now (see
+    :func:`_hook_program`). When it is gone, as on a collaborator's machine
+    that shares ``settings.json``, they run the copy on PATH, and exit
+    silently when there is none (#549).
     """
+    program = program or _hook_program()
     return {
         "hooks": {
             "PostToolUse": [
@@ -1758,7 +2034,7 @@ def generate_hooks_config(repo_root: Path) -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": _CLAUDE_UPDATE_HOOK_COMMAND,
+                            "command": _claude_update_hook_command(program),
                             "timeout": 30,
                         },
                     ],
@@ -1770,14 +2046,7 @@ def generate_hooks_config(repo_root: Path) -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": (
-                                "cat >/dev/null || true; "
-                                "command -v code-review-graph >/dev/null 2>&1 || exit 0; "
-                                "git rev-parse --git-dir >/dev/null 2>&1"
-                                " && code-review-graph status"
-                                " --repo \"$(git rev-parse --show-toplevel 2>/dev/null)\""
-                                " || echo 'Not a git repo, skipping'"
-                            ),
+                            "command": _claude_session_hook_command(program),
                             "timeout": 10,
                         },
                     ],
@@ -1787,22 +2056,34 @@ def generate_hooks_config(repo_root: Path) -> dict[str, Any]:
     }
 
 
-def _codex_hook_command(subcommand: str) -> str:
-    """Forward the event JSON to a payload-scoped subcommand when the CLI exists."""
-    return (
-        "cat | { if command -v code-review-graph >/dev/null 2>&1; "
-        f"then code-review-graph {subcommand}; else cat >/dev/null; fi; }}"
-    )
+def generate_plugin_hooks_config() -> dict[str, Any]:
+    """Return what ``hooks/hooks.json``, the Claude Code plugin's hooks, holds.
+
+    The plugin cannot know which copy a user has, so its hooks run the one on
+    PATH. Beside the hooks ``install`` writes, it builds a graph in a
+    worktree Claude Code enters.
+    """
+    hooks = generate_hooks_config(Path("."), program=_PATH_HOOK_PROGRAM)["hooks"]
+    worktree = {
+        "matcher": "EnterWorktree",
+        "hooks": [{"type": "command", "command": _PLUGIN_WORKTREE_BUILD_COMMAND}],
+    }
+    return {
+        "hooks": {
+            "SessionStart": hooks["SessionStart"],
+            "PostToolUse": [worktree, *hooks["PostToolUse"]],
+        }
+    }
 
 
-def generate_steering_hooks_config() -> dict[str, Any]:
+def generate_steering_hooks_config(program: _HookProgram | None = None) -> dict[str, Any]:
     """Generate the opt-in Claude Code hook that runs ``code-review-graph enrich``.
 
     It adds graph context beside each search and read, which changes what the
     model sees on every one of them, so ``install`` writes it only when asked.
     ``|| true`` matters: exit code 2 from a PreToolUse hook stops the tool call,
     and a failed lookup must never do that. Claude Code is the only client whose
-    hook output ``enrich`` writes.
+    hook output ``enrich`` writes. ``program`` is as for :func:`generate_hooks_config`.
     """
     return {
         "hooks": {
@@ -1812,7 +2093,7 @@ def generate_steering_hooks_config() -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": f"{_codex_hook_command('enrich')} || true",
+                            "command": f"{_codex_hook_command('enrich', program)} || true",
                             "timeout": 5,
                         },
                     ],
@@ -1822,8 +2103,20 @@ def generate_steering_hooks_config() -> dict[str, Any]:
     }
 
 
-def generate_codex_hooks_config(repo_root: Path) -> dict[str, Any]:
-    """Generate native Codex hooks configuration for the active Codex home."""
+# Codex builds a graph only when the user asks (see its skill), so its edit
+# hook updates one that exists and builds none. Up to 2.4.0 it ran plain
+# ``hook-update``, which built one on first use.
+_CODEX_UPDATE_SUBCOMMAND = "hook-update --existing-only"
+
+
+def generate_codex_hooks_config(
+    repo_root: Path, program: _HookProgram | None = None
+) -> dict[str, Any]:
+    """Generate native Codex hooks configuration for the active Codex home.
+
+    ``program`` is as for :func:`generate_hooks_config`.
+    """
+    program = program or _hook_program()
     return {
         "hooks": {
             "PostToolUse": [
@@ -1832,7 +2125,9 @@ def generate_codex_hooks_config(repo_root: Path) -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": _codex_hook_command("hook-update"),
+                            "command": _codex_hook_command(
+                                _CODEX_UPDATE_SUBCOMMAND, program
+                            ),
                             "timeout": 30,
                             "statusMessage": "Updating code-review-graph",
                         },
@@ -1845,7 +2140,7 @@ def generate_codex_hooks_config(repo_root: Path) -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": _codex_hook_command("hook-status"),
+                            "command": _codex_hook_command("hook-status", program),
                             "timeout": 10,
                             "statusMessage": "Checking code-review-graph status",
                         },
@@ -1877,6 +2172,8 @@ _GIT_HOOK_NOTE = (
 
 _GIT_HOOK_SHEBANG = "#!/bin/sh\n"
 
+# The marked body up to 2.4.0, which ran whichever copy PATH found. Kept so the
+# unmarked copy of it in ``_LEGACY_GIT_HOOK_BLOCKS`` is still recognised.
 _GIT_HOOK_BODY = """\
 if command -v code-review-graph >/dev/null 2>&1; then
     crg_hook_git_dir=$(git rev-parse --absolute-git-dir 2>/dev/null) || crg_hook_git_dir=""
@@ -1895,9 +2192,58 @@ if command -v code-review-graph >/dev/null 2>&1; then
 fi
 """
 
-_GIT_HOOK_BLOCK = (
-    f"{_GIT_HOOK_BEGIN_MARKER}\n{_GIT_HOOK_NOTE}\n{_GIT_HOOK_BODY}{_GIT_HOOK_END_MARKER}\n"
-)
+
+
+def _any_copy_guard(program: _HookProgram) -> str:
+    """A shell test that is true when ``program`` or the copy on PATH is there."""
+    if program == _PATH_HOOK_PROGRAM:
+        return _PATH_GUARD
+    return f"{{ {program.guard} || {_PATH_GUARD}; }}"
+
+
+def _hook_cli_function(name: str, program: _HookProgram, indent: str) -> str:
+    """Define ``name`` to run ``program``, or the copy on PATH when it is gone."""
+    if program == _PATH_HOOK_PROGRAM:
+        return f'{indent}{name}() {{ code-review-graph "$@"; }}\n'
+    return _shell_cli_function(name, program, indent)
+
+
+def _git_hook_body(program: _HookProgram | None = None) -> str:
+    """Return the pre-commit body: update the graph quietly, then show the risk summary.
+
+    It runs ``program``, by default the copy running now (see ``_hook_program``),
+    or the copy on PATH when that one is gone.
+    """
+    program = program or _hook_program()
+    return (
+        f"if {_any_copy_guard(program)}; then\n"
+        + _hook_cli_function("crg_hook_cli", program, "    ")
+        + """\
+    crg_hook_git_dir=$(git rev-parse --absolute-git-dir 2>/dev/null) || crg_hook_git_dir=""
+    crg_hook_root=$(git rev-parse --show-toplevel 2>/dev/null) || crg_hook_root=""
+    if [ -z "$crg_hook_git_dir" ] || [ -z "$crg_hook_root" ]; then
+        echo "code-review-graph: skipping automatic checks; cannot determine the Git worktree." >&2
+    elif [ -f "$crg_hook_git_dir/commondir" ] && [ "$CRG_HOOK_WORKTREES" != "1" ]; then
+        # Only a linked worktree's git dir carries a commondir file (Git 2.5+),
+        # so this needs no rev-parse options newer than --absolute-git-dir.
+        echo "code-review-graph: skipping automatic checks in a linked worktree;" \\
+            "set CRG_HOOK_WORKTREES=1 to keep a graph for this worktree too." >&2
+    else
+        crg_hook_cli update --quiet --repo "$crg_hook_root" || true
+        crg_hook_cli detect-changes --brief --repo "$crg_hook_root" || true
+    fi
+fi
+"""
+    )
+
+
+def _git_hook_block(program: _HookProgram | None = None) -> str:
+    """Return the whole marked pre-commit block, as ``install`` writes it."""
+    return (
+        f"{_GIT_HOOK_BEGIN_MARKER}\n{_GIT_HOOK_NOTE}\n"
+        f"{_git_hook_body(program)}{_GIT_HOOK_END_MARKER}\n"
+    )
+
 
 # Verbatim blocks shipped before the markers existed. Append-only, for the same
 # reason ``_legacy_instructions`` is: an entry dropped here is a block that can
@@ -1983,7 +2329,9 @@ def _git_hook_block_span(
     return begin, end
 
 
-def _upgrade_git_hook_block(existing: str) -> str | None:
+def _upgrade_git_hook_block(
+    existing: str, program: _HookProgram | None = None
+) -> str | None:
     """Return ``existing`` with a block we wrote replaced by the current one.
 
     Returns None when the hook carries our marker but no block this project
@@ -1994,14 +2342,102 @@ def _upgrade_git_hook_block(existing: str) -> str | None:
     """
     if _GIT_HOOK_BEGIN_MARKER in existing and not _git_hook_markers_balanced(existing):
         return None
+    current = _git_hook_block(program)
     span = _git_hook_block_span(existing)
     if span is not None:
         begin, end = span
-        return existing[:begin] + _GIT_HOOK_BLOCK + existing[end:]
+        return existing[:begin] + current + existing[end:]
     for block in _known_git_hook_blocks():
         if block in existing:
-            return existing.replace(block, _GIT_HOOK_BLOCK, 1)
+            return existing.replace(block, current, 1)
     return None
+
+
+# A top-level ``exit`` line: no indent, at most one argument, an optional
+# trailing ``;`` and comment.
+_TOP_LEVEL_EXIT_RE = re.compile(r"exit(?:[ \t]+(?P<arg>[^\s#;]+))?[ \t]*;?[ \t]*(?:#.*)?")
+
+# A line ending in one of these goes on to the next line.
+_SHELL_LINE_CONTINUATIONS = ("\\", "&&", "||", "|")
+
+
+def _is_shell_filler(line: str) -> bool:
+    """Return whether ``line`` is blank or only a comment."""
+    stripped = line.strip()
+    return not stripped or stripped.startswith("#")
+
+
+def _trailing_exit(text: str) -> tuple[int, bool] | None:
+    """Find the top-level ``exit`` a shell hook ends with, if any.
+
+    Returns ``(offset, safe)``: where the ``exit`` line starts, and whether
+    code put just before it leaves the hook's exit status alone. A bare
+    ``exit`` or ``exit $?`` passes on the last command's status, so it is not
+    safe. None when the hook does not end with such a line, or when the
+    ``exit`` belongs to the command on the line before (``check ||`` then
+    ``exit 1``).
+    """
+    lines = text.splitlines(keepends=True)
+    offset = len(text)
+    for index in range(len(lines) - 1, -1, -1):
+        offset -= len(lines[index])
+        if _is_shell_filler(lines[index]):
+            continue
+        match = _TOP_LEVEL_EXIT_RE.fullmatch(lines[index].rstrip("\r\n"))
+        if match is None:
+            return None
+        for before in reversed(lines[:index]):
+            if not _is_shell_filler(before):
+                if before.strip().endswith(_SHELL_LINE_CONTINUATIONS):
+                    return None
+                break
+        arg = match.group("arg")
+        return offset, bool(arg) and "$?" not in arg
+    return None
+
+
+def _add_hook_block(existing: str, block: str) -> str | None:
+    """Return a user's shell hook with ``block`` added where it will run.
+
+    That is the end, or just before a top-level ``exit`` the hook ends with,
+    since the shell stops there. None when the block would change what the
+    hook exits with (see ``_trailing_exit``): the caller leaves it alone.
+    """
+    trailing = _trailing_exit(existing)
+    if trailing is None:
+        return existing.rstrip("\n") + "\n" + block
+    offset, safe = trailing
+    if not safe:
+        return None
+    return existing[:offset] + block + existing[offset:]
+
+
+def _lift_block_above_exit(text: str, begin_marker: str, end_marker: str) -> str:
+    """Move a marked block that sits after a hook's final ``exit`` to just before it.
+
+    Earlier releases appended the block after it, where it never ran. Text
+    the user wrote after the block, or an ``exit`` that is not safe to move
+    past, keeps the block where it is.
+    """
+    span = _git_hook_block_span(text, 0, begin_marker, end_marker)
+    if span is None or text[span[1]:].strip():
+        return text
+    begin, end = span
+    trailing = _trailing_exit(text[:begin])
+    if trailing is None or not trailing[1]:
+        return text
+    offset = trailing[0]
+    return text[:offset] + text[begin:end] + text[offset:begin] + text[end:]
+
+
+def _exit_warning(hook_path: Path, command: str) -> None:
+    logger.warning(
+        "%s ends with an 'exit' that passes on the last command's status, so a "
+        "block added after it would never run; leaving it alone. Call "
+        "'code-review-graph %s' from it before the 'exit'.",
+        hook_path,
+        command,
+    )
 
 
 def _git_hooks_dir(repo_root: Path) -> Path | None:
@@ -2050,12 +2486,14 @@ def install_git_hook(repo_root: Path) -> Path | None:
 
     Creates ``pre-commit`` if it doesn't exist, or appends to an existing
     one — the hook is appended, not overwritten, preserving any hooks
-    already there. Falls back to the legacy ``.git/hooks`` resolution when
-    git itself is unavailable. Returns None when no hooks directory can be
-    determined. A block written by any past release is upgraded in place, and
-    a hand-edited one is left alone. The installed hook skips automatic checks
-    in linked worktrees, where an implicit update could build a duplicate graph
-    for a different branch; ``CRG_HOOK_WORKTREES=1`` opts a worktree back in.
+    already there. A hook that ends with a top-level ``exit`` gets the block
+    just before that line, where it still runs. Falls back to the legacy
+    ``.git/hooks`` resolution when git itself is unavailable. Returns None
+    when no hooks directory can be determined. A block written by any past
+    release is upgraded in place, and a hand-edited one is left alone. The
+    installed hook skips automatic checks in linked worktrees, where an
+    implicit update could build a duplicate graph for a different branch;
+    ``CRG_HOOK_WORKTREES=1`` opts a worktree back in.
     Detection relies only on ``git rev-parse --absolute-git-dir`` (Git 2.13),
     not on newer options.
     """
@@ -2064,6 +2502,7 @@ def install_git_hook(repo_root: Path) -> Path | None:
         return None
 
     hook_path = hooks_dir / "pre-commit"
+    program = _hook_program()
 
     if install_plan.exists(hook_path):
         try:
@@ -2088,23 +2527,28 @@ def install_git_hook(repo_root: Path) -> Path | None:
         if _GIT_HOOK_BEGIN_MARKER in existing or _GIT_HOOK_NOTE in existing:
             # Upgrade only a block this project generated; custom hook logic
             # and surrounding user commands remain intact.
-            upgraded = _upgrade_git_hook_block(existing)
+            upgraded = _upgrade_git_hook_block(existing, program)
             if upgraded is None:
                 logger.warning(
                     "%s has a hand-edited code-review-graph block; leaving it alone.",
                     hook_path,
                 )
                 return hook_path
+            upgraded = _lift_block_above_exit(
+                upgraded, _GIT_HOOK_BEGIN_MARKER, _GIT_HOOK_END_MARKER
+            )
             if upgraded == existing:
                 logger.info("%s already holds the current hook block.", hook_path)
                 return hook_path
             install_plan.write_text(hook_path, upgraded)
         else:
-            install_plan.write_text(
-                hook_path, existing.rstrip("\n") + "\n" + _GIT_HOOK_BLOCK
-            )
+            added = _add_hook_block(existing, _git_hook_block(program))
+            if added is None:
+                _exit_warning(hook_path, "detect-changes --brief")
+                return hook_path
+            install_plan.write_text(hook_path, added)
     else:
-        install_plan.write_text(hook_path, _GIT_HOOK_SHEBANG + _GIT_HOOK_BLOCK)
+        install_plan.write_text(hook_path, _GIT_HOOK_SHEBANG + _git_hook_block(program))
 
     install_plan.chmod(hook_path, 0o755)  # nosec B103 - a hook must be executable
     logger.info("Wrote git pre-commit hook: %s", hook_path)
@@ -2125,8 +2569,9 @@ def install_git_hook(repo_root: Path) -> Path | None:
 #   nothing is left to replay, Git never runs post-rewrite, so that checkout
 #   is the final tree and post-checkout updates after all.
 # - post-merge, after a merge or a merge-mode ``git pull``.
-# - post-rewrite, after a rebase has replayed every commit. ``--amend`` also
-#   fires it, but ``pre-commit`` already updated the graph for that commit.
+# - post-rewrite, after a rebase has replayed every commit and after
+#   ``commit --amend``. ``pre-commit`` updates before an amend too, but
+#   ``--no-verify`` skips it.
 #
 # They share the pre-commit block's rules: explicit begin/end markers, appended
 # to an existing hook rather than overwriting it, and skipped in linked
@@ -2144,13 +2589,19 @@ _GIT_SYNC_HOOK_CONDITIONS = {
     # $3 is 1 for a branch checkout and 0 for a file checkout.
     "post-checkout": '[ "$3" = "1" ] && ',
     "post-merge": "",
-    # $1 names the command that rewrote commits: "rebase" or "amend".
-    "post-rewrite": '[ "$1" = "rebase" ] && ',
+    # Git passes "rebase" or "amend" as $1; both update. Up to 2.4.0 it was
+    # '[ "$1" = "rebase" ] && ', and the markers still find that block.
+    "post-rewrite": "",
 }
 
 
-def _git_sync_hook_block(hook_name: str) -> str:
-    """Return the marked block that ``hook_name`` runs to update the graph."""
+def _git_sync_hook_block(hook_name: str, program: _HookProgram | None = None) -> str:
+    """Return the marked block that ``hook_name`` runs to update the graph.
+
+    It runs ``program``, by default the copy running now (see ``_hook_program``),
+    or the copy on PATH when that one is gone.
+    """
+    program = program or _hook_program()
     condition = _GIT_SYNC_HOOK_CONDITIONS[hook_name]
     rebase_guard = ""
     if hook_name == "post-checkout":
@@ -2166,9 +2617,11 @@ def _git_sync_hook_block(hook_name: str) -> str:
     elif [ -d "$crg_hook_git_dir/rebase-apply" ]; then
         :
 """
+    head = f"if {condition}{_any_copy_guard(program)}; then\n" + _hook_cli_function(
+        "crg_hook_cli", program, "    "
+    )
     body = f"""\
-if {condition}command -v code-review-graph >/dev/null 2>&1; then
-    crg_hook_git_dir=$(git rev-parse --absolute-git-dir 2>/dev/null) || crg_hook_git_dir=""
+{head}    crg_hook_git_dir=$(git rev-parse --absolute-git-dir 2>/dev/null) || crg_hook_git_dir=""
     crg_hook_root=$(git rev-parse --show-toplevel 2>/dev/null) || crg_hook_root=""
     if [ -z "$crg_hook_git_dir" ] || [ -z "$crg_hook_root" ]; then
         echo "code-review-graph: skipping graph sync; cannot determine the Git worktree." >&2
@@ -2176,7 +2629,7 @@ if {condition}command -v code-review-graph >/dev/null 2>&1; then
         echo "code-review-graph: skipping graph sync in a linked worktree;" \\
             "set CRG_HOOK_WORKTREES=1 to keep a graph for this worktree too." >&2
 {rebase_guard}    else
-        code-review-graph update --quiet --repo "$crg_hook_root" || true
+        crg_hook_cli update --quiet --repo "$crg_hook_root" || true
     fi
 fi
 """
@@ -2214,8 +2667,9 @@ def install_git_sync_hooks(repo_root: Path) -> list[Path]:
 
     Called automatically by ``code-review-graph install`` next to
     :func:`install_git_hook`, and resolves the hooks directory the same way.
-    Each block is appended to an existing hook, never overwriting it, and a
-    block written by an earlier release is replaced in place. A hook whose
+    Each block is appended to an existing hook, never overwriting it (just
+    before a final top-level ``exit``, so it runs), and a block written by an
+    earlier release is replaced in place. A hook whose
     markers are unbalanced was edited by hand and is left alone, and so is a
     hook written in a language other than shell. A failed
     update never fails the git command that triggered it.
@@ -2225,9 +2679,10 @@ def install_git_sync_hooks(repo_root: Path) -> list[Path]:
         return []
 
     written: list[Path] = []
+    program = _hook_program()
     for name in _GIT_SYNC_HOOK_NAMES:
         hook_path = hooks_dir / name
-        block = _git_sync_hook_block(name)
+        block = _git_sync_hook_block(name, program)
         if install_plan.exists(hook_path):
             try:
                 existing = install_plan.read_text(hook_path, encoding="utf-8")
@@ -2256,11 +2711,19 @@ def install_git_sync_hooks(repo_root: Path) -> list[Path]:
                     )
                     continue
                 begin, end = span
-                updated = existing[:begin] + block + existing[end:]
+                updated = _lift_block_above_exit(
+                    existing[:begin] + block + existing[end:],
+                    _GIT_SYNC_HOOK_BEGIN_MARKER,
+                    _GIT_SYNC_HOOK_END_MARKER,
+                )
                 if updated != existing:
                     install_plan.write_text(hook_path, updated)
             else:
-                install_plan.write_text(hook_path, existing.rstrip("\n") + "\n" + block)
+                added = _add_hook_block(existing, block)
+                if added is None:
+                    _exit_warning(hook_path, "update --quiet")
+                    continue
+                install_plan.write_text(hook_path, added)
         else:
             install_plan.write_text(hook_path, _GIT_HOOK_SHEBANG + block)
         install_plan.chmod(hook_path, 0o755)  # nosec B103 - a hook must be executable
@@ -2321,7 +2784,7 @@ _GENERATED_HOOK_COMMAND_RE = re.compile(
     r"(?:\s*\|\|\s*(?:true|echo\s+'Not a git repo, skipping'))?"
     # The Codex hook that forwards the event JSON to a payload-scoped subcommand.
     r"|cat\s*\|\s*\{\s*if\s+command\s+-v\s+code-review-graph\s*>/dev/null\s+2>&1;\s*"
-    r"then\s+code-review-graph\s+hook-(?:update|status);\s*"
+    r"then\s+code-review-graph\s+hook-(?:update(?:\s+--existing-only)?|status);\s*"
     r"else\s+cat\s*>/dev/null;\s*fi;\s*\}"
     # The project edit hook that forwards the event JSON to ``hook-update``.
     r"|command\s+-v\s+code-review-graph\s*>/dev/null\s+2>&1\s*&&\s*"
@@ -2337,6 +2800,68 @@ _STEERING_HOOK_COMMAND_RE = re.compile(
     r"then\s+code-review-graph\s+enrich;\s*"
     r"else\s+cat\s*>/dev/null;\s*fi;\s*\}\s*\|\|\s*true\Z"
 )
+
+# Hooks that start the copy which ran ``install`` (see ``_hook_program``). The
+# copy is the only part that varies, so each shape is the generated command
+# with that part opened up: the running interpreter by its quoted absolute
+# path, or ``uvx``. Nothing else about the command may differ.
+_PINNED_EXE_RE = r"'(?:[^']|'\"'\"')*'"
+_PINNED_GUARD_RE = (
+    rf"(?:\[ -x (?P<exe>{_PINNED_EXE_RE}) \]|{re.escape(_UVX_HOOK_PROGRAM.guard)})"
+)
+_PINNED_COMMAND_RE = (
+    rf"(?(exe)(?P=exe) -m code_review_graph|{re.escape(_UVX_HOOK_PROGRAM.command)})"
+)
+_PINNED_SENTINEL = _HookProgram("\x00guard\x00", "\x00command\x00")
+
+
+def _pinned_shape(text: str) -> re.Pattern[str]:
+    """Compile ``text``, made with ``_PINNED_SENTINEL``, into a pattern for any copy."""
+    pattern = (
+        re.escape(text)
+        .replace(re.escape(_PINNED_SENTINEL.guard), _PINNED_GUARD_RE, 1)
+        .replace(re.escape(_PINNED_SENTINEL.command), _PINNED_COMMAND_RE, 1)
+    )
+    return re.compile(rf"\A{pattern}\Z")
+
+
+# Each is compiled on its own: the copy's group name may appear once per pattern.
+# The project hooks go in Claude Code, Qoder and CodeBuddy settings, the Codex
+# ones in Codex's hooks.json.
+_PINNED_PROJECT_HOOK_COMMAND_RES = tuple(
+    _pinned_shape(text)
+    for text in (
+        _claude_update_hook_command(_PINNED_SENTINEL),
+        _claude_session_hook_command(_PINNED_SENTINEL),
+        _claude_session_hook_command(_PINNED_SENTINEL, _legacy_session_status_body),
+    )
+)
+_PINNED_CODEX_HOOK_COMMAND_RES = tuple(
+    _pinned_shape(_codex_hook_command(subcommand, _PINNED_SENTINEL))
+    for subcommand in (_CODEX_UPDATE_SUBCOMMAND, "hook-update", "hook-status")
+)
+_PINNED_STEERING_HOOK_COMMAND_RE = _pinned_shape(
+    f"{_codex_hook_command('enrich', _PINNED_SENTINEL)} || true"
+)
+
+
+def _is_pinned_project_hook_command(command: Any) -> bool:
+    """Return whether ``command`` is a project edit or session hook that names its copy."""
+    return isinstance(command, str) and any(
+        pattern.match(command) for pattern in _PINNED_PROJECT_HOOK_COMMAND_RES
+    )
+
+
+def _is_pinned_codex_hook_command(command: Any) -> bool:
+    """Return whether ``command`` is a Codex hook that names its copy."""
+    return isinstance(command, str) and any(
+        pattern.match(command) for pattern in _PINNED_CODEX_HOOK_COMMAND_RES
+    )
+
+
+def _is_pinned_hook_command(command: Any) -> bool:
+    """Return whether ``command`` is any hook ``install`` writes that names its copy."""
+    return _is_pinned_project_hook_command(command) or _is_pinned_codex_hook_command(command)
 
 # Loose spellings that merely *mention* this project. Used only to tell the
 # user about a hook that was kept because it could not be recognised; never to
@@ -2445,15 +2970,21 @@ def _is_generated_hook_command(command: Any) -> bool:
     stripped = command.strip()
     if not stripped:
         return False
-    return bool(_GENERATED_HOOK_COMMAND_RE.match(stripped)) or _is_generated_hook_script(
-        stripped
+    return (
+        bool(_GENERATED_HOOK_COMMAND_RE.match(stripped))
+        or _is_pinned_hook_command(stripped)
+        or _is_generated_hook_script(stripped)
     )
 
 
 def _is_steering_hook_command(command: Any) -> bool:
     """Return whether ``command`` is the steering hook this project writes."""
-    return isinstance(command, str) and bool(
-        _STEERING_HOOK_COMMAND_RE.match(command.strip())
+    if not isinstance(command, str):
+        return False
+    stripped = command.strip()
+    return bool(
+        _STEERING_HOOK_COMMAND_RE.match(stripped)
+        or _PINNED_STEERING_HOOK_COMMAND_RE.match(stripped)
     )
 
 
@@ -2662,11 +3193,20 @@ def _write_merged_settings(
 ) -> bool:
     """Write merged hook settings, keeping a backup and every comment.
 
-    Returns False when the file was left alone instead. A commented file that
-    already holds these hooks is not touched, so reinstalling neither rewrites it
-    nor replaces the backup of what the user wrote with our own earlier edit.
+    Returns False when the file was left alone instead. A file that already
+    holds these settings is not touched, so reinstalling neither rewrites it nor
+    leaves a backup that is the same as the file. An existing backup is kept:
+    it is the copy from before the first install, and a later install that
+    changes the file must not replace it with our own earlier edit.
     """
     spliced: str | None = None
+    if raw.strip() and not jsonc.has_comments(raw):
+        try:
+            unchanged = json.loads(_strip_jsonc(raw)) == merged
+        except (ValueError, RecursionError):
+            unchanged = False
+        if unchanged:
+            return True
     if jsonc.has_comments(raw):
         stripped = _strip_jsonc(raw)
         before = json.loads(stripped) if stripped.strip() else {}
@@ -2678,8 +3218,10 @@ def _write_merged_settings(
                 label, path, "has comments this installer cannot keep through the edit",
             )
             return False
-    if raw.strip():
-        backup_path = path.with_name(f"{path.name}.bak")
+    backup_path = path.with_name(f"{path.name}.bak")
+    if raw.strip() and install_plan.lexists(backup_path):
+        logger.info("Kept the existing backup %s", backup_path)
+    elif raw.strip():
         try:
             install_plan.copy_file(path, backup_path)
         except OSError as exc:
@@ -3106,6 +3648,7 @@ def install_gemini_cli_hooks(repo_root: Path) -> Path | None:
     raw, existing = loaded
 
     repo_arg = repo_root.resolve().as_posix()
+    cli_function = _hook_cli_function("crg", _hook_program(), "")
     session_start_script = """\
 #!/usr/bin/env bash
 # code-review-graph: session start status (Gemini CLI hook)
@@ -3114,7 +3657,8 @@ set -euo pipefail
 
 cat > /dev/null || true
 
-msg="$(code-review-graph status --repo "__CRG_REPO__" 2>&1 | head -n 1 || true)"
+__CRG_FUNCTION__
+msg="$(crg status --repo "__CRG_REPO__" 2>&1 | head -n 1 || true)"
 
 CRG_MSG="$msg" python3 -c '
 import json,os
@@ -3123,7 +3667,9 @@ print(json.dumps({"systemMessage":m,"suppressOutput":True}))
 ' 2>/dev/null || echo '{"suppressOutput": true}'
 exit 0
 """
-    session_start_script = session_start_script.replace("__CRG_REPO__", repo_arg)
+    session_start_script = session_start_script.replace(
+        "__CRG_REPO__", repo_arg
+    ).replace("__CRG_FUNCTION__\n", cli_function)
 
     update_script = """\
 #!/usr/bin/env bash
@@ -3133,11 +3679,14 @@ set -euo pipefail
 
 cat > /dev/null || true
 
-code-review-graph update --skip-flows --repo "__CRG_REPO__" >/dev/null 2>&1 || true
+__CRG_FUNCTION__
+crg update --skip-flows --repo "__CRG_REPO__" >/dev/null 2>&1 || true
 echo '{"suppressOutput": true}'
 exit 0
 """
-    update_script = update_script.replace("__CRG_REPO__", repo_arg)
+    update_script = update_script.replace("__CRG_REPO__", repo_arg).replace(
+        "__CRG_FUNCTION__\n", cli_function
+    )
 
     hooks_obj = existing.get("hooks", {})
 
@@ -3255,24 +3804,39 @@ def inject_platform_instructions(repo_root: Path, target: str = "all") -> list[s
     return [name for name, outcome in outcomes.items() if outcome in ("created", "updated")]
 
 
+def instruction_file_wanted(
+    owners: Iterable[str], target: str, platforms: Iterable[str] | None = None
+) -> bool:
+    """Return whether an instruction file read by ``owners`` is written for ``target``.
+
+    ``platforms`` narrows ``"all"`` to the platforms ``install`` selected.
+    """
+    if target != "all":
+        return target in owners
+    return platforms is None or not set(owners).isdisjoint(platforms)
+
+
 def inject_instruction_files(
     repo_root: Path,
     target: str = "all",
     *,
     include_claude_md: bool = True,
+    platforms: Iterable[str] | None = None,
 ) -> dict[str, str]:
     """Write every instruction file for ``target`` and report what happened.
 
     Maps each filename to ``"created"``, ``"updated"``, ``"unchanged"`` or
     ``"conflict"``, as documented on ``_inject_instructions``. This is the entry
     point the install command uses so it can tell the user which files it
-    upgraded and which ones need manual attention.
+    upgraded and which ones need manual attention. ``platforms`` narrows
+    ``"all"`` to the platforms ``install`` selected.
     """
+    selected = None if platforms is None else frozenset(platforms)
     outcomes: dict[str, str] = {}
-    if include_claude_md and target in ("claude", "all"):
+    if include_claude_md and instruction_file_wanted(("claude",), target, selected):
         outcomes["CLAUDE.md"] = inject_claude_md(repo_root)
     for filename, owners in _PLATFORM_INSTRUCTION_FILES.items():
-        if target != "all" and target not in owners:
+        if not instruction_file_wanted(owners, target, selected):
             continue
         path = repo_root / filename
         if filename in _PLATFORM_INSTRUCTION_CUSTOM_SECTIONS:
@@ -3338,9 +3902,12 @@ def _cursor_hook_scripts() -> dict[str, str]:
 
     All scripts:
     - Read stdin (Cursor passes JSON context) and discard it
+    - Run the copy of code-review-graph that ran ``install``, or the one on
+      PATH when it is gone
     - Fail gracefully (exit 0) so they never block the editor
     - Emit valid JSON on stdout per the Cursor hooks protocol
     """
+    cli_function = _hook_cli_function("crg", _hook_program(), "")
     update_script = """\
 #!/usr/bin/env bash
 # code-review-graph: auto-update graph after file edits (Cursor hook)
@@ -3350,8 +3917,9 @@ set -euo pipefail
 # Consume stdin (Cursor sends JSON context)
 cat > /dev/null
 
+__CRG_FUNCTION__
 # Run update; swallow errors so the hook always succeeds.
-output=$(code-review-graph update --skip-flows 2>&1) || true
+output=$(crg update --skip-flows 2>&1) || true
 
 # Emit valid JSON on stdout per Cursor hooks protocol.
 python3 -c "
@@ -3371,8 +3939,9 @@ set -euo pipefail
 # Consume stdin
 cat > /dev/null
 
+__CRG_FUNCTION__
 # Capture status output
-output=$(code-review-graph status 2>&1) || output="graph not built yet"
+output=$(crg status 2>&1) || output="graph not built yet"
 
 # Emit valid JSON on stdout
 python3 -c "
@@ -3393,8 +3962,9 @@ set -euo pipefail
 # Consume stdin
 cat > /dev/null
 
+__CRG_FUNCTION__
 # Run detect-changes; swallow errors
-output=$(code-review-graph detect-changes --brief 2>&1) || output=""
+output=$(crg detect-changes --brief 2>&1) || output=""
 
 # Emit valid JSON on stdout
 python3 -c "
@@ -3406,10 +3976,14 @@ print(json.dumps({'message': msg, 'passed': True}))
 exit 0
 """
 
-    return {
+    scripts = {
         "crg-update.sh": update_script,
         "crg-session-start.sh": session_start_script,
         "crg-pre-commit.sh": pre_commit_script,
+    }
+    return {
+        name: script.replace("__CRG_FUNCTION__\n", cli_function)
+        for name, script in scripts.items()
     }
 
 
@@ -3613,6 +4187,14 @@ import { promisify } from "node:util"
 
 const execFileAsync = promisify(execFile)
 
+// Say in OpenCode's log why a command failed. No CLI at all is not a failure.
+function logFailure(args: string[], error: unknown): void {
+  const failure = error as { code?: unknown; stderr?: unknown; message?: unknown } | null
+  if (failure?.code === "ENOENT") return
+  const detail = String(failure?.stderr || failure?.message || error).trim()
+  console.error(`[code-review-graph] ${args[0]} failed: ${detail}`)
+}
+
 async function runQuiet(args: string[], cwd: string, timeoutMs: number): Promise<string> {
   try {
     const { stdout } = await execFileAsync("code-review-graph", args, {
@@ -3620,7 +4202,8 @@ async function runQuiet(args: string[], cwd: string, timeoutMs: number): Promise
       timeout: timeoutMs,
     })
     return String(stdout ?? "").trim()
-  } catch {
+  } catch (error) {
+    logFailure(args, error)
     return ""
   }
 }
@@ -3728,7 +4311,16 @@ import { promisify } from "node:util"
 
 const execFileAsync = promisify(execFile)
 
-// Run code-review-graph quietly, swallowing errors. Never blocks the session.
+// Say in OpenCode's log why a command failed. No CLI at all is not a failure.
+function logFailure(args: string[], error: unknown): void {
+  const failure = error as { code?: unknown; stderr?: unknown; message?: unknown } | null
+  if (failure?.code === "ENOENT") return
+  const detail = String(failure?.stderr || failure?.message || error).trim()
+  console.error(`[code-review-graph] ${args[0]} failed: ${detail}`)
+}
+
+// Run code-review-graph quietly. A failure is logged, never thrown, so it
+// never blocks the session.
 async function runQuiet(args: string[], cwd: string, timeoutMs: number): Promise<string> {
   try {
     const { stdout } = await execFileAsync("code-review-graph", args, {
@@ -3736,7 +4328,8 @@ async function runQuiet(args: string[], cwd: string, timeoutMs: number): Promise
       timeout: timeoutMs,
     })
     return String(stdout ?? "").trim()
-  } catch {
+  } catch (error) {
+    logFailure(args, error)
     return ""
   }
 }
@@ -3821,21 +4414,88 @@ export default {
 """
 
 
-def _opencode_plugin_content(major_version: int = 2) -> str:
-    """Return the plugin template for an OpenCode major version."""
+# Both templates start the CLI through this one function.
+_OPENCODE_RUN_QUIET = """\
+async function runQuiet(args: string[], cwd: string, timeoutMs: number): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync("code-review-graph", args, {
+      cwd,
+      timeout: timeoutMs,
+    })
+    return String(stdout ?? "").trim()
+  } catch (error) {
+    logFailure(args, error)
+    return ""
+  }
+}
+"""
+
+# The same function when the plugin names the copy that ran ``install``.
+_OPENCODE_PINNED_RUN_QUIET = """\
+// The copy of code-review-graph that ran install, then the one on PATH.
+const CRG_COMMANDS: string[][] = __CRG_COMMANDS__
+
+async function runQuiet(args: string[], cwd: string, timeoutMs: number): Promise<string> {
+  for (const [file, ...prefix] of CRG_COMMANDS) {
+    try {
+      const { stdout } = await execFileAsync(file, [...prefix, ...args], {
+        cwd,
+        timeout: timeoutMs,
+      })
+      return String(stdout ?? "").trim()
+    } catch (error) {
+      // Try the next copy only when this one is not there at all.
+      if ((error as { code?: unknown } | null)?.code !== "ENOENT") {
+        logFailure(args, error)
+        return ""
+      }
+    }
+  }
+  return ""
+}
+"""
+
+
+def _opencode_plugin_content(
+    major_version: int = 2, launcher: Sequence[str] = ("code-review-graph",)
+) -> str:
+    """Return the plugin template for an OpenCode major version.
+
+    ``launcher`` is the command line that starts the CLI. Any other than the
+    copy on PATH is tried first, and the copy on PATH only when it is gone.
+    """
     if major_version == 1:
-        return _opencode_v1_plugin_content()
-    if major_version >= 2:
-        return _opencode_v2_plugin_content()
-    raise ValueError(f"Unsupported OpenCode major version: {major_version}")
+        content = _opencode_v1_plugin_content()
+    elif major_version >= 2:
+        content = _opencode_v2_plugin_content()
+    else:
+        raise ValueError(f"Unsupported OpenCode major version: {major_version}")
+    if list(launcher) == ["code-review-graph"]:
+        return content
+    commands = json.dumps([list(launcher), ["code-review-graph"]], ensure_ascii=False)
+    return content.replace(
+        _OPENCODE_RUN_QUIET,
+        _OPENCODE_PINNED_RUN_QUIET.replace("__CRG_COMMANDS__", commands),
+        1,
+    )
+
+
+def _opencode_plugin_path() -> Path:
+    """Return where OpenCode loads our global plugin from.
+
+    OpenCode keeps its global config in ``$XDG_CONFIG_HOME/opencode``
+    (default ``~/.config/opencode``).
+    """
+    return _xdg_config_home() / "opencode" / "plugins" / "crg-plugin.ts"
 
 
 def install_opencode_plugin(opencode_major: int | None = None) -> Path:
     """Install the OpenCode user-level plugin for code-review-graph.
 
-    Writes ``~/.config/opencode/plugins/crg-plugin.ts``.  Creates the
-    directories if they don't exist.  If the file already exists it is
-    overwritten (the plugin is self-contained and idempotent).
+    Writes ``crg-plugin.ts`` to OpenCode's global plugins folder (see
+    ``_opencode_plugin_path``).  Creates the directories if they don't
+    exist.  If the file already exists it is overwritten (the plugin is
+    self-contained and idempotent).
 
     Returns:
         Path to the plugin file that was written.
@@ -3852,10 +4512,11 @@ def install_opencode_plugin(opencode_major: int | None = None) -> Path:
             "defaulting to the OpenCode 2.x plugin template"
         )
 
-    plugins_dir = Path.home() / ".config" / "opencode" / "plugins"
-    plugin_path = plugins_dir / "crg-plugin.ts"
+    plugin_path = _opencode_plugin_path()
 
-    install_plan.write_text(plugin_path, _opencode_plugin_content(opencode_major))
+    install_plan.write_text(
+        plugin_path, _opencode_plugin_content(opencode_major, _hook_launcher())
+    )
     logger.info("Wrote OpenCode %s.x plugin: %s", opencode_major, plugin_path)
 
     return plugin_path
