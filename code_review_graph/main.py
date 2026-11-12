@@ -572,7 +572,7 @@ async def get_impact_radius_tool(
     )
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
+@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True})
 async def query_graph_tool(
     pattern: str,
     target: str,

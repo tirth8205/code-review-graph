@@ -12,6 +12,8 @@ WRITES_GRAPH = {
     "embed_graph_tool",
     "generate_wiki_tool",
 }
+# Opens the store through _get_store, which can create, migrate or move graph.db.
+STORE_OPENING_QUERY = {"query_graph_tool"}
 
 
 def _tools():
@@ -30,7 +32,7 @@ def test_every_tool_declares_read_only_hint():
 
 def test_write_tools_are_not_read_only():
     tools = _tools()
-    for name in WRITES_SOURCE | WRITES_GRAPH:
+    for name in WRITES_SOURCE | WRITES_GRAPH | STORE_OPENING_QUERY:
         assert wire(tools[name].annotations, "readOnlyHint") is False, name
     # False would promise additive-only writes. These replace graph rows, purge
     # embeddings and overwrite wiki pages, so none of them can make that promise.
@@ -50,5 +52,5 @@ def test_tools_that_renumber_flows_are_not_idempotent():
 def test_query_tools_are_read_only():
     tools = _tools()
     for name, tool in tools.items():
-        if name not in WRITES_SOURCE | WRITES_GRAPH:
+        if name not in WRITES_SOURCE | WRITES_GRAPH | STORE_OPENING_QUERY:
             assert wire(tool.annotations, "readOnlyHint") is True, name
