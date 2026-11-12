@@ -62,7 +62,7 @@ def export_json(store: GraphStore, output_path: Path) -> Path:
 
 
 # -------------------------------------------------------------------
-# GraphML export (for Gephi, yEd, Cytoscape)
+# GraphML export
 # -------------------------------------------------------------------
 
 #: The GraphML 1.0 namespace. Every GraphML reader keys off this exact URI.
@@ -94,7 +94,7 @@ def _xml_text(value: object) -> str:
 
 
 def export_graphml(store: GraphStore, output_path: Path) -> Path:
-    """Export the graph as GraphML XML for Gephi/yEd/Cytoscape.
+    """Export the graph as GraphML XML.
 
     The document declares the official GraphML namespace and validates
     against the GraphML 1.0 schema. That schema types ``node/@id`` as an
@@ -295,17 +295,7 @@ def export_obsidian_vault(
             {"target": src, "kind": kind}
         )
 
-    # Node name -> slug mapping
-    slugs: dict[str, str] = {}
-    for n in nodes:
-        slug = _obsidian_slug(n.get("name", n["qualified_name"]))
-        # Handle collisions
-        base_slug = slug
-        counter = 1
-        while slug in slugs.values():
-            slug = f"{base_slug}-{counter}"
-            counter += 1
-        slugs[n["qualified_name"]] = slug
+    slugs = _obsidian_slugs(nodes)
 
     # Write node pages
     for n in nodes:
@@ -438,6 +428,30 @@ def _obsidian_slug(name: str) -> str:
     slug = re.sub(r"[^\w\s-]", "", name.lower())
     slug = re.sub(r"[\s_]+", "-", slug).strip("-")
     return slug[:100] or "unnamed"
+
+
+def _obsidian_slugs(nodes: list[dict]) -> dict[str, str]:
+    """Map each node's qualified name to a slug no other node has.
+
+    A name that slugifies like an earlier one gets ``-1``, ``-2`` and so on.
+    Taken slugs are kept in a set, and each base remembers the suffix it
+    reached, so a thousand nodes named ``__init__`` cost a thousand steps,
+    not a scan of every earlier slug for each suffix tried.
+    """
+    slugs: dict[str, str] = {}
+    taken: set[str] = set()
+    next_suffix: dict[str, int] = {}
+    for n in nodes:
+        base = _obsidian_slug(n.get("name", n["qualified_name"]))
+        slug = base
+        counter = next_suffix.get(base, 1)
+        while slug in taken:
+            slug = f"{base}-{counter}"
+            counter += 1
+        next_suffix[base] = counter
+        taken.add(slug)
+        slugs[n["qualified_name"]] = slug
+    return slugs
 
 
 # -------------------------------------------------------------------

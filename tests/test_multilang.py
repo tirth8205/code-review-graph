@@ -3722,6 +3722,13 @@ class TestRescriptEdgeCases:
 class TestRescriptCrossModuleResolver:
     """Integration test for the cross-module resolver post-pass."""
 
+    @pytest.fixture(autouse=True)
+    def _close_built_stores(self):
+        self._stores = []
+        yield
+        for store in self._stores:
+            store.close()
+
     def _build(self, tmp_path):
         from code_review_graph.graph import GraphStore
         from code_review_graph.incremental import full_build
@@ -3751,6 +3758,7 @@ class TestRescriptCrossModuleResolver:
 
         store = GraphStore(tmp_path / "graph.db")
         result = full_build(tmp_path, store)
+        self._stores.append(store)
         return store, result
 
     def test_qualified_call_resolves_to_canonical_node(self, tmp_path):
@@ -4016,6 +4024,13 @@ class TestSpringDIParsing:
 class TestSpringDIResolver:
     """Integration tests for the Spring DI post-build resolver."""
 
+    @pytest.fixture(autouse=True)
+    def _close_built_stores(self):
+        self._stores = []
+        yield
+        for store in self._stores:
+            store.close()
+
     def _build(self, tmp_path):
         """Build a mini Spring repo and run the resolver."""
         pkg = tmp_path / "src/main/java/com/example"
@@ -4056,6 +4071,7 @@ class TestSpringDIResolver:
         store = GraphStore(str(tmp_path / "graph.db"))
         result = full_build(tmp_path, store)
         run_post_processing(store)
+        self._stores.append(store)
         return store, result
 
     def test_resolver_runs_and_reports(self, tmp_path):
@@ -4157,6 +4173,13 @@ class TestTemporalParsing:
 class TestTemporalResolver:
     """Integration tests for the Temporal post-build call resolver."""
 
+    @pytest.fixture(autouse=True)
+    def _close_built_stores(self):
+        self._stores = []
+        yield
+        for store in self._stores:
+            store.close()
+
     def _build(self, tmp_path):
         pkg = tmp_path / "src/main/java/com/example"
         pkg.mkdir(parents=True)
@@ -4192,6 +4215,7 @@ class TestTemporalResolver:
 
         store = GraphStore(str(tmp_path / "graph.db"))
         result = full_build(tmp_path, store)
+        self._stores.append(store)
         return store, result
 
     def test_temporal_resolver_runs_and_reports(self, tmp_path):

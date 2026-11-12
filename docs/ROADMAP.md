@@ -36,16 +36,19 @@ Releases after v2.3.6 are listed in [CHANGELOG.md](../CHANGELOG.md).
 
 ### v2.3.3
 - Parser coverage extended across source languages, shell scripts, notebooks and SFC-style files
-- Install targets for Gemini CLI, Qwen, Kiro, Qoder and GitHub Copilot variants
+- Install targets for Gemini CLI, Qoder, GitHub Copilot and GitHub Copilot CLI
 - Streamable HTTP MCP transport on localhost
-- Parser/resolver, Windows, FastMCP and daemon fixes
-- Community PR sweep and VS Code accessibility improvements
-
-### v2.2.0
 - Multi-repo watch daemon (`crg-daemon` / `code-review-graph daemon`)
 - TOML daemon configuration (`~/.code-review-graph/watch.toml`)
 - One `code-review-graph watch` child process per repo, config-file watching with reconciliation, PID file, health checks with restart
 - Standalone `crg-daemon` entry point (7 subcommands) and a `daemon` subcommand group in the main CLI
+- Parser/resolver, Windows and FastMCP fixes
+- Community PR sweep and VS Code accessibility improvements
+
+### v2.2.0
+- `get_minimal_context_tool` and a `detail_level` option on the most used tools
+- Parallel parsing, SQLite recursive-CTE impact search and configurable limits
+- Incremental flow and community updates; token-efficiency workflow benchmarks
 
 ### v2.0.0
 - 22 MCP tools (up from 9) and 5 MCP prompts
@@ -59,7 +62,7 @@ Releases after v2.3.6 are listed in [CHANGELOG.md](../CHANGELOG.md).
 - Multi-repo registry with cross-repo search
 - FTS5 full-text search with porter stemming
 - Database migrations (v1 to v5)
-- Evaluation framework with matplotlib reports
+- Evaluation framework with Markdown reports
 - TypeScript tsconfig path alias resolution
 - MiniMax embedding provider (embo-01)
 - Optional dependency groups: `[embeddings]`, `[google-embeddings]`, `[communities]`, `[eval]`, `[wiki]`, `[all]`

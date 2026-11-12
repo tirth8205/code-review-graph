@@ -1016,6 +1016,7 @@ def detect_changes_func(
     _validate_positive_int(max_flows, "max_flows")
 
     store, root = _get_store(repo_root)
+    notes: list[str] = []
     try:
         # Detect changed files if not provided.
         if changed_files is None:
@@ -1024,8 +1025,9 @@ def detect_changes_func(
             # a git that could not be run (or overran the discovery budget)
             # must not produce it. The ChangeDiscoveryError becomes
             # {"status": "error"} instead, so a client can tell "nothing to
-            # review" from "could not look".
-            changed_files, base = discover_review_changes(root, base)
+            # review" from "could not look". A base Git does not know is
+            # reported the same way.
+            changed_files, base = discover_review_changes(root, base, notes=notes)
         else:
             base = resolve_review_base(root, base)
 
@@ -1199,6 +1201,12 @@ def detect_changes_func(
                 "affected_flows_total": flows_total,
                 "truncated": any_cut,
             }
+        if notes:
+            # Said once, first: the review covers different files than the
+            # base the caller asked for would have.
+            result["summary"] = "\n".join(
+                [*(f"Note: {note}" for note in notes), result["summary"]]
+            )
         result["_hints"] = generate_hints(
             "detect_changes_tool", result, get_session()
         )

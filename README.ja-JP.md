@@ -39,9 +39,12 @@
   <a href="docs/COMMANDS.md">コマンド</a> ·
   <a href="docs/FAQ.md">FAQ</a> ·
   <a href="docs/TROUBLESHOOTING.md">トラブルシューティング</a> ·
+  <a href="docs/FEATURES.md">新機能</a> ·
+  <a href="CHANGELOG.md">変更履歴</a> ·
   <a href="docs/GITHUB_ACTION.md">GitHub Action</a> ·
   <a href="docs/REPRODUCING.md">ベンチマークの再現</a> ·
-  <a href="docs/ROADMAP.md">ロードマップ</a>
+  <a href="docs/ROADMAP.md">ロードマップ</a> ·
+  <a href="docs/INDEX.md">すべてのドキュメント</a>
 </p>
 
 <br>
@@ -52,20 +55,57 @@ AI コーディングツールは、変更をレビューするためにコー�
   <img src="diagrams/diagram1_before_vs_after.png" alt="トークンの問題: flask のコーパス全体を読むと 143,594 トークン、グラフの回答は 2,196 トークン（65 分の 1）" width="85%" />
 </p>
 
+**できること**
+
+- **コードを地図にします。** 関数、クラス、インポート、呼び出し、テストが 1 つのグラフになります。
+- **変更で壊れうるものを示します。** 変更が届きうる呼び出し元、依存先、テストを、リスクスコアつきで示します。
+- **常に最新に保ちます。** フックと watch モードが、変わったファイルだけを再解析します。
+- **AI ツールと連携します。** `install` を 1 回実行すると、見つかったツールをそれぞれ設定します。
+- **手元のマシンから出ません。** SQLite ファイル 1 つで、クラウドサービスは使いません。クラウド埋め込みは明示的に有効にした場合だけです。
+
 ---
 
 ## クイックスタート
 
+Python 3.10+ が必要です。
+
 ```bash
-pip install code-review-graph          # or: pipx install code-review-graph
-code-review-graph install              # detect installed AI coding tools and configure each one
+uv tool install code-review-graph      # or: pipx install / pip install code-review-graph
+code-review-graph install              # set up the AI coding tools found on this machine
 code-review-graph build                # parse the codebase
+code-review-graph detect-changes --brief  # see what your last change touches
 ```
 
-`install` は導入済みの AI コーディングツールを検出し、それぞれに MCP サーバーのエントリを書き込み、プラットフォームが対応していればフックとスキルを入れ、プラットフォームのルールファイルにグラフの説明を追加します。MCP エントリは、Poetry や uv のプロジェクト環境では `poetry run` または `uv run` を、PATH に `uvx` があれば `uvx code-review-graph serve` を、それ以外では現在の Python インタプリタを使います。`install` は、変更するファイルを一覧にし、指示ファイルについての質問にあなたが答えるまで、何も書き込みません。`install --dry-run` は各変更を差分で示し、何も書き込みません。実行後はエディタやツールを再起動してください。
+エディタやツールを再起動し、プロジェクトを開いて、アシスタントにこう頼みます。
+
+```
+Review my changes
+```
+
+`code-review-graph uninstall` ですべて元に戻せます（`--dry-run` で先に確認できます）。うまく動かないときは `code-review-graph doctor` を実行してください。設定を調べるだけで、何も変えません。
+
+<details>
+<summary><strong><code>install</code> が変えるものと、先に確かめる方法</strong></summary>
+<br>
+
+`install` はこのマシンにある AI コーディングツールを探し、見つかったものだけを設定します。それぞれに MCP サーバーのエントリを書き込み、ツールが対応していればフックとスキルを入れ、ルールファイルにグラフの説明を追加します。最後に、見つからなかったツールを示します。それでも追加したいツールは `install --platform NAME` で設定できます。
+
+`install` は、変更するファイルを一覧にし、指示ファイルについての質問にあなたが答えるまで、何も書き込みません。AI エージェントが実行する場合のように端末がないときは、既定の答え（はい）を選び、そのことを表示します。`--no-instructions` を付けるとそれらのファイルを書きません。`install --dry-run` は各変更を差分で示し、何も書き込みません。実行後はエディタやツールを再起動してください。
+
+MCP エントリとすべてのフックは、`install` を実行した code-review-graph を動かします。MCP エントリは、Poetry や uv のプロジェクトでは `poetry run` または `uv run` を、`install` 自体が `uvx` か `uv tool install` から動いたときは `uvx` を、それ以外では `install` を実行した Python を使います。フックはその Python（または `uvx`）を名前で指定し、それがなくなっていれば PATH 上の `code-review-graph` を実行します。アップグレードしたら `install` をもう一度実行してください。
+
+`install` が書くファイル（`.claude/` や `.mcp.json` など）は、チームでコミットする場合に備えて git から見えるままにしてあります。git が追跡するまでは `build` とレビューがこれらを除外するので、最初のレビューには自分の変更だけが出ます。`install` はこれらを `.code-review-graph/install-manifest.json` に記録します。`install --gitignore` を付けると、その実行で作ったものを `.gitignore` の印付きブロックに追加します。`uninstall` はそのブロックを取り除きます。
+
+Codex の場合、インストーラはさらにグローバルな `code-review-graph` スキルを `$CODEX_HOME/skills/code-review-graph/`（既定: `~/.codex/skills/code-review-graph/`）に置きます。このスキルは CRG の MCP ツールを優先し、MCP が使えないときは同梱の読み取り専用 CLI に切り替えます。グラフがない、空、または古い場合でも、暗黙にビルドや更新を始めることはありません。WSL と Windows の Codex ランタイムは `CODEX_HOME` ディレクトリとツール一覧がそれぞれ別なので、タスクを実行するランタイムの側でインストールと更新を行ってください。
+
+</details>
+
+<details>
+<summary><strong>対応するすべてのプラットフォームと、1 つだけを設定する方法</strong></summary>
+<br>
 
 <p align="center">
-  <img src="diagrams/diagram8_supported_platforms.png" alt="一度のインストールで全プラットフォーム対応: Codex、Claude Code、CodeBuddy Code、Cursor、Windsurf、Zed、Continue、OpenCode、MiMo Code、Antigravity、Gemini CLI、Qwen、Qoder、Kiro、GitHub Copilot、GitHub Copilot CLI、Hermes Agent を検出" width="85%" />
+  <img src="diagrams/diagram8_supported_platforms.png" alt="一度のインストールで全プラットフォーム対応: Codex、Claude Code、CodeBuddy Code、Cursor、Windsurf、Zed、Continue、OpenCode、MiMo Code、Antigravity、Gemini CLI、Qwen Code、Qoder、Kiro、GitHub Copilot、GitHub Copilot CLI、Hermes Agent、DeepSeek Harness を検出" width="85%" />
 </p>
 
 1 つのプラットフォームだけを設定するには、`--platform` に `codex`、`claude-code`、`cursor`、`windsurf`、`zed`、`continue`、`opencode`、`mimo`、`antigravity`、`gemini-cli`、`qwen`、`kiro`、`qoder`、`copilot`、`copilot-cli`、`codebuddy`、`hermes`、`dsh` のいずれかを渡します。
@@ -75,13 +115,15 @@ code-review-graph install --platform cursor
 code-review-graph install --platform codebuddy
 ```
 
-設定ファイルの場所は [docs/USAGE.md](docs/USAGE.md#supported-platforms) にあります。Python 3.10+ が必要です。
+この方法で指定したプラットフォームは、`install` が見つけられなくても設定されます。設定ファイルの場所は [docs/USAGE.md](docs/USAGE.md#supported-platforms) にあります。
 
-`install` が書くファイル（`.claude/` や `.mcp.json` など）は、チームでコミットする場合に備えて git から見えるままにしてあります。`install --gitignore` を付けると、その実行で作ったものを `.gitignore` の印付きブロックに追加します。`uninstall` はそのブロックを取り除きます。
+</details>
 
-Codex の場合、インストーラはさらにグローバルな `code-review-graph` スキルを `$CODEX_HOME/skills/code-review-graph/`（既定: `~/.codex/skills/code-review-graph/`）に置きます。このスキルは CRG の MCP ツールを優先し、MCP が使えないときは同梱の読み取り専用 CLI に切り替えます。グラフがない、空、または古い場合でも、暗黙にビルドや更新を始めることはありません。WSL と Windows の Codex ランタイムは `CODEX_HOME` ディレクトリとツール一覧がそれぞれ別なので、タスクを実行するランタイムの側でインストールと更新を行ってください。
+<details>
+<summary><strong><code>uninstall</code> のその他の使い方</strong></summary>
+<br>
 
-`uninstall` は Git または SVN の作業ツリーから CRG が書いたファイルとエントリを取り除き、ほかの MCP サーバー、フック、スキル、JSONC のコメントはそのまま残します。ツリー内のどこからでも実行できます。共有設定ファイルはアトミックに置き換えるので、書き込みに失敗しても元のファイルは壊れません。
+`uninstall` は Git または SVN の作業ツリーから CRG が書いたファイルとエントリを取り除き、ほかの MCP サーバー、フック、スキル、JSONC のコメントはそのまま残します。ツリー内のどこからでも実行できます。共有設定ファイルはアトミックに置き換えるので、書き込みに失敗しても元のファイルは壊れません。`install` が作った設定ファイルで、git が追跡しておらず中身がほかにないものは、`install` が作った空のフォルダーと一緒に削除されます。端末がないときは既定の答え（いいえ）を選び、`--yes` を付けるよう案内します。
 
 ```bash
 code-review-graph uninstall --dry-run    # preview only
@@ -92,76 +134,56 @@ code-review-graph uninstall --keep-data  # remove integrations, keep graph datab
 code-review-graph uninstall --keep-user-configs --repo .  # this project only
 ```
 
-そのあとプロジェクトを開き、アシスタントにこう頼みます。
+</details>
 
-```
-Build the code review graph for this project
-```
+<details>
+<summary><strong>ビルドにかかる時間と、一部だけのビルドの意味</strong></summary>
+<br>
 
-ビルド時間はリポジトリの規模に比例します。約 3,000 ファイルのリポジトリのコールドビルドで約 40 秒でした（[計測値](docs/REPRODUCING.md#incremental-update-latency)）。その後はフックと watch モードがグラフを更新し続けます。一部のファイルの解析に失敗した場合、結果のステータスは `partial` になり、要約にそのファイル名が入ります。CLI は stderr に `Warning:` の行も出力し、それらのファイルは以前のグラフの行をそのまま保持します。
+ビルド時間はリポジトリの規模に比例します。約 3,000 ファイルのリポジトリのコールドビルドで約 40 秒でした（[計測値](docs/REPRODUCING.md#incremental-update-latency)）。その後はフックと watch モードがグラフを更新し続けます。一部のファイルの解析に失敗した場合、結果のステータスは `partial` になり、要約にそのファイル名が入ります。CLI は stderr に `Warning:` の行も出力し、それらのファイルは以前のグラフの行をそのまま保持します。ソースファイルが 1 つも見つからないビルドは stderr に警告を出し、プロジェクトのルートにいるかどうかを尋ねます。
 
-### Docker または Podman で実行する
+</details>
 
-プロジェクトのリポジトリルートからイメージをビルドします。
-
-```bash
-docker build -t code-review-graph:local .
-```
-
-解析するリポジトリのディレクトリで、次を実行します。
+<details>
+<summary><strong>2.3.x からのアップグレード</strong></summary>
+<br>
 
 ```bash
-docker run --rm \
-  --user "$(id -u):$(id -g)" \
-  --env HOME=/tmp \
-  --volume "$PWD:/workspace" \
-  code-review-graph:local build
+pip install -U code-review-graph     # or: pipx upgrade / uv tool upgrade code-review-graph
+code-review-graph doctor             # every copy, MCP entry and hook, and the version each runs
+code-review-graph install --dry-run  # see what changes, then run install
+code-review-graph build              # once: new file types and fixes reach only re-parsed files
 ```
 
-マウントするリポジトリには書き込み権限が必要です。
-上のコマンドはホストのユーザー ID とグループ ID を使用するため、
-生成される `.code-review-graph/` ディレクトリの所有者は自分のユーザーになります。
-これらのコマンドは、ホスト上の root 以外のユーザーで実行してください。
+手元のすべてのコピーをアップグレードしてください。MCP エントリ、git とエディタのフック、`crg-daemon` は、それぞれ別のコピーを動かすことがあります。2.4.0 以降が一度開いたグラフは、2.3.9 のコピーでは読めず、それより古い 2.3.x のコピーでは壊れることがあります。`install` をもう一度実行してエントリとフックが新しいコピーを動かすようにし、エディタを再起動してください（デーモンを使っている場合は `crg-daemon restart` も実行します）。
 
-Podman では、同じ Dockerfile をビルドし、ユーザーマッピングを維持します。
+2.4.0 以降で最初に実行したコマンドが、グラフをスキーマ 15 に移します。VS Code 拡張機能を使っている場合、このグラフを読むにはバージョン 0.4.0 が必要です。全体の一覧: [アップグレードの注意](CHANGELOG.md#upgrade-notes)。
 
-```bash
-podman build -t code-review-graph:local .
-podman run --rm \
-  --userns=keep-id \
-  --env HOME=/tmp \
-  --volume "$PWD:/workspace" \
-  code-review-graph:local build
-```
-
-グラフはマウントしたリポジトリの `.code-review-graph/` に保存され、
-`/workspace/app.py` などのコンテナ内の絶対パスを記録します。
-`update` と `detect-changes` は、同じ `/workspace` マウントを使って Docker または Podman で実行してください。
-このグラフに対してホストで `update` を実行すると、"built with a different repository root"
-というエラーになる場合があります。ホストのコマンドに切り替えるには、ホストで
-`code-review-graph build` を実行し、ホストのパスでグラフを再構築してください。
-
-保存されたグラフを確認するには、`build` を `status` に置き換えます。
-イメージには Git が含まれ、デフォルトでは root 以外のユーザーで実行されます。
-イメージのビルド中にグラフは生成されません。
-
-これらの例は macOS/Linux のシェル構文を使用しています。
-macOS では、実行前に Docker 互換エンジンまたは Podman 仮想マシンを起動してください。
-Fedora など SELinux が有効なホストでは、マウントに `:z` を追加してください（`"$PWD:/workspace:z"`）。追加しないと、コンテナはリポジトリにアクセスできません。
+</details>
 
 ## 仕組み
+
+リポジトリは Tree-sitter で AST に解析され、ノード（関数、クラス、インポート）とエッジ（呼び出し、継承、テストカバレッジ）のグラフとして保存されます。レビュー時には、アシスタントが読むべき最小のファイル集合をグラフに問い合わせます。
+
+<details>
+<summary><strong>2 つの図: アシスタントがグラフを使う流れと、ビルドのパイプライン</strong></summary>
+<br>
 
 <p align="center">
   <img src="diagrams/diagram7_mcp_integration_flow.png" alt="アシスタントがグラフを使う流れ: ユーザーがレビューを依頼し、アシスタントが MCP ツールを呼び、グラフが影響範囲とリスクスコアを返し、アシスタントは影響のあるファイルだけを読む" width="80%" />
 </p>
 
-リポジトリは Tree-sitter で AST に解析され、ノード（関数、クラス、インポート）とエッジ（呼び出し、継承、テストカバレッジ）のグラフとして保存されます。レビュー時には、アシスタントが読むべき最小のファイル集合をグラフに問い合わせます。
-
 <p align="center">
   <img src="diagrams/diagram2_architecture_pipeline.png" alt="アーキテクチャのパイプライン: リポジトリ → Tree-sitter パーサー → SQLite グラフ → 影響範囲 → 最小レビュー集合" width="100%" />
 </p>
 
+</details>
+
 ### 影響範囲の分析
+
+<details>
+<summary><strong>変更が影響しうる呼び出し元、依存先、テストのすべて</strong></summary>
+<br>
 
 ファイルが変更されると、グラフは影響を受けうる呼び出し元、依存先、テストをすべて辿ります。アシスタントはプロジェクト全体を走査せず、それらのファイルを読みます。
 
@@ -169,15 +191,27 @@ Fedora など SELinux が有効なホストでは、マウントに `:z` を追�
   <img src="diagrams/diagram3_blast_radius.png" alt="影響範囲: login() の変更が呼び出し元、依存先、テストへ波及する" width="70%" />
 </p>
 
+</details>
+
 ### 増分更新
 
-エディタのフック、git のフック（pre-commit、post-checkout、post-merge、post-rewrite）、watch モードが増分更新を起動します。更新では変更ファイルの差分を取り、グラフのインポートエッジと呼び出しエッジから依存先を見つけ、SHA-256 ハッシュが変わったファイルだけを再解析します。約 3,000 ファイルのプロジェクト（django）では、2 ファイルの編集がフックの経路で約 2.5 秒で再インデックスされ、そのうち約 1.4 秒はプロセスの起動時間です。変更がない場合はその起動時間だけで済みます。[増分更新のレイテンシ](docs/REPRODUCING.md#incremental-update-latency)を参照してください。
+<details>
+<summary><strong>変更したファイルだけを再解析（2 ファイルの編集で約 2.5 秒）</strong></summary>
+<br>
+
+エディタのフック、git のフック（pre-commit、post-checkout、post-merge、post-rewrite）、watch モードが増分更新を起動します。フックは静かに更新します。コミットのたびに pre-commit フックが出すのは `detect-changes --brief` の短いレビューだけです。更新では変更ファイルの差分を取り、グラフのインポートエッジと呼び出しエッジから依存先を見つけ、SHA-256 ハッシュが変わったファイルだけを再解析します。約 3,000 ファイルのプロジェクト（django）では、2 ファイルの編集がフックの経路で約 2.5 秒で再インデックスされ、そのうち約 1.4 秒はプロセスの起動時間です。変更がない場合はその起動時間だけで済みます。[増分更新のレイテンシ](docs/REPRODUCING.md#incremental-update-latency)を参照してください。
 
 <p align="center">
   <img src="diagrams/diagram4_incremental_update.png" alt="増分更新の流れ: フックまたは watch の更新が git diff を起動し、グラフのエッジから依存先を見つけ、SHA-256 ハッシュが変わったファイルだけを再解析する" width="90%" />
 </p>
 
+</details>
+
 ### コードベース全体か、的を絞った回答か
+
+<details>
+<summary><strong>コードベース全体ではなく、質問に合わせて切り出したグラフの一部</strong></summary>
+<br>
 
 グラフはコーパス全体をモデルに渡す代わりに、質問に合わせて切り出した一部を返します。このリポジトリの `84bde354` における 2026-08-02 の計測では、208,821 のソーストークンが 1 質問あたり約 3,190 トークンになりました。そのスナップショット以降リポジトリは大きく育っているので、今日ではどちらの数字も大きくなっています。
 
@@ -185,19 +219,31 @@ Fedora など SELinux が有効なホストでは、マウントに `:z` を追�
   <img src="diagrams/diagram6_monorepo_funnel.png" alt="code-review-graph の 84bde354 スナップショット: 208,821 のソーストークンが約 3,190 トークンのグラフ応答に絞り込まれ、1 質問あたりのトークンが約 65 分の 1 になる" width="80%" />
 </p>
 
+</details>
+
 ### 対応言語とノートブック
 
+<details>
+<summary><strong>Python、JavaScript、TypeScript、Go、Rust、Java、C/C++、C# など多数とノートブック: 全一覧</strong></summary>
+<br>
+
 <p align="center">
-  <img src="diagrams/diagram9_language_coverage.png" alt="カテゴリ別の言語カバレッジ: Web、バックエンド、システム、モバイル、スクリプト、シェル、ドメイン、その他、加えて Jupyter と Databricks のノートブック" width="90%" />
+  <img src="diagrams/diagram9_language_coverage.png" alt="カテゴリ別の言語カバレッジ: Web、バックエンド、システム、モバイル、スクリプト、シェル、ドメイン、設定、その他、加えて Jupyter と Databricks のノートブック" width="90%" />
 </p>
 
-パーサーは関数、クラス、インポート、呼び出し箇所、継承、テストを抽出します。文法がある言語では Tree-sitter を、それ以外では的を絞ったフォールバックを使います。対応: Python、JavaScript/TypeScript/TSX（`.mjs`、`.cjs`、`.mts`、`.cts` を含む）、Go、Rust、Java、C/C++、C#、VB.NET、Ruby、Kotlin（`.kt`、`.kts`）、Swift、PHP、Scala、Solidity、Dart、R、Perl、Lua/Luau、Objective-C、シェルスクリプト、Elixir、Zig、PowerShell、Julia、ReScript、GDScript、Nix、Verilog/SystemVerilog、SQL/PL/SQL（Oracle）と dbt モデル、Terraform/OpenTofu（`.tf`。ほかの `.hcl` ファイルはファイルノードのみ）、Ansible YAML（playbook、role、task）、Spring Boot のアプリケーション設定（`application.properties`、`application.yml`、`application.yaml` とその `application-<profile>` 版。キー名と値の型のみを記録し、値は決して記録しません）、値を含まない一般的な YAML の構造（`locales/` などのフォルダにある翻訳ファイルはファイルノードのみ）、XSLT スタイルシート（`.xsl`、`.xslt`）、値を含まない JSON の構造（`.json`。翻訳、テスト、ドキュメント、サンプル、データのファイルはファイルノードのみで、ロックファイルは飛ばします）、Vue/Svelte の SFC、HTML ページ（`.html`、`.htm`。インラインスクリプトと、id を持つ `div`、`section`、`article` のブロックを `DocSection` ノードとして）、Astro ファイル（TypeScript の文法で解析）、Jupyter と Databricks のノートブック（`.ipynb`。加えて Databricks の `.py` エクスポート）、Perl XS ファイル（`.xs`）、Robot Framework のファイル（`.robot`、`.resource`）、Liquid テンプレート（`.liquid`）。ほかの `.properties` ファイルはソースコードとして扱いません。
+パーサーは関数、クラス、インポート、呼び出し箇所、継承、テストを抽出します。文法がある言語では Tree-sitter を、それ以外では的を絞ったフォールバックを使います。対応: Python、JavaScript/TypeScript/TSX（`.mjs`、`.cjs`、`.mts`、`.cts` を含む）、Go、Rust、Java、C/C++、C#、VB.NET、Ruby、Kotlin（`.kt`、`.kts`）、Swift、PHP、Scala、Solidity、Dart、R、Perl、Lua/Luau、Objective-C、シェルスクリプト、Elixir、Zig、PowerShell、Julia、ReScript、GDScript、Nix、Verilog/SystemVerilog、SQL/PL/SQL（Oracle）と dbt モデル、Terraform/OpenTofu（`.tf` と、`.hcl` ファイル内の Terraform ブロック。Terraform ブロックのない `.hcl` ファイルはファイルノードのみ）、Ansible YAML（playbook、role、task）、Spring Boot のアプリケーション設定（`application.properties`、`application.yml`、`application.yaml` とその `application-<profile>` 版。キー名と値の型のみを記録し、値は決して記録しません）、値を含まない一般的な YAML の構造（`locales/` などのフォルダにある翻訳ファイルはファイルノードのみ）、XSLT スタイルシート（`.xsl`、`.xslt`）、値を含まない JSON の構造（`.json`。翻訳、テスト、ドキュメント、サンプル、データのファイルはファイルノードのみで、ロックファイルは飛ばします）、Vue/Svelte の SFC、HTML ページ（`.html`、`.htm`。インラインスクリプトと、id を持つ `div`、`section`、`article` のブロックを `DocSection` ノードとして）、Astro ファイル（TypeScript の文法で解析）、Jupyter と Databricks のノートブック（`.ipynb`。加えて Databricks の `.py` エクスポート）、Perl XS ファイル（`.xs`）、Robot Framework のファイル（`.robot`、`.resource`）、Liquid テンプレート（`.liquid`）。ほかの `.properties` ファイルはソースコードとして扱いません。
 
 PHP プロジェクトではさらに、リポジトリ内に閉じた Composer PSR-4 の解決、Blade テンプレートの参照、そしてソースに明示的なフレームワークのインポート、モデルの継承、レシーバの根拠が現れている場合の Laravel Route と Eloquent のエッジが得られます。`routes/*.php` 内の静的な Laravel ルートは、Endpoint ノードとコントローラへの HANDLES エッジを生成し、リテラルのグループプレフィックスも反映します。
 
 Java プロジェクトでは、Spring の依存性注入による呼び出し解決、リクエストエンドポイントと WebFlux ルート、スケジュールトリガー、アプリケーションイベントの発行側からリスナーへのエッジ、Spring AOP のアドバイスから対象へのエッジ、Temporal のワークフローとアクティビティのエッジが得られます。各リゾルバは解析のあとに動き、注入されたフィールド、発行されるイベント、ワークフローのスタブがリポジトリ内で見えている必要があります。
 
+</details>
+
 ### 独自の言語を追加する
+
+<details>
+<summary><strong><code>languages.toml</code> でファイル拡張子を同梱の Tree-sitter 文法に対応づける</strong></summary>
+<br>
 
 パーサーが未対応の言語をリポジトリで使っている場合は、`.code-review-graph/` に `languages.toml` を置き、ファイル拡張子を `tree_sitter_language_pack` に同梱された任意の文法に対応づけ、関数、クラス、インポート、呼び出しのノード型を指定します。
 
@@ -213,7 +259,13 @@ call_node_types = ["call"]
 
 抽出は汎用の tree-sitter ウォーカーが行います。組み込み言語は上書きできません。スキーマ、検証ルール、具体例は [docs/CUSTOM_LANGUAGES.md](docs/CUSTOM_LANGUAGES.md) を参照してください。
 
+</details>
+
 ### CI でのリスクスコア付き PR レビュー（GitHub Action）
+
+<details>
+<summary><strong>リスクスコア、影響を受けるフロー、テストの穴をまとめたプルリクエストのコメント 1 件。ワークフローの例を参照</strong></summary>
+<br>
 
 同じ分析が composite の GitHub Action としても動きます。グラフはあなたの CI ランナー上で構築・照会され、ソースコードが外部サービスに送られることはありません。プルリクエストごとに、リスクスコア付きの関数、影響を受ける実行フロー、テストの穴をまとめた固定コメントを 1 件投稿し、プッシュのたびにその場で更新します。任意の `fail-on-risk` 入力を使うと、マージの関門にできます。任意の `details` 入力は、折りたたんでサイズに上限を設けた形でグラフの文脈を追加します。上位の各シンボルがそのスコアになった理由、変更が触れるコミュニティ、ハブ、境界をまたぐつながり、影響範囲、テストのないホットスポット、そしてグラフの出どころです。
 
@@ -238,17 +290,25 @@ jobs:
 
 入力、リスクレベル、キャッシュについては [docs/GITHUB_ACTION.md](docs/GITHUB_ACTION.md) を、このリポジトリ自身に対して動かしているワークフローは [`.github/workflows/pr-review.yml`](.github/workflows/pr-review.yml) を参照してください。
 
+</details>
+
 ---
 
 ## ベンチマーク
+
+6 リポジトリにおける 1 質問あたりのトークン削減の中央値は約 **63 倍**です（コーパス全体のベースライン対グラフ照会）。**358 倍**という最大値は 1 つのリポジトリ（fastapi、最大のコーパス）のもので、典型的な結果ではありません。
+
+<details>
+<summary><strong>ベンチマークの一覧図と、数字の出し方</strong></summary>
+<br>
 
 <p align="center">
   <img src="diagrams/diagram5_benchmark_board.png" alt="6 リポジトリのベンチマーク: 1 質問あたりのトークン削減の中央値は約 63 倍（最大 358 倍）、グラフ由来の正解に対する影響分析の平均 F1 は 0.69" width="85%" />
 </p>
 
-6 リポジトリにおける 1 質問あたりのトークン削減の中央値は約 **63 倍**です（コーパス全体のベースライン対グラフ照会）。**358 倍**という最大値は 1 つのリポジトリ（fastapi、最大のコーパス）のもので、典型的な結果ではありません。
-
 数字はすべて、6 つのオープンソースリポジトリ（13 コミット）に対する評価ランナーの出力です。各設定は上流の SHA を固定し、Leiden は固定シードで動き、埋め込みは CPU 上で決定的なので、別のマシンで 2 回実行しても同じ数字になります。再現手順は [`docs/REPRODUCING.md`](docs/REPRODUCING.md) にあります。最小の 2 設定に対する週次のレポート専用実行は [`.github/workflows/eval.yml`](.github/workflows/eval.yml) にあります。
+
+</details>
 
 <details>
 <summary><strong>トークン効率: 1 質問あたりの削減は中央値で約 63 倍（範囲は 35 倍から 358 倍。コーパス全体対グラフ照会）</strong></summary>
@@ -271,7 +331,7 @@ jobs:
 >
 > `code-review-graph` の行はスナップショットであり、現在の計測値ではありません。`84bde354` 以降リポジトリは大きくなっており、コーパスもグラフも今日ではかなり大きくなっています。
 
-コーパス全体のベースラインは、実際のエージェントが払うことのない上限です。エージェントは識別子を grep して、いちばん合致するファイルを読みます。`agent_baseline` の評価ベンチマークはその場合を測ります（純 Python でコーパスを grep し、一致数の多い上位 3 ファイルを取り、グラフ照会のコストとトークン数を比較）。結果は `evaluate/results/<repo>_agent_baseline_<date>.csv` に書かれます。この現実的なベースラインに対する中央値は、6 リポジトリ 18 問で **6.65x** です（平均 14.8x、範囲 4.2x〜72.6x）。2026-09-22 の計測は、検索とこのベースラインがテストファイルの順位を下げるようになる前のものです。計測し直すまで、`code-review-graph eval --benchmark agent_baseline --embed` の結果はこの数字と一致しません。完全な表は `docs/REPRODUCING.md` の「Canonical capture, 2026-09-22」にあります。
+コーパス全体のベースラインは、実際のエージェントが払うことのない上限です。エージェントは識別子を grep して、いちばん合致するファイルを読みます。`agent_baseline` の評価ベンチマークはその場合を測ります（純 Python でコーパスを grep し、一致数の多い上位 3 ファイルを取り、グラフ照会のコストとトークン数を比較）。この現実的なベースラインに対する中央値は、6 リポジトリ 18 問で **6.65x** です（平均 14.8x、範囲 4.2x〜72.6x）。2026-09-22 の計測は、検索とこのベースラインがテストファイルの順位を下げるようになる前のものです。計測し直すまで、`code-review-graph eval --benchmark agent_baseline --embed` の結果はこの数字と一致しません。完全な表は `docs/REPRODUCING.md` の「Canonical capture, 2026-09-22」にあります。
 
 この比はリポジトリの規模に追随します。グラフの応答は一定のまま（今回計測したすべてのリポジトリで 2,432〜4,021 トークン）である一方、grep のベースラインはコーパスとともに増えるためです。express では 4.5x、fastapi では 52x でした。どちらの数字も**検索**のコスト、つまり答えを見つけるのに必要なトークンを測っています。グラフが示したファイルをエージェントがそのうえで開くなら、グラフの分は置き換えではなく上乗せになります。`semantic_search_nodes_tool(include_source=True)` は位置とともにコードを返すのでその必要がなくなりますが、この経路を端から端まで計測することは今後の課題です。
 
@@ -322,15 +382,27 @@ jobs:
 
 ### 制限
 
+<details>
+<summary><strong>既知の 5 つの制限: 循環した再現率、小さな編集、検索の順位付け、フロー検出、偽陽性</strong></summary>
+<br>
+
 - **影響分析の「再現率 1.0」は循環している。** 過去の正解は予測器が辿るのと同じグラフのエッジから作られているので、構造上それは上限です。共変更の数字は、パスの修正を入れてベンチマークを再実行するまで引用しません。
 - **小さな単一ファイルの変更。** ささいな編集では、グラフの文脈のほうが素のファイル読み込みより大きくなることがあります。その差は、複数ファイルの分析を可能にしている構造メタデータです。
 - **検索の順位付け。** キーワード検索はたいてい正しい結果を上位に出しますが、順位付けには改善が必要です。モジュールパターンの命名のため、Express への問い合わせはヒットなしになることがあります。
 - **フロー検出。** エントリポイントの検出は Python と PHP/Laravel で最も強力です。JavaScript と Go のフロー検出には改善が必要です。
 - **適合率と再現率。** 影響分析は保守的です。影響を受けうるファイルを挙げるため、大きな依存グラフでは偽陽性が出ます。
 
+</details>
+
 ---
 
 ## 機能
+
+更新、影響分析、検索、可視化、CI でのレビュー、リファクタリング、マルチリポジトリ対応。すべて手元のマシンで完結します。
+
+<details>
+<summary><strong>機能の一覧表</strong></summary>
+<br>
 
 | 機能 | 内容 |
 |---------|---------|
@@ -340,7 +412,7 @@ jobs:
 | **フレームワークを理解する Java 解析** | Spring の依存性注入による呼び出し解決、リクエストエンドポイントと WebFlux ルート、スケジュールトリガー、アプリケーションイベントの発行側からリスナーへのエッジ、Spring AOP のアドバイスのエッジ、Temporal のワークフローとアクティビティのエッジ、そして値を含めずにインデックスする Spring Boot の設定キー |
 | **影響範囲の分析** | 変更によって影響を受けそうな関数、クラス、ファイル |
 | **自動更新フック** | エディタのフック、git のフック（コミットの前と、チェックアウト、マージ、リベースの後）、watch モードが作業中にグラフを更新 |
-| **セマンティック検索** | 任意のベクトル埋め込み。sentence-transformers、Google Gemini、MiniMax、Voyage AI、あるいは任意の OpenAI 互換エンドポイント（OpenAI、Azure、new-api、LiteLLM、vLLM、LocalAI） |
+| **セマンティック検索** | 任意のベクトル埋め込み。sentence-transformers、Google Gemini、MiniMax、Voyage AI、あるいは任意の OpenAI 互換エンドポイント |
 | **対話的な可視化** | D3.js の力学モデルグラフ。検索、コミュニティ凡例の切り替え、次数に応じたノードサイズ。加えて、シンボル、ファイル、フロー、変更を起点にした近傍ビュー |
 | **ハブとブリッジの検出** | 最も多く接続されたノードとボトルネック（媒介中心性） |
 | **意外度スコア** | 想定外の結合: コミュニティをまたぐ、言語をまたぐ、周辺からハブへのエッジ |
@@ -348,7 +420,7 @@ jobs:
 | **推奨質問** | ブリッジ、ハブ、意外な結合から生成したレビュー用の質問 |
 | **エッジの信頼度** | 4 段階（EXTRACTED、INFERRED、AMBIGUOUS、UNRESOLVED）とエッジ上の浮動小数点スコア。グラフが結び付けられなかった呼び出しはそうと分かる |
 | **グラフ探索** | 任意のノードからの BFS/DFS。深さとトークン予算を設定可能。`path_to` はあるシンボルが別のシンボルにどう到達するかを示し、最も弱いホップを挙げる |
-| **エクスポート形式** | GraphML（Gephi/yEd）、Neo4j Cypher、Obsidian vault、JSON、そして SVG（SVG には `eval` エクストラの matplotlib が必要） |
+| **エクスポート形式** | GraphML、Neo4j Cypher、Obsidian vault、JSON、そして SVG（SVG には `eval` エクストラの matplotlib が必要） |
 | **トークンのベンチマーク** | `code_review_graph/token_benchmark.py` が、質問ごとにコーパス全体のトークンとグラフ照会のトークンを計測 |
 | **文脈削減量の推定** | レビュー、影響分析、detect-changes、アーキテクチャの応答に付く `context_savings` メタデータ（`estimated`、`saved_tokens`、`saved_percent`） |
 | **コミュニティの自動分割** | グラフの 25% を超えるコミュニティを Leiden で再帰的に分割 |
@@ -366,15 +438,19 @@ jobs:
 | **全文検索** | キーワードとベクトル類似度を組み合わせた FTS5 のハイブリッド検索 |
 | **ローカル保存** | `.code-review-graph/` の SQLite ファイル 1 つ。外部データベースもクラウドサービスも不要 |
 
+</details>
+
 ---
 
 ## 使い方
+
+グラフを構築すれば、アシスタントは自分でそれを使います。スキル、コマンド、MCP ツール、設定については、下の各項目を開いてください。
 
 <details>
 <summary><strong>スキル</strong></summary>
 <br>
 
-`install` は、スキルに対応したプラットフォーム（Claude Code、Gemini CLI、CodeBuddy Code、Hermes Agent、Qoder）向けに次の 4 つのスキルを書き込みます。名前で呼び出してください。
+`install` は、設定するプラットフォームのうちスキルに対応したもの（Claude Code、Gemini CLI、CodeBuddy Code、Hermes Agent、Qoder）向けに次の 4 つのスキルを書き込みます。名前で呼び出してください。
 
 | スキル | 内容 |
 |-------|-------------|
@@ -392,10 +468,11 @@ Qoder にはさらに、このリポジトリの `skills/` ディレクトリか
 <br>
 
 ```bash
-code-review-graph install          # Detect and configure all platforms
+code-review-graph install          # Set up the AI coding tools found on this machine
 code-review-graph install --platform <name>  # One platform
 code-review-graph install --steering  # Claude Code: graph context beside each search and read
 code-review-graph uninstall --dry-run  # Preview removal of installed artifacts
+code-review-graph doctor           # Check copies, MCP entries, graph and hooks; changes nothing
 code-review-graph build            # Parse the whole codebase
 code-review-graph build --follow-symlinks  # Also index symlinked folders
 code-review-graph update           # Incremental update (changed files only)
@@ -413,7 +490,7 @@ code-review-graph visualize --format svg       # Export as SVG (needs matplotlib
 code-review-graph visualize --format obsidian  # Export as Obsidian vault
 code-review-graph visualize --format cypher    # Export as Neo4j Cypher
 code-review-graph wiki             # Markdown wiki from communities
-code-review-graph detect-changes --brief         # Risk panel + token savings (read-only)
+code-review-graph detect-changes --brief         # Top 3 to review, risk + token savings (read-only)
 code-review-graph detect-changes --brief --base main  # Against the merge base of main and HEAD
 code-review-graph update --brief                 # Refresh graph + same panel
 code-review-graph detect-changes --brief --verify  # Cross-check against tiktoken
@@ -425,16 +502,16 @@ code-review-graph repos            # List registered repositories
 code-review-graph daemon start     # Start the multi-repo watch daemon
 code-review-graph daemon stop      # Stop the daemon
 code-review-graph daemon status    # Daemon status and repos
-code-review-graph eval             # Run evaluation benchmarks
+code-review-graph eval --all       # Run every evaluation benchmark
 code-review-graph serve            # Start the MCP server (stdio)
 code-review-graph serve --http     # MCP over Streamable HTTP on localhost:5555
 code-review-graph serve --http --multi-repo  # One HTTP server for every registered repo
 code-review-graph serve --multi-worktree  # One child server per linked Git worktree
 ```
 
-これは抜粋です。`code-review-graph --help` がすべてのコマンドを並べ、[docs/COMMANDS.md](docs/COMMANDS.md) がそれぞれのフラグを説明します。
+これは抜粋です。コマンドを付けずに `code-review-graph` を実行すると、すべてのコマンドがグループごとに並び、[docs/COMMANDS.md](docs/COMMANDS.md) がそれぞれのフラグを説明します。コマンドを打ち間違えると終了コード 2 で終わり、いちばん近いコマンドを示します。
 
-`detect-changes --base` にブランチ名を渡すと、差分はそのブランチと HEAD のマージベースに対して取られます。コミットハッシュやその他のリビジョンはそのまま使われます。
+`detect-changes --base` にブランチ名を渡すと、差分はそのブランチと HEAD のマージベースに対して取られます。コミットハッシュやその他のリビジョンはそのまま使われます。git が知らないベースを渡すと、終了コード 1 で止まり、確かめ方を示します。コミットが 1 つしかない、または 1 つもないリポジトリでは、既定のベースの代わりに、コミットしていないファイルと新しいファイルをレビューし、そのことを表示します。
 
 `visualize --format svg` には matplotlib が必要で、これは `eval` エクストラに入っています（`pip install "code-review-graph[eval]"`）。ほかのエクスポート形式に追加インストールは要りません。
 
@@ -446,7 +523,7 @@ JSON のエクスポートはローカルのグラフデータディレクトリ
 <summary><strong>Token Savings パネル: <code>detect-changes --brief</code> と <code>update --brief</code></strong></summary>
 <br>
 
-どちらのコマンドも、変更ファイルをそのままエージェントに渡す場合と比べてグラフがどれだけトークンを節約したかを示す同じパネルを表示します。違いは 1 点だけ、先にグラフを更新するかどうかです。
+どちらのコマンドも、変更ファイルをそのままエージェントに渡す場合と比べてグラフがどれだけトークンを節約したかを示す同じパネルを表示します。違いは 1 点だけ、先にグラフを更新するかどうかです。パネルの上には、`detect-changes --brief` が先にレビューすべきものを最大 3 つ並べます。それぞれにファイルと行、1.00 を満点とするリスク、呼び出し元、テストが付きます。
 
 ```text
 ┌─────────────────────── Token Savings ────────────────────────┐
@@ -466,7 +543,7 @@ JSON のエクスポートはローカルのグラフデータディレクトリ
 
 同じ `context_savings` メタデータは、`get_impact_radius`、`get_review_context`、`detect_changes`、`get_architecture_overview` の各 MCP ツールの JSON 応答にも付きます。
 
-推定値の推移を見るには `CRG_CONTEXT_HISTORY=1` を設定します（既定ではオフ）。推定値ごとに `graph.db` の隣のローカルログへ 1 行追加され、内容はトークン数とツール名だけです。`code-review-graph context-history` で日別またはツール別に表示できます。[docs/USAGE.md](docs/USAGE.md#context-history) を参照してください。
+推定値の推移を見るには `CRG_CONTEXT_HISTORY=1` を設定します（既定ではオフ）。推定値ごとに `graph.db` の隣のローカルログへ 1 行追加されます。内容はトークン数、ツール名、タイムスタンプ、詳細レベル、ファイル数と深さで、ファイル名、パス、ソースコードは含みません。`code-review-graph context-history` で日別またはツール別に表示できます。[docs/USAGE.md](docs/USAGE.md#context-history) を参照してください。
 
 </details>
 
@@ -514,7 +591,7 @@ alias = "project-b"
 <summary><strong>30 個の MCP ツール</strong></summary>
 <br>
 
-グラフを構築すると、アシスタントはこれらを使います。
+グラフを構築すると、アシスタントはこれらを使います。読むだけの 25 個のツールには `readOnlyHint: true` が付いているので、クライアントは確認なしで実行できます。書き込みを行う 5 個（`build_or_update_graph_tool`、`run_postprocess_tool`、`embed_graph_tool`、`apply_refactor_tool`、`generate_wiki_tool`）には付いていません。
 
 | ツール | 内容 |
 |------|-------------|
@@ -567,7 +644,7 @@ vendor/**
 node_modules/**
 ```
 
-git リポジトリでは追跡されているファイルだけがインデックスされるので（`git ls-files`）、gitignore されたファイルは飛ばされます。追跡されているファイルを除外したいとき、あるいは git が使えないときに `.code-review-graphignore` を使ってください。既定の除外リストは [docs/USAGE.md](docs/USAGE.md#ignore-patterns) にあります。
+git リポジトリでは、ビルドは追跡されているファイルと、git が無視しない未追跡のファイルを読むので（`git ls-files` と `git ls-files --others --exclude-standard`）、gitignore されたファイルは飛ばされます。ほかのファイルを除外したいとき、あるいは git が使えないときは `.code-review-graphignore` を使ってください。既定の除外リストは [docs/USAGE.md](docs/USAGE.md#ignore-patterns) にあります。
 
 任意の依存グループ:
 
@@ -586,8 +663,9 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | 変数 | 内容 | 既定値 |
 |----------|-------------|---------|
 | `CRG_GIT_TIMEOUT` | Git 操作のタイムアウト（秒。build / update / watch） | `30` |
-| `CRG_DISCOVERY_TIMEOUT` | ファイル一覧が明示されなかったとき、変更内容を特定する各 Git コマンドのタイムアウト（秒）。超過時はエラーを返し、「変更なし」とは報告しない | `5`（`CRG_GIT_TIMEOUT` を明示設定した場合はその値） |
-| `CRG_DATA_DIR` | グラフのデータベースと生成物を置くディレクトリ | - |
+| `CRG_DISCOVERY_TIMEOUT` | レビューのツールやコマンドにファイル一覧が明示されなかったとき、変更内容を特定する各 Git コマンドのタイムアウト（秒）。超過時はエラーを返し、「変更なし」とは報告しない | `5`（`CRG_GIT_TIMEOUT` を明示設定した場合はその値） |
+| `CRG_DATA_DIR` | グラフのデータベースと生成物を置くディレクトリ。`install` が書いたファイルの記録は、リポジトリの `.code-review-graph/` に残ります | - |
+| `CRG_HOME` | ユーザーごとの状態を置くフォルダ: マルチリポジトリの登録簿（`registry.json`）、デーモンの `watch.toml`、その pid と状態のファイル、`logs/` | `~/.code-review-graph` |
 | `CRG_HOOK_WORKTREES` | `1` にすると、生成された git フックをリンク済みの git worktree でも動かす | - |
 | `CRG_EMBEDDING_MODEL` | ローカルのベクトル埋め込みの既定モデル | `all-MiniLM-L6-v2` |
 | `CRG_ACCEPT_CLOUD_EMBEDDINGS` | `1` にするとクラウド埋め込みの送信警告を抑制 | - |
@@ -604,12 +682,14 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_CALLER_TEST_ROUTE_MAX_CALLERS` | そのテスト済み呼び出し元を探す際に調べる呼び出し元の最大数 | `500` |
 | `CRG_TOOL_TIMEOUT` | 読み取り専用 MCP ツールのタイムアウト（秒。`0` で無効）。書き込みを行うツール（build / postprocess / embed / wiki / apply-refactor）には適用されない | `0` |
 | `CRG_CHURN_WINDOW_DAYS` | `detect-changes --churn` のコミット数を数える期間 | `90` |
-| `CRG_CONTEXT_HISTORY` | `1` にすると、`context_savings` の推定値を毎回ローカルログ `.code-review-graph/context-history.jsonl` に記録します。`code-review-graph context-history` で表示します。記録するのはトークン数とツール名だけで、外部には送信しません | - |
+| `CRG_CONTEXT_HISTORY` | `1` にすると、`context_savings` の推定値を毎回ローカルログ `.code-review-graph/context-history.jsonl` に記録します。`code-review-graph context-history` で表示します。記録するのはトークン数、ツール名、タイムスタンプ、詳細レベル、ファイル数と深さで、ファイル名、パス、ソースコードは記録せず、外部にも送信しません | - |
 | `CRG_LEIDEN_SEED` | Leiden のコミュニティ検出のシード | `42` |
 | `CRG_RECURSE_SUBMODULES` | `1`、`true`、`yes` のとき git サブモジュールを含める | - |
 | `CRG_FOLLOW_SYMLINKS` | `1`、`true`、`yes`、`on` のとき、シンボリックリンクのフォルダ（リポジトリの内外）をたどる。`--follow-symlinks` と同じ。[シンボリックリンクのフォルダ](docs/USAGE.md#symlinked-folders) を参照 | - |
 | `CRG_MAX_FOLLOWED_FILES` | シンボリックリンクのフォルダから取り込むファイルの上限 | `10000` |
 | `CRG_TOOLS` | サーバー起動時に公開する MCP ツールのカンマ区切り許可リスト | - |
+| `CRG_READ_ONLY` | `1`（または `true`、`yes`、`on`）にすると、グラフを読み取り専用で開きます。データフォルダでは何も作らず、移行も記録もせず、書き込むコマンドは失敗します。Codex スキルの読み取り専用 CLI がこれを設定します | - |
+| `CRG_BIN` | Codex スキルの読み取り専用 CLI が実行する `code-review-graph` のプログラム。名前が違う場合や PATH にない場合に使います | PATH 上のもの |
 | `GOOGLE_API_KEY` | Google Gemini 埋め込みの API キー | - |
 | `MINIMAX_API_KEY` | MiniMax 埋め込みの API キー | - |
 | `VOYAGE_API_KEY` | Voyage 埋め込みの API キー | - |
@@ -629,7 +709,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_ENABLE_ENRICHMENT` | `1` にすると毎回の build と update で Jedi により Python のメソッド呼び出しを解決（`enrichment` エクストラが必要、Python ファイル 1 つにつき約 1 秒増）。`build --enrich` と同じ | オフ |
 | `CRG_DISABLE_ENRICHMENT` | `1` にすると要求があっても Jedi を実行しない | - |
 
-OpenAI 互換の埋め込み（OpenAI、Azure、あるいは new-api、LiteLLM、vLLM、LocalAI、OpenAI モードの Ollama といった自前のゲートウェイ）に追加インストールは要りません。変数を設定し、`embed_graph` に `provider="openai"` を渡します。
+OpenAI 互換の埋め込みに追加インストールは要りません。変数を設定し、`embed_graph` に `provider="openai"` を渡します。
 
 ```bash
 export CRG_OPENAI_BASE_URL=http://127.0.0.1:3000/v1     # or https://api.openai.com/v1
@@ -638,7 +718,6 @@ export CRG_OPENAI_MODEL=text-embedding-3-small          # whatever your gateway 
 # optional:
 export CRG_OPENAI_DIMENSION=1536                        # pin dim (v3 models support reduction)
 export CRG_OPENAI_BATCH_SIZE=100                        # lower for gateways with tight limits
-                                                        # (e.g. Qwen text-embedding-v4 caps at 10)
 ```
 
 ベース URL が localhost（`127.0.0.1`、`localhost`、`0.0.0.0`、`::1`）を指している場合、クラウド送信の警告は出ません。
@@ -651,7 +730,7 @@ export CRG_ACCEPT_CLOUD_EMBEDDINGS=1
 code-review-graph embed --provider voyage --model voyage-code-3
 ```
 
-> **モデルの選び方。** 長く使うインデックスには `-preview`、`-beta`、`-exp` のモデル ID を避けてください。プレビュー版は重みが変わったり（次元が変わると全件の再埋め込みが必要）、取り下げられたりします。`text-embedding-3-small` / `text-embedding-3-large`（OpenAI）、`Qwen/Qwen3-Embedding-8B`（自前の vLLM や LocalAI）、`gemini-embedding-001`（`GOOGLE_API_KEY` が必要なネイティブの Gemini プロバイダ）といった正式リリースを選んでください。
+> **モデルの選び方。** 長く使うインデックスには `-preview`、`-beta`、`-exp` のモデル ID を避けてください。プレビュー版は重みが変わったり（次元が変わると全件の再埋め込みが必要）、取り下げられたりします。`text-embedding-3-small` / `text-embedding-3-large`（OpenAI）や `gemini-embedding-001`（`GOOGLE_API_KEY` が必要なネイティブの Gemini プロバイダ）といった正式リリースを選んでください。
 >
 > 埋め込むテキストは、識別子、シグネチャ、構造上の文脈、そして長さを制限した最初の段落の docstring かドキュメントコメントの要約です。関数の本体は送りません。ドキュメント抽出の追加前に作られたグラフは、再埋め込みの前に `code-review-graph build` を一度通す必要があります。通常のビルドでは埋め込みは更新されません。ビルド後に更新するには `--embedding-provider` と `--embedding-model` の両方を渡してください。クラウドのプロバイダはこのソース由来のテキストを受け取り、課金する場合があります。
 
@@ -682,29 +761,97 @@ CRG_TOOLS=query_graph_tool,semantic_search_nodes_tool code-review-graph serve
 
 </details>
 
+### Docker または Podman で実行する
+
+<details>
+<summary><strong>リリースからイメージをビルドし、自分のリポジトリで実行する</strong></summary>
+<br>
+
+公開されたイメージはありません。リリースのタグからビルドしてください。普通にクローンすると `staging` ブランチになり、まだリリースされていない変更を含むことがあります。
+
+```bash
+git clone --branch v2.4.0 https://github.com/tirth8205/code-review-graph.git
+cd code-review-graph
+docker build -t code-review-graph:local .
+```
+
+解析するリポジトリのディレクトリで、次を実行します。
+
+```bash
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --env HOME=/tmp \
+  --volume "$PWD:/workspace" \
+  code-review-graph:local build
+```
+
+マウントするリポジトリには書き込み権限が必要です。
+上のコマンドはホストのユーザー ID とグループ ID を使用するため、
+生成される `.code-review-graph/` ディレクトリの所有者は自分のユーザーになります。
+これらのコマンドは、ホスト上の root 以外のユーザーで実行してください。
+
+Podman では、同じクローンで同じ Dockerfile をビルドし、ユーザーマッピングを維持します。
+
+```bash
+podman build -t code-review-graph:local .
+podman run --rm \
+  --userns=keep-id \
+  --env HOME=/tmp \
+  --volume "$PWD:/workspace" \
+  code-review-graph:local build
+```
+
+グラフはマウントしたリポジトリの `.code-review-graph/` に保存され、
+`/workspace/app.py` などのコンテナ内の絶対パスを記録します。
+`update` と `detect-changes` は、同じ `/workspace` マウントを使って Docker または Podman で実行してください。
+このグラフに対してホストで `update` を実行すると、"built with a different repository root"
+というエラーになる場合があります。ホストのコマンドに切り替えるには、ホストで
+`code-review-graph build` を実行し、ホストのパスでグラフを再構築してください。
+
+保存されたグラフを確認するには、`build` を `status` に置き換えます。
+イメージには Git が含まれ、デフォルトでは root 以外のユーザーで実行されます。
+イメージのビルド中にグラフは生成されません。
+
+これらの例は macOS/Linux のシェル構文を使用しています。
+macOS では、実行前に Docker 互換エンジンまたは Podman 仮想マシンを起動してください。
+Fedora など SELinux が有効なホストでは、マウントに `:z` を追加してください（`"$PWD:/workspace:z"`）。追加しないと、コンテナはリポジトリにアクセスできません。
+
+</details>
+
 ---
 
 ## FAQ と比較
 
 答えは [docs/FAQ.md](docs/FAQ.md) にあります。
 
+<details>
+<summary><strong>LSP、RAG、grep との比較、使わないほうがよい場合など</strong></summary>
+<br>
+
 - [LSP / 言語サーバーとの違い](docs/FAQ.md#how-is-this-different-from-lsp-and-language-servers): 言語ごとのデーモンではなく、言語をまたぐ永続的なグラフが 1 つ。シンボル単位の正確さでは LSP が上。
 - [RAG / 埋め込みとの違い](docs/FAQ.md#isnt-this-just-rag): 類似度でのチャンクではなく、AST から解析した構造的なエッジ。埋め込みは任意で、検索の補助にすぎません。
 - [grep / エージェント検索との違い](docs/FAQ.md#why-not-just-grep): 1 ホップの探索なら grep。多ホップの問い（影響範囲、呼び出し元の呼び出し元、tests-for、影響を受けるフロー）ならグラフ。
-- [Serena、codegraph、claude-context、repomix との比較](docs/FAQ.md#how-does-it-compare-to-serena-codegraph-claude-context-and-repomix): 比較表。
 - [使わないほうがよい場合](docs/FAQ.md#when-should-i-not-use-it): 小さなリポジトリ、ささいな単一ファイルの差分、1 回きりの質問。
 - [外部に通信しますか？](docs/FAQ.md#does-it-phone-home): テレメトリはありません。クラウド埋め込みは明示的に有効にした場合だけ。
 - [動いているかどう確かめますか？](docs/FAQ.md#how-do-i-verify-it-is-working): `status`、`detect-changes --brief`、`/mcp`。
 
+</details>
+
 ## トラブルシューティング
+
+まず `code-review-graph doctor` を実行してください。AI ツールがグラフについて "written by a newer code-review-graph" と言うときは特にです。PATH 上のすべてのコピー、各 MCP エントリと各フックが動かすバージョン、グラフの状態を示します。何も変えず、失敗したチェックがあれば終了コード 1 で終わり、`--json` も使えます。
 
 Windows/WSL を含むより多くの事例は [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) にあります。
 
 ### `pip` / `pipx` が `hatchling` を取得できない（あるいは PyPI への `Errno 9` / `Bad file descriptor`）
 
+<details>
+<summary><strong>直し方</strong></summary>
+<br>
+
 ソースツリーからのインストール（たとえば `pipx install .`）には、PyPI からビルド依存を取る必要があります。接続の警告のあとに `Could not find a version that satisfies the requirement hatchling` が出る場合、その端末の Python が `pypi.org` への HTTPS 接続を開けていない可能性があります。エディタの統合ターミナルで最も多く、VPN、ファイアウォール、プロキシが原因のこともあります。
 
-1. エディタのターミナルではなく、Terminal.app や iTerm から同じコマンドを実行する。
+1. エディタの外のターミナル（Terminal.app など）から同じコマンドを実行する。
 2. ダウンロードの仕組みが異なる [uv](https://docs.astral.sh/uv/) を使って、チェックアウトからインストールする。
 
    ```bash
@@ -716,7 +863,13 @@ Windows/WSL を含むより多くの事例は [docs/TROUBLESHOOTING.md](docs/TRO
 
 切り分けには `python3 scripts/diagnose_pypi_connectivity.py` を実行します。`FAILED` と表示されたら、原因はパッケージ名ではなくネットワーク環境です。
 
+</details>
+
 ### Windows: `Invalid JSON: EOF while parsing` または `MCP error -32000: Connection closed`
+
+<details>
+<summary><strong>直し方</strong></summary>
+<br>
 
 Claude Code の設定で `cmd /c` によるラッパーを使わないでください。`~/.claude.json` から `.exe` を直接指し、UTF-8 は設定で渡します。
 
@@ -728,7 +881,17 @@ Claude Code の設定で `cmd /c` によるラッパーを使わないでくだ�
 }
 ```
 
+</details>
+
 ## コントリビュート
+
+プルリクエストは `staging`（既定のブランチ）に出してください。変更は
+`staging` → `testing` → `main` の順に進み、リリースは `main` からタグを打ちます。昇格は自動では行われず、毎回人がレビューしてマージします。全体の流れは
+[CONTRIBUTING.md](CONTRIBUTING.md#branching-and-promotion) を参照してください。
+
+<details>
+<summary><strong>開発用のコピーを用意してテストを実行する</strong></summary>
+<br>
 
 ```bash
 git clone https://github.com/tirth8205/code-review-graph.git
@@ -738,11 +901,15 @@ pip install -e ".[dev]"
 pytest
 ```
 
-プルリクエストは `staging`（既定のブランチ）に出してください。変更は
-`staging` → `testing` → `main` の順に進み、リリースは `main` からタグを打ちます。昇格は自動では行われず、毎回人がレビューしてマージします。全体の流れは
-[CONTRIBUTING.md](CONTRIBUTING.md#branching-and-promotion) を参照してください。
+</details>
+
+<details>
+<summary><strong>組み込みの言語を追加する</strong></summary>
+<br>
 
 組み込みの言語を追加するには `code_review_graph/parser.py` を編集します。拡張子を `EXTENSION_TO_LANGUAGE` に、ノード型の対応を `_CLASS_TYPES`、`_FUNCTION_TYPES`、`_IMPORT_TYPES`、`_CALL_TYPES` に追加してください。テスト用のフィクスチャを添えて PR を出してください。1 つのリポジトリだけで必要な言語なら、代わりに [`languages.toml`](docs/CUSTOM_LANGUAGES.md) を使ってください。
+
+</details>
 
 ## ライセンス
 

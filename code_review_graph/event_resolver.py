@@ -112,7 +112,11 @@ def resolve_spring_events(store: GraphStore) -> dict[str, int]:
                 emitted += 1
 
     store.commit()
-    logger.info(
+    # Most repositories have no Spring events at all; a line of zeros on
+    # every build says nothing, so it is DEBUG unless something was found.
+    found = bool(event_types or emitted or removed_calls)
+    logger.log(
+        logging.INFO if found else logging.DEBUG,
         "Spring event resolver: indexed %d events and emitted %d CALLS edges",
         len(event_types),
         emitted,

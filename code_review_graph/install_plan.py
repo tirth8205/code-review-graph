@@ -213,6 +213,10 @@ class Plan:
         """Return every file the plan changes, in the order first touched."""
         return [entry for entry in self._files.values() if entry.is_change()]
 
+    def written(self) -> list[Path]:
+        """Return every file the plan writes, also one whose bytes stay the same."""
+        return [entry.path for entry in self._files.values() if entry.after is not None]
+
     def checkpoint(self) -> dict[Path, tuple[bytes | None, int | None]]:
         """Return the plan as it stands, for :meth:`changes_since` and :meth:`rollback`."""
         return {key: (entry.after, entry.mode) for key, entry in self._files.items()}

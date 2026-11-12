@@ -17,7 +17,7 @@ Trace a bug through the knowledge graph before reading source.
 
 ## Token Efficiency Rules
 - Call `get_minimal_context_tool(task="<your task>")` before any other graph tool.
-- Pass `detail_level="minimal"` wherever a tool accepts it. Use "standard" only when minimal is not enough.
+- Pass `detail_level="minimal"` unless it is not enough. Minimal drops source, so leave `semantic_search_nodes_tool(include_source=True)` and `get_review_context_tool` at standard.
 - Prefer a targeted `query_graph_tool` call over a broad listing call.
-- Budget: about five tool calls and 800 tokens of graph output per task.
+- Budget: about five tool calls per task. Source snippets stand in for file reads.
 - Read the implementation and its tests before changing code. The graph narrows scope; it does not replace the source.

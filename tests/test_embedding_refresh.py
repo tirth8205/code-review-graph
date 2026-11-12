@@ -664,14 +664,14 @@ class TestRefreshWiring:
         assert postprocess.call_args.kwargs["embedding_provider"] == "local"
         assert postprocess.call_args.kwargs["embedding_model"] == "test-model"
 
-    def test_cli_build_forwards_exact_scope(self):
+    def test_cli_build_forwards_exact_scope(self, tmp_path):
         from code_review_graph import cli
 
         argv = [
             "code-review-graph",
             "build",
             "--repo",
-            "repo-root",
+            str(tmp_path),
             "--embedding-provider",
             "local",
             "--embedding-model",
@@ -698,7 +698,7 @@ class TestRefreshWiring:
         build.assert_called_once_with(
             full_rebuild=True,
             recover_corrupt=True,
-            repo_root=str(Path("repo-root").resolve()),
+            repo_root=str(tmp_path.resolve()),
             postprocess="full",
             wait_for_lock=False,
             embedding_provider="local",

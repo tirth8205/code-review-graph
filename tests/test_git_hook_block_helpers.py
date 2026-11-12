@@ -183,7 +183,7 @@ def hook(repo):
 def test_rewrite_keeps_user_commands_with_one_trailing_newline(repo, hook):
     report = uninstall.UninstallReport()
     uninstall._rewrite_or_remove_hook(
-        hook, "#!/bin/sh\necho user\n\n\n", repo, report, detail="edited", dry_run=False
+        hook, "#!/bin/sh\necho user\n\n\n", repo, report, detail="edit", dry_run=False
     )
     assert hook.read_text() == "#!/bin/sh\necho user\n"
     assert report.edited_paths == [f"{hook} (edited)"]
@@ -193,7 +193,7 @@ def test_rewrite_keeps_user_commands_with_one_trailing_newline(repo, hook):
 def test_rewrite_removes_a_hook_left_with_only_a_shebang(repo, hook):
     report = uninstall.UninstallReport()
     uninstall._rewrite_or_remove_hook(
-        hook, "#!/bin/sh\n\n  \n", repo, report, detail="edited", dry_run=False
+        hook, "#!/bin/sh\n\n  \n", repo, report, detail="edit", dry_run=False
     )
     assert not hook.exists()
     assert len(report.removed_paths) == 1
@@ -204,7 +204,7 @@ def test_rewrite_removes_a_hook_left_with_only_a_shebang(repo, hook):
 def test_rewrite_dry_run_touches_nothing(repo, hook, new_text):
     report = uninstall.UninstallReport()
     uninstall._rewrite_or_remove_hook(
-        hook, new_text, repo, report, detail="edited", dry_run=True
+        hook, new_text, repo, report, detail="edit", dry_run=True
     )
     assert hook.read_text() == "#!/bin/sh\nold\n"
     assert report.total_actions == 1

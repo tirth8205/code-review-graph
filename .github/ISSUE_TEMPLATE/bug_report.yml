@@ -14,8 +14,7 @@ body:
     attributes:
       label: code-review-graph version
       description: >-
-        Output of `pip show code-review-graph` (or the version reported by
-        `code-review-graph status`).
+        Output of `pip show code-review-graph` (or of `code-review-graph --version`).
       placeholder: "2.4.0"
     validations:
       required: true
@@ -45,12 +44,24 @@ body:
       description: Which AI coding tool were you using when you hit the bug?
       options:
         - claude-code
-        - cursor
         - codex
+        - cursor
         - windsurf
         - zed
+        - continue
         - opencode
+        - mimo
+        - antigravity
+        - gemini-cli
+        - qwen
+        - kiro
+        - qoder
         - copilot
+        - copilot-cli
+        - hermes
+        - dsh
+        - codebuddy
+        - none (CLI or GitHub Action only)
         - other (describe in "Additional context")
     validations:
       required: true
@@ -65,6 +76,17 @@ body:
     validations:
       required: true
   - type: textarea
+    id: doctor-output
+    attributes:
+      label: Output of `code-review-graph doctor`
+      description: >-
+        Run `code-review-graph doctor` in the affected repository and paste the full
+        output. It shows every copy on PATH and the copy your MCP entry and hooks run,
+        and changes nothing. If your version has no `doctor` command, leave this empty.
+      render: shell
+    validations:
+      required: false
+  - type: textarea
     id: repro-steps
     attributes:
       label: Steps to reproduce
@@ -78,7 +100,7 @@ body:
   - type: textarea
     id: expected-actual
     attributes:
-      label: Expected vs actual behavior
+      label: Expected vs actual behaviour
       description: What did you expect to happen, and what happened instead?
       placeholder: |
         Expected: ...

@@ -28,18 +28,8 @@ _NOT_IN_CLI = "the CLI query command does not accept it, and the wrapper only ru
 
 #: Query patterns the MCP tool has but the wrapper leaves out, each with why.
 #: A new pattern in tools/query.py must go in the wrapper or here.
-LEFT_OUT = {
-    "references_to": _NOT_IN_CLI,
-    "triggers_of": _NOT_IN_CLI,
-    "triggered_by": _NOT_IN_CLI,
-    "publishers_of": _NOT_IN_CLI,
-    "listeners_of": _NOT_IN_CLI,
-    "advises": _NOT_IN_CLI,
-    "advised_by": _NOT_IN_CLI,
-    "handlers_of": _NOT_IN_CLI,
-    "endpoints_for": _NOT_IN_CLI,
-    "consumers_of": _NOT_IN_CLI,
-}
+#: Empty since the CLI took every pattern (crg-vd8).
+LEFT_OUT: dict[str, str] = {}
 
 
 def _load_wrapper():

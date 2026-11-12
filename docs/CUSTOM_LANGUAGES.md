@@ -21,6 +21,11 @@ call_node_types = ["call"]
 comment = "Erlang via the bundled tree-sitter-erlang grammar"
 ```
 
+The folder's own `.gitignore` ignores everything in it, so commit the file
+with `git add -f .code-review-graph/languages.toml` to share it. The file is
+always read from `<repo_root>/.code-review-graph/`, even when `--data-dir` or
+`CRG_DATA_DIR` keeps the graph elsewhere.
+
 Then rebuild:
 
 ```bash

@@ -1002,6 +1002,7 @@ def hybrid_search(
     provider: Optional[str] = None,
     _out_mode: Optional[list[str]] = None,
     repo_root: Optional[str | Path] = None,
+    _out_ids: Optional[list[int]] = None,
 ) -> list[dict[str, Any]]:
     """Hybrid search combining FTS5 BM25 and vector embeddings via RRF.
 
@@ -1020,6 +1021,9 @@ def hybrid_search(
             ``"hybrid"`` (FTS + embeddings), ``"fts"`` (FTS only),
             ``"semantic"`` (embeddings only), ``"keyword"`` (LIKE fallback),
             or ``"none"`` (empty query, or all search paths returned 0 results).
+        _out_ids: Optional output list. If provided, each result's node id is
+            appended in order. A result's ``qualified_name`` is cut at 256
+            characters, so a caller that must find the node again uses this.
 
     Returns:
         List of dicts with node metadata and ``score`` field.
@@ -1196,5 +1200,7 @@ def hybrid_search(
             "signature": row["signature"] if "signature" in row.keys() else None,
             "score": round(final_score, 6),
         })
+        if _out_ids is not None:
+            _out_ids.append(node_id)
 
     return results

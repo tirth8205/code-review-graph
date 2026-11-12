@@ -7,9 +7,9 @@ body:
     attributes:
       value: |
         code-review-graph already configures Claude Code, Codex, Cursor, Windsurf, Zed,
-        Continue, OpenCode, MiMo Code, Antigravity, Gemini CLI, Qwen, Kiro, Qoder,
-        GitHub Copilot, GitHub Copilot CLI, Hermes Agent and CodeBuddy Code. Use this
-        form to request support for another AI coding tool.
+        Continue, OpenCode, MiMo Code, Antigravity, Gemini CLI, Qwen Code, Kiro, Qoder,
+        GitHub Copilot, GitHub Copilot CLI, Hermes Agent, DeepSeek Harness and
+        CodeBuddy Code. Use this form to request support for another AI coding tool.
   - type: input
     id: platform-name
     attributes:

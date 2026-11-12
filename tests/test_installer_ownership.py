@@ -123,6 +123,77 @@ def test_generated_hook_commands_are_claimed(command: str) -> None:
     assert skills._is_generated_hook_command(command) is True
 
 
+# Hooks name the copy that ran install. A reinstall from another copy, or an
+# uninstall, must still know them as ours.
+_OTHER_COPY = skills._HookProgram(
+    "[ -x '/other venv/it'\"'\"'s/python3' ]",
+    "'/other venv/it'\"'\"'s/python3' -m code_review_graph",
+)
+_PINNED_PROGRAMS = pytest.mark.parametrize(
+    "program", [_OTHER_COPY, skills._UVX_HOOK_PROGRAM], ids=["interpreter", "uvx"]
+)
+
+
+def _all_commands(config: dict) -> list[str]:
+    return [
+        hook["command"]
+        for groups in config["hooks"].values()
+        for group in groups
+        for hook in group["hooks"]
+    ]
+
+
+@_PINNED_PROGRAMS
+def test_hooks_that_name_any_copy_are_claimed(program: skills._HookProgram) -> None:
+    commands = _all_commands(skills.generate_hooks_config(Path("/r"), program=program))
+    commands += _all_commands(skills.generate_codex_hooks_config(Path("/r"), program=program))
+    for command in commands:
+        assert skills._is_generated_hook_command(command), command
+    steering = _all_commands(skills.generate_steering_hooks_config(program))
+    assert [skills._is_steering_hook_command(command) for command in steering] == [True]
+    assert not any(skills._is_generated_hook_command(command) for command in steering)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # The copy's test and the copy it then runs must be the same one.
+        "if [ -x '/a/python' ]; then '/b/python' -m code_review_graph hook-update;"
+        " elif command -v code-review-graph >/dev/null 2>&1;"
+        " then code-review-graph hook-update; fi; cat >/dev/null || true",
+        # Something added to the generated line makes it the user's.
+        "if [ -x '/a/python' ]; then '/a/python' -m code_review_graph hook-update;"
+        " elif command -v code-review-graph >/dev/null 2>&1;"
+        " then code-review-graph hook-update; fi; cat >/dev/null || true; notify-team",
+        "if [ -x '/a/python' ]; then '/a/python' -m code_review_graph build;"
+        " elif command -v code-review-graph >/dev/null 2>&1;"
+        " then code-review-graph build; fi; cat >/dev/null || true",
+        # An unquoted path is not a shape install writes.
+        "if [ -x /a/python ]; then /a/python -m code_review_graph hook-update;"
+        " elif command -v code-review-graph >/dev/null 2>&1;"
+        " then code-review-graph hook-update; fi; cat >/dev/null || true",
+    ],
+)
+def test_hand_edited_pinned_hooks_are_not_claimed(command: str) -> None:
+    assert skills._is_generated_hook_command(command) is False
+
+
+@_PINNED_PROGRAMS
+def test_reinstall_replaces_hooks_that_name_another_copy(
+    tmp_path: Path, program: skills._HookProgram
+) -> None:
+    settings = tmp_path / ".claude" / "settings.json"
+    settings.parent.mkdir()
+    settings.write_text(
+        json.dumps(skills.generate_hooks_config(tmp_path, program=program)), encoding="utf-8"
+    )
+
+    skills.install_hooks(tmp_path)
+
+    data = _read_jsonc(settings)
+    assert _all_commands(data) == _all_commands(skills.generate_hooks_config(tmp_path))
+
+
 def test_install_twice_under_a_home_with_a_space_leaves_one_cursor_hook(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -981,7 +1052,7 @@ def test_uninstall_names_a_hand_edited_block_once(tmp_path: Path) -> None:
     hook = repo / ".git" / "hooks" / "pre-commit"
     hook.write_text(
         "#!/bin/sh\n"
-        + skills._GIT_HOOK_BLOCK
+        + skills._git_hook_block()
         + f"{skills._GIT_HOOK_NOTE}\n"
         + "if command -v code-review-graph >/dev/null 2>&1; then\n"
         + "    code-review-graph update --hand-edited || true\n"

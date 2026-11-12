@@ -202,3 +202,25 @@ def _get_table_names(conn: sqlite3.Connection) -> set[str]:
         "SELECT name FROM sqlite_master WHERE type IN ('table', 'view')"
     ).fetchall()
     return {row[0] if isinstance(row, (tuple, list)) else row["name"] for row in rows}
+
+
+def test_a_migration_that_lost_the_column_race_still_runs(tmp_path, monkeypatch):
+    """Two openers of a fresh graph can both see a column missing before
+    either adds it. The second ``ALTER`` then finds the column there, and
+    must take that as done rather than fail the open with ``duplicate column
+    name`` (crg-5up). Every column check here says "missing", as it does for
+    the opener that checked just before its peer added the column.
+    """
+    from code_review_graph import migrations
+
+    db = tmp_path / "graph.db"
+    GraphStore(db).close()
+    monkeypatch.setattr(migrations, "_has_column", lambda conn, table, column: False)
+
+    conn = sqlite3.connect(str(db), isolation_level=None)
+    try:
+        conn.execute("UPDATE metadata SET value = '1' WHERE key = 'schema_version'")
+        run_migrations(conn)
+        assert get_schema_version(conn) == LATEST_VERSION
+    finally:
+        conn.close()

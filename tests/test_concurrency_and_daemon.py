@@ -783,17 +783,20 @@ class TestConcurrentAccess:
     @staticmethod
     def _seed_v1_database(db: Path) -> None:
         """Create a version 1 database with pending migrations."""
-        # parent_name and extra are in the base CREATE TABLE and no migration
-        # adds them, so a real v1 database carries both; the backfills from v13
-        # on read them, and a seed without them would fail for that reason
+        # Every column below is in the base CREATE TABLE and no migration adds
+        # it, so a real v1 database carries them all. Later migrations read
+        # them (v13 reads parent_name and extra, v14 reads language and
+        # file_hash), and a seed without them would fail for that reason
         # rather than for the race this test is about.
         seed = sqlite3.connect(str(db))
         try:
             seed.executescript(
                 "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
                 "CREATE TABLE nodes (id INTEGER PRIMARY KEY, kind TEXT, name TEXT,"
-                " qualified_name TEXT UNIQUE, file_path TEXT, parent_name TEXT,"
-                " extra TEXT DEFAULT '{}', updated_at REAL);"
+                " qualified_name TEXT UNIQUE, file_path TEXT, line_start INTEGER,"
+                " line_end INTEGER, language TEXT, parent_name TEXT, params TEXT,"
+                " return_type TEXT, modifiers TEXT, is_test INTEGER DEFAULT 0,"
+                " file_hash TEXT, extra TEXT DEFAULT '{}', updated_at REAL);"
                 "CREATE TABLE edges (id INTEGER PRIMARY KEY, kind TEXT,"
                 " source_qualified TEXT, target_qualified TEXT, file_path TEXT,"
                 " extra TEXT DEFAULT '{}', updated_at REAL);"
@@ -849,6 +852,63 @@ class TestConcurrentAccess:
 
         # Canary: both really reached the check-then-act window.
         assert len(seen) == 2, f"barrier never engaged both openers: {seen}"
+        assert errors == [], f"{type(errors[0]).__name__}: {errors[0]}"
+
+    def test_concurrent_first_open_should_not_race_in_the_fts_rebuild(
+        self, tmp_path: Path
+    ) -> None:
+        """v13 drops ``nodes_fts`` and makes it again with more columns.
+
+        Two openers that both drop before either makes it again then both
+        make it, and the second fails with ``table nodes_fts already exists``.
+        Each opener here waits after its drop until the other has dropped
+        too, or two seconds pass, which forces that order whenever nothing
+        stops the second opener from reaching its drop.
+        """
+        db = tmp_path / "graph.db"
+        self._seed_v1_database(db)
+
+        lock = threading.Lock()
+        dropped = {"n": 0}
+        both_dropped = threading.Event()
+
+        class _HoldAfterDrop:
+            def __init__(self, conn: sqlite3.Connection) -> None:
+                self._conn = conn
+
+            def execute(self, sql, *args, **kwargs):
+                result = self._conn.execute(sql, *args, **kwargs)
+                if sql.strip() == "DROP TABLE IF EXISTS nodes_fts":
+                    with lock:
+                        dropped["n"] += 1
+                        if dropped["n"] == 2:
+                            both_dropped.set()
+                    both_dropped.wait(timeout=2)
+                return result
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+        errors: list[BaseException] = []
+
+        def open_store() -> None:
+            try:
+                conn = sqlite3.connect(str(db), timeout=30, isolation_level=None)
+                conn.execute("PRAGMA busy_timeout=10000")
+                try:
+                    migrations_mod.run_migrations(_HoldAfterDrop(conn))
+                finally:
+                    conn.close()
+            except BaseException as exc:  # noqa: BLE001 - recorded, re-asserted
+                errors.append(exc)
+
+        threads = [threading.Thread(target=open_store) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=60)
+
+        assert dropped["n"] == 2, f"an opener never reached the drop: {dropped}"
         assert errors == [], f"{type(errors[0]).__name__}: {errors[0]}"
 
     def test_watcher_and_hook_updates_converge(self, tmp_path: Path) -> None:

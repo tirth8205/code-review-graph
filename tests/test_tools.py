@@ -2546,7 +2546,7 @@ class TestGetMinimalContext:
 
         assert result["status"] == "not_ready"
         assert result["reason"] == "missing_graph"
-        assert result["next_tool_suggestions"] == ["build_or_update_graph"]
+        assert result["next_tool_suggestions"] == ["build_or_update_graph_tool"]
         assert not db_path.exists()
         assert not db_path.parent.exists()
 
@@ -2624,7 +2624,7 @@ class TestGetMinimalContext:
 
         assert result["status"] == "not_ready"
         assert result["reason"] == "empty_graph"
-        assert result["next_tool_suggestions"] == ["build_or_update_graph"]
+        assert result["next_tool_suggestions"] == ["build_or_update_graph_tool"]
 
     def test_graph_built_at_another_commit_returns_not_ready(self, monkeypatch):
         from code_review_graph.tools.context import get_minimal_context
@@ -2640,7 +2640,7 @@ class TestGetMinimalContext:
 
         assert result["status"] == "not_ready"
         assert result["reason"] == "stale_graph"
-        assert result["next_tool_suggestions"] == ["build_or_update_graph"]
+        assert result["next_tool_suggestions"] == ["build_or_update_graph_tool"]
 
     def test_output_is_compact(self):
         import json
@@ -2659,7 +2659,7 @@ class TestGetMinimalContext:
         result = get_minimal_context(
             task="review PR #42", repo_root=str(self.root),
         )
-        assert "detect_changes" in result["next_tool_suggestions"]
+        assert "detect_changes_tool" in result["next_tool_suggestions"]
 
     def test_task_routing_debug(self):
         from code_review_graph.tools.context import get_minimal_context
@@ -2667,7 +2667,7 @@ class TestGetMinimalContext:
         result = get_minimal_context(
             task="debug login bug", repo_root=str(self.root),
         )
-        assert "semantic_search_nodes" in result["next_tool_suggestions"]
+        assert "semantic_search_nodes_tool" in result["next_tool_suggestions"]
 
     def test_task_routing_refactor(self):
         from code_review_graph.tools.context import get_minimal_context
@@ -2675,7 +2675,7 @@ class TestGetMinimalContext:
         result = get_minimal_context(
             task="refactor auth module", repo_root=str(self.root),
         )
-        assert "refactor" in result["next_tool_suggestions"]
+        assert "refactor_tool" in result["next_tool_suggestions"]
 
 
 class TestGraphProvenance:
