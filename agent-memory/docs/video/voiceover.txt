@@ -1,0 +1,23 @@
+Code Review Graph: 60-second explainer
+Voice: Marin, AI-generated natural British female narration.
+
+00:00–00:07
+What if you could see what your agent remembers? Meet Code Review Graph.
+
+00:07–00:17
+You ask: “Reply in British English, and use em dashes.” The prompt is captured before the agent starts work.
+
+00:17–00:26
+Two preferences become memory nodes. Only your prompts create memories. The agent’s replies are never used to invent them.
+
+00:26–00:37
+Then say: “Forget em dashes. That was just for this task.” The preference is forgotten, while British English stays. You’re in control.
+
+00:37–00:48
+Next, the agent checks your memory, then the existing code graph, then does the work. Two separate stores. No permanent cross-graph edges.
+
+00:48–00:56
+Lovable shows your memory graph. As you chat across tools, new nodes join the same graph. You can inspect and edit it.
+
+00:56–01:00
+Code Review Graph. Your memory. Your control.

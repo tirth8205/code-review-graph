@@ -1,0 +1,14 @@
+{
+  "name": "code-review-graph-agent-memory-video",
+  "private": true,
+  "type": "module",
+  "scripts": {"render": "node render.mjs", "samples": "node render.mjs --samples"},
+  "dependencies": {
+    "@remotion/bundler": "4.0.533",
+    "@remotion/renderer": "4.0.533",
+    "framer-motion": "14.0.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "remotion": "4.0.533"
+  }
+}
