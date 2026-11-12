@@ -741,23 +741,42 @@ def test_the_old_database_was_behind_the_current_schema(
     )
 
 
+def _schema_written_by(tag: str) -> int | None:
+    """The newest migration number in *tag*, or None if it cannot be read."""
+    shown = _run([
+        "git", "-C", str(REPO_ROOT), "show", f"{tag}:code_review_graph/migrations.py",
+    ])
+    if shown.returncode != 0:
+        return None
+    numbers = [int(n) for n in re.findall(r"^    (\d+): _migrate", shown.stdout, re.M)]
+    return max(numbers) if numbers else None
+
+
 def test_release_list_tracks_the_newest_tag() -> None:
-    """The newest release under test must be the newest release that exists."""
+    """Every release newer than the list's newest must already write this schema.
+
+    A newer release with an older schema is one a user could upgrade from, so it
+    belongs in ``RELEASES``. A newer release that already writes
+    ``LATEST_VERSION`` has nothing to migrate and stays out.
+    """
     listing = _run([
         "git", "-C", str(REPO_ROOT), "tag", "--list", "v*", "--sort=-v:refname",
     ])
     if listing.returncode != 0:
         pytest.skip("cannot list tags in this checkout")
     semver = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
-    newest = next(
-        (line for line in listing.stdout.split() if semver.match(line)), None,
-    )
-    if newest is None:
+    tags = [line for line in listing.stdout.split() if semver.match(line)]
+    if not tags:
         pytest.skip("no vX.Y.Z tags in this checkout")
-    assert newest == f"v{RELEASES[0]}", (
-        f"the newest tag is {newest} but this check still upgrades from "
-        f"v{RELEASES[0]}; update RELEASES so the release about to ship is the "
-        "one being tested"
+    newest_tested = f"v{RELEASES[0]}"
+    assert newest_tested in tags, f"{newest_tested} is in RELEASES but not tagged"
+    behind = [
+        tag for tag in tags[: tags.index(newest_tested)]
+        if (_schema_written_by(tag) or 0) < LATEST_VERSION
+    ]
+    assert not behind, (
+        f"{behind[0]} writes an older schema than this code but this check "
+        f"still upgrades from {newest_tested}; add it to RELEASES"
     )
 
 

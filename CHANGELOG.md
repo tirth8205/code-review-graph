@@ -164,6 +164,8 @@
   not old runs mixed in.
 - The PR comment workflow no longer shows a red run when the PR moved during
   its analysis; it leaves a notice naming both commits.
+- A call that could mean several functions now stores them in sorted order, so
+  the same code gives the same graph whatever order its files are read in.
 
 ## [2.4.0] - 2026-11-10
 
