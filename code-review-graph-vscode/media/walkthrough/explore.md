@@ -7,4 +7,4 @@ Open the **Code Graph** panel in the activity bar to browse your codebase struct
 - **Code Graph: Find Callers** -- Find all callers of a function
 - **Code Graph: Find Tests** -- Find tests for any function
 - **Code Graph: Search** -- Search across your entire code graph
-- **Code Graph: Show Graph** -- Open the interactive graph visualization
+- **Code Graph: Show Graph** -- Open the interactive graph visualisation

@@ -174,13 +174,17 @@ def test_update_calls_real_builder_with_payload_repo(monkeypatch, tmp_path):
 
 
 def test_generated_command_preserves_executable_failure(monkeypatch, tmp_path):
+    from code_review_graph import skills
     from code_review_graph.skills import generate_codex_hooks_config
 
-    config = generate_codex_hooks_config(tmp_path)
-    command = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
     executable = tmp_path / "code-review-graph"
     executable.write_text("#!/bin/sh\nexit 7\n")
     executable.chmod(0o755)
+    # The hook names the copy that ran install; here that is the stub.
+    quoted = skills._sh_single_quote(str(executable))
+    program = skills._HookProgram(f"[ -x {quoted} ]", quoted)
+    config = generate_codex_hooks_config(tmp_path, program=program)
+    command = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
     result = subprocess.run(
         ["/bin/bash", "-c", command],
         cwd=tmp_path,

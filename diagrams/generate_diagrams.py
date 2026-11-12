@@ -29,6 +29,7 @@ YLW = "#e67700"; YLW_BG = "#fff3bf"
 BLU = "#1971c2"; BLU_BG = "#a5d8ff"
 PRP = "#6741d9"; PRP_BG = "#d0bfff"
 GRY = "#868e96"; GRY_BG = "#dee2e6"
+CYN = "#0c8599"; CYN_BG = "#99e9f2"
 DRK = "#1e1e1e"
 
 # ── Element factories ──
@@ -93,6 +94,16 @@ def TC(cx, y, s, fs=20, **k):
     w = _tw(s, fs)
     return T(cx - w/2, y, s, fs, **k)
 
+def TM(cx, y, s, fs=20, **k):
+    """Text centred on cx by Excalidraw itself (textAlign "center").
+
+    TC centres the estimated width, which is wider than the real font, so its
+    text sits left of centre. With "center" the text is drawn around x + width/2
+    whatever its real width.
+    """
+    k.setdefault("ta", "center")
+    return TC(cx, y, s, fs, **k)
+
 def save(name, els):
     with open(name, 'w') as f:
         json.dump({"type": "excalidraw", "version": 2,
@@ -106,89 +117,99 @@ def save(name, els):
 # DIAGRAM 1 — Before vs After
 # ════════════════════════════════════════════
 def d1():
+    # Layout follows the hand-tuned .excalidraw: panels drawn closer together,
+    # labels above their arrows. Keep the element count and order: the seeds of
+    # every later diagram depend on them.
+    # Numbers: flask row of the README token table (naive_corpus_tokens /
+    # avg graph_tokens = 143,594 / 2,196 = 65.4x).
     els = []
-    LC = 420   # left panel center-x
-    RC = 1420  # right panel center-x
+    LC = 673   # left panel center-x
+    RC = 1123  # right panel center-x
+    # Title and banner center-x: the middle of the content, from the left
+    # grid's edge (x 448) to the right dashed box's edge (x 1289).
+    MID = 868.5
 
     # Title
-    els.append(TC(920, 25, "The Token Problem", 40, sc=DRK))
+    els.append(TM(MID, -15, "The Token Problem", 40, sc=DRK))
 
     # Dashed divider
-    els.append(LN(920, 80, [[0,0],[0,680]], ss="dashed", sc=GRY, sw=1, op=40))
+    els.append(LN(918, 77, [[0,0],[0,680]], ss="dashed", sc=GRY, sw=1, op=40))
 
     # ── LEFT: Without Graph ──
-    els.append(TC(LC, 85, "Without Graph", 28, sc=RED))
+    els.append(TM(LC, 77, "Without Graph", 28, sc=RED))
 
     # Claude Code box
-    els.append(R(295, 140, 250, 48, bg=GRY_BG, fs="solid"))
-    els.append(TC(LC, 150, "Claude Code", 20))
+    els.append(R(LC-125, 132, 250, 48, bg=GRY_BG, fs="solid"))
+    els.append(TM(LC, 142, "Claude Code", 20))
 
-    # Arrow + label
-    els.append(A(LC, 195, [[0,0],[0,55]], sc=RED))
-    els.append(TC(LC, 215, "reads entire codebase", 14, sc=RED))
+    # Arrow + label. No arrow gets width or height 0: the Excalidraw VS Code
+    # extension rejects a file that has one.
+    els.append(A(LC-12, 213, [[0,0],[3,53]], sc=RED))
+    els.append(TM(LC-17, 191, "reads entire codebase", 14, sc=RED))
 
     # File grid container
-    els.append(R(195, 275, 450, 240, sc=GRY, bg="#f8f9fa", fs="solid", op=80))
+    els.append(R(LC-225, 267, 450, 240, sc=GRY, bg="#f8f9fa", fs="solid", op=80))
 
     # 20 small file rects (4×5 grid)
     for row in range(4):
         for col in range(5):
-            fx = 218 + col * 85
-            fy = 292 + row * 52
+            fx = LC - 202 + col * 85
+            fy = 284 + row * 52
             shade = random.choice(["#dee2e6", "#e9ecef", "#ced4da"])
             els.append(R(fx, fy, 62, 32, bg=shade, fs="solid", sc=GRY, sw=1, rough=0))
 
-    els.append(TC(LC, 528, "Entire Codebase", 16, sc=GRY))
+    els.append(TM(LC, 520, "Entire Codebase", 16, sc=GRY))
 
     # Red badge
-    els.append(R(295, 565, 250, 48, bg=RED_BG, fs="solid", sc=RED))
-    els.append(TC(LC, 575, "125,022 tokens", 22, sc=RED))
+    els.append(R(LC-125, 557, 250, 48, bg=RED_BG, fs="solid", sc=RED))
+    els.append(TM(LC, 567, "143,594 tokens", 22, sc=RED))
 
     # Impact detection
-    els.append(TC(LC, 630, "Impact detection: unknown", 16, sc=GRY))
+    els.append(TM(LC, 622, "Impact detection: unknown", 16, sc=GRY))
 
     # ── RIGHT: With Graph ──
-    els.append(TC(RC, 85, "With Graph", 28, sc=GRN))
+    els.append(TM(RC, 77, "With Graph", 28, sc=GRN))
 
     # Claude Code box
-    els.append(R(1295, 140, 250, 48, bg=GRY_BG, fs="solid"))
-    els.append(TC(RC, 150, "Claude Code", 20))
+    els.append(R(RC-125, 132, 250, 48, bg=GRY_BG, fs="solid"))
+    els.append(TM(RC, 142, "Claude Code", 20))
 
     # Arrow + label
-    els.append(A(RC, 195, [[0,0],[0,40]], sc=GRN))
-    els.append(TC(RC, 210, "queries graph", 14, sc=GRN))
+    els.append(A(RC, 208, [[0,0],[1,42]], sc=GRN))
+    els.append(TM(RC-3, 189, "queries graph", 14, sc=GRN))
 
     # Diamond: Graph
-    els.append(D(1378, 255, 84, 58, bg=PRP_BG, fs="solid", sc=PRP))
-    els.append(TC(RC, 269, "Graph", 16, sc=PRP))
+    els.append(D(RC-42, 248, 84, 58, bg=PRP_BG, fs="solid", sc=PRP))
+    els.append(TM(RC, 264, "Graph", 16, sc=PRP))
 
     # Arrow + label
-    els.append(A(RC, 320, [[0,0],[0,40]], sc=GRN))
-    els.append(TC(RC, 332, "blast radius", 14, sc=GRN))
+    els.append(A(RC+3, 335, [[0,0],[-1,38]], sc=GRN))
+    els.append(TM(RC+5, 311, "search hits + edges", 14, sc=GRN))
 
-    # Ghost rect (faded full codebase)
-    els.append(R(1195, 380, 450, 155, sc=GRY, bg="#f8f9fa", fs="solid", op=20, ss="dashed"))
+    # Ghost rect (faded full codebase): 16 px clear of the green box on every
+    # side, so it stays inside the image.
+    els.append(R(RC-166, 370, 332, 157, sc=GRY, bg="#f8f9fa", fs="solid", op=20, ss="dashed"))
 
     # Relevant files rect
-    els.append(R(1270, 393, 300, 125, sc=GRN, bg="#ebfbee", fs="solid"))
+    els.append(R(RC-150, 386, 300, 125, sc=GRN, bg="#ebfbee", fs="solid"))
 
     # 5 green file squares
     for i in range(5):
-        fx = 1290 + i * 55
-        els.append(R(fx, 415, 40, 35, bg=GRN_BG, fs="solid", sc=GRN, sw=1, rough=0))
+        fx = RC - 130 + i * 55
+        els.append(R(fx, 408, 40, 35, bg=GRN_BG, fs="solid", sc=GRN, sw=1, rough=0))
 
-    els.append(TC(RC, 465, "Minimal Review Set", 16, sc=GRN))
+    els.append(TM(RC, 458, "Graph answer", 16, sc=GRN))
 
     # Green badge
-    els.append(R(1295, 565, 250, 48, bg=GRN_BG, fs="solid", sc=GRN))
-    els.append(TC(RC, 575, "1,986 tokens", 22, sc=GRN))
+    els.append(R(RC-125, 557, 250, 48, bg=GRN_BG, fs="solid", sc=GRN))
+    els.append(TM(RC, 567, "2,196 tokens", 22, sc=GRN))
 
     # Impact detection
-    els.append(TC(RC, 630, "100% recall on impact detection", 16, sc=GRN))
+    els.append(TM(RC, 622, "Impact recall 1.0 (upper bound)", 16, sc=GRN))
 
     # ── BOTTOM BANNER ──
-    els.append(R(600, 700, 640, 52, bg=BLU_BG, fs="solid", sc=BLU))
-    els.append(TC(920, 710, "71.4\u00d7 fewer tokens \u00b7 100% impact recall (flask)", 22, sc=BLU))
+    els.append(R(MID-350, 700, 700, 52, bg=BLU_BG, fs="solid", sc=BLU))
+    els.append(TM(MID, 712, "65.4× fewer tokens · recall 1.0 upper bound (flask)", 22, sc=BLU))
 
     return els
 
@@ -398,28 +419,31 @@ def d4():
 # DIAGRAM 5 — Benchmark Metric Board
 # ════════════════════════════════════════════
 def d5():
+    # Same measure as the README token table: naive_corpus_tokens / avg
+    # graph_tokens. The benchmark's own average_reduction_ratio (mean of the
+    # per-question ratios) reads higher; docs/REPRODUCING.md lists both.
     els = []
-    els.append(TC(800, 15, "Benchmarks Across Real Repos", 36))
+    els.append(TM(800, 15, "Benchmarks Across Real Repos", 36))
 
-    # Header: range number left, quality badge right
-    els.append(TC(500, 75, "38\u00d7 \u2013 528\u00d7", 64, sc=BLU))
-    els.append(TC(500, 160, "fewer tokens across 6 tested repos", 20, sc=GRY))
+    # Header: median left, quality badge right
+    els.append(TM(500, 75, "~63× median", 64, sc=BLU))
+    els.append(TM(500, 160, "fewer tokens · 6 repos · range 35× – 358×", 20, sc=GRY))
 
-    els.append(R(820, 85, 340, 80, bg=GRN_BG, fs="solid", sc=GRN))
-    els.append(TC(990, 100, "100% recall, 0.71 F1", 22, sc=GRN))
-    els.append(TC(990, 132, "on impact detection (13 commits)", 14, sc=GRN))
+    els.append(R(795, 85, 390, 80, bg=GRN_BG, fs="solid", sc=GRN))
+    els.append(TM(990, 100, "0.69 avg F1 on 13 commits", 22, sc=GRN))
+    els.append(TM(990, 132, "recall 1.0: graph-derived upper bound", 14, sc=GRN))
 
-    # 3 repo cards \u2014 naive_corpus_tokens \u2192 avg graph_tokens across 5 questions
-    # Pinned SHAs: gin@5c00df8a, flask@a29f88ce, fastapi@0227991a
+    # 3 repo cards — naive_corpus_tokens → avg graph_tokens across 5 questions
+    # Pinned SHAs: gin@5c00df8a, flask@a29f88ce, fastapi@22381558 (2026-08-02 capture)
     cards = [
-        {"name":"gin",     "files":"Go web framework",   "red":"92\u00d7",
-         "tok":"166,868 \u2192 1,990 tokens",
+        {"name":"gin",     "files":"Go web framework",     "red":"60.3×",
+         "tok":"166,868 → 2,766 tokens",
          "c":BLU, "bg":BLU_BG},
-        {"name":"flask",   "files":"Python web framework",      "red":"71\u00d7",
-         "tok":"125,022 \u2192 1,986 tokens",
+        {"name":"flask",   "files":"Python web framework", "red":"65.4×",
+         "tok":"143,594 → 2,196 tokens",
          "c":ORG, "bg":ORG_BG},
-        {"name":"fastapi", "files":"Python web framework",   "red":"528\u00d7",
-         "tok":"951,071 \u2192 2,169 tokens",
+        {"name":"fastapi", "files":"Python web framework", "red":"357.6×",
+         "tok":"948,793 → 2,653 tokens",
          "c":GRN, "bg":GRN_BG},
     ]
     cw, ch = 370, 200
@@ -432,15 +456,16 @@ def d5():
         cx = x0 + i*(cw+gap)
         ccx = cx + cw/2
         els.append(R(cx, cy, cw, ch, bg=cd["bg"], fs="solid", sc=cd["c"], op=80))
-        els.append(TC(ccx, cy+15,  cd["name"],  24, sc=cd["c"]))
-        els.append(TC(ccx, cy+48,  cd["files"], 14, sc=GRY))
-        els.append(TC(ccx, cy+75,  cd["red"],   52, sc=cd["c"]))
-        els.append(TC(ccx, cy+150, cd["tok"],   14, sc=DRK))
+        els.append(TM(ccx, cy+15,  cd["name"],  24, sc=cd["c"]))
+        els.append(TM(ccx, cy+48,  cd["files"], 14, sc=GRY))
+        els.append(TM(ccx, cy+75,  cd["red"],   52, sc=cd["c"]))
+        els.append(TM(ccx, cy+150, cd["tok"],   14, sc=DRK))
 
     # Footnote — styled as a subtle callout
     fn_y = cy + ch + 20
     els.append(LN(x0+80, fn_y, [[0,0],[total-160,0]], sc=GRY, sw=1, op=30))
-    els.append(TC(800, fn_y+10, "Reproducible: see docs/REPRODUCING.md (pinned SHAs, Leiden seed=42)", 16, sc=GRY))
+    els.append(TM(800, fn_y+10, "Reproducible: docs/REPRODUCING.md (pinned SHAs, Leiden seed=42)"
+                  " · captured 2026-08-02", 16, sc=GRY))
 
     return els
 
@@ -449,8 +474,12 @@ def d5():
 # DIAGRAM 6 — Monorepo Funnel
 # ════════════════════════════════════════════
 def d6():
+    # This repository at the 84bde354 snapshot (2026-08-02 capture):
+    # 208,821 / 3,190 = 65.5x, the README token table's measure.
     els = []
-    els.append(TC(700, 15, "Whole Codebase or Targeted Answer?", 40))
+    # Title centred on the content below: from the grid's left edge (x 40) to
+    # the end of the widest right-hand label (x 974).
+    els.append(TM(507, 15, "Whole Codebase or Targeted Answer?", 40))
 
     # ── LEFT: dense grid ──
     gx, gy = 40, 110
@@ -466,26 +495,27 @@ def d6():
             els.append(R(fx, fy, dw, dh, bg=shade, fs="solid", sc=GRY, sw=1, rough=0))
 
     gcx = gx + (cols*gapx)/2
-    els.append(TC(gcx, gy-35, "code-review-graph", 22, sc=DRK))
-    els.append(TC(gcx, gy+rows*gapy+8,  "1,326 nodes",     16, sc=GRY))
-    els.append(TC(gcx, gy+rows*gapy+30, "208,821 source tokens", 14, sc=RED))
+    els.append(TM(gcx, gy-35, "code-review-graph", 22, sc=DRK))
+    els.append(TM(gcx, gy+rows*gapy+8,  "1,446 nodes · snapshot 84bde354", 16, sc=GRY))
+    els.append(TM(gcx, gy+rows*gapy+30, "208,821 source tokens", 14, sc=RED))
 
     # ── CENTER: funnel (rounded rect) ──
     fx, fy, fw, fh = 470, 120, 210, 180
     els.append(R(fx, fy, fw, fh, bg=PRP_BG, fs="solid", sc=PRP))
     fcx = fx + fw/2
-    els.append(TC(fcx, fy+25,  "code-review-graph", 17, sc=PRP))
-    els.append(TC(fcx, fy+65,  "parse \u2192", 13, sc=PRP, op=70))
-    els.append(TC(fcx, fy+85,  "graph \u2192", 13, sc=PRP, op=70))
-    els.append(TC(fcx, fy+105, "blast radius", 13, sc=PRP, op=70))
+    els.append(TM(fcx, fy+25,  "code-review-graph", 17, sc=PRP))
+    els.append(TM(fcx, fy+65,  "parse →", 13, sc=PRP, op=70))
+    els.append(TM(fcx, fy+85,  "graph →", 13, sc=PRP, op=70))
+    els.append(TM(fcx, fy+105, "blast radius", 13, sc=PRP, op=70))
 
-    # Arrow into funnel
+    # Arrow into funnel. Each arrow drops 1px so none has height 0, which
+    # the Excalidraw VS Code extension rejects.
     els.append(A(gx+cols*gapx+5, gy+(rows*gapy)/2,
-                 [[0,0],[fx-gx-cols*gapx-20, 0]]))
+                 [[0,0],[fx-gx-cols*gapx-20, 1]]))
 
     # Arrow out of funnel
     rx = 740
-    els.append(A(fx+fw+5, fy+fh/2, [[0,0],[rx-fx-fw-10, 0]], sc=GRN))
+    els.append(A(fx+fw+5, fy+fh/2, [[0,0],[rx-fx-fw-10, 1]], sc=GRN))
 
     # ── RIGHT: sparse green files ──
     rf_x, rf_y = 760, 130
@@ -498,13 +528,13 @@ def d6():
     lbl_x = rf_x + file_w + 20
     els.append(T(lbl_x, rf_y,    "Graph answer",    17, sc=GRN))
     els.append(T(lbl_x, rf_y+22, "5 hits + edges",  14, sc=GRN))
-    els.append(T(lbl_x, rf_y + 4*file_gap + 5,  "~2,495 tokens",  16, sc=GRN))
+    els.append(T(lbl_x, rf_y + 4*file_gap + 5,  "~3,190 tokens",  16, sc=GRN))
     els.append(T(lbl_x, rf_y + 4*file_gap + 26, "avg over 5 questions",   12, sc=GRN))
 
     # Big number at bottom
-    els.append(TC(550, 400, "93\u00d7", 80, sc=BLU))
-    els.append(TC(550, 490, "fewer tokens per question", 24, sc=BLU))
-    els.append(TC(550, 525, "answer-shaped context, not file dumps", 18, sc=GRY))
+    els.append(TM(550, 400, "65.5×", 80, sc=BLU))
+    els.append(TM(550, 490, "fewer tokens per question", 24, sc=BLU))
+    els.append(TM(550, 525, "answer-shaped context, not file dumps", 18, sc=GRY))
 
     return els
 
@@ -585,72 +615,83 @@ def d7():
 # ════════════════════════════════════════════
 def d8():
     els = []
-    els.append(TC(600, 20, "One Install, Every Platform", 36))
-    els.append(TC(600, 70, "code-review-graph install", 20, sc=PRP, ff=3))
+    els.append(TM(600, 20, "One Install, Every Platform", 36))
+    els.append(TM(600, 70, "code-review-graph install", 20, sc=PRP, ff=3))
 
-    # 14 platforms \u2014 matches code_review_graph/skills.py PLATFORMS dict
+    # 18 platforms, in the order of the PLATFORMS dict in code_review_graph/skills.py,
+    # each with the config file install writes by default ("~" is the home folder,
+    # the rest sit in the repository). Zed's file depends on the OS.
     platforms = [
-        # Row 1 (7)
-        ("Claude Code",     ".mcp.json",                                BLU, BLU_BG),
-        ("Codex",           "~/.codex/config.toml",                     PRP, PRP_BG),
-        ("Cursor",          ".cursor/mcp.json",                         ORG, ORG_BG),
-        ("Windsurf",        "~/.codeium/windsurf/mcp_config.json",      GRN, GRN_BG),
-        ("Zed",             "Zed settings.json",                        YLW, YLW_BG),
-        ("Continue",        "~/.continue/config.json",                  RED, RED_BG),
-        ("OpenCode",        ".opencode.json",                           BLU, PRP_BG),
-        # Row 2 (7)
-        ("Antigravity",     "~/.gemini/antigravity/mcp_config.json",    GRY, GRY_BG),
-        ("Gemini CLI",      ".gemini/settings.json",                    PRP, BLU_BG),
-        ("Qwen Code",       "~/.qwen/settings.json",                    ORG, YLW_BG),
-        ("Kiro",            ".kiro/settings/mcp.json",                  GRN, ORG_BG),
-        ("Qoder",           ".qoder/mcp.json",                          YLW, GRN_BG),
-        ("GitHub Copilot",  ".vscode/mcp.json",                         RED, RED_BG),
-        ("Copilot CLI",     "~/.copilot/mcp-config.json",               PRP, GRN_BG),
+        ("Codex",              "~/.codex/config.toml"),
+        ("Claude Code",        ".mcp.json"),
+        ("Cursor",             ".cursor/mcp.json"),
+        ("Windsurf",           "~/.codeium/windsurf/mcp_config.json"),
+        ("Zed",                "Zed settings.json"),
+        ("Continue",           "~/.continue/config.json"),
+        ("OpenCode",           "opencode.jsonc"),
+        ("MiMo Code",          ".mimocode/mimocode.json"),
+        ("Antigravity",        "~/.gemini/antigravity/mcp_config.json"),
+        ("Gemini CLI",         ".gemini/settings.json"),
+        ("Qwen Code",          "~/.qwen/settings.json"),
+        ("Kiro",               ".kiro/settings/mcp.json"),
+        ("Qoder",              ".qoder/mcp.json"),
+        ("GitHub Copilot",     ".vscode/mcp.json"),
+        ("GitHub Copilot CLI", "~/.copilot/mcp-config.json"),
+        ("Hermes Agent",       "~/.hermes/config.yaml"),
+        ("DeepSeek Harness",   "~/.dsh/cordis.patch.yml"),
+        ("CodeBuddy Code",     ".mcp.json"),
     ]
+    colours = [(BLU, BLU_BG), (PRP, PRP_BG), (ORG, ORG_BG), (GRN, GRN_BG),
+               (YLW, YLW_BG), (RED, RED_BG), (GRY, GRY_BG)]
 
     # Central "install" node
-    center_x, center_y = 600, 215
+    center_x, center_y = 600, 175
     els.append(E(center_x-75, center_y-30, 150, 60, bg=PRP_BG, fs="solid", sc=PRP))
-    els.append(TC(center_x, center_y-10, "auto-detect", 16, sc=PRP))
+    els.append(TM(center_x, center_y-10, "auto-detect", 16, sc=PRP))
 
-    # Two rows of 7 cards each
-    cols, rows = 7, 2
-    card_w, card_h = 135, 85
-    gap_x, gap_y = 18, 35
-    total_w = cols * card_w + (cols - 1) * gap_x  # 7*135 + 6*18 = 1053
+    # Three rows of 6 cards
+    cols = 6
+    card_w, card_h = 165, 85
+    gap_x, gap_y = 20, 30
+    total_w = cols * card_w + (cols - 1) * gap_x  # 6*165 + 5*20 = 1090
     x0 = center_x - total_w/2
-    row_y = [330, 330 + card_h + gap_y]
+    rows = math.ceil(len(platforms) / cols)
+    row_y = [290 + r * (card_h + gap_y) for r in range(rows)]
+    path_fs = 10
+    # Characters that fit on one line: Cascadia's advance is about 0.59em.
+    max_chars = int((card_w - 6) / (path_fs * 0.59))
 
-    for i, (name, cfg, sc, bg) in enumerate(platforms):
+    for i, (name, cfg) in enumerate(platforms):
+        sc, bg = colours[i % len(colours)]
         row = i // cols
         col = i % cols
         cx = x0 + col * (card_w + gap_x) + card_w/2
         cy = row_y[row]
 
-        # Light arrow from center node only to the first row, to keep things readable.
-        # Skip the center column (dx≈0): a width=0 arrow renders as nothing
-        # anyway, and the Excalidraw VS Code extension rejects the file if
-        # any arrow has width=0 OR height=0 (the excalidraw.com web app is
-        # more lenient and accepts them).
+        # Light arrow from the center node to the first row only, to keep
+        # things readable. With an even number of columns no arrow is
+        # vertical: the Excalidraw VS Code extension rejects a file with an
+        # arrow of width 0 or height 0.
         if row == 0:
-            dx = cx - center_x
-            dy = cy - center_y - 30
-            dist = math.sqrt(dx*dx + dy*dy)
-            if dist > 0 and abs(dx) > 1.0:
-                sf = 35/dist
-                els.append(A(center_x + dx*sf, center_y + 30 + dy*sf*0.1,
-                             [[0,0], [dx*(1-sf*2), dy*(1-sf*1.5)]],
-                             sc=sc, sw=1, op=45))
+            sx = center_x + (cx - center_x) * 0.12
+            sy = center_y + 32
+            els.append(A(sx, sy, [[0,0], [cx - sx, cy - 8 - sy]],
+                         sc=sc, sw=1, op=45))
 
         # Platform card
         els.append(R(cx-card_w/2, cy, card_w, card_h, bg=bg, fs="solid", sc=sc))
-        els.append(TC(cx, cy+14, name, 14, sc=sc))
-        short_cfg = cfg if len(cfg) < 26 else "..." + cfg[-22:]
-        els.append(TC(cx, cy+45, short_cfg, 9, sc=GRY, ff=3))
+        els.append(TM(cx, cy+14, name, 14, sc=sc))
+        # A long path breaks after its last "/" that fits, never mid-name.
+        if len(cfg) > max_chars:
+            cut = cfg.rindex("/", 0, max_chars) + 1
+            cfg = cfg[:cut] + "\n" + cfg[cut:]
+        y_path = cy + 50 if "\n" not in cfg else cy + 43
+        els.append(TM(cx, y_path, cfg, path_fs, sc=GRY, ff=3))
 
     # Footer
-    footer_y = row_y[1] + card_h + 30
-    els.append(TC(600, footer_y, "Auto-detects installed platforms \u00b7 Poetry / uv / uvx aware \u00b7 Writes correct config", 14, sc=GRY))
+    footer_y = row_y[-1] + card_h + 30
+    els.append(TM(600, footer_y, "18 platforms · Auto-detects installed ones"
+                  " · Poetry / uv / uvx aware · Writes correct config", 14, sc=GRY))
 
     return els
 
@@ -660,23 +701,32 @@ def d8():
 # ════════════════════════════════════════════
 def d9():
     els = []
-    els.append(TC(700, 15, "30+ Languages + Notebook Support", 34))
+    els.append(TM(700, 15, "40+ Languages + Notebook Support", 34))
 
-    # Group languages by ecosystem \u2014 verified against parser.py EXTENSION_TO_LANGUAGE
+    # Group languages by ecosystem — verified against parser.py
+    # EXTENSION_TO_LANGUAGE and detect_language (Blade, Ansible, Spring config,
+    # dbt models, Databricks notebooks and shebang scripts are found by name,
+    # path or content; custom languages come from .code-review-graph/languages.toml).
     groups = [
-        ("Web",        ["TypeScript", "JavaScript", "TSX", "Vue", "Svelte"],         BLU, BLU_BG),
-        ("Backend",    ["Python", "Go", "Rust", "Java", "Scala", "Elixir"],          GRN, GRN_BG),
-        ("Systems",    ["C", "C++", "C#", "Objective-C", "Zig"],                     ORG, ORG_BG),
-        ("Mobile",     ["Kotlin", "Swift", "Dart"],                                  PRP, PRP_BG),
-        ("Scripting",  ["Ruby", "PHP", "Perl", "Lua", "R", "Julia"],                 YLW, YLW_BG),
-        ("Shells",     ["Bash", "PowerShell"],                                       RED, RED_BG),
-        ("Domain",     ["Solidity", "SQL", "Verilog", "GDScript", "Nix"],            GRY, GRY_BG),
-        ("Other",      ["ReScript", "Jupyter/.ipynb"],                               PRP, PRP_BG),
+        ("Web",       ["TypeScript", "JavaScript", "TSX", "Vue", "Svelte", "Astro",
+                       "HTML", "Blade", "Liquid"],                                    BLU, BLU_BG),
+        ("Backend",   ["Python", "Go", "Rust", "Java", "Scala", "Elixir"],            GRN, GRN_BG),
+        ("Systems",   ["C", "C++", "C#", "Objective-C", "Zig", "VB.NET"],             ORG, ORG_BG),
+        ("Mobile",    ["Kotlin", "Swift", "Dart"],                                    PRP, PRP_BG),
+        ("Scripting", ["Ruby", "PHP", "Perl", "Lua", "R", "Julia", "Luau",
+                       "Perl XS"],                                                    YLW, YLW_BG),
+        ("Shells",    ["Bash", "PowerShell", "Zsh / Ksh"],                            RED, RED_BG),
+        ("Domain",    ["Solidity", "SQL", "Oracle PL/SQL", "dbt models", "Verilog",
+                       "GDScript", "Robot Framework"],                                GRY, GRY_BG),
+        ("Config",    ["JSON", "YAML", "XSLT", "Terraform", "Ansible",
+                       "Spring config", "Nix"],                                       CYN, CYN_BG),
+        ("Other",     ["ReScript", "Jupyter/.ipynb", "Databricks .py",
+                       "custom (toml)"],                                              PRP, PRP_BG),
     ]
 
-    gw = 130  # group width \u2014 narrower to fit 8 groups
+    gw = 130  # group width
     gap = 18
-    total_w = len(groups) * gw + (len(groups)-1) * gap  # 8*130 + 7*18 = 1166
+    total_w = len(groups) * gw + (len(groups)-1) * gap  # 9*130 + 8*18 = 1314
     x0 = (1400 - total_w) / 2  # center on 700
     gy = 75
 
@@ -686,7 +736,7 @@ def d9():
 
         # Group container
         els.append(R(gx, gy, gw, gh, bg=bg, fs="solid", sc=sc, op=60))
-        els.append(TC(gx+gw/2, gy+10, group_name, 16, sc=sc))
+        els.append(TM(gx+gw/2, gy+10, group_name, 16, sc=sc))
 
         # Language pills
         for li, lang in enumerate(langs):
@@ -694,7 +744,7 @@ def d9():
             pw = gw - 20
             els.append(R(gx+10, ly, pw, 24, bg="#ffffff", fs="solid",
                          sc=sc, sw=1, rough=0, op=80))
-            els.append(TC(gx+gw/2, ly+4, lang, 12, sc=sc))
+            els.append(TM(gx+gw/2, ly+4, lang, 12, sc=sc))
 
     # Bottom: what each language gets
     max_gh = max(55 + len(g[1]) * 32 for g in groups)
@@ -703,9 +753,12 @@ def d9():
     feat_w = total_w / len(features)
     for i, feat in enumerate(features):
         fx = x0 + i * feat_w + feat_w/2
-        els.append(TC(fx, fy, "\u2713 " + feat, 13, sc=GRN))
+        els.append(TM(fx, fy, "✓ " + feat, 13, sc=GRN))
+    els.append(TM(700, fy+26, "where the grammar supports it — not all six apply", 12, sc=GRY))
 
-    els.append(TC(700, fy+28, "Tree-sitter grammars + ReScript regex pass + Jupyter / Databricks notebook handling", 13, sc=GRY))
+    els.append(TM(700, fy+52, "Tree-sitter grammars + text-based fallbacks (ReScript, VB.NET, Blade,"
+                  " Liquid, PL/SQL, Robot Framework) + notebook, config & shebang passes",
+                  13, sc=GRY))
 
     return els
 
@@ -714,8 +767,13 @@ def d9():
 # GENERATE ALL
 # ════════════════════════════════════════════
 if __name__ == "__main__":
+    # Pass diagram numbers (e.g. `1 5 6`) to write only those files. Every
+    # diagram is still built in order, because element ids and seeds run on
+    # across diagrams; skipping one would change the ones after it.
+    import sys
+    only = set(sys.argv[1:])
     print("Generating diagrams...")
-    for name, fn in [
+    for num, (name, fn) in enumerate([
         ("diagram1_before_vs_after.excalidraw", d1),
         ("diagram2_architecture_pipeline.excalidraw", d2),
         ("diagram3_blast_radius.excalidraw", d3),
@@ -725,6 +783,8 @@ if __name__ == "__main__":
         ("diagram7_mcp_integration_flow.excalidraw", d7),
         ("diagram8_supported_platforms.excalidraw", d8),
         ("diagram9_language_coverage.excalidraw", d9),
-    ]:
-        save(f"{OUT}/{name}", fn())
-    print("\nDone! Open files in https://excalidraw.com")
+    ], start=1):
+        els = fn()
+        if not only or str(num) in only:
+            save(f"{OUT}/{name}", els)
+    print("\nDone! Open the files in an Excalidraw editor.")

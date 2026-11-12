@@ -26,8 +26,10 @@ It is deliberately conservative so it never fabricates an edge:
 * ``self`` / ``static`` (PHP) and ``self`` / ``Self`` (Rust) resolve to the
   enclosing class/type of the caller.
 * A target resolves when exactly one ``(class, method)`` node exists in the
-  graph, or when the caller file's ``IMPORTS_FROM`` edges disambiguate between
-  several same-named definitions.
+  graph and the caller's file backs it (same file, an import naming the class,
+  or for PHP the caller's own namespace), or when the caller file's
+  ``IMPORTS_FROM`` edges disambiguate between several same-named definitions.
+  Being the only match in the graph is not enough on its own.
 * Ambiguous or unknown targets (external types such as ``Vec::new`` or
   ``Redis::get`` with no in-graph definition) are left untouched, keeping the
   behaviour of unresolved external calls exactly as it is today.
@@ -345,6 +347,56 @@ def resolve_scoped_calls(store: GraphStore, repo_root: Path | None = None) -> di
             return next(iter(matched_by_suffix))
         return None
 
+    # php_namespaces: PHP file → the namespaces it declares. A class in the
+    # caller's own namespace needs no ``use``.
+    php_namespaces: dict[str, set[str]] = {}
+    for row in conn.execute(
+        "SELECT file_path, extra FROM nodes WHERE kind = 'File' AND language = 'php'"
+    ).fetchall():
+        try:
+            file_extra = json.loads(row["extra"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            file_extra = {}
+        declared = file_extra.get("php_namespaces") if isinstance(file_extra, dict) else None
+        if isinstance(declared, list):
+            php_namespaces[row["file_path"]] = {
+                name.casefold() for name in declared if isinstance(name, str)
+            }
+
+    def php_namespace_backs(candidate_file: str, caller_file: str, scope: str) -> bool:
+        """Is the class the scope names in the candidate's namespace?"""
+        theirs = php_namespaces.get(candidate_file, set())
+        ours = php_namespaces.get(caller_file, set())
+        written = scope.strip("\\").rpartition("\\")[0].casefold()
+        if not written:
+            # Unqualified: the caller's own namespace, or the global one.
+            return bool(theirs & ours) or (not theirs and not ours)
+        if scope.startswith("\\"):
+            return written in theirs
+        return written in theirs or any(f"{ns}\\{written}" in theirs for ns in ours)
+
+    def backed(
+        candidate: str, caller_file: str, class_name: str, scope: str, language: str,
+    ) -> bool:
+        """Does the caller's file say *candidate* is the class it means?
+
+        Being the one match in the whole graph is no evidence on its own: a
+        vendor class or another crate's type of the same name may be meant.
+        """
+        candidate_file = file_of.get(candidate, "")
+        if candidate_file == caller_file:
+            return True
+        if disambiguate([candidate], caller_file, class_name, language) is not None:
+            return True
+        folded = _fold(class_name, language)
+        for target in imports_by_file.get(caller_file, ()):
+            segments = _import_segments(target)
+            if segments and _fold(segments[-1], language) == folded:
+                return True
+        if language == "php":
+            return php_namespace_backs(candidate_file, caller_file, scope)
+        return False
+
     calls_rows = []
     for start in range(0, len(scoped_file_list), 450):
         batch = scoped_file_list[start : start + 450]
@@ -403,6 +455,11 @@ def resolve_scoped_calls(store: GraphStore, repo_root: Path | None = None) -> di
         if len(candidates) == 1:
             new_target = candidates[0]
             via = "single_match"
+            if not needs_enclosing and not backed(
+                new_target, row["file_path"], class_name,
+                resolution_target.partition("::")[0], language,
+            ):
+                continue
         else:
             new_target = disambiguate(
                 candidates, row["file_path"], class_name, language

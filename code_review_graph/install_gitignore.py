@@ -79,37 +79,42 @@ def repo_files(
     with_skills: bool,
     with_hooks: bool,
     with_instructions: bool,
+    platforms: Iterable[str] | None = None,
 ) -> list[str]:
     """Return the files ``install`` may write inside the repository.
 
     Follows the steps in ``cli._handle_init`` for the same options. Files
     outside the repository, such as user-level configs and ``.git/hooks``, are
     left out because no ``.gitignore`` in the repository applies to them.
+    ``platforms`` is :func:`skills.selected_platforms`, worked out by the caller.
     """
-    everything = target == "all"
+    chosen = frozenset(
+        skills.selected_platforms(repo_root, target) if platforms is None else platforms
+    )
     files: list[Path] = [
         spec["config_path"](repo_root)
-        for spec in skills.platforms_for_target(repo_root, target).values()
+        for key, spec in skills.PLATFORMS.items()
+        if key in chosen
     ]
     # The MCP step runs first, so a settings file it writes is already there
     # when the hook step backs that file up.
     config_files = set(files)
     # Codex writes under CODEX_HOME, which can be a folder in the work tree.
-    codex = target in ("codex", "all")
+    codex = "codex" in chosen
     codex_home = codex_skill.codex_home()
 
     if with_skills:
         slugs = [name.rsplit(".", 1)[0] for name in skills._SKILLS]
         for folder, owner in ((".claude", "claude"), (".gemini", "gemini-cli"),
                               (".codebuddy", "codebuddy")):
-            if everything or target == owner:
+            if owner in chosen:
                 files.extend(repo_root / folder / "skills" / slug / "SKILL.md" for slug in slugs)
-        if everything or target == "qoder":
+        if "qoder" in chosen:
             files.extend(
                 repo_root / ".qoder" / "skills" / name / "SKILL.md"
                 for name in skills.bundled_skill_names()
             )
-        if target == "codex" or (everything and skills.PLATFORMS["codex"]["detect"]()):
+        if codex:
             try:
                 bundled = codex_skill._iter_resource_files(codex_skill.bundled_skill_dir())
             except OSError:  # install reports the missing bundle itself
@@ -122,7 +127,7 @@ def repo_files(
             folder
             for folder, owner in ((".claude", "claude"), (".qoder", "qoder"),
                                   (".codebuddy", "codebuddy"), (".gemini", "gemini-cli"))
-            if everything or target == owner
+            if owner in chosen
         ]
         for folder in settings_folders:
             settings = repo_root / folder / "settings.json"
@@ -135,7 +140,7 @@ def repo_files(
             files.append(codex_hooks)
             if codex_hooks.exists():
                 files.append(codex_home / "hooks.json.bak")
-        if everything or target == "gemini-cli":
+        if "gemini-cli" in chosen:
             files.extend(
                 repo_root / ".gemini" / "hooks" / name
                 for name in skills._GEMINI_CLI_HOOK_FILENAMES
@@ -150,10 +155,10 @@ def repo_files(
                 )
 
     if with_instructions:
-        if target in ("claude", "all"):
+        if skills.instruction_file_wanted(("claude",), target, chosen):
             files.append(repo_root / "CLAUDE.md")
         for filename, owners in skills._PLATFORM_INSTRUCTION_FILES.items():
-            if everything or target in owners:
+            if skills.instruction_file_wanted(owners, target, chosen):
                 files.append(repo_root / filename)
 
     relative = (_relative(repo_root, path) for path in files)
@@ -179,6 +184,7 @@ def plan(
     with_skills: bool,
     with_hooks: bool,
     with_instructions: bool,
+    platforms: Iterable[str] | None = None,
 ) -> Plan:
     """Record which of install's paths exist. Call it before install writes."""
     files = repo_files(
@@ -187,6 +193,7 @@ def plan(
         with_skills=with_skills,
         with_hooks=with_hooks,
         with_instructions=with_instructions,
+        platforms=platforms,
     )
     existed = frozenset(
         path for path in _with_folders(files) if os.path.lexists(repo_root / path)

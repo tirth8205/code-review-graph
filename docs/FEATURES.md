@@ -14,6 +14,8 @@ Release highlights by version. The full changelog is in [CHANGELOG.md](../CHANGE
 - **One write at a time**: `build`, `update`, `postprocess`, `forget`, `embed` and `watch` share a per-repository write lock. A second writer exits `75`, or waits with `--wait`, instead of repeating the work, and a watcher keeps its changes and tries again.
 - **Smaller graphs**: schema v15 drops three tables nothing read and three covered indexes; a new graph of this repository is 17% smaller. Schema 13 → 15 runs on first open, rolling back needs a rebuild, and VS Code extension 0.4.0 is needed for v15. See the CHANGELOG's *Upgrade notes*.
 - **New opt-in settings**: Jedi enrichment (`--enrich`), the steering hook (`install --steering`), `install --gitignore`, `--follow-symlinks`, a local context-savings log (`CRG_CONTEXT_HISTORY=1`), a vector cache (`CRG_VECTOR_CACHE=1`), `serve --http --multi-repo`, `serve --multi-worktree` and the Action's `details` input. All are off by default.
+- **Run from a container**: a `Dockerfile` for Docker and Podman. Mount the repository at `/workspace`; the graph stays in that repository. No image is published. See the README.
+- **More answers from the graph**: `impact --detail-level compact` and `get_impact_radius_tool(detail_level="compact")` give ranked file paths and counts, capped by `max_files`, and list changed files with no nodes in `unmatched_files`; `get_knowledge_gaps_tool` reports `import_cycles`; static Laravel routes give `Endpoint` nodes and `HANDLES` edges; Spring AOP advice reaches its targets, with new `advises` and `advised_by` query patterns; read-only tools carry `readOnlyHint`; Codex gets a global skill with a read-only CLI fallback.
 
 ## v2.3.9
 - **Go and Ruby imports resolve into the repository**: Go reads the module path from the nearest `go.mod` and maps an in-repo import to the package directory it names; Ruby resolves `require_relative` against the requiring file and `require`, `load`, `autoload` and `require_all` against the repository's load roots. `importers_of` for cli/cli's `pkg/iostreams/color.go` goes from 0 to 424. A package or directory target is one edge tagged `extra.import_scope` that the read path expands, so the edge count tracks import statements rather than imports times package size. Binding these imports costs build time and disk on every repository measured; the CHANGELOG records the numbers.
@@ -30,7 +32,7 @@ Release highlights by version. The full changelog is in [CHANGELOG.md](../CHANGE
 - **Registry-scoped cross-repo search**: `cross_repo_search_tool` takes `repos`, a list of registry aliases or folder names, and reports names that matched nothing in `unknown` and ambiguous ones in `ambiguous`.
 - **Automatic `staging` → `testing` promotion**: `.github/workflows/auto-promote.yml` opens and merges the promotion pull request once a day when every required check is green. Promotion to `main` is never automatic. Removed after 2.3.9: a person now reviews and merges every promotion.
 
-## v2.3.8
+## v2.3.6 to v2.3.8
 - **Bounded MCP responses**: #849 found `get_affected_flows` returning ~247k tokens inside a workflow documented as "5 tool calls, 800 tokens total". A sweep of the other 29 tools found the same bug in ten more places: `list_communities` returned 206k tokens with default arguments, `get_community` 134k, `get_architecture_overview` 625k in standard mode. All are now capped under one contract: `total` (or a per-list `*_total`) reports the untruncated count, `truncated` marks a cut, and the summary says how many of how many are shown. Cap parameters reject values below 1 and reject booleans. `detail_level="minimal"` was added to the analysis and refactor tools. `tests/test_token_budget.py` pins the per-tool budget table so a removed cap fails CI. Four query tools (`get_impact_radius`, `find_large_functions`, `traverse_graph`, `semantic_search_nodes`) were still unbounded in the worst case (#888). After 2.3.9, `find_large_functions`, `traverse_graph` and `semantic_search_nodes` got hard ceilings and `CRG_MAX_IMPACT_NODES` reaches `get_impact_radius` (#895). See [COMMANDS.md](COMMANDS.md#result-bounds).
 - **Framework-aware PHP parsing**: traits, enums, object creation and base clauses are indexed. Composer PSR-4 resolution is longest-prefix, multi-directory, cached and bounded to the repository. Blade references ignore comments and escaped directives. Laravel Route and Eloquent edges require explicit framework, import or receiver evidence.
 - **Custom languages without forking**: a `.code-review-graph/languages.toml` file indexes any grammar shipped by tree-sitter-language-pack (extension map plus node-type lists, validated and capped). Built-in languages always win. See [CUSTOM_LANGUAGES.md](CUSTOM_LANGUAGES.md).
@@ -38,7 +40,7 @@ Release highlights by version. The full changelog is in [CHANGELOG.md](../CHANGE
 - **`agent_baseline` eval benchmark**: compares graph queries with a grep-and-read-top-3 agent baseline instead of the whole-corpus baseline. Wired into all six pinned eval configs.
 - **Co-change ground truth for `impact_accuracy`**: predictions are also graded against the files co-changed in the same commit. The graph-derived metric is labelled "circular (upper bound)".
 - **Weekly eval CI**: `.github/workflows/eval.yml` runs a report-only cron on the two smallest pinned configs and uploads CSV artifacts with a job summary.
-- **docs/FAQ.md**: comparison with LSP, RAG, grep and adjacent tools; when not to use it; verification steps; monorepo, worktree and registry guidance.
+- **docs/FAQ.md**: comparison with LSP, RAG and grep; when not to use it; verification steps; monorepo, worktree and registry guidance.
 - **Contribution scaffolding**: issue forms (bug, feature, platform), a PR template mirroring the CONTRIBUTING checklist, and dependabot config for pip and GitHub Actions.
 - **Windows fixes**: `daemon status` no longer fails with WinError 87 (#511). CLI `detect-changes` maps diff paths to absolute native paths, so it no longer reports 0 functions (#528).
 - **Provider-name validation**: an unknown embedding provider raises an error listing the valid names instead of falling back to the local model.
@@ -48,7 +50,7 @@ Release highlights by version. The full changelog is in [CHANGELOG.md](../CHANGE
 
 ## v2.3.5
 - **Token Savings panel**: `detect-changes --brief` and the new `update --brief` print a boxed panel with the full-context baseline, graph response size, saved tokens, percentage, and a per-category breakdown (Functions / Tests / Risk / Other) that sums to the graph response size.
-- **`--verify` flag**: adds a `Verified (tiktoken)` row computed with OpenAI's `cl100k_base` tokenizer. Calibration across 222 files put the aggregate estimate within about 1% of real tokens; see [REPRODUCING.md](REPRODUCING.md#calibration-result-committed).
+- **`--verify` flag**: adds a `Verified (tiktoken)` row computed with OpenAI's `cl100k_base` tokenizer. Calibration across 222 files put the aggregate estimate within about 1% of real tokens; see [REPRODUCING.md](REPRODUCING.md#calibration-table).
 - **`update --brief`**: incremental update plus the risk panel in one command. `detect-changes --brief` is read-only against the existing graph; use `update --brief` when the graph may be stale (after a rebase or a large change set).
 - **`embed` CLI subcommand**: embedding generation from the shell. Previously reachable only over MCP.
 - **Deterministic eval pipeline**: all 6 eval configs pin upstream SHAs, `eval/runner.py` uses full clones with explicit `returncode` checks, and Leiden runs with a fixed seed (`CRG_LEIDEN_SEED=42`).
@@ -103,7 +105,6 @@ Release highlights by version. The full changelog is in [CHANGELOG.md](../CHANGE
 - **Visualisation XSS hardening**: `</` escaped to `<\/` in JSON serialisation.
 - **CLI error handling**: broad `except` split into specific handlers.
 - **Git timeout**: configurable through `CRG_GIT_TIMEOUT` (build, update, watch).
-- **Change-discovery timeout**: `CRG_DISCOVERY_TIMEOUT` bounds each Git command run to work out what changed when no file list was supplied; 5 seconds by default, or `CRG_GIT_TIMEOUT` when that is set explicitly. Exhausting it is reported as an error, never as "no changes".
 - **Governance files**: CONTRIBUTING.md, SECURITY.md, CODE_OF_CONDUCT.md.
 
 ## v1.8.2
@@ -136,7 +137,7 @@ Release highlights by version. The full changelog is in [CHANGELOG.md](../CHANGE
 ## v1.5.3
 - **No git required**: `build`, `status`, `visualize` and `watch` work on any directory.
 - **File organisation**: generated files moved into `.code-review-graph/` (auto-created `.gitignore`, legacy migration).
-- **Visualisation density**: starts collapsed (File nodes only), search bar, clickable edge type toggles, scale-aware layout for large graphs.
+- **Visualisation density**: past 2,000 nodes the page starts collapsed (File nodes only); search bar, clickable edge type toggles, scale-aware layout for large graphs.
 
 ## v1.4.0
 - **`init` command**: automatic `.mcp.json` setup for Claude Code.

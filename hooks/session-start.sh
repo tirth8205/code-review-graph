@@ -21,5 +21,5 @@ When answering questions about this codebase, prefer using the code-review-graph
 This saves significant tokens by avoiding full codebase scans.
 INSTRUCTIONS
 else
-    echo "[code-review-graph] No knowledge graph found. Run /code-review-graph:build-graph to parse this codebase and enable graph-powered queries."
+    echo "[code-review-graph] No knowledge graph found. Run `code-review-graph build` to parse this codebase and enable graph-powered queries."
 fi

@@ -70,16 +70,18 @@ The sample list and raw counts behind this table are not stored in the repositor
 - Network access to clone the six upstream repositories
 - For embeddings, `torch` and `sentence-transformers`, installed by the `embeddings` extra
 
-## Step 1: install with the eval and embeddings extras
+## Step 1: install with the eval, embeddings and communities extras
 
 ```bash
 git clone https://github.com/tirth8205/code-review-graph
 cd code-review-graph
-uv sync --extra eval --extra embeddings     # or: pip install -e ".[eval,embeddings]"
+uv sync --extra eval --extra embeddings --extra communities     # or: pip install -e ".[eval,embeddings,communities]"
 ```
 
-`eval` is `pyyaml` and `matplotlib` (matplotlib is only used by `--report`); `embeddings` is
-`sentence-transformers` and `numpy`.
+`eval` is `pyyaml` and `matplotlib` (the eval itself does not use matplotlib; only
+`visualize --format svg` does); `embeddings` is `sentence-transformers` and `numpy`;
+`communities` is `igraph`, which Leiden needs. Without it the build groups communities by
+file, so the community numbers will not match.
 
 ## Step 2: run the eval
 
@@ -159,6 +161,10 @@ PY
 Captured 2026-08-02 on macOS arm64 (Apple M4 Pro, 14 cores, 24 GB), Python 3.13.12,
 code-review-graph 2.3.7, sentence-transformers 5.6.1, `all-MiniLM-L6-v2`,
 `CRG_LEIDEN_SEED=42`, from clean clones at the pinned SHAs.
+
+These numbers predate 2.4.0, which also indexes HTML, JSON, YAML and Liquid files and ranks
+test code below production code in search, so a 2.4.0 run gives different node, edge,
+embedding and token counts until the capture is redone.
 
 ### Standalone token benchmark (`code_review_graph/token_benchmark.py`)
 
@@ -490,13 +496,13 @@ job-summary table. Regressions do not fail the default branch.
 |---|---|---|---|
 | `code_review_graph/eval/benchmarks/token_efficiency.py` | changed-file content of one commit | full `get_review_context()` JSON | Is the graph cheaper than reading the diffed files? |
 | `code_review_graph/eval/benchmarks/agent_baseline.py` | grep, top 3 files for the question's identifiers | 5 search hits + 5 neighbour edges per hit | Is the graph cheaper than a grep-and-read agent? |
-| `code_review_graph/eval/token_benchmark.py` | none; absolute cost | sum of the tool responses in simulated review, architecture and debug workflows | What does a complete agent workflow cost? |
+| `code_review_graph/eval/token_benchmark.py` | none; absolute cost | sum of the tool responses in simulated review, architecture, debug, onboarding and pre-merge workflows | What does a complete agent workflow cost? |
 | `code_review_graph/token_benchmark.py` (standalone) | all source files in the repo | 5 search hits + 5 neighbour edges per hit | Is the graph cheaper than reading the whole repo? |
 | `code_review_graph/eval/benchmarks/incremental_fidelity.py` | a clean rebuild of the same tree | the same graph after `incremental_update` | Does an incremental update equal a rebuild? |
 
 `token_efficiency` can be below 1.0x for small commits. The standalone numbers are always
 large because the baseline is the whole repo, which is why the README leads with the median
-(about 65x), treats 376x as the maximum, and points to `agent_baseline` as the realistic
+(about 63x), treats 358x as the maximum, and points to `agent_baseline` as the realistic
 middle ground. Quote the one that matches the scenario.
 
 ## Generating diagrams
@@ -506,9 +512,11 @@ The 9 PNGs in `diagrams/` are produced from `diagrams/generate_diagrams.py`. The
 tracked. After a benchmark refresh:
 
 ```bash
-uv run python diagrams/generate_diagrams.py
-# Open each .excalidraw at https://excalidraw.com to render and export
+uv run python diagrams/generate_diagrams.py         # write all 9 .excalidraw files
+uv run python diagrams/generate_diagrams.py 1 5 6   # write only diagrams 1, 5 and 6
 ```
+
+Then open the files in an Excalidraw editor and export each one as a PNG.
 
 ## Troubleshooting
 
@@ -553,20 +561,20 @@ once the clones are cached; budget a few minutes on CI hardware.
 one answer to "which commit of fastapi do we measure". `tests/test_real_repo_corpus_guard.py`
 fails if those two ever drift apart.
 
-### Initial baseline
+### Recorded baseline (2.4.0)
 
 Measured on macOS 15 (Apple silicon), CPython 3.13.
 
 | Repo | Language | Commit | Files | Nodes | Edges | Resolved edges | Resolved imports | Parse errors | Files with no node | Dangling CONTAINS | Build |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| fastapi | python | `22381558` | 1179 | 6287 | 32613 | 51.1% | 47.6% | 0 | 51 | 0 | 5.4s |
-| gin | go | `5c00df8a` | 109 | 1591 | 17266 | 51.4% | 0.0% | 0 | 11 | 1 | 2.5s |
-| zod | typescript | `59bbc03e` | 534 | 7082 | 98833 | 52.9% | 43.4% | 0 | 11 | 0 | 13.9s |
-| gson | java | `854c8255` | 272 | 4125 | 47564 | 52.5% | 14.6% | 0 | 8 | 693 | 10.7s |
-| newtonsoft-json | csharp | `09bb545d` | 952 | 9094 | 76052 | 60.1% | 0.0% | 0 | 2 | 486 | 20.6s |
-| ripgrep | rust | `3fce3b5b` | 125 | 3518 | 29256 | 46.1% | 22.4% | 0 | 5 | 17 | 3.5s |
-| sinatra | ruby | `cb22afd7` | 157 | 1224 | 14647 | 19.7% | 0.0% | 0 | 10 | 615 | 2.1s |
-| guzzle | php | `93939470` | 141 | 3221 | 43443 | 57.6% | 45.1% | 0 | 4 | 0 | 6.5s |
+| fastapi | python | `22381558` | 1182 | 10804 | 36969 | 56.8% | 46.9% | 0 | 0 | 0 | 5.4s |
+| gin | go | `5c00df8a` | 109 | 1870 | 17530 | 52.2% | 0.0% | 0 | 0 | 1 | 2.5s |
+| zod | typescript | `59bbc03e` | 577 | 8629 | 99923 | 53.7% | 65.5% | 0 | 0 | 0 | 13.9s |
+| gson | java | `854c8255` | 273 | 4736 | 47834 | 62.2% | 34.1% | 0 | 0 | 0 | 10.7s |
+| newtonsoft-json | csharp | `09bb545d` | 977 | 10491 | 76920 | 52.9% | 0.0% | 0 | 0 | 0 | 20.6s |
+| ripgrep | rust | `3fce3b5b` | 125 | 3755 | 29431 | 47.1% | 22.8% | 0 | 0 | 17 | 3.5s |
+| sinatra | ruby | `cb22afd7` | 159 | 3268 | 24701 | 55.8% | 31.4% | 0 | 0 | 0 | 2.1s |
+| guzzle | php | `93939470` | 145 | 3451 | 43658 | 57.7% | 45.1% | 0 | 0 | 0 | 6.5s |
 
 Counts are deterministic: two recording runs on the same machine produced identical numbers
 for every column except `Build`.
@@ -595,8 +603,8 @@ Each failure names the property, the recorded value, the measured value, the del
 band. Dropping `".go": "go"` from the parser's extension map produces:
 
 ```text
-gin (go) @ 5c00df8afadd: 6 of 12 properties moved out of band
+gin (go) @ 5c00df8afadd: 5 of 12 properties moved out of band
   - files_parsed fell below its band: baseline=109 measured=11 delta=-98 (-89.9%), allowed [106.8, 136.2] (x0.98..x1.25)
-  - total_nodes fell below its band: baseline=1591 measured=0 delta=-1591 (-100.0%), allowed [1463.7, 2227.4] (x0.92..x1.4)
-  - primary_language_present dropped: baseline=1 measured=0 delta=-1. gin is a go project but the graph holds languages []
+  - total_nodes fell below its band: baseline=1870 measured=275 delta=-1595 (-85.3%), allowed [1720.4, 2618.0] (x0.92..x1.4)
+  - primary_language_present dropped: baseline=1 measured=0 delta=-1. gin is a go project but the graph holds languages ['yaml']
 ```

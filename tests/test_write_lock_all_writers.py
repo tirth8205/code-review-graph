@@ -9,6 +9,7 @@ stop every build for as long as the watcher lived.
 
 from __future__ import annotations
 
+import contextlib
 import shutil
 import sqlite3
 import subprocess
@@ -117,7 +118,8 @@ def test_forget_dry_run_writes_nothing_so_needs_no_lock(repo, held, monkeypatch,
 
 
 def _schema_version(db) -> int:
-    with sqlite3.connect(db) as conn:
+    # ``with`` on a connection ends a transaction; it does not close it.
+    with contextlib.closing(sqlite3.connect(db)) as conn:
         row = conn.execute(
             "SELECT value FROM metadata WHERE key = 'schema_version'"
         ).fetchone()

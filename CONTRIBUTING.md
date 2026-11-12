@@ -30,7 +30,7 @@ CI runs the suite on Python 3.10, 3.11, 3.12 and 3.13 and fails below 65% covera
 `tests/test_parser_grammar_contract.py` checks every built-in class, function, import,
 and call dispatch name against its bundled Tree-sitter grammar. When updating a grammar
 or adding dispatch entries, use the grammar's actual named node types. This contract
-checks configured dispatch names; language fixtures still verify extraction behavior.
+checks configured dispatch names; language fixtures still verify extraction behaviour.
 
 ## Linting and Type Checking
 
@@ -55,7 +55,7 @@ The `minimum-dependencies` job installs every direct dependency at the lowest ve
 1. Fork the repository and create a branch from `staging`: `git checkout -b feature/your-feature origin/staging`.
 2. Make the change and add tests for new behaviour.
 3. Run the tests, ruff and mypy as above.
-4. Update docs where behaviour changed (README, `docs/`, docstrings).
+4. Update docs where behaviour changed (README, `docs/`, docstrings). README.md has four translations: README.zh-CN.md, README.ja-JP.md, README.ko-KR.md and README.hi-IN.md. If you add or remove a heading, change a code block or a link, or add or remove a table row in README.md, make the same change in all four. `tests/test_readme_parity.py` checks this. Add a bullet under `## [Unreleased]` in `CHANGELOG.md` for anything a user will notice, in user terms, not function names. Changes only contributors see (tests, CI, internal names) go under `### Internal`.
 5. Open a pull request against `staging` (the default branch, so GitHub picks it for you). The template asks for the linked issue, what changed and why, and the commands you ran.
 
 ## Branching and promotion
@@ -180,13 +180,18 @@ CRG_UPGRADE_TEST=1 uv run pytest -m upgrade -q -rxX   # upgrade-path
 uv run pytest tests/test_packaging.py -m packaging -q # packaging
 uv run pytest -m determinism -q -rxX                  # determinism
 uv run pytest -m corpus -q                            # corpus (clones 8 repos)
-uv run pytest -m browser -q                           # browser (needs the browser-test extra)
+uv run pytest -m browser -q                           # browser (needs the browser-test extra and `uv run python -m playwright install chromium`)
 uv run pytest -m e2e -q                               # e2e
 ```
 
-**Releases** are cut from `main` only: bump the version, tag `vX.Y.Z`, publish a GitHub
-release, and the `publish` workflow uploads to PyPI. Nothing is ever released from
-`staging` or `testing`.
+**Releases** are cut from `main` only: move the `[Unreleased]` notes in `CHANGELOG.md`
+under the new version, update `docs/FEATURES.md`, bump the version, tag `vX.Y.Z`, publish
+a GitHub release, and the `publish` workflow uploads to PyPI. When
+`SUPPORTED_SCHEMA_VERSION` in the VS Code extension changes, publish the extension in the
+same release and add its row to the Versions table in `code-review-graph-vscode/README.md`:
+the `publish` workflow does not ship it, and an older extension cannot read the new graph.
+Nothing is ever released from `staging` or `testing`. The full steps are in
+[docs/RELEASING.md](docs/RELEASING.md).
 
 **Archived branches.** Old branches are not deleted outright. A branch that carried work
 not on `main` is kept as a tag under `archive/<branch-name>` (list them with
@@ -234,11 +239,11 @@ Start with a platform request issue (https://github.com/tirth8205/code-review-gr
 
 1. A link to the platform's official MCP configuration documentation. Blog posts, forum replies and screenshots of a settings dialog are not enough.
 2. The exact config file path and the exact schema of a server entry: which top-level key holds the servers, whether that value is an object or an array, and whether a `type` field is required.
-3. The entry added through the existing `PLATFORMS` table in `code_review_graph/skills.py`, plus `_PLATFORM_CHOICES` in `code_review_graph/cli.py`. Use the fields already there: `name`, `config_path`, `key`, `detect`, `format`, `needs_type`, and where needed `legacy_keys`, `server_type`, `entry_fields`. If the client needs something the table cannot express, say so in the pull request and explain why, rather than adding a separate code path beside it.
+3. The entry added through the existing `PLATFORMS` table in `code_review_graph/skills.py`, plus `_PLATFORM_CHOICES` in `code_review_graph/cli.py`. Use the fields already there: `name`, `config_path`, `key`, `detect`, `format`, `needs_type`, and where needed `config_paths`, `legacy_keys`, `server_type`, `entry_fields`. If the client needs something the table cannot express, say so in the pull request and explain why, rather than adding a separate code path beside it.
 4. Preservation of unrelated user settings. Install must merge only the `code-review-graph` server entry and leave every other server, key and top-level setting intact. If the file cannot be parsed, install must skip it rather than rewrite it.
 5. A byte-idempotent reinstall. Running install twice must leave the config file and any generated instruction file byte for byte identical.
 6. A working uninstall in `code_review_graph/uninstall.py` that removes only what install added, including any legacy keys, and leaves the rest of the file untouched.
-7. Lifecycle tests matching the existing ones: an install, reinstall and uninstall test in `tests/test_cli_install.py` shaped like `test_copilot_cli_install_reinstall_uninstall_lifecycle`, and a passing run of the all-platforms sweep in `tests/test_uninstall.py` (`test_uninstall_removes_mcp_entry_for_every_current_platform_spec`), which covers every new entry automatically.
+7. Lifecycle tests matching the existing ones: an install, reinstall and uninstall test in `tests/test_cli_install.py` shaped like `test_copilot_cli_install_reinstall_uninstall_lifecycle`, and a passing run of the all-platforms sweep in `tests/test_uninstall.py` (`test_uninstall_removes_mcp_entry_for_every_current_platform_spec`), which covers every new entry automatically. Also add the platform to `EXPECTATIONS` in `tests/test_platform_lifecycle.py` (and raise the platform count there), add its key to the `--platform` list in README.md and its translations, and list every file it writes inside the repository in the root `.gitignore`; `tests/test_platform_lifecycle.py -m platform_lifecycle` and `tests/test_install_outputs_are_ignored.py` fail otherwise.
 8. Evidence from a real released client: a screenshot or transcript of a session in that client where a code-review-graph tool is invoked and returns a result. A rendered image of text, a mockup or a description of what should happen is not evidence.
 
 If no maintainer can install and run the client, the request may be declined or left open until someone who uses it is willing to own it and respond when it breaks. An existing target may also be removed if it breaks and nobody steps up to fix it.

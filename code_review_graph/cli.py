@@ -40,6 +40,7 @@ if sys.version_info < (3, 10):
 
 import argparse
 import contextlib
+import difflib
 import fnmatch
 import io
 import json
@@ -52,7 +53,7 @@ from importlib.metadata import version as pkg_version
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Iterable, TypedDict
 
-from . import install_plan
+from . import install_manifest, install_plan
 from .errors import CodeReviewGraphError, is_lock_error
 
 if TYPE_CHECKING:
@@ -139,31 +140,84 @@ def _print_banner() -> None:
 {c}  │╱ │ ╲│{r}       {d}Structural knowledge graph for{r}
 {c}  ●──●──●{r}       {d}smarter code reviews{r}
 
-  {b}Commands:{r}
-    {g}install{r}     Set up MCP server for AI coding platforms
-    {g}init{r}        Alias for install
-    {g}build{r}       Full graph build {d}(parse all files){r}
-    {g}update{r}      Incremental update {d}(changed files only){r}
-    {g}watch{r}       Auto-update on file changes
-    {g}status{r}      Show graph statistics
-    {g}visualize{r}   Generate interactive HTML graph
-    {g}wiki{r}        Generate markdown wiki from communities
-    {g}detect-changes{r} Analyze change impact {d}(risk-scored review){r}
-    {g}register{r}    Register a repository in the multi-repo registry
-    {g}unregister{r}  Remove a repository from the registry
-    {g}repos{r}       List registered repositories
-    {g}postprocess{r} Run post-processing {d}(flows, communities, FTS){r}
-    {g}daemon{r}      Multi-repo watch daemon management
-    {g}eval{r}        Run evaluation benchmarks
-    {g}serve{r}       Start MCP server {d}(stdio, or {g}--http{r} on localhost:5555){r}
+  {b}Start:{r} code-review-graph install && code-review-graph build
 
+{_banner_commands(b, g, r)}
   {d}Run{r} {b}code-review-graph <command> --help{r} {d}for details{r}
 """)
+
+
+#: Every command a user types, grouped, with one short line each. The three
+#: hook commands (``enrich``, ``hook-update``, ``hook-status``) are left out
+#: on purpose: only the hooks ``install`` writes call them. A test holds this
+#: list to the parser, so a new command cannot be left off.
+_BANNER_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
+    ("Set up", (
+        ("install", "Set up the MCP server, hooks and skills for your AI tools"),
+        ("init", "Same as install"),
+        ("uninstall", "Remove what install added"),
+        ("doctor", "Check which copies run, the graph and the hooks"),
+    )),
+    ("Build the graph", (
+        ("build", "Parse every file into a new graph"),
+        ("update", "Parse only the files that changed"),
+        ("watch", "Update the graph as files change"),
+        ("status", "Show graph counts"),
+        ("postprocess", "Redo flows, communities and the search index"),
+        ("embed", "Add vectors for search by meaning"),
+        ("forget", "Drop files from the graph"),
+    )),
+    ("Review", (
+        ("detect-changes", "Score the risk of your changes (read-only)"),
+        ("impact", "Show what a change can reach"),
+        ("dead-code", "Find code that nothing calls or tests"),
+        ("refactor", "Preview a rename, dead code or suggestions"),
+    )),
+    ("Explore", (
+        ("query", "Callers, callees, imports, tests and more"),
+        ("search", "Find code by name or keyword"),
+        ("architecture", "Show the main parts of the code"),
+        ("flows", "List execution flows"),
+        ("flow", "Show one execution flow"),
+        ("communities", "List groups of related code"),
+        ("community", "Show one group"),
+        ("large-functions", "Find very long functions and classes"),
+        ("visualize", "Draw the graph as an interactive page"),
+        ("wiki", "Write a Markdown wiki from the graph"),
+        ("context-history", "Show the saved-context log"),
+    )),
+    ("Serve and more", (
+        ("serve", "Start the MCP server (stdio, or --http on localhost)"),
+        ("mcp", "Same as serve"),
+        ("daemon", "Watch many repositories in the background"),
+        ("register", "Add a repository to the multi-repo list"),
+        ("unregister", "Remove a repository from that list"),
+        ("repos", "Show the listed repositories"),
+        ("eval", "Run the benchmarks"),
+    )),
+)
+
+#: Commands only the hooks ``install`` writes call. Hidden from ``--help``
+#: and from the banner, and never offered as a "did you mean".
+_HIDDEN_COMMANDS = frozenset({"enrich", "hook-update", "hook-status"})
+
+
+def _banner_commands(bold: str, green: str, reset: str) -> str:
+    """Render ``_BANNER_GROUPS`` as the banner's command list."""
+    width = max(len(name) for _, rows in _BANNER_GROUPS for name, _ in rows) + 2
+    lines: list[str] = []
+    for title, rows in _BANNER_GROUPS:
+        lines.append(f"  {bold}{title}:{reset}")
+        for name, text in rows:
+            lines.append(f"    {green}{name}{reset}{' ' * (width - len(name))}{text}")
+        lines.append("")
+    return "\n".join(lines)
 
 
 def _instruction_files_to_modify(
     repo_root: Path,
     target: str,
+    platforms: Iterable[str] | None = None,
 ) -> list[tuple[str, str]]:
     """Return ``(filename, how)`` for each instruction file that ``install``
     would write or modify, given the current state of the repo and the
@@ -171,6 +225,7 @@ def _instruction_files_to_modify(
 
     A file holding a section from an older release is listed as ``update``:
     install replaces that block in place rather than leaving it stale (#314).
+    ``platforms`` narrows ``"all"`` to the platforms ``install`` selected.
     """
     from .skills import (
         _CLAUDE_MD_SECTION,
@@ -179,6 +234,7 @@ def _instruction_files_to_modify(
         _PLATFORM_INSTRUCTION_CUSTOM_SECTIONS,
         _PLATFORM_INSTRUCTION_FILES,
         _upgrade_managed_block,
+        instruction_file_wanted,
     )
 
     targets: list[tuple[str, str]] = []
@@ -193,11 +249,11 @@ def _instruction_files_to_modify(
         elif _upgrade_managed_block(content, section) is not None:
             targets.append((filename, "update"))
 
-    if target in ("claude", "all"):
+    if instruction_file_wanted(("claude",), target, platforms):
         _describe("CLAUDE.md", repo_root / "CLAUDE.md", _CLAUDE_MD_SECTION)
 
     for filename, owners in _PLATFORM_INSTRUCTION_FILES.items():
-        if target != "all" and target not in owners:
+        if not instruction_file_wanted(owners, target, platforms):
             continue
         section = (
             _COPILOT_SECTION
@@ -210,20 +266,33 @@ def _instruction_files_to_modify(
 
 
 def _confirm_yes_no(
-    prompt: str, default_yes: bool = True, *, cancel_on_interrupt: bool = False
+    prompt: str,
+    default_yes: bool = True,
+    *,
+    cancel_on_interrupt: bool = False,
+    no_terminal_hint: str = "",
 ) -> bool:
     """Prompt the user [Y/n] and return True for yes.
 
     Non-interactive environments (no TTY on stdin, e.g. an MCP wrapper
     piping the CLI) return ``default_yes`` without blocking — the
     stdio transport cannot safely read from stdin without corrupting
-    the JSON-RPC stream. See: #173, #174
+    the JSON-RPC stream. See: #173, #174. They say so, with
+    ``no_terminal_hint`` on how to get the other answer, so an agent that
+    runs the command knows a question was answered for it.
 
     Ctrl-C counts as "no" unless ``cancel_on_interrupt`` is set, in which case
-    it is raised so the caller can stop altogether.
+    it is raised so the caller can stop altogether. The end of input takes the
+    default like a pipe: on Windows, stdin from ``NUL`` says it is a terminal.
     """
-    if not sys.stdin.isatty():
+
+    def take_default() -> bool:
+        answer = "yes" if default_yes else "no"
+        print(f"No terminal: taking the default ({answer}). {no_terminal_hint}".rstrip())
         return default_yes
+
+    if not sys.stdin.isatty():
+        return take_default()
     suffix = "[Y/n]" if default_yes else "[y/N]"
     try:
         answer = input(f"{prompt} {suffix} ").strip().lower()
@@ -234,7 +303,7 @@ def _confirm_yes_no(
         return False
     except EOFError:
         print()
-        return False
+        return take_default()
     if not answer:
         return default_yes
     return answer in ("y", "yes")
@@ -395,7 +464,7 @@ def _handle_init(args: argparse.Namespace) -> None:
     then writes exactly that plan (#173).
     """
     from .incremental import find_repo_root
-    from .skills import inject_instruction_files
+    from .skills import inject_instruction_files, selected_platforms
 
     repo_root = Path(args.repo) if args.repo else find_repo_root()
     if not repo_root:
@@ -409,6 +478,8 @@ def _handle_init(args: argparse.Namespace) -> None:
     skip_instructions = getattr(args, "no_instructions", False)
     skip_hooks = getattr(args, "no_hooks", False)
     steering = getattr(args, "steering", None)
+    # Worked out once: every step writes only for these platforms.
+    platforms = selected_platforms(repo_root, target)
 
     # --gitignore (#471, off by default): note what exists before anything is
     # planned, so only files this run creates are added to .gitignore.
@@ -422,6 +493,7 @@ def _handle_init(args: argparse.Namespace) -> None:
             with_skills=not getattr(args, "no_skills", False),
             with_hooks=not skip_hooks,
             with_instructions=not skip_instructions,
+            platforms=platforms,
         )
 
     # In a real install the progress messages wait until the files are
@@ -433,9 +505,10 @@ def _handle_init(args: argparse.Namespace) -> None:
         with install_plan.planning() as plan:
             quiet = contextlib.nullcontext() if dry_run else contextlib.redirect_stdout(report)
             with quiet:
-                _plan_mcp_configs(repo_root, target, dry_run)
+                _plan_mcp_configs(repo_root, target, dry_run, platforms)
                 codex_skill_error = _plan_integrations(
-                    args, repo_root, target, say=_say_nothing if dry_run else print
+                    args, repo_root, target, platforms,
+                    say=_say_nothing if dry_run else print,
                 )
                 if steering is not None:
                     _apply_steering_choice(
@@ -449,8 +522,10 @@ def _handle_init(args: argparse.Namespace) -> None:
             outcomes: dict[str, str] = {}
             before_instructions = plan.checkpoint()
             if not skip_instructions:
-                instr_targets = _instruction_files_to_modify(repo_root, target)
-                outcomes = inject_instruction_files(repo_root, target=target)
+                instr_targets = _instruction_files_to_modify(repo_root, target, platforms)
+                outcomes = inject_instruction_files(
+                    repo_root, target=target, platforms=platforms
+                )
             instr_changes = plan.changes_since(before_instructions)
 
             # The --gitignore block lists what the run creates, instruction
@@ -462,6 +537,10 @@ def _handle_init(args: argparse.Namespace) -> None:
                 with contextlib.redirect_stdout(to):
                     print()
                     _report_gitignore_block(repo_root, gitignore_plan, dry_run=dry_run)
+
+            # The record of what install wrote is planned after every other
+            # file, so it lists them all (see install_manifest).
+            install_manifest.plan_record(repo_root, plan)
 
             if dry_run:
                 _print_instruction_conflicts(outcomes)
@@ -485,11 +564,14 @@ def _handle_init(args: argparse.Namespace) -> None:
                 print("Graph instructions will be injected into:")
                 for name, how in instr_targets:
                     print(f"  {name} ({how})")
+                if not auto_yes and sys.stdin.isatty():
+                    print("Ctrl-C now to stop; nothing has been written yet.")
                 try:
                     inject = auto_yes or _confirm_yes_no(
                         "Inject graph instructions into these files?",
                         default_yes=True,
                         cancel_on_interrupt=True,
+                        no_terminal_hint="Use --no-instructions to skip them.",
                     )
                 except KeyboardInterrupt:
                     # Nothing has been written yet, so stopping here leaves no trace.
@@ -504,6 +586,9 @@ def _handle_init(args: argparse.Namespace) -> None:
                     with contextlib.redirect_stdout(gitignore_report):
                         print()
                         _report_gitignore_block(repo_root, gitignore_plan, dry_run=False)
+                # The rollback dropped the record too; it must not list the
+                # instruction files either.
+                install_manifest.plan_record(repo_root, plan)
             with contextlib.redirect_stdout(report):
                 if inject:
                     for label, wording in (
@@ -552,12 +637,16 @@ def _handle_init(args: argparse.Namespace) -> None:
     print("  2. Restart your AI coding tool to pick up the new config")
 
 
-def _plan_mcp_configs(repo_root: Path, target: str, dry_run: bool) -> None:
+def _plan_mcp_configs(
+    repo_root: Path, target: str, dry_run: bool, platforms: Iterable[str] | None = None
+) -> None:
     """Plan the MCP server entry for each platform and say what it does."""
-    from .skills import install_platform_configs
+    from .skills import PLATFORMS, install_platform_configs
 
     print("Installing MCP server config...")
-    configured = install_platform_configs(repo_root, target=target, dry_run=dry_run)
+    configured = install_platform_configs(
+        repo_root, target=target, dry_run=dry_run, platforms=platforms
+    )
     if not configured:
         print("No platforms detected.")
     elif dry_run:
@@ -567,10 +656,20 @@ def _plan_mcp_configs(repo_root: Path, target: str, dry_run: bool) -> None:
         )
     else:
         print(f"\nConfigured {len(configured)} platform(s): {', '.join(configured)}")
+    if target == "all" and platforms is not None:
+        missing = [key for key in PLATFORMS if key not in set(platforms)]
+        if missing:
+            print(f"Not found here, so not set up: {', '.join(missing)}.")
+            print("Add one anyway with: code-review-graph install --platform NAME")
 
 
 def _plan_integrations(
-    args: argparse.Namespace, repo_root: Path, target: str, *, say: Callable[[str], None]
+    args: argparse.Namespace,
+    repo_root: Path,
+    target: str,
+    platforms: Iterable[str] | None = None,
+    *,
+    say: Callable[[str], None],
 ) -> str | None:
     """Plan the .gitignore entry, skills and hooks. Return a Codex skill error, if any.
 
@@ -578,11 +677,12 @@ def _plan_integrations(
     so the graph tools are used proactively; ``--no-skills`` and ``--no-hooks``
     opt out. The legacy ``--skills``/``--hooks``/``--all`` flags are still
     accepted and do nothing. ``say`` prints a message that only reports a
-    write; a warning is printed in both modes.
+    write; a warning is printed in both modes. Skills and hooks are written
+    only for ``platforms``, by default :func:`skills.selected_platforms`.
     """
     from .incremental import ensure_repo_gitignore_excludes_crg
     from .skills import (
-        PLATFORMS,
+        _git_hooks_dir,
         generate_skills,
         install_codebuddy_hooks,
         install_codebuddy_skills,
@@ -597,8 +697,15 @@ def _plan_integrations(
         install_hooks,
         install_opencode_plugin,
         install_qoder_skills,
+        selected_platforms,
     )
 
+    def shown(path: Path) -> str:
+        return install_plan.display_path(path, repo_root)
+
+    chosen = frozenset(
+        selected_platforms(repo_root, target) if platforms is None else platforms
+    )
     gitignore_state = ensure_repo_gitignore_excludes_crg(repo_root)
     if gitignore_state == "created":
         say("Created .gitignore and added .code-review-graph/.")
@@ -611,10 +718,7 @@ def _plan_integrations(
     skip_hooks = getattr(args, "no_hooks", False)
     codex_skill_error: str | None = None
     if not skip_skills:
-        codex_detected = target == "codex" or (
-            target == "all" and PLATFORMS["codex"]["detect"]()
-        )
-        if codex_detected:
+        if "codex" in chosen:
             try:
                 codex_skill_dir = install_codex_skill()
             except OSError as exc:
@@ -627,84 +731,87 @@ def _plan_integrations(
                 if target == "all":
                     print(codex_skill_error, file=sys.stderr)
             else:
-                say(f"Installed Codex skill in {codex_skill_dir}")
+                say(f"Installed Codex skill in {shown(codex_skill_dir)}")
 
-        # Claude Code skills are only relevant for Claude (or full install).
-        if target in ("claude", "all"):
+        if "claude" in chosen:
             skills_dir = generate_skills(repo_root)
-            say(f"Generated Claude Code skills in {skills_dir}")
+            say(f"Generated Claude Code skills in {shown(skills_dir)}")
 
         # Gemini CLI skills are workspace-scoped under .gemini/.
-        if target in ("gemini-cli", "all"):
+        if "gemini-cli" in chosen:
             gemini_skills_dir = install_gemini_cli_skills(repo_root)
-            say(f"Installed Gemini CLI skills in {gemini_skills_dir}")
+            say(f"Installed Gemini CLI skills in {shown(gemini_skills_dir)}")
 
         # CodeBuddy discovers project skills under .codebuddy/skills/.
-        if target in ("codebuddy", "all"):
+        if "codebuddy" in chosen:
             codebuddy_skills_dir = install_codebuddy_skills(repo_root)
-            say(f"Installed CodeBuddy skills in {codebuddy_skills_dir}")
+            say(f"Installed CodeBuddy skills in {shown(codebuddy_skills_dir)}")
 
         # Hermes Agent discovers skills under <HERMES_HOME>/skills/.
-        if target == "hermes" or (target == "all" and PLATFORMS["hermes"]["detect"]()):
+        if "hermes" in chosen:
             hermes_skills_dir = install_hermes_skills(repo_root)
-            say(f"Installed Hermes Agent skills in {hermes_skills_dir}")
+            say(f"Installed Hermes Agent skills in {shown(hermes_skills_dir)}")
 
         # Qoder skills live in the project's .qoder/skills/.
-        if target in ("qoder", "all"):
+        if "qoder" in chosen:
             qoder_skills_dir = install_qoder_skills(repo_root)
             if qoder_skills_dir:
-                say(f"Installed Qoder skills to {qoder_skills_dir}")
+                say(f"Installed Qoder skills in {shown(qoder_skills_dir)}")
 
-    if not skip_hooks and target in ("codebuddy", "all"):
+    if not skip_hooks and "codebuddy" in chosen:
         try:
             codebuddy_settings = install_codebuddy_hooks(repo_root)
             if codebuddy_settings:
-                say(f"Installed CodeBuddy hooks in {codebuddy_settings}")
+                say(f"Installed CodeBuddy hooks in {shown(codebuddy_settings)}")
         except Exception as exc:
             logger.warning("Could not install CodeBuddy hooks: %s", exc)
-    if not skip_hooks and target in ("codex", "all"):
+    if not skip_hooks and "codex" in chosen:
         hooks_path = install_codex_hooks(repo_root)
         if hooks_path:
-            say(f"Installed Codex hooks in {hooks_path}")
-        git_hook = install_git_hook(repo_root)
-        if git_hook:
-            say(f"Installed git pre-commit hook in {git_hook}")
-        for sync_hook in install_git_sync_hooks(repo_root):
-            say(f"Installed git {sync_hook.name} hook in {sync_hook}")
-    if not skip_hooks and target in ("claude", "qoder", "all"):
-        platforms_to_install = [target] if target != "all" else ["claude", "qoder"]
-        for plat in platforms_to_install:
+            say(f"Installed Codex hooks in {shown(hooks_path)}")
+    if not skip_hooks:
+        for plat in ("claude", "qoder"):
+            if plat not in chosen:
+                continue
             settings_path = install_hooks(repo_root, platform=plat)
             if settings_path:
-                say(f"Installed hooks in {settings_path}")
+                say(f"Installed hooks in {shown(settings_path)}")
+    # The git hooks keep the graph fresh for every tool, so they are written
+    # once, and only when git has a hooks folder for this repository (the
+    # lookup warns once when it has none).
+    if (
+        not skip_hooks
+        and target in ("all", "claude", "qoder", "codex")
+        and _git_hooks_dir(repo_root) is not None
+    ):
         git_hook = install_git_hook(repo_root)
         if git_hook:
-            say(f"Installed git pre-commit hook in {git_hook}")
+            say(f"Installed git pre-commit hook in {shown(git_hook)}")
         for sync_hook in install_git_sync_hooks(repo_root):
-            say(f"Installed git {sync_hook.name} hook in {sync_hook}")
+            say(f"Installed git {sync_hook.name} hook in {shown(sync_hook)}")
 
-    # Cursor hooks (user-level, only if ~/.cursor exists — matching MCP detect)
-    if not skip_hooks and target in ("all", "cursor") and PLATFORMS["cursor"]["detect"]():
+    # Cursor hooks are user-level, written like the MCP entry.
+    if not skip_hooks and "cursor" in chosen:
         try:
             hooks_path = install_cursor_hooks()
             if hooks_path:
-                say(f"Installed Cursor hooks in {hooks_path}")
+                say(f"Installed Cursor hooks in {shown(hooks_path)}")
         except Exception as exc:
             logger.warning("Could not install Cursor hooks: %s", exc)
 
-    if not skip_hooks and target in ("gemini-cli", "all"):
+    if not skip_hooks and "gemini-cli" in chosen:
         try:
             gemini_settings = install_gemini_cli_hooks(repo_root)
             if gemini_settings:
-                say(f"Installed Gemini CLI hooks in {gemini_settings}")
+                say(f"Installed Gemini CLI hooks in {shown(gemini_settings)}")
         except Exception as exc:
             logger.warning("Could not install Gemini CLI hooks: %s", exc)
 
-    # OpenCode plugin (user-level, gated by same detect() as MCP config)
-    if not skip_hooks and target in ("all", "opencode") and PLATFORMS["opencode"]["detect"]():
+    # The OpenCode plugin is user-level, written like the MCP entry.
+    if not skip_hooks and "opencode" in chosen:
         try:
             plugin_path = install_opencode_plugin()
-            say(f"Installed OpenCode plugin in {plugin_path}")
+            say(f"Installed OpenCode plugin in {shown(plugin_path)}")
         except Exception as exc:
             logger.warning("Could not install OpenCode plugin: %s", exc)
     return codex_skill_error
@@ -882,6 +989,7 @@ _GRAPH_TOOL_COMMANDS = {
 
 _PATH_REPO_COMMANDS = frozenset({
     "context-history",
+    "doctor",
     "install",
     "init",
     "uninstall",
@@ -937,6 +1045,21 @@ def _find_explicit_repo_root(start: Path) -> "Path | None":
         if current == current.parent:
             return None
         current = current.parent
+
+
+def _handle_doctor(args) -> None:
+    """Report on the setup, read-only; exit 1 when a check failed."""
+    from .doctor import run_doctor
+    from .incremental import find_project_root
+
+    if args.repo:
+        given = Path(args.repo).expanduser()
+        repo_root = _find_explicit_repo_root(given) or given.resolve()
+    else:
+        repo_root = find_project_root()
+    code = run_doctor(repo_root, as_json=args.json_output)
+    if code:
+        raise SystemExit(code)
 
 
 def _handle_context_history(args) -> None:
@@ -1137,6 +1260,18 @@ def _open_graph_store(db_path: Path, command: str):
     return open_store(db_path, command)
 
 
+def _require_repo_folder(repo_root: Path) -> None:
+    """Stop with one line when ``--repo`` names no folder.
+
+    The write commands used to make the folder, so a typed path left an
+    empty one behind; stopping is the safer answer.
+    """
+    if not repo_root.is_dir():
+        raise CodeReviewGraphError(
+            f"--repo is not a folder: {repo_root}. Check the path and try again."
+        )
+
+
 def _ensure_project_marker(repo_root: Path) -> None:
     """Let a plain directory pass tool validation, without opening graph.db.
 
@@ -1153,6 +1288,14 @@ def _ensure_project_marker(repo_root: Path) -> None:
 def _enrich_kwargs(args) -> dict:
     """``--enrich`` asks for Jedi; without it the env var decides (see full_build)."""
     return {"enrich": True} if getattr(args, "enrich", False) else {}
+
+
+#: Printed after a build that stored something, so a new user knows what to
+#: try next instead of stopping at a line of counts.
+_BUILD_NEXT_STEP = (
+    "Next: code-review-graph detect-changes --brief, "
+    'or ask your assistant "Review my changes".'
+)
 
 
 def _handle_build_update(args, repo_root: Path, embedding_refresh_kwargs) -> None:
@@ -1195,6 +1338,17 @@ def _handle_build_update(args, repo_root: Path, embedding_refresh_kwargs) -> Non
             )
             if result.get("errors"):
                 print(f"Errors: {len(result['errors'])}")
+            if parsed == 0 and not result.get("errors"):
+                # An empty graph is a working build of the wrong folder far
+                # more often than a project with nothing in it.
+                sys.stdout.flush()
+                print(
+                    f"Warning: no source files found under {repo_root}. "
+                    "Is this the project root?",
+                    file=sys.stderr,
+                )
+            elif parsed:
+                print(_BUILD_NEXT_STEP)
 
     elif args.command == "update":
         pp = (
@@ -1256,11 +1410,7 @@ def _handle_build_update(args, repo_root: Path, embedding_refresh_kwargs) -> Non
         if getattr(args, "brief", False) and not args.quiet:
             from .changes import analyze_changes
             from .context_history import CallInfo
-            from .context_savings import (
-                attach_context_savings,
-                estimate_file_tokens,
-                format_context_savings_panel,
-            )
+            from .context_savings import attach_context_savings, estimate_file_tokens
             from .incremental import discover_review_changes
 
             # Reuse the base the update actually resolved to (args.base is
@@ -1301,31 +1451,42 @@ def _handle_build_update(args, repo_root: Path, embedding_refresh_kwargs) -> Non
                     summary = impact.get("summary", "")
                     if summary:
                         print(summary)
-                    verified = None
-                    if getattr(args, "verify", False):
-                        from .context_savings import verify_with_tiktoken
-                        verified = verify_with_tiktoken(
-                            repo_root, changed, impact,
-                        )
-                        if verified is None:
-                            print(
-                                "Note: --verify requires tiktoken. "
-                                "Install with `pip install tiktoken`.",
-                            )
-                    panel = format_context_savings_panel(
-                        impact.get("context_savings"),
-                        original_tokens=original_tokens,
-                        response=impact,
-                        verified=verified,
-                    )
-                    if panel:
-                        print(panel)
+                    _print_savings_panel(args, repo_root, changed, impact, original_tokens)
                 finally:
                     try:
                         if store is not None:
                             store.close()
                     finally:
                         brief_lock.release()
+
+
+def _print_savings_panel(
+    args, repo_root: Path, changed: list[str], response: dict, original_tokens: int
+) -> None:
+    """Print the Token Savings panel of a ``--brief`` review.
+
+    With no changed function the response is almost empty, so the panel would
+    claim nearly all of it saved for telling the reader nothing. One plain
+    line says why there is no panel instead.
+    """
+    from .context_savings import format_context_savings_panel, verify_with_tiktoken
+
+    if not response.get("changed_functions"):
+        print("Token Savings: none to show, as no functions changed.")
+        return
+    verified = None
+    if getattr(args, "verify", False):
+        verified = verify_with_tiktoken(repo_root, changed, response)
+        if verified is None:
+            print("Note: --verify requires tiktoken. Install with `pip install tiktoken`.")
+    panel = format_context_savings_panel(
+        response.get("context_savings"),
+        original_tokens=original_tokens,
+        response=response,
+        verified=verified,
+    )
+    if panel:
+        print(panel)
 
 
 def _handle_forget(args, repo_root: Path, db_path: Path, *, legacy: bool = False) -> None:
@@ -1569,9 +1730,12 @@ def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="code-review-graph",
         description="Persistent incremental knowledge graph for code reviews",
+        epilog="Start: code-review-graph install && code-review-graph build",
     )
     ap.add_argument("-v", "--version", action="store_true", help="Show version and exit")
-    sub = ap.add_subparsers(dest="command")
+    # Without a metavar argparse prints every command name, hidden ones too,
+    # as one long {a,b,c,...} list in the usage line.
+    sub = ap.add_subparsers(dest="command", metavar="<command>")
 
     # install (primary) + init (alias)
     install_cmd = sub.add_parser("install", help="Register MCP server with AI coding platforms")
@@ -1718,6 +1882,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Apply without an interactive confirmation",
     )
 
+    # doctor
+    doctor_cmd = sub.add_parser(
+        "doctor",
+        help="Check which copies run, the graph and the hooks (read-only)",
+        description=(
+            "Check the setup without changing anything: every code-review-graph "
+            "on PATH and its version, the version the MCP entries in this "
+            "repository's configs run, the graph's schema and whether it is "
+            "current, and which hooks are installed. Exit 0 when nothing "
+            "failed, 1 when something did."
+        ),
+    )
+    doctor_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
+    doctor_cmd.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Output one machine-readable JSON object",
+    )
+
     # build
     build_cmd = sub.add_parser("build", help="Full graph build (re-parse all files)")
     build_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
@@ -1845,7 +2029,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--provider",
         choices=["local", "openai", "google", "minimax", "voyage"],
         default=None,
-        help="Embedding provider (default: local, needs code-review-graph[embeddings])",
+        help='Embedding provider (default: local, needs pip install '
+             '"code-review-graph[embeddings]")',
     )
     embed_cmd.add_argument(
         "--model",
@@ -1958,7 +2143,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     # visualize
-    vis_cmd = sub.add_parser("visualize", help="Generate interactive HTML graph visualization")
+    vis_cmd = sub.add_parser("visualize", help="Generate an interactive HTML graph visualisation")
     vis_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
     vis_cmd.add_argument(
         "--mode",
@@ -1969,7 +2154,7 @@ def build_parser() -> argparse.ArgumentParser:
     vis_cmd.add_argument(
         "--serve",
         action="store_true",
-        help="Start a local HTTP server to view the visualization (localhost:8765)",
+        help="Start a local HTTP server to view the visualisation (localhost:8765)",
     )
     vis_group = vis_cmd.add_argument_group(
         "neighbourhood view",
@@ -2124,8 +2309,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--embed-provider",
         choices=["local", "openai", "google", "minimax", "voyage"],
         default=None,
-        help="Provider for --embed (default: local, needs "
-             "code-review-graph[embeddings])",
+        help="Provider for --embed (default: local, needs pip install "
+             '"code-review-graph[embeddings]")',
     )
     eval_cmd.add_argument(
         "--embed-model",
@@ -2136,7 +2321,7 @@ def build_parser() -> argparse.ArgumentParser:
     # detect-changes
     detect_cmd = sub.add_parser(
         "detect-changes",
-        help="Analyze change impact against the existing graph (read-only). "
+        help="Analyse change impact against the existing graph (read-only). "
              "Does NOT re-parse files — for that, use 'update --brief'.",
     )
     detect_cmd.add_argument(
@@ -2176,12 +2361,31 @@ def build_parser() -> argparse.ArgumentParser:
              "impact, gaps, graph, or all. Not used with --brief.",
     )
 
-    # enrich (Claude Code PreToolUse hook; reads one JSON object from stdin)
-    sub.add_parser("enrich", help="Enrich hook input with graph context")
+    # Hook-only commands: the hooks install writes call them with one JSON
+    # object on stdin, and nobody types them. No ``help=`` keeps them out of
+    # the command list in --help; ``help=argparse.SUPPRESS`` would not, as
+    # argparse before 3.14 prints it as "==SUPPRESS==" for a subcommand.
+    # ``description`` still explains each one under ``<command> --help``.
     sub.add_parser(
-        "hook-update", help="Update the graph of the repo that holds the hook's edited file"
+        "enrich",
+        description="Hook command: add graph context to a Claude Code "
+                    "PreToolUse event read from stdin.",
     )
-    sub.add_parser("hook-status", help="Show graph status for the hook payload cwd")
+    hook_update_cmd = sub.add_parser(
+        "hook-update",
+        description="Hook command: update the graph of the repository that "
+                    "holds the edited file named in the event read from stdin.",
+    )
+    hook_update_cmd.add_argument(
+        "--existing-only",
+        action="store_true",
+        help="Update only a graph that exists; never build a new one.",
+    )
+    sub.add_parser(
+        "hook-status",
+        description="Hook command: show graph status for the folder named in "
+                    "the event read from stdin.",
+    )
 
     # dead-code
     dead_cmd = sub.add_parser(
@@ -2220,19 +2424,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Graph tool wrappers
     query_cmd = sub.add_parser("query", help="Query graph relationships")
+    from .constants import QUERY_PATTERNS
+
     query_cmd.add_argument(
         "pattern",
-        choices=[
-            "callers_of",
-            "callees_of",
-            "imports_of",
-            "importers_of",
-            "children_of",
-            "tests_for",
-            "inheritors_of",
-            "file_summary",
-            "path_to",
-        ],
+        choices=list(QUERY_PATTERNS),
+        metavar="pattern",
+        help="One of: " + ", ".join(QUERY_PATTERNS),
     )
     query_cmd.add_argument("target", help="Node name, qualified name, or file path")
     query_cmd.add_argument(
@@ -2240,7 +2438,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     query_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
 
-    impact_cmd = sub.add_parser("impact", help="Analyze the blast radius of changes")
+    impact_cmd = sub.add_parser("impact", help="Analyse the blast radius of changes")
     impact_cmd.add_argument(
         "--files",
         nargs="+",
@@ -2419,7 +2617,7 @@ def build_parser() -> argparse.ArgumentParser:
     daemon_start.add_argument(
         "--foreground",
         action="store_true",
-        help="Run in foreground instead of daemonizing",
+        help="Run in the foreground instead of in the background",
     )
 
     daemon_sub.add_parser(
@@ -2434,7 +2632,7 @@ def build_parser() -> argparse.ArgumentParser:
     daemon_restart.add_argument(
         "--foreground",
         action="store_true",
-        help="Run in foreground instead of daemonizing",
+        help="Run in the foreground instead of in the background",
     )
 
     daemon_sub.add_parser("status", help="Show daemon and watcher status")
@@ -2490,10 +2688,41 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
+def _command_names(ap: argparse.ArgumentParser) -> list[str]:
+    """Every top-level command name the parser accepts, hidden ones included."""
+    for action in ap._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            return list(action.choices)
+    return []
+
+
+def _reject_unknown_command(ap: argparse.ArgumentParser, argv: list[str]) -> None:
+    """Stop on a mistyped command with a "did you mean", exit 2.
+
+    argparse's own message lists every command, hidden ones too, in one long
+    line and suggests nothing. The top level takes no option with a value, so
+    the first word that is not an option is the command.
+    """
+    names = _command_names(ap)
+    for word in argv:
+        if word in ("-h", "--help") or word in names:
+            return
+        if word.startswith("-"):
+            continue
+        visible = [name for name in names if name not in _HIDDEN_COMMANDS]
+        close = difflib.get_close_matches(word, visible, n=3, cutoff=0.6)
+        hint = f" Did you mean {' or '.join(close)}?" if close else ""
+        ap.error(
+            f"unknown command '{word}'.{hint} "
+            "Run code-review-graph --help to see every command."
+        )
+
+
 def _dispatch() -> None:
     """Parse arguments and run the requested subcommand."""
     _configure_utf8_stdio()
     ap = build_parser()
+    _reject_unknown_command(ap, sys.argv[1:])
     args = ap.parse_args()
 
     if args.version:
@@ -2532,9 +2761,12 @@ def _dispatch() -> None:
         return
 
     if args.command in {"hook-update", "hook-status"}:
-        from .hook_update import run_status_hook, run_update_hook
+        from . import hook_update
 
-        (run_update_hook if args.command == "hook-update" else run_status_hook)()
+        if args.command == "hook-update":
+            hook_update.run_update_hook(existing_only=args.existing_only)
+        else:
+            hook_update.run_status_hook()
         return
 
     if args.command in _GRAPH_TOOL_COMMANDS:
@@ -2581,6 +2813,10 @@ def _dispatch() -> None:
 
     if args.command == "context-history":
         _handle_context_history(args)
+        return
+
+    if args.command == "doctor":
+        _handle_doctor(args)
         return
 
     embedding_refresh_kwargs = _embedding_refresh_kwargs(args, ap)
@@ -2777,7 +3013,9 @@ def _dispatch() -> None:
             return
         action_word = "unbind" if scoped_platforms else "uninstall"
         if not args.yes and not _confirm_yes_no(
-            f"\nProceed with {action_word}?", default_yes=False
+            f"\nProceed with {action_word}?",
+            default_yes=False,
+            no_terminal_hint="Use --yes to go ahead.",
         ):
             print("Aborted.")
             return
@@ -2845,6 +3083,9 @@ def _dispatch() -> None:
         watch,
     )
 
+    if args.command in ("build", "update", "postprocess") and args.repo:
+        _require_repo_folder(Path(args.repo))
+
     if args.command == "postprocess":
         repo_root = Path(args.repo) if args.repo else find_project_root()
         _handle_data_dir_option(args, repo_root)
@@ -2901,6 +3142,12 @@ def _dispatch() -> None:
     if args.command in ("update", "detect-changes"):
         # update and detect-changes require git for diffing
         repo_root = Path(args.repo) if args.repo else find_repo_root()
+        if not repo_root and args.command == "update":
+            # A project with a graph but no Git is updated in place, as with
+            # --repo. A folder with no graph is not built here.
+            project = find_project_root()
+            if (project / ".code-review-graph").is_dir():
+                repo_root = project
         if not repo_root:
             logging.error(
                 "Not in a git repository. '%s' requires git for diffing.",
@@ -3203,7 +3450,7 @@ def _dispatch() -> None:
                     print(f"visualize: {exc}", file=sys.stderr)
                     sys.exit(2)
                 label = _describe_visualization(args, vis_mode, depth)
-                print(f"Visualization ({label}): {html_path}")
+                print(f"Visualisation ({label}): {html_path}")
                 _print_seed_budget(seed_report)
                 if getattr(args, "sidecar", False):
                     print(f"Payload sidecar: {html_path.parent / 'graph.data.js'}")
@@ -3262,8 +3509,11 @@ def _dispatch() -> None:
             # must never render as "there is nothing to review" — a CI job
             # keyed on exit 0 would wave through a pull request nobody read.
             # ChangeDiscoveryError reaches main() and becomes one
-            # `Error: ...` line and exit 1.
-            changed, base = discover_review_changes(repo_root, args.base)
+            # `Error: ...` line and exit 1, a --base Git does not know included.
+            notes: list[str] = []
+            changed, base = discover_review_changes(repo_root, args.base, notes=notes)
+            for note in notes:
+                print(f"Note: {note}", file=sys.stderr)
 
             if not changed:
                 print("No changes detected.")
@@ -3308,27 +3558,10 @@ def _dispatch() -> None:
                     ),
                 )
                 if args.brief:
-                    from .context_savings import (
-                        format_context_savings_panel,
-                        verify_with_tiktoken,
-                    )
-                    print(result.get("summary", "No summary available."))
-                    verified = None
-                    if getattr(args, "verify", False):
-                        verified = verify_with_tiktoken(repo_root, changed, result)
-                        if verified is None:
-                            print(
-                                "Note: --verify requires tiktoken. "
-                                "Install with `pip install tiktoken`.",
-                            )
-                    panel = format_context_savings_panel(
-                        result.get("context_savings"),
-                        original_tokens=original_tokens,
-                        response=result,
-                        verified=verified,
-                    )
-                    if panel:
-                        print(panel)
+                    from .changes import format_brief
+
+                    print(format_brief(store, result, repo_root))
+                    _print_savings_panel(args, repo_root, changed, result, original_tokens)
                 else:
                     print(json.dumps(result, indent=2, default=str))
 

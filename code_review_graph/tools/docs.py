@@ -35,7 +35,7 @@ def embed_graph(
 ) -> dict[str, Any]:
     """Compute vector embeddings for all graph nodes to enable semantic search.
 
-    Requires: ``pip install code-review-graph[embeddings]`` (local provider only;
+    Requires: ``pip install "code-review-graph[embeddings]"`` (local provider only;
     cloud providers like ``openai`` / ``google`` / ``minimax`` / ``voyage`` use
     stdlib ``urllib``).
     Default model: all-MiniLM-L6-v2. Override via ``model`` param or
@@ -55,8 +55,7 @@ def embed_graph(
         provider: Provider name: ``local`` (default), ``openai``, ``google``,
                   ``minimax``, or ``voyage``. ``openai`` requires CRG_OPENAI_BASE_URL +
                   CRG_OPENAI_API_KEY + CRG_OPENAI_MODEL env vars and accepts
-                  any OpenAI-compatible endpoint (real OpenAI, Azure, new-api,
-                  LiteLLM, vLLM, LocalAI, Ollama openai-mode, etc.).
+                  any OpenAI-compatible endpoint.
                   ``voyage`` requires VOYAGE_API_KEY and defaults to
                   voyage-code-3 unless a model arg or CRG_VOYAGE_MODEL is
                   supplied.
@@ -104,7 +103,8 @@ def embed_graph(
                     else:
                         err = (
                             "The local embedding provider needs sentence-transformers. "
-                            "Install with: pip install code-review-graph[embeddings] — "
+                            "Install with: pip install "
+                            "\"code-review-graph[embeddings]\" — "
                             "or switch provider to 'openai' / 'google' / 'minimax' "
                             "/ 'voyage'."
                         )

@@ -96,3 +96,56 @@ def test_visualize_svg_without_matplotlib_prints_one_line_and_exits(
     assert captured.err.strip() == SVG_INSTALL_HINT
     assert "Traceback" not in captured.err
     store.close.assert_called_once()
+
+
+# Every "pip install" hint for an extra must quote it: zsh reads the bare
+# square brackets as a glob and fails with "no matches found" (developer-experience
+# review, item 12). The four messages below are the ones a user can see.
+_UNQUOTED_EXTRA = __import__("re").compile(r"pip install code-review-graph\[")
+
+
+def test_no_unquoted_extra_hint_anywhere_in_the_package():
+    offenders = [
+        f"{path.relative_to(ROOT)}:{number}"
+        for path in sorted((ROOT / "code_review_graph").rglob("*.py"))
+        for number, line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(), start=1
+        )
+        if _UNQUOTED_EXTRA.search(line)
+    ]
+    assert not offenders, f"unquoted pip extras: {offenders}"
+
+
+def test_local_embedding_hint_quotes_the_extra(monkeypatch):
+    from code_review_graph import embeddings
+
+    monkeypatch.setitem(sys.modules, "sentence_transformers", None)
+    monkeypatch.setattr(embeddings, "_MODEL_CACHE", {})
+    provider = embeddings.LocalEmbeddingProvider("not-cached-model")
+
+    with pytest.raises(ImportError) as raised:
+        provider.embed(["x"])
+
+    assert 'pip install "code-review-graph[embeddings]"' in str(raised.value)
+
+
+def test_embed_graph_hint_quotes_the_extra(tmp_path):
+    from code_review_graph.tools import docs
+
+    (tmp_path / ".git").mkdir()
+    unavailable = MagicMock(available=False)
+    with patch.object(docs, "EmbeddingStore", return_value=unavailable):
+        result = docs.embed_graph(repo_root=str(tmp_path))
+
+    assert result["status"] == "error"
+    assert 'pip install "code-review-graph[embeddings]"' in result["error"]
+
+
+def test_eval_yaml_hint_quotes_the_extra(monkeypatch):
+    from code_review_graph.eval import runner
+
+    monkeypatch.setattr(runner, "yaml", None)
+    with pytest.raises(ImportError) as raised:
+        runner._require_yaml()
+
+    assert 'pip install "code-review-graph[eval]"' in str(raised.value)

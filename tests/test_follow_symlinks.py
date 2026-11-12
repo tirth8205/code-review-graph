@@ -634,9 +634,11 @@ def test_project_folder_of_links_to_input_folders(tmp_path: Path) -> None:
      (["--no-follow-symlinks"], {"follow_symlinks": False})],
 )
 @pytest.mark.parametrize("command", ["build", "update"])
-def test_cli_flag_reaches_the_build(command: str, flag: list[str], expected: dict) -> None:
+def test_cli_flag_reaches_the_build(
+    command: str, flag: list[str], expected: dict, tmp_path: Path
+) -> None:
     result = {"files_parsed": 0, "files_updated": 0, "total_nodes": 0, "total_edges": 0}
-    argv = ["code-review-graph", command, "--repo", "repo-root", "-q", *flag]
+    argv = ["code-review-graph", command, "--repo", str(tmp_path), "-q", *flag]
     with patch.object(sys, "argv", argv), \
             patch("code_review_graph.cli._ensure_project_marker"), \
             patch(

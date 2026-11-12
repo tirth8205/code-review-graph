@@ -268,8 +268,10 @@ def run_hook() -> None:
     queries the graph, and outputs hookSpecificOutput JSON to stdout.
     """
     try:
-        hook_input = json.load(sys.stdin)
-    except (json.JSONDecodeError, ValueError):
+        # Bytes, so json finds the UTF-8 hosts write: on Windows a text-mode
+        # stdin decodes a pipe with the ANSI code page.
+        hook_input = json.loads(getattr(sys.stdin, "buffer", sys.stdin).read())
+    except (json.JSONDecodeError, OSError, ValueError):
         return
     if not isinstance(hook_input, dict):
         return

@@ -39,9 +39,12 @@
   <a href="docs/COMMANDS.md">कमांड</a> ·
   <a href="docs/FAQ.md">सामान्य प्रश्न</a> ·
   <a href="docs/TROUBLESHOOTING.md">समस्या निवारण</a> ·
+  <a href="docs/FEATURES.md">नया क्या है</a> ·
+  <a href="CHANGELOG.md">बदलाव सूची</a> ·
   <a href="docs/GITHUB_ACTION.md">GitHub Action</a> ·
   <a href="docs/REPRODUCING.md">बेंचमार्क दोहराना</a> ·
-  <a href="docs/ROADMAP.md">रोडमैप</a>
+  <a href="docs/ROADMAP.md">रोडमैप</a> ·
+  <a href="docs/INDEX.md">सभी दस्तावेज़</a>
 </p>
 
 <br>
@@ -52,32 +55,46 @@
   <img src="diagrams/diagram1_before_vs_after.png" alt="टोकन की समस्या: flask का पूरा कॉर्पस पढ़ने पर 143,594 टोकन लगते हैं, ग्राफ़ का उत्तर 2,196 टोकन लेता है (65 गुना कम)" width="85%" />
 </p>
 
+**यह क्या करता है**
+
+- **आपके कोड का नक्शा बनाता है।** फ़ंक्शन, क्लास, इम्पोर्ट, कॉल और टेस्ट मिलकर एक ग्राफ़ बनते हैं।
+- **बताता है कि बदलाव क्या तोड़ सकता है।** जिन कॉलर, आश्रितों और टेस्ट तक वह पहुँच सकता है, जोखिम स्कोर के साथ।
+- **अद्यतन रहता है।** हुक और watch मोड सिर्फ़ बदली हुई फ़ाइलों को दोबारा पार्स करते हैं।
+- **आपके AI टूल के साथ काम करता है।** एक `install` हर मिले टूल को सेट कर देता है।
+- **आपकी मशीन पर रहता है।** एक SQLite फ़ाइल, कोई क्लाउड सेवा नहीं; क्लाउड एम्बेडिंग तभी चलती हैं जब आप चालू करें।
+
 ---
 
 ## जल्दी शुरुआत
 
+Python 3.10+ चाहिए।
+
 ```bash
-pip install code-review-graph          # or: pipx install code-review-graph
-code-review-graph install              # detect installed AI coding tools and configure each one
+uv tool install code-review-graph      # or: pipx install / pip install code-review-graph
+code-review-graph install              # set up the AI coding tools found on this machine
 code-review-graph build                # parse the codebase
+code-review-graph detect-changes --brief  # see what your last change touches
 ```
 
-`install` यह पहचानता है कि आपके पास कौन-कौन से AI कोडिंग टूल हैं, हर एक के लिए MCP सर्वर प्रविष्टि लिखता है, जहाँ प्लेटफ़ॉर्म समर्थन करता है वहाँ हुक और स्किल लगाता है, और प्लेटफ़ॉर्म की नियम फ़ाइल में ग्राफ़ संबंधी निर्देश जोड़ता है। Poetry या uv प्रोजेक्ट परिवेश में MCP प्रविष्टि `poetry run` या `uv run` का उपयोग करती है, PATH पर `uvx` होने पर `uvx code-review-graph serve` का, और बाकी स्थितियों में मौजूदा Python इंटरप्रेटर का। जब तक `install` बदली जाने वाली फ़ाइलों की सूची न दिखा दे और आप निर्देश फ़ाइलों वाले उसके प्रश्न का उत्तर न दे दें, तब तक कुछ भी नहीं लिखा जाता; `install --dry-run` हर बदलाव को diff के रूप में दिखाता है और कुछ नहीं लिखता। उसके बाद एडिटर या टूल को फिर से शुरू करें।
+एडिटर या टूल को फिर से शुरू करें, फिर प्रोजेक्ट खोलें और असिस्टेंट से कहें:
 
-<p align="center">
-  <img src="diagrams/diagram8_supported_platforms.png" alt="एक इंस्टॉल, हर प्लेटफ़ॉर्म: Codex, Claude Code, CodeBuddy Code, Cursor, Windsurf, Zed, Continue, OpenCode, MiMo Code, Antigravity, Gemini CLI, Qwen, Qoder, Kiro, GitHub Copilot, GitHub Copilot CLI और Hermes Agent को पहचानता है" width="85%" />
-</p>
-
-सिर्फ़ एक प्लेटफ़ॉर्म सेट करने के लिए `--platform` के साथ `codex`, `claude-code`, `cursor`, `windsurf`, `zed`, `continue`, `opencode`, `mimo`, `antigravity`, `gemini-cli`, `qwen`, `kiro`, `qoder`, `copilot`, `copilot-cli`, `codebuddy`, `hermes` या `dsh` में से कोई एक दें:
-
-```bash
-code-review-graph install --platform cursor
-code-review-graph install --platform codebuddy
+```
+Review my changes
 ```
 
-कॉन्फ़िग फ़ाइलों के स्थान [docs/USAGE.md](docs/USAGE.md#supported-platforms) में सूचीबद्ध हैं। Python 3.10+ चाहिए।
+`code-review-graph uninstall` से सब कुछ वापस हो जाता है (पहले देखने के लिए `--dry-run`)। अगर कुछ काम न करे, तो `code-review-graph doctor` चलाएँ: यह सेटअप जाँचता है और कुछ नहीं बदलता।
 
-`install` जो फ़ाइलें लिखता है, जैसे `.claude/` और `.mcp.json`, वे git को दिखती रहती हैं, ताकि आपकी टीम चाहे तो उन्हें कमिट कर सके। `install --gitignore` उस बार बनाई गई फ़ाइलों को `.gitignore` के एक चिह्नित ब्लॉक में जोड़ता है; `uninstall` वह ब्लॉक हटा देता है।
+<details>
+<summary><strong><code>install</code> क्या बदलता है, और पहले उसे कैसे देखें</strong></summary>
+<br>
+
+`install` इस मशीन पर AI कोडिंग टूल ढूँढता है और सिर्फ़ उन्हीं को सेट करता है जो उसे मिलते हैं। हर एक के लिए यह MCP सर्वर प्रविष्टि लिखता है, जहाँ टूल समर्थन करता है वहाँ हुक और स्किल लगाता है, और उसकी नियम फ़ाइल में ग्राफ़ संबंधी निर्देश जोड़ता है। फिर यह उन टूल के नाम बताता है जो नहीं मिले; फिर भी कोई जोड़ना हो तो `install --platform NAME` चलाएँ।
+
+जब तक `install` बदली जाने वाली फ़ाइलों की सूची न दिखा दे और आप निर्देश फ़ाइलों वाले उसके प्रश्न का उत्तर न दे दें, तब तक कुछ भी नहीं लिखा जाता। टर्मिनल न होने पर, जैसे जब कोई AI एजेंट इसे चलाता है, यह डिफ़ॉल्ट उत्तर (हाँ) लेता है और यह बताता है; `--no-instructions` उन फ़ाइलों को छोड़ देता है। `install --dry-run` हर बदलाव को diff के रूप में दिखाता है और कुछ नहीं लिखता। उसके बाद एडिटर या टूल को फिर से शुरू करें।
+
+MCP प्रविष्टि और हर हुक code-review-graph की वही कॉपी चलाते हैं जिसने `install` चलाया। Poetry या uv प्रोजेक्ट में MCP प्रविष्टि `poetry run` या `uv run` का उपयोग करती है, जब `install` खुद `uvx` या `uv tool install` से चला हो तो `uvx` का, और बाकी स्थितियों में उस Python का जिसने `install` चलाया। हुक उसी Python (या `uvx`) का नाम लिखते हैं, और वह न रहे तो PATH पर मौजूद `code-review-graph` चलाते हैं। अपग्रेड के बाद `install` फिर से चलाएँ।
+
+`install` जो फ़ाइलें लिखता है, जैसे `.claude/` और `.mcp.json`, वे git को दिखती रहती हैं, ताकि आपकी टीम चाहे तो उन्हें कमिट कर सके। जब तक git उन्हें ट्रैक नहीं करता, `build` और रिव्यू उन्हें छोड़ देते हैं, इसलिए आपके पहले रिव्यू में सिर्फ़ आपका अपना बदलाव दिखता है; `install` उन्हें `.code-review-graph/install-manifest.json` में दर्ज करता है। `install --gitignore` उस बार बनाई गई फ़ाइलों को `.gitignore` के एक चिह्नित ब्लॉक में जोड़ता है; `uninstall` वह ब्लॉक हटा देता है।
 
 Codex के लिए इंस्टॉलर एक वैश्विक `code-review-graph` स्किल भी
 `$CODEX_HOME/skills/code-review-graph/` में रखता है (डिफ़ॉल्ट:
@@ -87,7 +104,32 @@ Codex के लिए इंस्टॉलर एक वैश्विक `co
 रनटाइम की `CODEX_HOME` डायरेक्टरी और टूल सूची अलग-अलग होती हैं, इसलिए उसी रनटाइम में
 इंस्टॉल और रीफ़्रेश करें जो काम चलाएगा।
 
-`uninstall` किसी Git या SVN वर्किंग ट्री से CRG की अपनी फ़ाइलें और प्रविष्टियाँ हटाता है और दूसरे MCP सर्वर, हुक, स्किल तथा JSONC टिप्पणियाँ जैसी की तैसी छोड़ देता है। इसे ट्री के भीतर कहीं से भी चलाया जा सकता है। साझा कॉन्फ़िग फ़ाइलें एटॉमिक तरीके से बदली जाती हैं, इसलिए लिखने में विफलता होने पर मूल फ़ाइल सुरक्षित रहती है।
+</details>
+
+<details>
+<summary><strong>हर समर्थित प्लेटफ़ॉर्म, और सिर्फ़ एक को कैसे सेट करें</strong></summary>
+<br>
+
+<p align="center">
+  <img src="diagrams/diagram8_supported_platforms.png" alt="एक इंस्टॉल, हर प्लेटफ़ॉर्म: Codex, Claude Code, CodeBuddy Code, Cursor, Windsurf, Zed, Continue, OpenCode, MiMo Code, Antigravity, Gemini CLI, Qwen Code, Qoder, Kiro, GitHub Copilot, GitHub Copilot CLI, Hermes Agent और DeepSeek Harness को पहचानता है" width="85%" />
+</p>
+
+सिर्फ़ एक प्लेटफ़ॉर्म सेट करने के लिए `--platform` के साथ `codex`, `claude-code`, `cursor`, `windsurf`, `zed`, `continue`, `opencode`, `mimo`, `antigravity`, `gemini-cli`, `qwen`, `kiro`, `qoder`, `copilot`, `copilot-cli`, `codebuddy`, `hermes` या `dsh` में से कोई एक दें:
+
+```bash
+code-review-graph install --platform cursor
+code-review-graph install --platform codebuddy
+```
+
+इस तरह नाम दिया गया प्लेटफ़ॉर्म तब भी सेट होता है जब `install` उसे न ढूँढ पाए। कॉन्फ़िग फ़ाइलों के स्थान [docs/USAGE.md](docs/USAGE.md#supported-platforms) में सूचीबद्ध हैं।
+
+</details>
+
+<details>
+<summary><strong><code>uninstall</code> के और तरीके</strong></summary>
+<br>
+
+`uninstall` किसी Git या SVN वर्किंग ट्री से CRG की अपनी फ़ाइलें और प्रविष्टियाँ हटाता है और दूसरे MCP सर्वर, हुक, स्किल तथा JSONC टिप्पणियाँ जैसी की तैसी छोड़ देता है। इसे ट्री के भीतर कहीं से भी चलाया जा सकता है। साझा कॉन्फ़िग फ़ाइलें एटॉमिक तरीके से बदली जाती हैं, इसलिए लिखने में विफलता होने पर मूल फ़ाइल सुरक्षित रहती है। `install` की बनाई कोई कॉन्फ़िग फ़ाइल, जिसे git ट्रैक नहीं करता और जिसमें कुछ और नहीं है, `install` के बनाए खाली फ़ोल्डरों के साथ हटा दी जाती है। टर्मिनल न होने पर यह डिफ़ॉल्ट उत्तर (नहीं) लेता है और `--yes` देने को कहता है।
 
 ```bash
 code-review-graph uninstall --dry-run    # preview only
@@ -98,75 +140,56 @@ code-review-graph uninstall --keep-data  # remove integrations, keep graph datab
 code-review-graph uninstall --keep-user-configs --repo .  # this project only
 ```
 
-फिर प्रोजेक्ट खोलें और असिस्टेंट से कहें:
+</details>
 
-```
-Build the code review graph for this project
-```
+<details>
+<summary><strong>बिल्ड में कितना समय लगता है, और अधूरे बिल्ड का क्या मतलब है</strong></summary>
+<br>
 
-बिल्ड का समय रिपॉज़िटरी के आकार के साथ बढ़ता है; लगभग 3,000 फ़ाइलों वाली रिपॉज़िटरी के कोल्ड बिल्ड में लगभग 40 सेकंड लगे ([मापा गया](docs/REPRODUCING.md#incremental-update-latency))। उसके बाद हुक और watch मोड ग्राफ़ को अद्यतन रखते हैं। अगर कुछ फ़ाइलें पार्स नहीं हो पातीं तो परिणाम की स्थिति `partial` होती है और सारांश में उनके नाम आते हैं; CLI stderr पर एक `Warning:` पंक्ति भी छापता है, और उन फ़ाइलों की पुरानी ग्राफ़ पंक्तियाँ बनी रहती हैं।
+बिल्ड का समय रिपॉज़िटरी के आकार के साथ बढ़ता है; लगभग 3,000 फ़ाइलों वाली रिपॉज़िटरी के कोल्ड बिल्ड में लगभग 40 सेकंड लगे ([मापा गया](docs/REPRODUCING.md#incremental-update-latency))। उसके बाद हुक और watch मोड ग्राफ़ को अद्यतन रखते हैं। अगर कुछ फ़ाइलें पार्स नहीं हो पातीं तो परिणाम की स्थिति `partial` होती है और सारांश में उनके नाम आते हैं; CLI stderr पर एक `Warning:` पंक्ति भी छापता है, और उन फ़ाइलों की पुरानी ग्राफ़ पंक्तियाँ बनी रहती हैं। जिस बिल्ड को कोई सोर्स फ़ाइल नहीं मिलती, वह stderr पर चेतावनी देता है और पूछता है कि क्या आप प्रोजेक्ट के मूल फ़ोल्डर में हैं।
 
-### Docker या Podman से चलाएँ
+</details>
 
-प्रोजेक्ट की रिपॉज़िटरी के मूल फ़ोल्डर से इमेज बनाएँ:
-
-```bash
-docker build -t code-review-graph:local .
-```
-
-जिस रिपॉज़िटरी का विश्लेषण करना है, उसके फ़ोल्डर से चलाएँ:
+<details>
+<summary><strong>2.3.x से अपग्रेड करना</strong></summary>
+<br>
 
 ```bash
-docker run --rm \
-  --user "$(id -u):$(id -g)" \
-  --env HOME=/tmp \
-  --volume "$PWD:/workspace" \
-  code-review-graph:local build
+pip install -U code-review-graph     # or: pipx upgrade / uv tool upgrade code-review-graph
+code-review-graph doctor             # every copy, MCP entry and hook, and the version each runs
+code-review-graph install --dry-run  # see what changes, then run install
+code-review-graph build              # once: new file types and fixes reach only re-parsed files
 ```
 
-माउंट की गई रिपॉज़िटरी में लिखने की अनुमति होनी चाहिए।
-ऊपर दिया गया कमांड आपके यूज़र और ग्रुप ID का उपयोग करता है,
-जिससे बनाई गई `.code-review-graph/` डायरेक्टरी का स्वामित्व आपके यूज़र के पास रहता है।
-इन कमांड को होस्ट पर गैर-root यूज़र के रूप में चलाएँ।
+अपनी हर कॉपी अपग्रेड करें। MCP प्रविष्टि, git और एडिटर हुक और `crg-daemon` हर एक अलग कॉपी चला सकते हैं, और जिस ग्राफ़ को 2.4.0 या बाद वाले ने खोला हो, उसे 2.3.9 की कॉपी पढ़ने से मना कर देती है और उससे पुरानी 2.3.x कॉपी उसे बिगाड़ सकती है। `install` फिर से चलाएँ ताकि प्रविष्टि और हुक नई कॉपी चलाएँ, फिर एडिटर को फिर से शुरू करें (और अगर आप डेमॉन इस्तेमाल करते हैं तो `crg-daemon restart` चलाएँ)।
 
-Podman के लिए, उसी Dockerfile से इमेज बनाएँ और यूज़र मैपिंग बनाए रखें:
+2.4.0 या बाद वाले का पहला कमांड ग्राफ़ को स्कीमा 15 पर ले जाता है। अगर आप VS Code एक्सटेंशन इस्तेमाल करते हैं, तो उस ग्राफ़ को पढ़ने के लिए उसका 0.4.0 संस्करण चाहिए। पूरी सूची: [अपग्रेड नोट्स](CHANGELOG.md#upgrade-notes)।
 
-```bash
-podman build -t code-review-graph:local .
-podman run --rm \
-  --userns=keep-id \
-  --env HOME=/tmp \
-  --volume "$PWD:/workspace" \
-  code-review-graph:local build
-```
-
-ग्राफ़ माउंट किए गए रिपॉज़िटरी की `.code-review-graph/` डायरेक्टरी में बना रहता है और
-`/workspace/app.py` जैसे कंटेनर के पूर्ण पथ सहेजता है। `update` और `detect-changes` को
-Docker या Podman से उसी `/workspace` माउंट के साथ चलाएँ। इस ग्राफ़ पर होस्ट से `update`
-चलाने पर "built with a different repository root" त्रुटि आ सकती है। होस्ट कमांड पर
-स्विच करने के लिए, होस्ट पर `code-review-graph build` चलाकर होस्ट के पथों के साथ ग्राफ़ फिर से बनाएँ।
-
-सहेजे गए ग्राफ़ को देखने के लिए `build` की जगह `status` लिखें।
-इमेज में Git शामिल है और यह डिफ़ॉल्ट रूप से गैर-root यूज़र के रूप में चलती है।
-इमेज बनाते समय ग्राफ़ नहीं बनाया जाता।
-
-इन उदाहरणों में macOS/Linux शेल सिंटैक्स का उपयोग किया गया है।
-macOS पर इन्हें चलाने से पहले अपना Docker-संगत इंजन या Podman वर्चुअल मशीन शुरू करें।
-Fedora जैसे SELinux चालू वाले होस्ट पर माउंट में `:z` जोड़ें (`"$PWD:/workspace:z"`), नहीं तो कंटेनर को रिपॉज़िटरी तक पहुँच नहीं मिलेगी।
+</details>
 
 ## यह कैसे काम करता है
+
+रिपॉज़िटरी को Tree-sitter से AST में पार्स किया जाता है और नोड (फ़ंक्शन, क्लास, इम्पोर्ट) तथा एज (कॉल, इनहेरिटेंस, टेस्ट कवरेज) के ग्राफ़ के रूप में संग्रहीत किया जाता है। रिव्यू के समय ग्राफ़ से वह सबसे छोटा फ़ाइल समूह पूछा जाता है जिसे असिस्टेंट को पढ़ना है।
+
+<details>
+<summary><strong>दो चित्र: असिस्टेंट ग्राफ़ का उपयोग कैसे करता है, और बिल्ड पाइपलाइन</strong></summary>
+<br>
 
 <p align="center">
   <img src="diagrams/diagram7_mcp_integration_flow.png" alt="असिस्टेंट ग्राफ़ का उपयोग कैसे करता है: उपयोगकर्ता रिव्यू माँगता है, असिस्टेंट MCP टूल बुलाता है, ग्राफ़ प्रभाव क्षेत्र और जोखिम स्कोर लौटाता है, असिस्टेंट सिर्फ़ प्रभावित फ़ाइलें पढ़ता है" width="80%" />
 </p>
 
-रिपॉज़िटरी को Tree-sitter से AST में पार्स किया जाता है और नोड (फ़ंक्शन, क्लास, इम्पोर्ट) तथा एज (कॉल, इनहेरिटेंस, टेस्ट कवरेज) के ग्राफ़ के रूप में संग्रहीत किया जाता है। रिव्यू के समय ग्राफ़ से वह सबसे छोटा फ़ाइल समूह पूछा जाता है जिसे असिस्टेंट को पढ़ना है।
-
 <p align="center">
   <img src="diagrams/diagram2_architecture_pipeline.png" alt="आर्किटेक्चर पाइपलाइन: रिपॉज़िटरी → Tree-sitter पार्सर → SQLite ग्राफ़ → प्रभाव क्षेत्र → न्यूनतम रिव्यू समूह" width="100%" />
 </p>
 
+</details>
+
 ### प्रभाव क्षेत्र का विश्लेषण
+
+<details>
+<summary><strong>हर कॉलर, आश्रित और टेस्ट जिस पर बदलाव असर डाल सकता है</strong></summary>
+<br>
 
 जब कोई फ़ाइल बदलती है, ग्राफ़ हर उस कॉलर, आश्रित और टेस्ट का पता लगाता है जो प्रभावित हो सकता है। असिस्टेंट पूरे प्रोजेक्ट को खंगालने के बजाय वही फ़ाइलें पढ़ता है।
 
@@ -174,15 +197,27 @@ Fedora जैसे SELinux चालू वाले होस्ट पर म
   <img src="diagrams/diagram3_blast_radius.png" alt="प्रभाव क्षेत्र: login() में बदलाव कॉलर, आश्रितों और टेस्ट तक फैलता है" width="70%" />
 </p>
 
+</details>
+
 ### इंक्रीमेंटल अपडेट
 
-एडिटर हुक, git हुक (pre-commit, post-checkout, post-merge, post-rewrite) और watch मोड इंक्रीमेंटल अपडेट चलाते हैं। अपडेट बदली हुई फ़ाइलों का diff लेता है, ग्राफ़ के इम्पोर्ट और कॉल एज से उनके आश्रित ढूँढता है, और सिर्फ़ उन्हीं फ़ाइलों को दोबारा पार्स करता है जिनका SHA-256 हैश बदला है। लगभग 3,000 फ़ाइलों वाले प्रोजेक्ट (django) में दो फ़ाइलों का संपादन हुक वाले रास्ते पर लगभग 2.5 सेकंड में दोबारा इंडेक्स होता है, जिसमें से लगभग 1.4 सेकंड प्रोसेस के शुरू होने का समय है; कुछ न बदलने पर सिर्फ़ वही समय लगता है। देखें [इंक्रीमेंटल अपडेट विलंब](docs/REPRODUCING.md#incremental-update-latency)।
+<details>
+<summary><strong>सिर्फ़ बदली हुई फ़ाइलें दोबारा पार्स होती हैं (दो फ़ाइलों के संपादन में लगभग 2.5 सेकंड)</strong></summary>
+<br>
+
+एडिटर हुक, git हुक (pre-commit, post-checkout, post-merge, post-rewrite) और watch मोड इंक्रीमेंटल अपडेट चलाते हैं। हुक चुपचाप अपडेट करते हैं; हर कमिट पर pre-commit हुक सिर्फ़ `detect-changes --brief` की छोटी समीक्षा छापता है। अपडेट बदली हुई फ़ाइलों का diff लेता है, ग्राफ़ के इम्पोर्ट और कॉल एज से उनके आश्रित ढूँढता है, और सिर्फ़ उन्हीं फ़ाइलों को दोबारा पार्स करता है जिनका SHA-256 हैश बदला है। लगभग 3,000 फ़ाइलों वाले प्रोजेक्ट (django) में दो फ़ाइलों का संपादन हुक वाले रास्ते पर लगभग 2.5 सेकंड में दोबारा इंडेक्स होता है, जिसमें से लगभग 1.4 सेकंड प्रोसेस के शुरू होने का समय है; कुछ न बदलने पर सिर्फ़ वही समय लगता है। देखें [इंक्रीमेंटल अपडेट विलंब](docs/REPRODUCING.md#incremental-update-latency)।
 
 <p align="center">
   <img src="diagrams/diagram4_incremental_update.png" alt="इंक्रीमेंटल अपडेट प्रवाह: हुक या watch अपडेट git diff चलाता है, ग्राफ़ के एज से आश्रित मिलते हैं, और सिर्फ़ वही फ़ाइलें दोबारा पार्स होती हैं जिनका SHA-256 हैश बदला है" width="90%" />
 </p>
 
+</details>
+
 ### पूरा कोडबेस, या लक्षित उत्तर?
+
+<details>
+<summary><strong>पूरा कोडबेस नहीं, प्रश्न के अनुसार ग्राफ़ का एक हिस्सा</strong></summary>
+<br>
 
 पूरा कॉर्पस मॉडल को देने के बजाय ग्राफ़ प्रश्न के अनुसार काटा गया हिस्सा लौटाता है। इस रिपॉज़िटरी के `84bde354` पर 2026-08-02 के माप में 208,821 स्रोत टोकन प्रति प्रश्न लगभग 3,190 टोकन बन गए। उस स्नैपशॉट के बाद रिपॉज़िटरी काफ़ी बढ़ी है, इसलिए आज दोनों संख्याएँ बड़ी हैं।
 
@@ -190,19 +225,31 @@ Fedora जैसे SELinux चालू वाले होस्ट पर म
   <img src="diagrams/diagram6_monorepo_funnel.png" alt="code-review-graph का 84bde354 स्नैपशॉट: 208,821 स्रोत टोकन सिमटकर लगभग 3,190 टोकन के ग्राफ़ उत्तर बनते हैं, प्रति प्रश्न टोकन लगभग 65 गुना कम" width="80%" />
 </p>
 
+</details>
+
 ### भाषा कवरेज और नोटबुक
 
+<details>
+<summary><strong>Python, JavaScript, TypeScript, Go, Rust, Java, C/C++, C# और बहुत सी और भाषाएँ, साथ में नोटबुक: पूरी सूची</strong></summary>
+<br>
+
 <p align="center">
-  <img src="diagrams/diagram9_language_coverage.png" alt="श्रेणी के अनुसार भाषा कवरेज: वेब, बैकएंड, सिस्टम्स, मोबाइल, स्क्रिप्टिंग, शेल, डोमेन और अन्य, साथ में Jupyter और Databricks नोटबुक" width="90%" />
+  <img src="diagrams/diagram9_language_coverage.png" alt="श्रेणी के अनुसार भाषा कवरेज: वेब, बैकएंड, सिस्टम्स, मोबाइल, स्क्रिप्टिंग, शेल, डोमेन, कॉन्फ़िग और अन्य, साथ में Jupyter और Databricks नोटबुक" width="90%" />
 </p>
 
-पार्सर फ़ंक्शन, क्लास, इम्पोर्ट, कॉल स्थल, इनहेरिटेंस और टेस्ट निकालता है; जहाँ व्याकरण मौजूद है वहाँ Tree-sitter का और बाकी जगह लक्षित फ़ॉलबैक का उपयोग करता है। समर्थित: Python, JavaScript/TypeScript/TSX (`.mjs`, `.cjs`, `.mts` और `.cts` सहित), Go, Rust, Java, C/C++, C#, VB.NET, Ruby, Kotlin (`.kt`, `.kts`), Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, शेल स्क्रिप्ट, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL/PL/SQL (Oracle) और dbt मॉडल, Terraform/OpenTofu (`.tf`; अन्य `.hcl` फ़ाइलें सिर्फ़ फ़ाइल नोड बनती हैं), Ansible YAML (playbook, role, task), Spring Boot ऐप्लिकेशन कॉन्फ़िग (`application.properties`, `application.yml`, `application.yaml` और इनके `application-<profile>` रूप; सिर्फ़ कुंजी नाम और मान के प्रकार, मान कभी नहीं), मान के बिना सामान्य YAML संरचना (`locales/` जैसे फ़ोल्डरों की अनुवाद फ़ाइलें सिर्फ़ फ़ाइल नोड बनती हैं), XSLT स्टाइलशीट (`.xsl`, `.xslt`), मान के बिना JSON संरचना (`.json`; अनुवाद, टेस्ट, docs, उदाहरण और डेटा फ़ाइलें सिर्फ़ फ़ाइल नोड रखती हैं, और lock फ़ाइलें छोड़ दी जाती हैं), Vue/Svelte SFC, HTML पेज (`.html`, `.htm`; इनलाइन स्क्रिप्ट, और id वाले `div`, `section` तथा `article` ब्लॉक `DocSection` नोड के रूप में), Astro फ़ाइलें (TypeScript व्याकरण से पार्स), Jupyter और Databricks नोटबुक (`.ipynb`, साथ में Databricks के `.py` एक्सपोर्ट), Perl XS फ़ाइलें (`.xs`), Robot Framework फ़ाइलें (`.robot`, `.resource`), और Liquid टेम्पलेट (`.liquid`)। अन्य `.properties` फ़ाइलों को स्रोत कोड नहीं माना जाता।
+पार्सर फ़ंक्शन, क्लास, इम्पोर्ट, कॉल स्थल, इनहेरिटेंस और टेस्ट निकालता है; जहाँ व्याकरण मौजूद है वहाँ Tree-sitter का और बाकी जगह लक्षित फ़ॉलबैक का उपयोग करता है। समर्थित: Python, JavaScript/TypeScript/TSX (`.mjs`, `.cjs`, `.mts` और `.cts` सहित), Go, Rust, Java, C/C++, C#, VB.NET, Ruby, Kotlin (`.kt`, `.kts`), Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, शेल स्क्रिप्ट, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL/PL/SQL (Oracle) और dbt मॉडल, Terraform/OpenTofu (`.tf`, और `.hcl` फ़ाइलों के Terraform ब्लॉक; जिस `.hcl` फ़ाइल में कोई Terraform ब्लॉक नहीं, वह सिर्फ़ फ़ाइल नोड रखती है), Ansible YAML (playbook, role, task), Spring Boot ऐप्लिकेशन कॉन्फ़िग (`application.properties`, `application.yml`, `application.yaml` और इनके `application-<profile>` रूप; सिर्फ़ कुंजी नाम और मान के प्रकार, मान कभी नहीं), मान के बिना सामान्य YAML संरचना (`locales/` जैसे फ़ोल्डरों की अनुवाद फ़ाइलें सिर्फ़ फ़ाइल नोड बनती हैं), XSLT स्टाइलशीट (`.xsl`, `.xslt`), मान के बिना JSON संरचना (`.json`; अनुवाद, टेस्ट, docs, उदाहरण और डेटा फ़ाइलें सिर्फ़ फ़ाइल नोड रखती हैं, और lock फ़ाइलें छोड़ दी जाती हैं), Vue/Svelte SFC, HTML पेज (`.html`, `.htm`; इनलाइन स्क्रिप्ट, और id वाले `div`, `section` तथा `article` ब्लॉक `DocSection` नोड के रूप में), Astro फ़ाइलें (TypeScript व्याकरण से पार्स), Jupyter और Databricks नोटबुक (`.ipynb`, साथ में Databricks के `.py` एक्सपोर्ट), Perl XS फ़ाइलें (`.xs`), Robot Framework फ़ाइलें (`.robot`, `.resource`), और Liquid टेम्पलेट (`.liquid`)। अन्य `.properties` फ़ाइलों को स्रोत कोड नहीं माना जाता।
 
 PHP प्रोजेक्ट्स को रिपॉज़िटरी तक सीमित Composer PSR-4 समाधान, Blade टेम्पलेट संदर्भ, और जब स्रोत में स्पष्ट फ़्रेमवर्क इम्पोर्ट, मॉडल इनहेरिटेंस तथा रिसीवर का प्रमाण दिखता है तब Laravel Route और Eloquent एज भी मिलते हैं। `routes/*.php` में स्थिर Laravel रूट Endpoint नोड और कंट्रोलर तक HANDLES एज बनाते हैं, जिनमें स्थिर (literal) ग्रुप प्रीफ़िक्स भी शामिल हैं।
 
 Java प्रोजेक्ट्स को Spring डिपेंडेंसी इंजेक्शन का कॉल समाधान, रिक्वेस्ट एंडपॉइंट तथा WebFlux रूट, शेड्यूल्ड ट्रिगर, ऐप्लिकेशन इवेंट के प्रकाशक से श्रोता तक के एज, Spring AOP एडवाइस से लक्ष्य तक के एज, और Temporal वर्कफ़्लो तथा ऐक्टिविटी एज मिलते हैं। हर रिज़ॉल्वर पार्स के बाद चलता है और उसे इंजेक्ट किया गया फ़ील्ड, प्रकाशित इवेंट या वर्कफ़्लो स्टब रिपॉज़िटरी में दिखाई देना चाहिए।
 
+</details>
+
 ### अपनी भाषा जोड़ें
+
+<details>
+<summary><strong><code>languages.toml</code> में फ़ाइल एक्सटेंशन को साथ आए Tree-sitter व्याकरण से जोड़ें</strong></summary>
+<br>
 
 अगर आपकी रिपॉज़िटरी ऐसी भाषा इस्तेमाल करती है जिसे पार्सर नहीं समझता, तो `.code-review-graph/` में एक `languages.toml` जोड़ें जो फ़ाइल एक्सटेंशन को `tree_sitter_language_pack` में शामिल किसी भी व्याकरण से जोड़े, साथ में फ़ंक्शन, क्लास, इम्पोर्ट और कॉल के नोड प्रकार दे:
 
@@ -218,7 +265,13 @@ call_node_types = ["call"]
 
 निकालने का काम सामान्य tree-sitter वॉकर करता है। अंतर्निहित भाषाओं को बदला नहीं जा सकता। स्कीमा, सत्यापन नियम और एक पूरा उदाहरण [docs/CUSTOM_LANGUAGES.md](docs/CUSTOM_LANGUAGES.md) में देखें।
 
+</details>
+
 ### CI में जोखिम-स्कोर वाले PR रिव्यू (GitHub Action)
+
+<details>
+<summary><strong>जोखिम स्कोर, प्रभावित प्रवाह और टेस्ट की कमियों वाली एक पुल रिक्वेस्ट टिप्पणी; नमूना वर्कफ़्लो देखें</strong></summary>
+<br>
 
 यही विश्लेषण एक composite GitHub Action के रूप में भी चलता है। ग्राफ़ आपके CI रनर पर ही बनता और पूछा जाता है; कोई स्रोत कोड किसी बाहरी सेवा को नहीं भेजा जाता। हर पुल रिक्वेस्ट पर यह ऐक्शन एक स्थायी टिप्पणी डालता है जिसमें जोखिम-स्कोर वाले फ़ंक्शन, प्रभावित निष्पादन प्रवाह और टेस्ट की कमियाँ होती हैं, और हर पुश पर वहीं अपडेट हो जाती है। वैकल्पिक `fail-on-risk` इनपुट इसे मर्ज गेट बना देता है। वैकल्पिक `details` इनपुट ग्राफ़ का और संदर्भ जोड़ता है, जो मुड़ा हुआ (folded) रहता है और आकार में सीमित है: हर शीर्ष सिंबल को उसका स्कोर क्यों मिला, बदलाव जिन कम्युनिटी, हब और सीमा-पार कड़ियों को छूता है, उसका प्रभाव क्षेत्र, उसके बिना टेस्ट वाले हॉटस्पॉट, और ग्राफ़ कहाँ से आया।
 
@@ -243,17 +296,25 @@ jobs:
 
 इनपुट, जोखिम स्तर और कैशिंग के लिए [docs/GITHUB_ACTION.md](docs/GITHUB_ACTION.md) देखें, या यह रिपॉज़िटरी खुद पर जो वर्कफ़्लो चलाती है वह [`.github/workflows/pr-review.yml`](.github/workflows/pr-review.yml) में देखें।
 
+</details>
+
 ---
 
 ## बेंचमार्क
+
+6 रिपॉज़िटरी में प्रति प्रश्न टोकन कमी का माध्यिका लगभग **63 गुना** है (पूरे कॉर्पस की आधाररेखा बनाम ग्राफ़ क्वेरी)। **358 गुना** का अधिकतम मान एक ही रिपॉज़िटरी (fastapi, सबसे बड़ा कॉर्पस) का है, यह सामान्य परिणाम नहीं है।
+
+<details>
+<summary><strong>बेंचमार्क बोर्ड, और संख्याएँ कैसे निकाली गईं</strong></summary>
+<br>
 
 <p align="center">
   <img src="diagrams/diagram5_benchmark_board.png" alt="6 रिपॉज़िटरी पर बेंचमार्क: प्रति प्रश्न टोकन कमी का माध्यिका लगभग 63 गुना (अधिकतम 358 गुना), ग्राफ़ से निकाले गए सही उत्तर के मुकाबले औसत प्रभाव F1 0.69" width="85%" />
 </p>
 
-6 रिपॉज़िटरी में प्रति प्रश्न टोकन कमी का माध्यिका लगभग **63 गुना** है (पूरे कॉर्पस की आधाररेखा बनाम ग्राफ़ क्वेरी)। **358 गुना** का अधिकतम मान एक ही रिपॉज़िटरी (fastapi, सबसे बड़ा कॉर्पस) का है, यह सामान्य परिणाम नहीं है।
-
 सारी संख्याएँ 6 ओपन-सोर्स रिपॉज़िटरी (13 कमिट) पर चले मूल्यांकन रनर से आती हैं। हर कॉन्फ़िग अपस्ट्रीम SHA को पिन करता है, Leiden तय सीड पर चलता है, और एम्बेडिंग CPU पर नियतात्मक हैं, इसलिए अलग-अलग मशीनों पर दो बार चलाने पर वही संख्याएँ मिलती हैं। दोहराने की विधि [`docs/REPRODUCING.md`](docs/REPRODUCING.md) में है। दो सबसे छोटे कॉन्फ़िग पर साप्ताहिक, केवल-रिपोर्ट वाला रन [`.github/workflows/eval.yml`](.github/workflows/eval.yml) में है।
+
+</details>
 
 <details>
 <summary><strong>टोकन दक्षता: प्रति प्रश्न कमी का माध्यिका लगभग 63 गुना (दायरा 35 गुना से 358 गुना; पूरा कॉर्पस बनाम ग्राफ़ क्वेरी)</strong></summary>
@@ -276,7 +337,7 @@ jobs:
 >
 > `code-review-graph` वाली पंक्ति एक स्नैपशॉट है, आज का माप नहीं। `84bde354` के बाद रिपॉज़िटरी बढ़ी है, इसलिए उसका कॉर्पस और ग्राफ़ दोनों आज कहीं बड़े हैं।
 
-पूरे कॉर्पस वाली आधाररेखा एक ऊपरी सीमा है जो कोई असली एजेंट नहीं चुकाता; एजेंट पहचानकर्ताओं को grep करता है और सबसे मेल खाती फ़ाइलें पढ़ता है। `agent_baseline` मूल्यांकन बेंचमार्क उसी स्थिति को मापता है (शुद्ध Python से कॉर्पस पर grep, मिलान संख्या के हिसाब से शीर्ष 3 फ़ाइलें, और ग्राफ़ क्वेरी की लागत से टोकन तुलना)। यह `evaluate/results/<repo>_agent_baseline_<date>.csv` लिखता है। इस वास्तविक आधाररेखा के मुकाबले 6 रिपॉज़िटरी के 18 प्रश्नों पर माध्यिका **6.65x** है (माध्य 14.8x, सीमा 4.2x से 72.6x), जो 2026-09-22 को मापी गई, यानी खोज और इस आधाररेखा के परीक्षण फ़ाइलों को नीचे रखने से पहले। इसलिए दोबारा मापे जाने तक `code-review-graph eval --benchmark agent_baseline --embed` अलग संख्याएँ देगा। पूरी तालिका `docs/REPRODUCING.md` में "Canonical capture, 2026-09-22" के अंतर्गत है।
+पूरे कॉर्पस वाली आधाररेखा एक ऊपरी सीमा है जो कोई असली एजेंट नहीं चुकाता; एजेंट पहचानकर्ताओं को grep करता है और सबसे मेल खाती फ़ाइलें पढ़ता है। `agent_baseline` मूल्यांकन बेंचमार्क उसी स्थिति को मापता है (शुद्ध Python से कॉर्पस पर grep, मिलान संख्या के हिसाब से शीर्ष 3 फ़ाइलें, और ग्राफ़ क्वेरी की लागत से टोकन तुलना)। इस वास्तविक आधाररेखा के मुकाबले 6 रिपॉज़िटरी के 18 प्रश्नों पर माध्यिका **6.65x** है (माध्य 14.8x, सीमा 4.2x से 72.6x), जो 2026-09-22 को मापी गई, यानी खोज और इस आधाररेखा के परीक्षण फ़ाइलों को नीचे रखने से पहले। इसलिए दोबारा मापे जाने तक `code-review-graph eval --benchmark agent_baseline --embed` अलग संख्याएँ देगा। पूरी तालिका `docs/REPRODUCING.md` में "Canonical capture, 2026-09-22" के अंतर्गत है।
 
 यह अनुपात रिपॉज़िटरी के आकार के साथ चलता है, क्योंकि ग्राफ़ का उत्तर स्थिर रहता है (यहाँ मापी गई हर रिपॉज़िटरी में 2,432 से 4,021 टोकन) जबकि grep आधाररेखा कॉर्पस के साथ बढ़ती है: express पर 4.5x, fastapi पर 52x। दोनों आंकड़े **पुनर्प्राप्ति** लागत मापते हैं, यानी उत्तर ढूँढने के लिए ज़रूरी टोकन। यदि एजेंट उसके बाद भी ग्राफ़ द्वारा बताई गई फ़ाइलें खोलता है, तो ग्राफ़ की लागत प्रतिस्थापन नहीं बल्कि अतिरिक्त होती है; `semantic_search_nodes_tool(include_source=True)` स्थान के साथ कोड भी लौटाता है ताकि ऐसा न करना पड़े, और इस रास्ते को आद्योपांत मापना अभी बाकी काम है।
 
@@ -327,15 +388,27 @@ jobs:
 
 ### सीमाएँ
 
+<details>
+<summary><strong>पाँच ज्ञात सीमाएँ: चक्रीय रिकॉल, छोटे संपादन, खोज क्रम, प्रवाह पहचान, झूठे संकेत</strong></summary>
+<br>
+
 - **प्रभाव का "रिकॉल 1.0" चक्रीय है।** ऐतिहासिक सही उत्तर उन्हीं ग्राफ़ एज से आता है जिन पर भविष्यवक्ता चलता है, इसलिए वह बनावट से ही एक ऊपरी सीमा है। पथ सुधार के साथ बेंचमार्क दोबारा चलने तक सह-परिवर्तन के आँकड़े उद्धृत नहीं किए जाते।
 - **छोटे, एकल-फ़ाइल बदलाव।** मामूली संपादन में ग्राफ़ का संदर्भ सादी फ़ाइल पढ़ने से बड़ा हो सकता है। यह अतिरिक्त हिस्सा वही संरचनात्मक मेटाडेटा है जो बहु-फ़ाइल विश्लेषण संभव बनाता है।
 - **खोज क्रम।** कीवर्ड खोज आमतौर पर सही परिणाम ऊपर ले आती है, पर क्रम तय करने में सुधार बाकी है। मॉड्यूल पैटर्न वाले नामकरण के कारण Express पर की गई क्वेरी बिना परिणाम के लौट सकती है।
 - **प्रवाह पहचान।** प्रवेश बिंदु की पहचान Python और PHP/Laravel में सबसे मज़बूत है। JavaScript और Go की प्रवाह पहचान में सुधार बाकी है।
 - **प्रिसिज़न बनाम रिकॉल।** प्रभाव विश्लेषण सतर्क है। यह उन फ़ाइलों को भी दिखाता है जो प्रभावित हो सकती हैं, यानी बड़े निर्भरता ग्राफ़ में झूठे संकेत आते हैं।
 
+</details>
+
 ---
 
 ## विशेषताएँ
+
+अपडेट, प्रभाव विश्लेषण, खोज, विज़ुअलाइज़ेशन, CI रिव्यू, रीफ़ैक्टरिंग और बहु-रिपॉज़िटरी समर्थन, सब कुछ आपकी मशीन पर।
+
+<details>
+<summary><strong>पूरी विशेषता तालिका</strong></summary>
+<br>
 
 | विशेषता | विवरण |
 |---------|---------|
@@ -345,7 +418,7 @@ jobs:
 | **फ़्रेमवर्क-सचेत Java पार्सिंग** | Spring डिपेंडेंसी इंजेक्शन का कॉल समाधान, रिक्वेस्ट एंडपॉइंट तथा WebFlux रूट, शेड्यूल्ड ट्रिगर, ऐप्लिकेशन इवेंट के प्रकाशक से श्रोता तक के एज, Spring AOP एडवाइस एज, Temporal वर्कफ़्लो तथा ऐक्टिविटी एज, और मान के बिना इंडेक्स होने वाली Spring Boot कॉन्फ़िग कुंजियाँ |
 | **प्रभाव क्षेत्र विश्लेषण** | किसी बदलाव से कौन-से फ़ंक्शन, क्लास और फ़ाइलें प्रभावित हो सकती हैं |
 | **स्वतः अपडेट हुक** | एडिटर हुक, git हुक (हर कमिट से पहले, और checkout, merge तथा rebase के बाद) और watch मोड काम करते-करते ग्राफ़ अद्यतन करते हैं |
-| **सिमेंटिक खोज** | वैकल्पिक वेक्टर एम्बेडिंग: sentence-transformers, Google Gemini, MiniMax, Voyage AI, या कोई भी OpenAI-संगत एंडपॉइंट (OpenAI, Azure, new-api, LiteLLM, vLLM, LocalAI) |
+| **सिमेंटिक खोज** | वैकल्पिक वेक्टर एम्बेडिंग: sentence-transformers, Google Gemini, MiniMax, Voyage AI, या कोई भी OpenAI-संगत एंडपॉइंट |
 | **इंटरैक्टिव विज़ुअलाइज़ेशन** | D3.js फ़ोर्स-डायरेक्टेड ग्राफ़ जिसमें खोज, कम्युनिटी लेजेंड टॉगल और डिग्री के अनुसार नोड आकार, साथ में किसी सिंबल, फ़ाइल, प्रवाह या बदलाव से शुरू होने वाला पड़ोस दृश्य |
 | **हब और ब्रिज पहचान** | सबसे अधिक जुड़े नोड और अड़चनें (बिटवीननेस सेंट्रैलिटी) |
 | **आश्चर्य स्कोरिंग** | अप्रत्याशित युग्मन: कम्युनिटी-पार, भाषा-पार, परिधि से हब तक के एज |
@@ -353,7 +426,7 @@ jobs:
 | **सुझाए गए प्रश्न** | ब्रिज, हब और आश्चर्यजनक युग्मनों से बने रिव्यू प्रश्न |
 | **एज विश्वास स्तर** | चार स्तर (EXTRACTED, INFERRED, AMBIGUOUS, UNRESOLVED) और एज पर फ़्लोट स्कोर, ताकि जिस कॉल को ग्राफ़ बाँध नहीं सका वह यह बात बताए |
 | **ग्राफ़ ट्रैवर्सल** | किसी भी नोड से BFS/DFS, गहराई और टोकन बजट सेट किए जा सकते हैं; `path_to` बताता है कि एक सिंबल दूसरे तक कैसे पहुँचता है और सबसे कमज़ोर कड़ी का नाम देता है |
-| **निर्यात प्रारूप** | GraphML (Gephi/yEd), Neo4j Cypher, Obsidian वॉल्ट, JSON, और SVG (SVG के लिए `eval` एक्स्ट्रा का matplotlib चाहिए) |
+| **निर्यात प्रारूप** | GraphML, Neo4j Cypher, Obsidian वॉल्ट, JSON, और SVG (SVG के लिए `eval` एक्स्ट्रा का matplotlib चाहिए) |
 | **टोकन बेंचमार्किंग** | `code_review_graph/token_benchmark.py` प्रति प्रश्न पूरे कॉर्पस के टोकन और ग्राफ़ क्वेरी के टोकन मापता है |
 | **अनुमानित संदर्भ बचत** | रिव्यू, प्रभाव, detect-changes और आर्किटेक्चर उत्तरों पर `context_savings` मेटाडेटा (`estimated`, `saved_tokens`, `saved_percent`) |
 | **कम्युनिटी स्वतः विभाजन** | ग्राफ़ के 25% से बड़ी कम्युनिटी को Leiden से पुनरावर्ती रूप से बाँटा जाता है |
@@ -371,15 +444,19 @@ jobs:
 | **पूर्ण-पाठ खोज** | कीवर्ड और वेक्टर समानता को जोड़ने वाली FTS5 हाइब्रिड खोज |
 | **स्थानीय भंडारण** | `.code-review-graph/` में एक SQLite फ़ाइल; कोई बाहरी डेटाबेस या क्लाउड सेवा नहीं |
 
+</details>
+
 ---
 
 ## उपयोग
+
+ग्राफ़ बन जाने के बाद आपका असिस्टेंट उसे अपने आप इस्तेमाल करता है। स्किल, कमांड, MCP टूल और सेटिंग के लिए नीचे कोई हिस्सा खोलें।
 
 <details>
 <summary><strong>स्किल</strong></summary>
 <br>
 
-`install` इन चार स्किल को उन प्लेटफ़ॉर्म पर लिखता है जो इन्हें समर्थित करते हैं (Claude Code, Gemini CLI, CodeBuddy Code, Hermes Agent और Qoder)। इन्हें नाम से बुलाएँ।
+`install` इन चार स्किल को उन प्लेटफ़ॉर्म पर लिखता है जिन्हें वह सेट करता है और जो इन्हें समर्थित करते हैं (Claude Code, Gemini CLI, CodeBuddy Code, Hermes Agent और Qoder)। इन्हें नाम से बुलाएँ।
 
 | स्किल | विवरण |
 |-------|-------------|
@@ -397,10 +474,11 @@ Qoder को इस रिपॉज़िटरी की `skills/` डायर
 <br>
 
 ```bash
-code-review-graph install          # Detect and configure all platforms
+code-review-graph install          # Set up the AI coding tools found on this machine
 code-review-graph install --platform <name>  # One platform
 code-review-graph install --steering  # Claude Code: graph context beside each search and read
 code-review-graph uninstall --dry-run  # Preview removal of installed artifacts
+code-review-graph doctor           # Check copies, MCP entries, graph and hooks; changes nothing
 code-review-graph build            # Parse the whole codebase
 code-review-graph build --follow-symlinks  # Also index symlinked folders
 code-review-graph update           # Incremental update (changed files only)
@@ -418,7 +496,7 @@ code-review-graph visualize --format svg       # Export as SVG (needs matplotlib
 code-review-graph visualize --format obsidian  # Export as Obsidian vault
 code-review-graph visualize --format cypher    # Export as Neo4j Cypher
 code-review-graph wiki             # Markdown wiki from communities
-code-review-graph detect-changes --brief         # Risk panel + token savings (read-only)
+code-review-graph detect-changes --brief         # Top 3 to review, risk + token savings (read-only)
 code-review-graph detect-changes --brief --base main  # Against the merge base of main and HEAD
 code-review-graph update --brief                 # Refresh graph + same panel
 code-review-graph detect-changes --brief --verify  # Cross-check against tiktoken
@@ -430,16 +508,16 @@ code-review-graph repos            # List registered repositories
 code-review-graph daemon start     # Start the multi-repo watch daemon
 code-review-graph daemon stop      # Stop the daemon
 code-review-graph daemon status    # Daemon status and repos
-code-review-graph eval             # Run evaluation benchmarks
+code-review-graph eval --all       # Run every evaluation benchmark
 code-review-graph serve            # Start the MCP server (stdio)
 code-review-graph serve --http     # MCP over Streamable HTTP on localhost:5555
 code-review-graph serve --http --multi-repo  # One HTTP server for every registered repo
 code-review-graph serve --multi-worktree  # One child server per linked Git worktree
 ```
 
-यह एक चुनी हुई सूची है। `code-review-graph --help` हर कमांड दिखाता है, और [docs/COMMANDS.md](docs/COMMANDS.md) उनके फ़्लैग बताता है।
+यह एक चुनी हुई सूची है। बिना कमांड के `code-review-graph` चलाने पर हर कमांड समूहों में दिखता है, और [docs/COMMANDS.md](docs/COMMANDS.md) उनके फ़्लैग बताता है। गलत लिखा कमांड exit code 2 के साथ रुकता है और सबसे मिलता-जुलता कमांड सुझाता है।
 
-जब `detect-changes --base` किसी ब्रांच का नाम देता है, तो diff उस ब्रांच और HEAD के मर्ज बेस के मुकाबले चलता है। कमिट हैश और अन्य रिवीज़न जैसे दिए जाते हैं वैसे ही इस्तेमाल होते हैं।
+जब `detect-changes --base` किसी ब्रांच का नाम देता है, तो diff उस ब्रांच और HEAD के मर्ज बेस के मुकाबले चलता है। कमिट हैश और अन्य रिवीज़न जैसे दिए जाते हैं वैसे ही इस्तेमाल होते हैं। जिस बेस को git नहीं जानता, उस पर कमांड exit code 1 के साथ रुकता है और बताता है कि उसे कैसे जाँचें। जिस रिपॉज़िटरी में एक ही कमिट हो या एक भी न हो, वहाँ डिफ़ॉल्ट बेस की जगह बिना कमिट की और नई फ़ाइलों का रिव्यू होता है, और यह बताया जाता है।
 
 `visualize --format svg` के लिए matplotlib चाहिए, जो `eval` एक्स्ट्रा में आता है (`pip install "code-review-graph[eval]"`)। बाकी निर्यात प्रारूपों के लिए कोई अतिरिक्त इंस्टॉल नहीं चाहिए।
 
@@ -451,7 +529,7 @@ JSON निर्यात स्थानीय ग्राफ़ डेटा
 <summary><strong>Token Savings पैनल: <code>detect-changes --brief</code> बनाम <code>update --brief</code></strong></summary>
 <br>
 
-दोनों कमांड एक ही पैनल छापते हैं, जो बताता है कि बदली हुई फ़ाइलें एजेंट को कच्ची देने की तुलना में ग्राफ़ ने कितने टोकन बचाए। इनमें फ़र्क़ सिर्फ़ एक है: ग्राफ़ पहले ताज़ा किया जाता है या नहीं।
+दोनों कमांड एक ही पैनल छापते हैं, जो बताता है कि बदली हुई फ़ाइलें एजेंट को कच्ची देने की तुलना में ग्राफ़ ने कितने टोकन बचाए। इनमें फ़र्क़ सिर्फ़ एक है: ग्राफ़ पहले ताज़ा किया जाता है या नहीं। पैनल के ऊपर `detect-changes --brief` सबसे पहले रिव्यू करने लायक अधिकतम तीन चीज़ें भी दिखाता है, हर एक के साथ उसकी फ़ाइल और पंक्ति, 1.00 में से उसका जोखिम, उसके कॉलर और उसके टेस्ट।
 
 ```text
 ┌─────────────────────── Token Savings ────────────────────────┐
@@ -471,7 +549,7 @@ JSON निर्यात स्थानीय ग्राफ़ डेटा
 
 यही `context_savings` मेटाडेटा `get_impact_radius`, `get_review_context`, `detect_changes` और `get_architecture_overview` MCP टूल के JSON उत्तरों के साथ भी जुड़ता है।
 
-इन अनुमानों को समय के साथ देखने के लिए `CRG_CONTEXT_HISTORY=1` सेट करें (डिफ़ॉल्ट रूप से बंद)। हर अनुमान `graph.db` के पास एक स्थानीय लॉग में एक पंक्ति जोड़ता है, जिसमें केवल टोकन संख्या और टूल के नाम होते हैं, और `code-review-graph context-history` इसे दिन या टूल के हिसाब से दिखाता है। देखें [docs/USAGE.md](docs/USAGE.md#context-history)।
+इन अनुमानों को समय के साथ देखने के लिए `CRG_CONTEXT_HISTORY=1` सेट करें (डिफ़ॉल्ट रूप से बंद)। हर अनुमान `graph.db` के पास एक स्थानीय लॉग में एक पंक्ति जोड़ता है, जिसमें टोकन संख्या, टूल के नाम, समय, विवरण स्तर और फ़ाइल व गहराई की संख्या होती है, फ़ाइल के नाम, पाथ या सोर्स कोड कभी नहीं, और `code-review-graph context-history` इसे दिन या टूल के हिसाब से दिखाता है। देखें [docs/USAGE.md](docs/USAGE.md#context-history)।
 
 </details>
 
@@ -519,7 +597,7 @@ alias = "project-b"
 <summary><strong>30 MCP टूल</strong></summary>
 <br>
 
-ग्राफ़ बन जाने के बाद असिस्टेंट इनका उपयोग करता है।
+ग्राफ़ बन जाने के बाद असिस्टेंट इनका उपयोग करता है। जो 25 टूल सिर्फ़ पढ़ते हैं, उन पर `readOnlyHint: true` लगा है, इसलिए क्लाइंट उन्हें बिना पूछे चला सकता है; लिखने वाले पाँच टूल (`build_or_update_graph_tool`, `run_postprocess_tool`, `embed_graph_tool`, `apply_refactor_tool`, `generate_wiki_tool`) पर यह नहीं लगा।
 
 | टूल | विवरण |
 |------|-------------|
@@ -572,7 +650,7 @@ vendor/**
 node_modules/**
 ```
 
-git रिपॉज़िटरी में सिर्फ़ ट्रैक की गई फ़ाइलें इंडेक्स होती हैं (`git ls-files`), इसलिए gitignore की गई फ़ाइलें छूट जाती हैं। ट्रैक की गई फ़ाइलें हटाने के लिए, या जब git उपलब्ध न हो, तब `.code-review-graphignore` का उपयोग करें। डिफ़ॉल्ट अनदेखी सूची [docs/USAGE.md](docs/USAGE.md#ignore-patterns) में है।
+git रिपॉज़िटरी में बिल्ड ट्रैक की गई फ़ाइलें और वे अनट्रैक्ड फ़ाइलें पढ़ता है जिन्हें git अनदेखा नहीं करता (`git ls-files` और `git ls-files --others --exclude-standard`), इसलिए gitignore की गई फ़ाइलें छूट जाती हैं। दूसरी फ़ाइलें हटाने के लिए, या जब git उपलब्ध न हो, तब `.code-review-graphignore` का उपयोग करें। डिफ़ॉल्ट अनदेखी सूची [docs/USAGE.md](docs/USAGE.md#ignore-patterns) में है।
 
 वैकल्पिक निर्भरता समूह:
 
@@ -591,8 +669,9 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | चर | विवरण | डिफ़ॉल्ट |
 |----------|-------------|---------|
 | `CRG_GIT_TIMEOUT` | Git संक्रियाओं की समय सीमा (सेकंड में; build / update / watch) | `30` |
-| `CRG_DISCOVERY_TIMEOUT` | जब फ़ाइल सूची स्पष्ट रूप से नहीं दी गई हो, तब बदलाव पता करने वाली प्रत्येक Git कमांड की समय सीमा (सेकंड में)। सीमा पार होने पर त्रुटि मिलती है, "कोई बदलाव नहीं" नहीं | `5` (`CRG_GIT_TIMEOUT` स्पष्ट रूप से सेट हो तो वही) |
-| `CRG_DATA_DIR` | ग्राफ़ डेटाबेस और बनी हुई फ़ाइलों की डायरेक्टरी | - |
+| `CRG_DISCOVERY_TIMEOUT` | जब किसी रिव्यू टूल या कमांड को फ़ाइल सूची स्पष्ट रूप से नहीं दी गई हो, तब बदलाव पता करने वाली प्रत्येक Git कमांड की समय सीमा (सेकंड में)। सीमा पार होने पर त्रुटि मिलती है, "कोई बदलाव नहीं" नहीं | `5` (`CRG_GIT_TIMEOUT` स्पष्ट रूप से सेट हो तो वही) |
+| `CRG_DATA_DIR` | ग्राफ़ डेटाबेस और बनी हुई फ़ाइलों की डायरेक्टरी। `install` ने जो फ़ाइलें लिखीं, उनका रिकॉर्ड रिपॉज़िटरी के `.code-review-graph/` में ही रहता है | - |
+| `CRG_HOME` | हर यूज़र की स्थिति वाला फ़ोल्डर: मल्टी-रिपॉज़िटरी रजिस्ट्री (`registry.json`), डेमॉन की `watch.toml`, उसकी pid और स्थिति फ़ाइलें, और `logs/` | `~/.code-review-graph` |
 | `CRG_HOOK_WORKTREES` | `1` करने पर बनाए गए git हुक जुड़े हुए git worktree में भी चलते हैं | - |
 | `CRG_EMBEDDING_MODEL` | स्थानीय वेक्टर एम्बेडिंग का डिफ़ॉल्ट मॉडल | `all-MiniLM-L6-v2` |
 | `CRG_ACCEPT_CLOUD_EMBEDDINGS` | `1` करने पर क्लाउड एम्बेडिंग की बाहर-भेजने वाली चेतावनी दबती है | - |
@@ -609,12 +688,14 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_CALLER_TEST_ROUTE_MAX_CALLERS` | उस टेस्ट किए गए कॉलर की खोज में अधिकतम कितने कॉलर देखे जाएँ | `500` |
 | `CRG_TOOL_TIMEOUT` | केवल-पठन MCP टूल की समय सीमा (सेकंड; `0` से बंद)। लिखने वाले टूल (build / postprocess / embed / wiki / apply-refactor) पर लागू नहीं | `0` |
 | `CRG_CHURN_WINDOW_DAYS` | `detect-changes --churn` की कमिट गिनती की अवधि | `90` |
-| `CRG_CONTEXT_HISTORY` | `1` करने पर हर `context_savings` अनुमान `.code-review-graph/context-history.jsonl` नाम के स्थानीय लॉग में लिखा जाता है; इसे `code-review-graph context-history` से पढ़ें। इसमें केवल टोकन संख्या और टूल के नाम होते हैं, यह कहीं भेजा नहीं जाता | - |
+| `CRG_CONTEXT_HISTORY` | `1` करने पर हर `context_savings` अनुमान `.code-review-graph/context-history.jsonl` नाम के स्थानीय लॉग में लिखा जाता है; इसे `code-review-graph context-history` से पढ़ें। इसमें टोकन संख्या, टूल के नाम, समय, विवरण स्तर और फ़ाइल व गहराई की संख्या होती है, फ़ाइल के नाम, पाथ या सोर्स कोड कभी नहीं, और यह कहीं भेजा नहीं जाता | - |
 | `CRG_LEIDEN_SEED` | Leiden कम्युनिटी पहचान का सीड | `42` |
 | `CRG_RECURSE_SUBMODULES` | `1`, `true` या `yes` होने पर git सबमॉड्यूल शामिल करें | - |
 | `CRG_FOLLOW_SYMLINKS` | `1`, `true`, `yes` या `on` होने पर symlink फ़ोल्डरों में जाएँ, रिपॉज़िटरी के अंदर या बाहर; `--follow-symlinks` जैसा। देखें [Symlink फ़ोल्डर](docs/USAGE.md#symlinked-folders) | - |
 | `CRG_MAX_FOLLOWED_FILES` | symlink फ़ोल्डरों से ली जाने वाली फ़ाइलों की अधिकतम संख्या | `10000` |
 | `CRG_TOOLS` | सर्व करते समय दिखाए जाने वाले MCP टूल की अल्पविराम से अलग सूची | - |
+| `CRG_READ_ONLY` | `1` (या `true`, `yes`, `on`) रखने पर ग्राफ़ सिर्फ़ पढ़ने के लिए खुलता है। डेटा फ़ोल्डर में कुछ नहीं बनता, अपग्रेड नहीं होता या दर्ज नहीं होता, और लिखने वाले कमांड विफल होते हैं। Codex स्किल का read-only CLI इसे सेट करता है | - |
+| `CRG_BIN` | वह `code-review-graph` प्रोग्राम जिसे Codex स्किल का read-only CLI चलाता है, जब उसका नाम अलग हो या वह PATH पर न हो | PATH वाला |
 | `GOOGLE_API_KEY` | Google Gemini एम्बेडिंग की API कुंजी | - |
 | `MINIMAX_API_KEY` | MiniMax एम्बेडिंग की API कुंजी | - |
 | `VOYAGE_API_KEY` | Voyage एम्बेडिंग की API कुंजी | - |
@@ -634,7 +715,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_ENABLE_ENRICHMENT` | `1` करने पर हर build और update में Jedi से Python मेथड कॉल हल होते हैं (`enrichment` एक्स्ट्रा चाहिए; हर Python फ़ाइल पर लगभग एक सेकंड ज़्यादा)। `build --enrich` जैसा | बंद |
 | `CRG_DISABLE_ENRICHMENT` | `1` करने पर माँगने पर भी Jedi नहीं चलता | - |
 
-OpenAI-संगत एम्बेडिंग (OpenAI, Azure, या new-api, LiteLLM, vLLM, LocalAI, या OpenAI मोड में Ollama जैसा स्व-होस्टेड गेटवे) के लिए अतिरिक्त इंस्टॉल नहीं चाहिए। चर सेट करें और `embed_graph` को `provider="openai"` दें:
+OpenAI-संगत एम्बेडिंग के लिए अतिरिक्त इंस्टॉल नहीं चाहिए। चर सेट करें और `embed_graph` को `provider="openai"` दें:
 
 ```bash
 export CRG_OPENAI_BASE_URL=http://127.0.0.1:3000/v1     # or https://api.openai.com/v1
@@ -643,7 +724,6 @@ export CRG_OPENAI_MODEL=text-embedding-3-small          # whatever your gateway 
 # optional:
 export CRG_OPENAI_DIMENSION=1536                        # pin dim (v3 models support reduction)
 export CRG_OPENAI_BATCH_SIZE=100                        # lower for gateways with tight limits
-                                                        # (e.g. Qwen text-embedding-v4 caps at 10)
 ```
 
 जब बेस URL localhost (`127.0.0.1`, `localhost`, `0.0.0.0`, `::1`) की ओर इशारा करता है, तब क्लाउड चेतावनी नहीं दिखती।
@@ -656,7 +736,7 @@ export CRG_ACCEPT_CLOUD_EMBEDDINGS=1
 code-review-graph embed --provider voyage --model voyage-code-3
 ```
 
-> **मॉडल चुनना।** जिस इंडेक्स को लंबे समय तक रखना हो, उसके लिए `-preview`, `-beta` या `-exp` वाले मॉडल ID से बचें; प्रीव्यू मॉडल के वेट बदल सकते हैं (डाइमेंशन बदलने पर पूरा दोबारा एम्बेड करना पड़ता है) या उन्हें हटाया जा सकता है। `text-embedding-3-small` / `text-embedding-3-large` (OpenAI), `Qwen/Qwen3-Embedding-8B` (स्व-होस्टेड vLLM या LocalAI), या `gemini-embedding-001` (नेटिव Gemini प्रोवाइडर, जिसे `GOOGLE_API_KEY` चाहिए) जैसे GA रिलीज़ चुनें।
+> **मॉडल चुनना।** जिस इंडेक्स को लंबे समय तक रखना हो, उसके लिए `-preview`, `-beta` या `-exp` वाले मॉडल ID से बचें; प्रीव्यू मॉडल के वेट बदल सकते हैं (डाइमेंशन बदलने पर पूरा दोबारा एम्बेड करना पड़ता है) या उन्हें हटाया जा सकता है। स्थिर (GA) रिलीज़ चुनें, जैसे `text-embedding-3-small` / `text-embedding-3-large` (OpenAI) या `gemini-embedding-001` (नेटिव Gemini प्रोवाइडर, जिसे `GOOGLE_API_KEY` चाहिए)।
 >
 > एम्बेडिंग टेक्स्ट में पहचानकर्ता, हस्ताक्षर, संरचनात्मक संदर्भ, और पहले अनुच्छेद के docstring या डॉक-टिप्पणी का सीमित सारांश होता है। फ़ंक्शन के बॉडी नहीं भेजे जाते। दस्तावेज़ निकालने की सुविधा आने से पहले बने ग्राफ़ को दोबारा एम्बेड करने से पहले एक पूरा `code-review-graph build` चाहिए। सामान्य बिल्ड एम्बेडिंग कभी ताज़ा नहीं करते; बिल्ड के बाद ताज़ा करने के लिए `--embedding-provider` और `--embedding-model` दोनों दें। क्लाउड प्रोवाइडर को यह स्रोत-आधारित टेक्स्ट मिलता है और वे उसका शुल्क ले सकते हैं।
 
@@ -687,29 +767,96 @@ CRG_TOOLS=query_graph_tool,semantic_search_nodes_tool code-review-graph serve
 
 </details>
 
+### Docker या Podman से चलाएँ
+
+<details>
+<summary><strong>किसी रिलीज़ से इमेज बनाएँ, फिर उसे अपनी रिपॉज़िटरी पर चलाएँ</strong></summary>
+<br>
+
+कोई इमेज प्रकाशित नहीं की गई है। किसी रिलीज़ टैग से इमेज बनाएँ; सीधा क्लोन `staging` ब्रांच देता है, जिसमें ऐसे बदलाव हो सकते हैं जो अभी रिलीज़ नहीं हुए:
+
+```bash
+git clone --branch v2.4.0 https://github.com/tirth8205/code-review-graph.git
+cd code-review-graph
+docker build -t code-review-graph:local .
+```
+
+जिस रिपॉज़िटरी का विश्लेषण करना है, उसके फ़ोल्डर से चलाएँ:
+
+```bash
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --env HOME=/tmp \
+  --volume "$PWD:/workspace" \
+  code-review-graph:local build
+```
+
+माउंट की गई रिपॉज़िटरी में लिखने की अनुमति होनी चाहिए।
+ऊपर दिया गया कमांड आपके यूज़र और ग्रुप ID का उपयोग करता है,
+जिससे बनाई गई `.code-review-graph/` डायरेक्टरी का स्वामित्व आपके यूज़र के पास रहता है।
+इन कमांड को होस्ट पर गैर-root यूज़र के रूप में चलाएँ।
+
+Podman के लिए, उसी क्लोन में उसी Dockerfile से इमेज बनाएँ और यूज़र मैपिंग बनाए रखें:
+
+```bash
+podman build -t code-review-graph:local .
+podman run --rm \
+  --userns=keep-id \
+  --env HOME=/tmp \
+  --volume "$PWD:/workspace" \
+  code-review-graph:local build
+```
+
+ग्राफ़ माउंट किए गए रिपॉज़िटरी की `.code-review-graph/` डायरेक्टरी में बना रहता है और
+`/workspace/app.py` जैसे कंटेनर के पूर्ण पथ सहेजता है। `update` और `detect-changes` को
+Docker या Podman से उसी `/workspace` माउंट के साथ चलाएँ। इस ग्राफ़ पर होस्ट से `update`
+चलाने पर "built with a different repository root" त्रुटि आ सकती है। होस्ट कमांड पर
+स्विच करने के लिए, होस्ट पर `code-review-graph build` चलाकर होस्ट के पथों के साथ ग्राफ़ फिर से बनाएँ।
+
+सहेजे गए ग्राफ़ को देखने के लिए `build` की जगह `status` लिखें।
+इमेज में Git शामिल है और यह डिफ़ॉल्ट रूप से गैर-root यूज़र के रूप में चलती है।
+इमेज बनाते समय ग्राफ़ नहीं बनाया जाता।
+
+इन उदाहरणों में macOS/Linux शेल सिंटैक्स का उपयोग किया गया है।
+macOS पर इन्हें चलाने से पहले अपना Docker-संगत इंजन या Podman वर्चुअल मशीन शुरू करें।
+Fedora जैसे SELinux चालू वाले होस्ट पर माउंट में `:z` जोड़ें (`"$PWD:/workspace:z"`), नहीं तो कंटेनर को रिपॉज़िटरी तक पहुँच नहीं मिलेगी।
+
+</details>
+
 ---
 
 ## सामान्य प्रश्न और तुलना
 
 उत्तर [docs/FAQ.md](docs/FAQ.md) में हैं:
 
+<details>
+<summary><strong>LSP, RAG और grep से तुलना, कब इस्तेमाल न करें, और भी बहुत कुछ</strong></summary>
+<br>
+
 - [LSP / लैंग्वेज सर्वर से अंतर](docs/FAQ.md#how-is-this-different-from-lsp-and-language-servers): हर भाषा के लिए अलग डीमन के बजाय एक स्थायी, बहुभाषी ग्राफ़; प्रति सिंबल सटीकता में LSP आगे रहता है।
 - [RAG / एम्बेडिंग से अंतर](docs/FAQ.md#isnt-this-just-rag): समानता के टुकड़े नहीं, AST से पार्स किए गए संरचनात्मक एज; एम्बेडिंग वैकल्पिक हैं और सिर्फ़ खोज में मदद करती हैं।
 - [grep / एजेंट खोज से अंतर](docs/FAQ.md#why-not-just-grep): एक-हॉप खोज में grep जीतता है; बहु-हॉप सवालों (प्रभाव क्षेत्र, कॉलर के कॉलर, tests-for, प्रभावित प्रवाह) में ग्राफ़ जीतता है।
-- [Serena, codegraph, claude-context, repomix से तुलना](docs/FAQ.md#how-does-it-compare-to-serena-codegraph-claude-context-and-repomix): तुलना तालिका।
 - [कब इस्तेमाल न करें](docs/FAQ.md#when-should-i-not-use-it): छोटी रिपॉज़िटरी, मामूली एकल-फ़ाइल diff, एक बार के सवाल।
 - [क्या यह डेटा बाहर भेजता है?](docs/FAQ.md#does-it-phone-home): कोई टेलीमेट्री नहीं; क्लाउड एम्बेडिंग तभी चलती हैं जब आप चालू करें।
 - [कैसे जाँचें कि यह काम कर रहा है?](docs/FAQ.md#how-do-i-verify-it-is-working): `status`, `detect-changes --brief`, `/mcp`।
 
+</details>
+
 ## समस्या निवारण
+
+सबसे पहले `code-review-graph doctor` चलाएँ, ख़ासकर जब आपका AI टूल कहे कि ग्राफ़ "written by a newer code-review-graph"। यह PATH पर हर कॉपी, हर MCP प्रविष्टि और हुक जो संस्करण चलाते हैं, और ग्राफ़ की स्थिति दिखाता है। यह कुछ नहीं बदलता, कोई जाँच विफल हो तो exit code 1 के साथ रुकता है, और `--json` लेता है।
 
 Windows/WSL सहित और भी मामले [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) में हैं।
 
 ### `pip` / `pipx` `hatchling` डाउनलोड नहीं कर पाता (या PyPI के लिए `Errno 9` / `Bad file descriptor`)
 
+<details>
+<summary><strong>इसे कैसे ठीक करें</strong></summary>
+<br>
+
 स्रोत ट्री से इंस्टॉल करने पर (जैसे `pipx install .`) PyPI से बिल्ड निर्भरताएँ चाहिए होती हैं। अगर कनेक्शन चेतावनियों के बाद `Could not find a version that satisfies the requirement hatchling` दिखे, तो हो सकता है उस टर्मिनल का Python `pypi.org` से HTTPS कनेक्शन न खोल पा रहा हो। यह एडिटर के अंदरूनी टर्मिनल में सबसे अधिक दिखता है, और कभी-कभी VPN, फ़ायरवॉल या प्रॉक्सी के साथ।
 
-1. वही कमांड एडिटर के टर्मिनल के बजाय Terminal.app या iTerm से चलाएँ।
+1. वही कमांड एडिटर से बाहर के किसी टर्मिनल से चलाएँ, जैसे Terminal.app।
 2. [uv](https://docs.astral.sh/uv/) से चेकआउट से इंस्टॉल करें, जो अलग डाउनलोड तंत्र इस्तेमाल करता है:
 
    ```bash
@@ -721,7 +868,13 @@ Windows/WSL सहित और भी मामले [docs/TROUBLESHOOTING.md]
 
 जाँच के लिए: `python3 scripts/diagnose_pypi_connectivity.py`। अगर यह `FAILED` छापे, तो समस्या नेटवर्क परिवेश की है, पैकेज के नाम की नहीं।
 
+</details>
+
 ### Windows: `Invalid JSON: EOF while parsing` या `MCP error -32000: Connection closed`
+
+<details>
+<summary><strong>इसे कैसे ठीक करें</strong></summary>
+<br>
 
 Claude Code कॉन्फ़िग में `cmd /c` रैपर का उपयोग न करें। `~/.claude.json` को सीधे `.exe` की ओर इंगित करें और UTF-8 कॉन्फ़िग से सेट करें:
 
@@ -733,7 +886,18 @@ Claude Code कॉन्फ़िग में `cmd /c` रैपर का उ�
 }
 ```
 
+</details>
+
 ## योगदान
+
+पुल रिक्वेस्ट `staging` (डिफ़ॉल्ट ब्रांच) पर भेजें। बदलाव
+`staging` → `testing` → `main` के क्रम में आगे बढ़ते हैं, और रिलीज़ `main` से टैग होते हैं। कोई भी
+प्रमोशन अपने आप नहीं होता: हर एक को कोई व्यक्ति देखता और मर्ज करता है। पूरा प्रवाह
+[CONTRIBUTING.md](CONTRIBUTING.md#branching-and-promotion) में देखें।
+
+<details>
+<summary><strong>विकास के लिए एक कॉपी सेट करें और टेस्ट चलाएँ</strong></summary>
+<br>
 
 ```bash
 git clone https://github.com/tirth8205/code-review-graph.git
@@ -743,12 +907,15 @@ pip install -e ".[dev]"
 pytest
 ```
 
-पुल रिक्वेस्ट `staging` (डिफ़ॉल्ट ब्रांच) पर भेजें। बदलाव
-`staging` → `testing` → `main` के क्रम में आगे बढ़ते हैं, और रिलीज़ `main` से टैग होते हैं। कोई भी
-प्रमोशन अपने आप नहीं होता: हर एक को कोई व्यक्ति देखता और मर्ज करता है। पूरा प्रवाह
-[CONTRIBUTING.md](CONTRIBUTING.md#branching-and-promotion) में देखें।
+</details>
+
+<details>
+<summary><strong>अंतर्निहित भाषा जोड़ें</strong></summary>
+<br>
 
 अंतर्निहित भाषा जोड़ने के लिए `code_review_graph/parser.py` संपादित करें: एक्सटेंशन को `EXTENSION_TO_LANGUAGE` में और नोड प्रकार मैपिंग को `_CLASS_TYPES`, `_FUNCTION_TYPES`, `_IMPORT_TYPES` तथा `_CALL_TYPES` में जोड़ें। एक टेस्ट फ़िक्स्चर साथ दें और PR खोलें। अगर भाषा सिर्फ़ एक ही रिपॉज़िटरी में चाहिए, तो उसके बजाय [`languages.toml`](docs/CUSTOM_LANGUAGES.md) का उपयोग करें।
+
+</details>
 
 ## लाइसेंस
 

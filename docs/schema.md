@@ -198,7 +198,23 @@ names the class the call went through. Both are `INFERRED`.
 /absolute/path/to/file.yml::yaml:0:$.services[*].metadata.tier # aggregated YAML path in document 0
 /absolute/path/to/file.yml::yaml:0:alias:$.service["<<"]@12    # alias or anchor identity
 /absolute/path/to/package.json::json:$.scripts.build            # JSON path
+/absolute/path/to/routes.ts::handle:S1a2b3c4d5e6f              # second same-named definition in a file
 ```
+
+### Same-named definitions in one file
+
+Two definitions in one file can get the same name, such as two object-literal
+methods called `handle`. The first keeps the plain name. Each other one gets
+`:S<hash>`: the first 12 hex characters of a SHA-256 of its kind, name, parent,
+language, parameters, return type, modifiers and test flag. Line numbers are left
+out, so the name stays the same when code moves. If two are the same in all of
+those, the later ones also get `:2`, `:3` and so on.
+
+On a re-index each definition keeps its old name, matched first by line and then
+by those fields, so its edges stay with it. A call from another file that names
+only the plain name does not say which one it means, so it lists them all as
+ambiguous. C++ overloads carry their parameter types instead, as in
+`::Workspace.remove(DataFile*,bool)`.
 
 `nodes.symbol` stores the part after the first `::` (or the whole name when there is none)
 so that dotted-tail lookups are an indexed equality test.
@@ -348,6 +364,15 @@ CREATE TABLE embeddings (
 | `svn_branch`, `svn_revision` | Builds in an SVN working copy |
 | `postprocess_level` | Post-processing |
 | `community_detector` | Community detection: `leiden`, `file`, or both joined by `+` |
+| `last_postprocessed_at` | Post-processing; when it last finished |
+| `repo_root` | Builds; the repository the graph belongs to |
+| `build_state` | Builds and post-processing: `in-progress`, `postprocess-pending` or `complete`; `status` reads it to report an unfinished build |
+| `verified_file_count` | Builds; how many files a complete graph holds (`0` until checked) |
+| `intentionally_incomplete` | `forget` sets `1`; a full build sets `0` |
+| `symlink_followed_files`, `symlink_followed_dirs` | Builds that follow symlinked folders (`--follow-symlinks` or `CRG_FOLLOW_SYMLINKS`): files and outside folders reached through a link |
+| `dependents_reparse_pending` | Incremental updates; importers whose re-parse failed, to retry. A full build clears it |
+| `cpp_identity_version`, `cpp_identity_pending`, `csharp_identity_version`, `csharp_identity_pending_files`, `nested_scope_identity_version`, `nested_scope_identity_pending_files` | Builds and updates; force one re-parse when node names change shape |
+| `csharp_flows_dirty` | C# call resolution sets `1`; rebuilding flows clears it |
 
 ### Indexes
 

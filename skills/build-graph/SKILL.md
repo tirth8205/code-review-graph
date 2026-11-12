@@ -1,6 +1,6 @@
 ---
 name: build-graph
-description: Build or update the code review knowledge graph. Run this first to initialize, or let hooks keep it updated automatically.
+description: Build or update the code review knowledge graph. Run this first to initialise, or let hooks keep it updated automatically.
 argument-hint: "[full]"
 ---
 

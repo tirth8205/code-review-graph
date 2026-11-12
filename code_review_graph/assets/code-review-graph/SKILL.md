@@ -11,7 +11,7 @@ Use CRG as a local structural index, not as a replacement for source inspection.
 
 - Invoke this skill when the user names CRG/code-review-graph, asks for graph-backed exploration/review/debugging/impact analysis, or the repository already contains a usable CRG graph and graph context would reduce broad scanning.
 - For an ordinary repository with no graph and no request to use or build CRG, do not call the CLI or MCP merely to keep checking. A single first-task health check is allowed only after this skill has been triggered by the conditions above.
-- “Use the graph” and “understand this code” do not authorize building a missing graph. Ask before any mutating CRG command.
+- “Use the graph” and “understand this code” do not authorise building a missing graph. Ask before any mutating CRG command.
 
 ## Entry workflow
 
@@ -19,15 +19,15 @@ Use CRG as a local structural index, not as a replacement for source inspection.
 2. Inspect the current tool inventory for CRG MCP tools. Prefer MCP when its tools are actually exposed.
 3. On the first CRG task for a repository, perform exactly one read-only health check. With MCP, use `get_minimal_context_tool(task=<short task>, repo_root=<root>)` or the available graph-stats tool. Without MCP, run the bundled helper’s `status` command (it forwards `--json` to the CLI). Reuse the result; do not poll status on every turn.
 4. If the graph is healthy and fresh, use the smallest relevant MCP query or CLI read-only query to narrow the work. If an MCP call fails, retry at most once, then use the CLI helper.
-5. If the graph is missing, empty, or stale, report that once and stop using CRG for this task unless the user explicitly authorizes maintenance. Continue with the smallest useful source/test inspection.
+5. If the graph is missing, empty, or stale, report that once and stop using CRG for this task unless the user explicitly authorises maintenance. Continue with the smallest useful source/test inspection.
 
 ## Health and mutation boundary
 
 - A graph is not ready when its database is missing, `nodes` or `files` is zero, or `last_updated` is null. It is stale when the built commit does not match the current repository commit.
-- Never run `build`, `update`, `postprocess`, `embed`, or `watch` unless the user explicitly asks to create/maintain the graph or has already granted that authority for this task. Verify status once after an authorized mutation.
+- Never run `build`, `update`, `postprocess`, `embed`, or `watch` unless the user explicitly asks to create/maintain the graph or has already granted that authority for this task. Verify status once after an authorised mutation.
 - Never launch `serve` as a one-shot query or implicitly use `uvx`; `serve` is a long-running MCP process. Use the installed CLI executable for fallback queries.
 - Keep all CRG operations local. Do not send credentials, private keys, or unrelated source to external services.
-- Graph results only select a smaller reading scope. Read the actual implementation and relevant tests before making or reporting behavioral conclusions; if graph and source disagree, trust source.
+- Graph results only select a smaller reading scope. Read the actual implementation and relevant tests before making or reporting behavioural conclusions; if graph and source disagree, trust source.
 
 ## Route by task
 

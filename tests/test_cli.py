@@ -30,7 +30,7 @@ def test_main_handles_legacy_stdio_encoding(monkeypatch):
     assert legacy_stdout.encoding == "utf-8"
     assert legacy_stderr.encoding == "utf-8"
     assert "code-review-graph" in output
-    assert "Commands:" in output
+    assert "Start:" in output
 
 
 def test_get_version_falls_back_to_package_attr_when_metadata_missing(
@@ -240,6 +240,54 @@ def test_visualize_json_uses_local_export(tmp_path, capsys):
 
 
 class TestBuildUpdateCommands:
+    @pytest.fixture(autouse=True)
+    def _repo_root_folder(self, tmp_path, monkeypatch):
+        # build and update stop on a --repo path that is not a folder.
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "repo-root").mkdir()
+
+    @staticmethod
+    def _run_build(result: dict, *extra: str) -> None:
+        argv = ["code-review-graph", "build", "--repo", "repo-root", *extra]
+        with patch.object(sys, "argv", argv):
+            with patch("code_review_graph.graph.GraphStore") as mock_store:
+                mock_store.return_value = MagicMock()
+                with patch("code_review_graph.incremental.get_db_path") as mock_db:
+                    mock_db.return_value = MagicMock()
+                    with patch(
+                        "code_review_graph.tools.build.build_or_update_graph",
+                        return_value=result,
+                    ):
+                        cli.main()
+
+    def test_build_says_what_to_do_next(self, capsys):
+        """A new user should not stop at a line of counts (developer-experience review, item 8)."""
+        self._run_build({"files_parsed": 3, "total_nodes": 9, "total_edges": 4})
+
+        out = capsys.readouterr().out
+        assert "Full build: 3 files" in out
+        assert out.rstrip().splitlines()[-1] == (
+            "Next: code-review-graph detect-changes --brief, "
+            'or ask your assistant "Review my changes".'
+        )
+
+    def test_build_of_an_empty_folder_warns_instead_of_suggesting(self, capsys):
+        self._run_build({"files_parsed": 0, "total_nodes": 0, "total_edges": 0})
+
+        captured = capsys.readouterr()
+        assert "Next:" not in captured.out
+        root = Path("repo-root").resolve()
+        assert captured.err.strip() == (
+            f"Warning: no source files found under {root}. Is this the project root?"
+        )
+
+    def test_quiet_build_prints_neither_hint(self, capsys):
+        self._run_build({"files_parsed": 0, "total_nodes": 0, "total_edges": 0}, "-q")
+
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert captured.err == ""
+
     def test_build_skip_postprocess_does_not_run_extra_cli_postprocess(self):
         argv = [
             "code-review-graph",
@@ -618,7 +666,10 @@ class TestDetectChangesCommand:
                     ):
                         with patch(
                             "code_review_graph.changes.analyze_changes",
-                            return_value={"summary": "summary only"},
+                            return_value={
+                                "summary": "summary only",
+                                "changed_functions": [{"name": "app.f"}],
+                            },
                         ):
                             cli.main()
 

@@ -8,7 +8,12 @@ import subprocess
 from typing import Any
 
 from ..errors import ChangeDiscoveryError
-from ..incremental import discover_review_changes, get_db_path, resolve_review_base
+from ..incremental import (
+    discover_review_changes,
+    get_db_path,
+    graph_holds_commits,
+    resolve_review_base,
+)
 from ..parser import normalize_file_path
 from ._common import _get_store, _resolve_root, compact_response, graph_provenance
 
@@ -21,7 +26,7 @@ def _not_ready(reason: str, summary: str) -> dict[str, Any]:
         "status": "not_ready",
         "reason": reason,
         "summary": summary,
-        "next_tool_suggestions": ["build_or_update_graph"],
+        "next_tool_suggestions": ["build_or_update_graph_tool"],
     }
 
 
@@ -66,7 +71,14 @@ def get_minimal_context(
             )
 
         provenance = graph_provenance(str(root))
-        if provenance and provenance.get("head_matches_build") is False:
+        if (
+            provenance
+            and provenance.get("head_matches_build") is False
+            # The pre-commit hook updates the graph before the commit
+            # exists, so it records the parent. A graph that already holds
+            # every file the newer commits changed is current.
+            and not graph_holds_commits(root, store, str(provenance.get("built_at_sha", "")))
+        ):
             return _not_ready(
                 "stale_graph",
                 "The graph was built at a different Git commit. "
@@ -152,20 +164,26 @@ def get_minimal_context(
 
         # 5. Suggest next tools based on task keywords
         task_lower = task.lower()
+        # Registered tool names, which all end in ``_tool``: a client can
+        # only call a name exactly as the server lists it.
         if any(w in task_lower for w in ("review", "pr", "merge", "diff")):
-            suggestions = ["detect_changes", "get_affected_flows", "get_review_context"]
+            suggestions = [
+                "detect_changes_tool", "get_affected_flows_tool", "get_review_context_tool",
+            ]
         elif any(w in task_lower for w in ("debug", "bug", "error", "fix")):
-            suggestions = ["semantic_search_nodes", "query_graph", "get_flow"]
+            suggestions = ["semantic_search_nodes_tool", "query_graph_tool", "get_flow_tool"]
         elif any(w in task_lower for w in ("refactor", "rename", "dead", "clean")):
-            suggestions = ["refactor", "find_large_functions", "get_architecture_overview"]
+            suggestions = [
+                "refactor_tool", "find_large_functions_tool", "get_architecture_overview_tool",
+            ]
         elif any(w in task_lower for w in ("onboard", "understand", "explore", "arch")):
             suggestions = [
-                "get_architecture_overview", "list_communities", "list_flows",
+                "get_architecture_overview_tool", "list_communities_tool", "list_flows_tool",
             ]
         else:
             suggestions = [
-                "detect_changes", "semantic_search_nodes",
-                "get_architecture_overview",
+                "detect_changes_tool", "semantic_search_nodes_tool",
+                "get_architecture_overview_tool",
             ]
 
         # Build summary

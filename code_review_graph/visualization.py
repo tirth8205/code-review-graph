@@ -26,7 +26,7 @@ from collections import Counter, defaultdict
 from dataclasses import asdict
 from importlib import resources
 from pathlib import Path
-from typing import Iterable, Iterator, Sequence
+from typing import Any, Iterable, Iterator, Sequence
 
 from .graph import GraphNode, GraphStore, _sanitize_name, edge_to_dict, node_to_dict
 from .neighbourhood import (
@@ -695,6 +695,9 @@ def _aggregate_file(data: dict) -> dict:
     file_symbol_count: Counter[str] = Counter()
     qn_to_file: dict[str, str] = {}
     file_languages: dict[str, str] = {}
+    # Each file takes the community of its first node that has one. Found in
+    # this one pass: a scan of every node per file is quadratic.
+    file_community: dict[str, Any] = {}
 
     for n in nodes:
         fp = n.get("file_path", "")
@@ -707,6 +710,8 @@ def _aggregate_file(data: dict) -> dict:
             file_symbol_count.setdefault(fp, 0)
         if n.get("language"):
             file_languages[fp] = n["language"]
+        if n.get("community_id") is not None:
+            file_community.setdefault(fp, n["community_id"])
 
     # Build file nodes
     file_nodes = []
@@ -715,12 +720,6 @@ def _aggregate_file(data: dict) -> dict:
         short = parts[-1] if parts else fp
         parent = parts[-2] if len(parts) >= 2 else ""
         label = f"{parent}/{short}" if parent else short
-        # Recover community_id from the majority of symbols in this file
-        cid = None
-        for n in nodes:
-            if n.get("file_path") == fp and n.get("community_id") is not None:
-                cid = n["community_id"]
-                break
         file_nodes.append({
             "qualified_name": fp,
             "name": label,
@@ -729,7 +728,7 @@ def _aggregate_file(data: dict) -> dict:
             "line_start": None,
             "line_end": None,
             "language": file_languages.get(fp, ""),
-            "community_id": cid,
+            "community_id": file_community.get(fp),
             "symbol_count": count,
         })
 
@@ -1431,6 +1430,14 @@ communities.forEach(function(c) {
     nodeToCommunity.set(qn, c.id);
   });
 });
+// Communities unticked in the community legend. The filter only applies
+// while community colours are on, as the checkboxes are hidden otherwise.
+var hiddenCommunities = new Set();
+function inHiddenCommunity(d) {
+  if (!communityColoringOn || !hiddenCommunities.size) return false;
+  var cid = d.community_id != null ? d.community_id : nodeToCommunity.get(d.qualified_name);
+  return cid != null && hiddenCommunities.has(cid);
+}
 // Compute node degree (connection count) for size scaling
 var nodeDegree = new Map();
 edges.forEach(function(e) {
@@ -1491,6 +1498,11 @@ function moveTooltip(ev) {
   tooltip.style.left = x + "px"; tooltip.style.top = y + "px";
 }
 function hideTooltip() { tooltip.classList.remove("visible"); }
+// A focus event has no pointer position, so place the tooltip by the node.
+function tooltipAnchor(el) {
+  var r = el.getBoundingClientRect();
+  return { pageX: r.right + window.scrollX, pageY: r.top + r.height / 2 + window.scrollY };
+}
 var svgEl = document.getElementById("graph-svg");
 function getW() { return svgEl.clientWidth || window.innerWidth || 800; }
 function getH() { return svgEl.clientHeight || window.innerHeight || 600; }
@@ -1558,7 +1570,7 @@ var labelGroup = gRoot.append("g").attr("class","labels");
 var linkSel, labelSel;
 var showLabels = true;
 function updateLinks() {
-  var vis = new Set(nodes.filter(function(n) { return !n._hidden; }).map(function(n) { return n.qualified_name; }));
+  var vis = new Set(nodes.filter(function(n) { return !n._hidden && !inHiddenCommunity(n); }).map(function(n) { return n.qualified_name; }));
   var visEdges = edges.filter(function(e) {
     if (hiddenEdgeKinds.has(e.kind)) return false;
     var s = typeof e.source === "object" ? e.source.qualified_name : e._source;
@@ -1619,7 +1631,7 @@ function updateNodes() {
         showDetailPanel(d);
       } else if (ev.key === "Escape") {
         ev.preventDefault();
-        detailPanel.classList.remove("visible");
+        closeDetailPanel(false);
         hideTooltip();
       } else if (["ArrowUp","ArrowDown","ArrowLeft","ArrowRight"].indexOf(ev.key) !== -1) {
         ev.preventDefault();
@@ -1642,9 +1654,10 @@ function updateNodes() {
         }
       }
     })
-    .on("focus", function(ev, d) { highlightConnected(d, true); showTooltip(ev, d); })
+    .on("focus", function(ev, d) { highlightConnected(d, true); showTooltip(tooltipAnchor(this), d); })
     .on("blur",  function(ev, d) { highlightConnected(d, false); hideTooltip(); });
   nodeSel = enter.merge(nodeSel);
+  nodeSel.attr("display", function(d) { return inHiddenCommunity(d) ? "none" : null; });
   labelSel = labelGroup.selectAll("text.node-label").data(vis, function(d) { return d.qualified_name; });
   labelSel.exit().remove();
   var lEnter = labelSel.enter().append("text").attr("class","node-label")
@@ -1661,7 +1674,7 @@ function updateLabelVisibility() {
   if (!labelSel) return;
   var s = currentTransform.k;
   labelSel.attr("display", function(d) {
-    if (!showLabels) return "none";
+    if (!showLabels || inHiddenCommunity(d)) return "none";
     if (d.kind === "File") return null;
     if (d.kind === "Class") return s > 0.5 ? null : "none";
     return s > 1.0 ? null : "none";
@@ -1919,9 +1932,10 @@ document.getElementById("btn-community").addEventListener("click", function() {
   var cl = document.getElementById("community-legend");
   if (communityColoringOn) cl.classList.add("visible");
   else cl.classList.remove("visible");
+  // The filter lives in that legend, so it goes and comes back with it.
+  applyCommunityFilter();
 });
 // Build community legend with toggle checkboxes
-var hiddenCommunities = new Set();
 (function buildCommunityLegend() {
   var cl = document.getElementById("community-legend");
   if (!communities.length) return;
@@ -1948,39 +1962,13 @@ var hiddenCommunities = new Set();
     }
   );
 })();
+// Labels go through updateLabelVisibility so the zoom rule still holds and
+// clearing the filter brings them back.
 function applyCommunityFilter() {
-  if (!communityColoringOn || !hiddenCommunities.size) {
-    nodeGroup.selectAll("g.node-g")
-      .attr("display", function(d) {
-        return d._hidden ? "none" : null;
-      });
-    updateLinks();
-    return;
-  }
   nodeGroup.selectAll("g.node-g")
-    .attr("display", function(d) {
-      if (d._hidden) return "none";
-      var cid = d.community_id;
-      if (cid == null) {
-        cid = nodeToCommunity.get(d.qualified_name);
-      }
-      if (cid != null && hiddenCommunities.has(cid)) {
-        return "none";
-      }
-      return null;
-    });
-  if (labelSel) labelSel
-    .attr("display", function(d) {
-      var cid = d.community_id;
-      if (cid == null) {
-        cid = nodeToCommunity.get(d.qualified_name);
-      }
-      if (cid != null && hiddenCommunities.has(cid)) {
-        return "none";
-      }
-      return null;
-    });
+    .attr("display", function(d) { return d._hidden || inHiddenCommunity(d) ? "none" : null; });
   updateLinks();
+  updateLabelVisibility();
 }
 var activeFlowQns = null;
 flowSelect.addEventListener("change", function() {
@@ -2015,16 +2003,17 @@ function clearFlowHighlight() {
 var detailPanel = document.getElementById("detail-panel");
 var dpContent = document.getElementById("dp-content");
 var detailTrigger = null;
+// The one way to close the panel: opening it hides the legend, so closing
+// it must bring the legend back, whatever closed it.
+function closeDetailPanel(returnFocus) {
+  detailPanel.classList.remove("visible");
+  document.getElementById("legend").style.display = "";
+  if (returnFocus && detailTrigger) detailTrigger.focus();
+}
 document.querySelector("#detail-panel .dp-close").addEventListener("click", function() {
-  detailPanel.classList.remove("visible");
-  document.getElementById("legend").style.display = "";
-  if (detailTrigger) detailTrigger.focus();
+  closeDetailPanel(true);
 });
-svg.on("click", function() {
-  detailPanel.classList.remove("visible");
-  document.getElementById("legend").style.display = "";
-  if (detailTrigger) detailTrigger.focus();
-});
+svg.on("click", function() { closeDetailPanel(true); });
 function showDetailPanel(d) {
   detailTrigger = document.activeElement;
   var callers = [], callees = [];
@@ -2181,8 +2170,7 @@ document.addEventListener("keydown", function(ev) {
   var inInput = tag === "input" || tag === "textarea" || tag === "select" || ev.target.isContentEditable;
   if (ev.key === "Escape") {
     if (detailPanel.classList.contains("visible")) {
-      detailPanel.classList.remove("visible");
-      if (detailTrigger) detailTrigger.focus();
+      closeDetailPanel(true);
     } else if (searchResults.style.display === "block") {
       searchResults.style.display = "none";
       searchInput.focus();

@@ -36,20 +36,17 @@ export function registerWalkthroughCommands(
                     return;
                 }
 
-                await vscode.window.withProgress(
-                    {
-                        location: vscode.ProgressLocation.Notification,
-                        title: 'Code Graph: Building graph...',
-                        cancellable: false,
-                    },
-                    async () => {
-                        await cli.buildGraph(workspaceFolder.uri.fsPath);
-                    },
-                );
-
-                vscode.window.showInformationMessage(
-                    'Code Graph: Build complete.',
-                );
+                // buildGraph shows its own progress notification.
+                const result = await cli.buildGraph(workspaceFolder.uri.fsPath);
+                if (result.success) {
+                    vscode.window.showInformationMessage(
+                        'Code Graph: Build complete.',
+                    );
+                } else {
+                    vscode.window.showErrorMessage(
+                        `Code Graph: Build failed. ${result.stderr}`,
+                    );
+                }
             },
         ),
     );

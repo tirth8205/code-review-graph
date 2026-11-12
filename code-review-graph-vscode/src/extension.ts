@@ -536,7 +536,7 @@ function registerCommands(
         vscode.window.showInformationMessage("Code Graph: Embeddings computed.");
       } else {
         const msg = result.stderr.includes("not installed")
-          ? "Install embeddings support: pip install code-review-graph[embeddings]"
+          ? "Install embeddings support: pip install \"code-review-graph[embeddings]\""
           : `Embedding failed: ${result.stderr}`;
         vscode.window.showErrorMessage(`Code Graph: ${msg}`);
       }
@@ -554,7 +554,16 @@ function registerCommands(
         return;
       }
 
-      vscode.window.showInformationMessage("Code Graph: Watch mode started.");
+      // Running the command again stops the watch.
+      if (cli.isWatching()) {
+        cli.stopWatch();
+        vscode.window.showInformationMessage("Code Graph: Watch mode stopped.");
+        return;
+      }
+
+      vscode.window.showInformationMessage(
+        "Code Graph: Watch mode started. Run Watch Mode again to stop it."
+      );
       const result = await cli.watchGraph(workspaceRoot);
       if (!result.success) {
         vscode.window.showErrorMessage(
@@ -878,6 +887,8 @@ export async function activate(
   context: vscode.ExtensionContext
 ): Promise<void> {
   const cli = new CliWrapper();
+  // Stop any watch still running when the extension shuts down.
+  context.subscriptions.push({ dispose: () => cli.stopWatch() });
   const installer = new Installer(cli);
 
   // Register walkthrough commands

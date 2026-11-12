@@ -753,7 +753,7 @@ async def embed_graph_tool(
 
     Afterwards semantic_search_nodes_tool ranks by vector similarity instead
     of keyword matching. Changing the model or provider re-embeds every node.
-    The local provider needs: pip install code-review-graph[embeddings].
+    The local provider needs: pip install "code-review-graph[embeddings]".
 
     Args:
         repo_root: Repository root path. Auto-detected if omitted.

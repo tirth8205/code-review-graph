@@ -143,8 +143,10 @@ jobs:
           actual_sha=$(gh api \
             "repos/${GITHUB_REPOSITORY}/pulls/${pr_number}" --jq '.head.sha')
           if [ "${actual_sha}" != "${HEAD_SHA}" ]; then
-            echo "PR head does not match the analyzed commit; refusing to comment." >&2
-            exit 1
+            # The PR moved while its analysis ran. Not commenting is right,
+            # and expected, so it is a notice and a green run, not a failure.
+            echo "::notice title=Comment skipped::PR head moved after the analysis (analysed ${HEAD_SHA}, head is now ${actual_sha}); refusing to comment on a commit that was not analysed."
+            exit 0
           fi
 
           # Unlike action.yml, this workflow's token is not configurable: it
