@@ -175,8 +175,10 @@ class TsconfigResolver:
         extends: Optional[str] = data.get("extends")
         if extends and isinstance(extends, str) and extends.startswith("."):
             parent_path = Path(os.path.abspath(tsconfig_path.parent / extends))
-            if not parent_path.suffix:
-                parent_path = parent_path.with_suffix(".json")
+            # Like tsc: the path as written first, then with ".json" appended,
+            # so a dotted stem such as "../tsconfig.base" is found too.
+            if not parent_path.is_file() and not str(parent_path).endswith(".json"):
+                parent_path = Path(f"{parent_path}.json")
             if parent_path.is_file():
                 parent_config = self._resolve_extends(parent_path, seen)
                 parent_opts = parent_config.get("compilerOptions", {})
