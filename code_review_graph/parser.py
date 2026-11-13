@@ -2998,6 +2998,12 @@ class _OuterBinding(str):
         binding.levels = levels
         return binding
 
+    def __reduce__(self) -> tuple[type["_OuterBinding"], tuple[str, int]]:
+        # Pickle rebuilds a str subclass through ``__new__(cls, str(self))``,
+        # which drops *levels*. Workers of the process-pool parser return this
+        # value, so it has to survive the round trip.
+        return (_OuterBinding, (str(self), self.levels))
+
 
 def _csharp_name(node) -> str:
     """Read a C# name without folding trivia into its identity."""
