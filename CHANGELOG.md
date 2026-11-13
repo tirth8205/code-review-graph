@@ -166,6 +166,10 @@
   its analysis; it leaves a notice naming both commits.
 - A call that could mean several functions now stores them in sorted order, so
   the same code gives the same graph whatever order its files are read in.
+- `build` and `update` no longer crash with `BrokenProcessPool` on a C# repository
+  where a nested class calls a member through a field of its outer class. The
+  parallel parser could not pass that call back to the main process. Setting
+  `CRG_PARSE_EXECUTOR=thread` is no longer needed as a workaround.
 
 ## [2.4.0] - 2026-11-10
 
