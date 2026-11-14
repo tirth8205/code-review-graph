@@ -777,7 +777,7 @@ def build_or_update_graph(
             if full_rebuild:
                 result = full_build(
                     root, store, recurse_submodules, enrich=enrich,
-                    follow_symlinks=follow_symlinks,
+                    follow_symlinks=follow_symlinks, classify_edges=store.checkout is None,
                 )
                 failed = [str(item.get("file", "?")) for item in result["errors"]]
                 summary = (
