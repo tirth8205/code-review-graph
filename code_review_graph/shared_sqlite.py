@@ -8,6 +8,7 @@ import re
 import sqlite3
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,20 @@ _TABLES = frozenset({
 _TOKEN = re.compile(
     r"--[^\n]*|/\*[\s\S]*?\*/|'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|\b\w+\b",
 )
+
+
+@lru_cache(maxsize=512)
+def _qualify_sql(prefix: str, sql: str) -> str:
+    """Reuse bounded SQL translations by checkout and statement."""
+    def qualify(match: re.Match[str]) -> str:
+        token = match[0]
+        if token in _TABLES or token.startswith("idx_"):
+            return prefix + token
+        if token in {"'nodes'", "'embeddings'"}:
+            return "'" + prefix + token[1:-1] + "'"
+        return token
+
+    return _TOKEN.sub(qualify, sql)
 
 
 def shared_database() -> Path | None:
@@ -56,15 +71,7 @@ class CheckoutConnection(sqlite3.Connection):
         if not self._prefix:
             return sql
 
-        def qualify(match: re.Match[str]) -> str:
-            token = match[0]
-            if token in _TABLES or token.startswith("idx_"):
-                return self.table(token)
-            if token in {"'nodes'", "'embeddings'"}:
-                return "'" + self.table(token[1:-1]) + "'"
-            return token
-
-        return _TOKEN.sub(qualify, sql)
+        return _qualify_sql(self._prefix, sql)
 
     @property
     def in_transaction(self) -> bool:

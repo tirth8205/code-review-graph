@@ -2991,6 +2991,8 @@ def full_build(
     recurse_submodules: bool | None = None,
     enrich: bool | None = None,
     follow_symlinks: bool | None = None,
+    *,
+    classify_edges: bool = True,
 ) -> dict:
     """Full rebuild of the entire graph.
 
@@ -3005,6 +3007,7 @@ def full_build(
         follow_symlinks: If True, also index files in symlinked folders,
             under paths inside the repository. When *None*, falls back to the
             ``CRG_FOLLOW_SYMLINKS`` env var. Default: off.
+        classify_edges: Disable only when the caller classifies after post-processing.
     """
     repo_root = _canonical_repo_root(repo_root)
     _assert_graph_matches_root(repo_root, store)
@@ -3123,7 +3126,8 @@ def full_build(
     scoped_stats = _run_scoped_resolver(store, repo_root)
     jedi_stats = _run_jedi_enrichment(store, repo_root, enrich=enrich)
     _relink_stored_edges(store, repo_root, followed_dirs)
-    _refresh_target_resolution(store)
+    if classify_edges:
+        _refresh_target_resolution(store)
     store.set_metadata(_DEPENDENTS_PENDING_KEY, "[]")
     # Storing is over: every file that could be parsed has its rows. Recorded
     # before the anchor and before post-processing, so a process killed from
