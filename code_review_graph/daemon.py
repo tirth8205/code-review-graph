@@ -295,6 +295,25 @@ def _watch_targets(
     return targets
 
 
+def _has_committed_graph(root: Path) -> bool:
+    """Check the selected checkout, not merely the shared file's existence."""
+    from .graph import GraphStore
+    from .incremental import get_db_path
+    from .shared_sqlite import UnbuiltCheckoutError, shared_database
+    from .tools._common import _graph_is_built
+
+    path = get_db_path(root, read_only=True)
+    if not path.is_file():
+        return False
+    if path != shared_database():
+        return True
+    try:
+        with GraphStore(path, checkout=root, read_only=True) as store:
+            return _graph_is_built(store)
+    except UnbuiltCheckoutError:
+        return False
+
+
 def watcher_env(repo: WatchRepo) -> dict[str, str]:
     """Build the child environment honoring per-repo overrides."""
     env = dict(os.environ)
@@ -1344,7 +1363,6 @@ class WatchDaemon:
         logger.info("Starting daemon '%s'", self._config.session_name)
 
         # Auto-register repos in the central registry
-        from .incremental import get_db_path
         from .registry import Registry
 
         registry = Registry()
@@ -1354,8 +1372,7 @@ class WatchDaemon:
 
         # Build initial graph for repos that lack a database
         for repo in targets.values():
-            db_path = get_db_path(Path(repo.path), read_only=True)
-            if not db_path.exists() and self._existing_watcher(repo) is None:
+            if not _has_committed_graph(Path(repo.path)) and self._existing_watcher(repo) is None:
                 self._initial_build(repo)
 
         # Spawn a watcher child for every repo
@@ -1430,7 +1447,6 @@ class WatchDaemon:
         # Register new/updated repos and build graphs *before* acquiring
         # the lock so that long-running builds don't block health checks.
         if to_add or to_update:
-            from .incremental import get_db_path
             from .registry import Registry
 
             registry = Registry()
@@ -1439,8 +1455,8 @@ class WatchDaemon:
             for alias in to_add | to_update:
                 repo = desired[alias]
                 registry.register(repo.path, alias=repo.alias, data_dir=repo.data_dir or None)
-                db_path = get_db_path(Path(repo.path), read_only=True)
-                if not db_path.exists() and self._existing_watcher(repo) is None:
+                if (not _has_committed_graph(Path(repo.path))
+                        and self._existing_watcher(repo) is None):
                     repos_needing_build.append(repo)
 
             for repo in repos_needing_build:
