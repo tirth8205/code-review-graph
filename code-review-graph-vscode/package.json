@@ -245,7 +245,7 @@
     "typescript": "^5.3.3"
   },
   "dependencies": {
-    "better-sqlite3": "^12.4.1",
+    "better-sqlite3": "12.11.1",
     "d3": "^7.9.0"
   }
 }
