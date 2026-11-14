@@ -54,6 +54,21 @@ PLACEHOLDERS = {
         "cat | { if command -v code-review-graph >/dev/null 2>&1; "
         "then code-review-graph hook-update; else cat >/dev/null; fi; }"
     ),
+    # v2.4.0-dc.1 moved the commands into helpers that receive ``program``.
+    "_claude_update_hook_command(program)": skills._claude_update_hook_command(
+        skills._hook_program()
+    ),
+    "_claude_session_hook_command(program)": skills._claude_session_hook_command(
+        skills._hook_program()
+    ),
+    "_codex_hook_command('hook-status', program)": skills._codex_hook_command(
+        "hook-status", skills._hook_program()
+    ),
+    "_codex_hook_command(_CODEX_UPDATE_SUBCOMMAND, program)": (
+        skills._codex_hook_command(
+            skills._CODEX_UPDATE_SUBCOMMAND, skills._hook_program()
+        )
+    ),
 }
 
 # Frozen from the tags below, so a checkout without tags still checks
