@@ -3494,9 +3494,10 @@ def _dispatch() -> None:
                     print(f"  [{kind}] {name}  ({file_path}:{line})")
 
         elif args.command == "status":
+            from .shared_sqlite import shared_database
             from .tools._common import _graph_is_built
 
-            if store.checkout is not None and not _graph_is_built(store):
+            if db_path == shared_database() and not _graph_is_built(store):
                 print("No committed graph for this checkout. Run `code-review-graph build` first.",
                       file=sys.stderr)
                 raise SystemExit(1)
