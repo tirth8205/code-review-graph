@@ -79,6 +79,35 @@ def test_daemon_reuses_external_graph(tmp_path, monkeypatch, operation, placemen
 
 
 @pytest.mark.parametrize("operation", ["start", "reconcile"])
+def test_shared_admission_builds_only_the_unindexed_checkout(tmp_path, monkeypatch, operation):
+    db = tmp_path / "shared.db"
+    monkeypatch.setenv("CRG_SHARED_DB", str(db))
+    built, fresh = (tmp_path / name for name in ("built", "fresh"))
+    for path in (built, fresh):
+        path.mkdir()
+        (path / ".git").mkdir()
+    with GraphStore(db, checkout=built) as store:
+        store.set_metadata("last_build_type", "full")
+        store.commit()
+    # A schema left behind by an interrupted first writer is also unbuilt.
+    with GraphStore(db, checkout=fresh):
+        pass
+    repos = [WatchRepo(path=str(path), alias=path.name) for path in (built, fresh)]
+    daemon = WatchDaemon(DaemonConfig(repos=repos), config_path=tmp_path / "watch.toml")
+    try:
+        with (
+            patch.object(daemon, "_initial_build") as build,
+            patch.object(daemon, "_start_watcher"),
+            patch.object(daemon, "start_config_watcher"),
+            patch.object(daemon, "start_health_checker"),
+        ):
+            getattr(daemon, operation)()
+            build.assert_called_once_with(repos[1])
+    finally:
+        daemon.stop()
+
+
+@pytest.mark.parametrize("operation", ["start", "reconcile"])
 def test_daemon_does_not_build_while_another_watcher_initializes(tmp_path, operation):
     (tmp_path / ".git").mkdir()
     repo = WatchRepo(path=str(tmp_path), alias="repo")
