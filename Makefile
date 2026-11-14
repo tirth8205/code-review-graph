@@ -125,3 +125,7 @@ test-vscode:
 	npm --prefix code-review-graph-vscode run compile
 	npm --prefix code-review-graph-vscode run lint
 	uv run --locked --extra dev env CRG_TEST_CLI="$(CURDIR)/.venv/bin/code-review-graph" npm --prefix code-review-graph-vscode test
+
+.PHONY: test-upgrade-path
+test-upgrade-path:
+	CRG_UPGRADE_TEST=1 uv run --locked --extra dev pytest -m upgrade -q -rsxX

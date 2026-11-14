@@ -195,7 +195,7 @@ jobs:
       - name: Run upgrade-path tests
         env:
           CRG_UPGRADE_TEST: "1"
-        run: pytest -m upgrade -q -rxX
+        run: pytest -m upgrade -q -rsxX
 
   minimum-dependencies:
     name: Minimum declared dependencies (${{ matrix.python-version }})
