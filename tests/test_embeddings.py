@@ -31,7 +31,7 @@ from code_review_graph.embeddings import (
     clear_model_cache,
     get_provider,
 )
-from code_review_graph.graph import GraphNode
+from code_review_graph.graph import GraphNode, GraphStore
 
 
 class TestVectorEncoding:
@@ -144,6 +144,35 @@ class TestEmbeddingStore:
             file_hash=None,
             extra={},
         )
+
+    def test_shared_checkout_vector_reads_and_deletes_are_isolated(self, tmp_path, monkeypatch):
+        db = tmp_path / "shared.db"
+        monkeypatch.setenv("CRG_SHARED_DB", str(db))
+        monkeypatch.setenv("CRG_VECTOR_CACHE", "1")
+        provider = MagicMock()
+        provider.name = "test:shared"
+        provider.embed.return_value = [[1.0, 0.0]]
+        provider.embed_query.return_value = [1.0, 0.0]
+        roots = [tmp_path / "left", tmp_path / "right"]
+        keys = [self._make_node(i).qualified_name for i in range(2)]
+        with patch("code_review_graph.embeddings.get_provider", return_value=provider):
+            for i, root in enumerate(roots):
+                root.mkdir()
+                with GraphStore(db, checkout=root) as graph:
+                    with EmbeddingStore(db, graph_store=graph) as vectors:
+                        assert vectors.embed_nodes([self._make_node(i)]) == 1
+            for root, key in zip(roots, keys):
+                with GraphStore(db, checkout=root, read_only=True) as graph:
+                    with EmbeddingStore(db, graph_store=graph) as vectors:
+                        assert vectors.search("symbol") == [(key, 1.0)]
+            with GraphStore(db, checkout=roots[0]) as graph:
+                with EmbeddingStore(db, graph_store=graph) as vectors:
+                    vectors.remove_node(keys[0])
+                    assert vectors.count() == 0
+            with GraphStore(db, checkout=roots[1], read_only=True) as graph:
+                with EmbeddingStore(db, graph_store=graph) as vectors:
+                    assert vectors.search("symbol") == [(keys[1], 1.0)]
+        assert list(tmp_path.glob("*.db")) == [db]
 
     def test_store_initializes(self, tmp_path):
         db = tmp_path / "embeddings.db"
