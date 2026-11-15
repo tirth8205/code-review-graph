@@ -137,19 +137,7 @@ def _build(root: Path, db_dir: Path) -> Iterator[BuiltGraph]:
 
 @pytest.fixture(scope="module")
 def _e2e_env(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
-    """Isolate per-user state and pin the parse executor for the whole module.
-
-    ``conftest.isolated_crg_home`` is function-scoped, so a module-scoped
-    build can be set up before it runs; redirect ``CRG_HOME`` here too rather
-    than depend on fixture ordering.
-
-    ``CRG_PARSE_EXECUTOR=thread`` is the documented override for hosts where
-    ``ProcessPoolExecutor`` workers are a problem (the same knob
-    ``test_identity_retry.py`` uses). Under pytest the process pool re-imports
-    the session's ``__main__`` in every spawned worker, which is both slow and
-    platform-dependent; threads keep the parallel path under test and make the
-    run deterministic.
-    """
+    """Isolate module builds before the function-scoped fixture runs."""
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setenv("CRG_HOME", str(tmp_path_factory.mktemp("e2e-crg-home")))
     monkeypatch.setenv("CRG_PARSE_EXECUTOR", "thread")
@@ -161,11 +149,14 @@ def _e2e_env(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
 
 @pytest.fixture(scope="module")
 def repo_graph(
-    _e2e_env: None,
+    fixtures_graph: BuiltGraph,
     tmp_path_factory: pytest.TempPathFactory,
 ) -> Iterator[BuiltGraph]:
-    """This repository, built once through the public pipeline."""
-    yield from _build(REPO_ROOT, tmp_path_factory.mktemp("e2e-repo-graph"))
+    """Scan this repository once, after the language corpus exercises threads."""
+    # CPU-bound parser threads contend under coverage on this larger corpus.
+    with pytest.MonkeyPatch.context() as env:
+        env.setenv("CRG_SERIAL_PARSE", "1")
+        yield from _build(REPO_ROOT, tmp_path_factory.mktemp("e2e-repo-graph"))
 
 
 @pytest.fixture(scope="module")

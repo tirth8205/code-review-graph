@@ -142,13 +142,14 @@ def graph_repo(tmp_path_factory) -> dict[str, Any]:
     db_path = root / ".code-review-graph" / "graph.db"
     # Serial parsing keeps the build deterministic and avoids spawning a
     # ProcessPoolExecutor inside the test session.
-    os.environ["CRG_SERIAL_PARSE"] = "1"
-    with GraphStore(db_path) as store:
+    with pytest.MonkeyPatch.context() as env, GraphStore(db_path) as store:
+        env.setenv("CRG_SERIAL_PARSE", "1")
         full_build(root, store)
 
     # Populate communities and flows so the tools that read them have data.
     asyncio.run(crg_main.run_postprocess_tool(repo_root=str(root)))
-    asyncio.run(crg_main.generate_wiki_tool(repo_root=str(root)))
+    wiki = asyncio.run(crg_main.generate_wiki_tool(repo_root=str(root)))
+    assert wiki["status"] == "ok", wiki
 
     return {
         "root": str(root),

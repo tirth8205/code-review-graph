@@ -21,6 +21,10 @@
 
 ### Changed
 
+- Creating a graph database now initializes its schema in one transaction,
+  reducing disk synchronization while preserving the same schema version.
+- Indexing deeply nested HTML no longer looks up the parent from the tree
+  root for every opening tag.
 - The reference that `get_docs_section_tool` serves no longer sets a budget of
   800 tokens per task, and says that `detail_level="minimal"` drops source, so
   a search with `include_source=True` stays at standard. It now also covers
@@ -35,6 +39,8 @@
 
 ### Fixed
 
+- OpenCode version detection now keeps the probe's logs and caches out of
+  the user profile, so `install --dry-run` leaves it unchanged.
 - The MCP entry and every hook `install` writes now run the copy of
   code-review-graph that ran `install`. The MCP entry used `uvx` whenever it
   was on PATH, and hooks ran the first copy on PATH, so an older copy could

@@ -5019,22 +5019,20 @@ class CodeParser:
         handlers: list[tuple[str, str, int]] = []
 
         # Iterative: page nesting comes from the input, so it has no safe bound.
-        stack = [tree.root_node]
+        # Carry the parent error state instead of walking back up deep trees.
+        stack = [(tree.root_node, False)]
         while stack:
-            node = stack.pop()
-            if node.type == "script_element":
+            node, in_error = stack.pop()
+            kind = node.type
+            if kind == "script_element":
                 scripts.append(node)
                 continue
-            if node.type == "style_element":
+            if kind == "style_element":
                 continue
             # An element never closed has no ``element`` node: the grammar
             # leaves its opening tag directly under the error.
-            if node.type == "element" or (
-                node.type in ("start_tag", "self_closing_tag")
-                and node.parent is not None
-                and node.parent.type == "ERROR"
-            ):
-                start_tag = node if node.type != "element" else _html_start_tag(node)
+            if kind == "element" or (in_error and kind in ("start_tag", "self_closing_tag")):
+                start_tag = _html_start_tag(node) if kind == "element" else node
                 if start_tag is not None:
                     attributes = _html_attributes(start_tag)
                     line = start_tag.start_point[0] + 1
@@ -5045,7 +5043,7 @@ class CodeParser:
                         node, _html_tag_name(start_tag), attributes, file_path_str,
                         test_file, sections, file_node,
                     )
-            stack.extend(reversed(node.children))
+            stack.extend((child, kind == "ERROR") for child in reversed(node.children))
 
         for section in sections.values():
             all_nodes.append(section)

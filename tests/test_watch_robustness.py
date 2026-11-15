@@ -1504,6 +1504,18 @@ class TestRealObserver:
             time.sleep(interval)
         return False
 
+    def _wait_until_watching(self, repo: Path) -> bool:
+        def ready() -> bool:
+            health = read_watch_health(repo)
+            return (
+                health is not None
+                and health.get("phase") == "watching"
+                and not health["stalled"]
+            )
+
+        # The initial-build heartbeat is published before watches are registered.
+        return self._wait_for(ready)
+
     def _polling_watch_survives_failed_replan(
         self,
         tmp_path,
@@ -1642,9 +1654,7 @@ class TestRealObserver:
             thread = threading.Thread(target=run_watch, name="watch-under-test", daemon=True)
             thread.start()
             try:
-                assert self._wait_for(
-                    lambda: watch_health_path(repo).exists()
-                ), "the watch loop never started"
+                assert self._wait_until_watching(repo), "the watch loop never started"
 
                 # The whole point: this directory did not exist when the
                 # watches were planned.
@@ -1699,7 +1709,7 @@ class TestRealObserver:
             thread = threading.Thread(target=run_watch, name="watch-under-test", daemon=True)
             thread.start()
             try:
-                assert self._wait_for(lambda: watch_health_path(repo).exists())
+                assert self._wait_until_watching(repo)
 
                 # Delete and recreate back to back, well inside one tick.
                 shutil.rmtree(repo / "src")
@@ -1744,7 +1754,7 @@ class TestRealObserver:
             thread = threading.Thread(target=run_watch, name="watch-under-test", daemon=True)
             thread.start()
             try:
-                assert self._wait_for(lambda: watch_health_path(repo).exists())
+                assert self._wait_until_watching(repo)
                 shutil.rmtree(repo / "lib")
                 time.sleep(1.0)  # several ticks
                 still_running = thread.is_alive()
