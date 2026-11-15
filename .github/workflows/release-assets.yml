@@ -57,6 +57,7 @@ jobs:
 
       - name: Checksums
         run: |
+          git rev-parse HEAD > dist/RELEASE-COMMIT.txt
           cd dist
           sha256sum -- * > SHA256SUMS.txt
 
@@ -66,5 +67,13 @@ jobs:
           TAG: ${{ github.ref_name }}
           GH_REPO: ${{ github.repository }}
         run: |
+          set -euo pipefail
+          expected=$(cat dist/RELEASE-COMMIT.txt)
+          remote_commit() {
+            git ls-remote --exit-code origin "refs/tags/$TAG" "refs/tags/$TAG^{}" |
+              awk 'NR == 1 { direct = $1 } $2 ~ /\^\{\}$/ { peeled = $1 } END { print peeled ? peeled : direct }'
+          }
+          test "$(remote_commit)" = "$expected"
           gh release create "$TAG" dist/* --repo "$GH_REPO" --verify-tag \
             --draft --notes-from-tag
+          test "$(remote_commit)" = "$expected"
