@@ -32,9 +32,20 @@ health reporting do not change the refresh profile for a shared file.
 A verified CLI, MCP or startup watcher refresh also interns its input manifest
 digest and records it in its checkout's completion in the same transaction.
 The manifest uses relative paths, SHA-256 of the bytes and the indexing
-profile; it excludes file timestamps and Git anchors. It identifies matching
-inputs for future graph-generation reuse. Resolver dependencies and the
-materialized graph still belong to the checkout namespace.
+profile; it excludes file timestamps and Git anchors. Equal inputs alone do
+not authorize graph reuse. Verified refreshes also intern normalized node and
+edge payloads by SHA-256 and bind their immutable generation to the checkout
+and Git ref in the same transaction. Equal materialized structural graphs
+share their payloads and membership. The watcher publishes structural changes
+without needing to rescan source files for the input manifest.
+
+`query --generation-ref refs/heads/main` and the corresponding MCP parameter
+read the published structural generation for the requested checkout. A
+structural query also selects the current ref's generation if the native
+tables were last built on a different ref. The
+query assigns local row IDs; qualified names are the stable symbols. The
+current native graph and its derived FTS, flow, community and vector views
+still use the checkout namespace.
 
 Shared builds reuse Python AST evidence by source SHA-256 and extractor
 profile. This evidence describes local function bindings and unreachable

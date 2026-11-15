@@ -76,6 +76,10 @@ class CheckoutConnection(sqlite3.Connection):
         return _qualify_sql(self._prefix, sql)
 
     @property
+    def refresh_active(self) -> bool:
+        return self._atomic
+
+    @property
     def in_transaction(self) -> bool:
         return self._step if self._atomic else super().in_transaction
 

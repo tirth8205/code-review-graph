@@ -586,6 +586,7 @@ async def query_graph_tool(
     max_results: int = 100,
     resolution: str = "all",
     to: Optional[str] = None,
+    generation_ref: Optional[str] = None,
 ) -> dict:
     """Run a predefined graph query to explore code relationships.
 
@@ -632,6 +633,7 @@ async def query_graph_tool(
         resolution: "all" (default), "direct" for only calls bound to an indexed
             node, or "unresolved" for only the bare-name matches.
         to: For path_to, the node name, qualified name, or file path to reach.
+        generation_ref: Published structural snapshot (e.g. refs/heads/main).
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -639,7 +641,7 @@ async def query_graph_tool(
         lambda: query_graph(
             pattern=pattern, target=target, repo_root=root,
             detail_level=detail_level, max_results=max_results,
-            resolution=resolution, to=to,
+            resolution=resolution, to=to, generation_ref=generation_ref,
         ),
         root,
     )

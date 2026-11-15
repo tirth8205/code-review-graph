@@ -1177,6 +1177,7 @@ def _run_graph_tool_command(args, repo_root: Path) -> None:
             target=args.target,
             repo_root=root,
             **({"to": args.to} if args.to else {}),
+            **({"generation_ref": args.generation_ref} if args.generation_ref else {}),
         )
     elif args.command == "impact":
         result = tools.get_impact_radius(
@@ -2502,6 +2503,9 @@ def build_parser() -> argparse.ArgumentParser:
     query_cmd.add_argument("target", help="Node name, qualified name, or file path")
     query_cmd.add_argument(
         "--to", default=None, help="For path_to: the node or file to reach",
+    )
+    query_cmd.add_argument(
+        "--generation-ref", help="Read a published structural snapshot (e.g. refs/heads/main)",
     )
     query_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
 

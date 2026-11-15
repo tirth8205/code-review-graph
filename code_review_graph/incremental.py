@@ -5110,7 +5110,8 @@ def _create_watch_handler(
                 self.last_event_at = time.time()
                 self.events_seen += len(events)
                 try:
-                    if store.checkout is not None and _git_branch_info(repo_root) != (
+                    anchor = _git_branch_info(repo_root) if store.checkout is not None else None
+                    if anchor is not None and anchor != (
                         store.get_metadata("git_branch") or "",
                         store.get_metadata("git_head_sha") or "",
                     ):
@@ -5157,6 +5158,12 @@ def _create_watch_handler(
                                 if store.checkout is not None:
                                     store.set_metadata("postprocess_level", "full")
                                     store.set_metadata(BUILD_STATE_KEY, BUILD_COMPLETE)
+                            if anchor is not None:
+                                if _git_branch_info(repo_root) != anchor:
+                                    raise RuntimeError(
+                                        "Git reference changed during watch publication",
+                                    )
+                                store.publish_generation(*anchor)
                 except BaseException as exc:
                     self.failure = exc
                 finally:

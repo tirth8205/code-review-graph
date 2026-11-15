@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 from collections import defaultdict, deque
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
@@ -1025,6 +1026,7 @@ def query_graph(
     max_results: int = 100,
     resolution: str = RESOLUTION_ALL,
     to: str | None = None,
+    generation_ref: str | None = None,
 ) -> dict[str, Any]:
     """Run a predefined graph query.
 
@@ -1045,6 +1047,8 @@ def query_graph(
             "unresolved" keeps only the bare-name matches.
         to: For path_to, the node, qualified name or file to reach. A route is one
             answer, so max_results and the minimal cap do not cut it.
+
+        generation_ref: A published structural snapshot for this checkout and Git ref.
 
     Returns:
         Matching nodes and their aligned edges, with total and omitted counts.
@@ -1071,7 +1075,14 @@ def query_graph(
     if not_built is not None:
         return not_built
     assert store is not None and root is not None
+    stack = ExitStack()
+    stack.callback(store.close)
     try:
+        if store.checkout is not None:
+            stack.enter_context(store.read_snapshot(strict=True))
+        ref = generation_ref if generation_ref is not None else store.historical_ref_for_checkout()
+        if ref is not None:
+            store = stack.enter_context(store.open_generation(ref))
         minimal = detail_level == "minimal"
         if pattern == "path_to" and to:
             return _query_route(store, root, target, to, minimal)
@@ -1799,7 +1810,7 @@ def query_graph(
             response["confidence"] = confidence
         return response
     finally:
-        store.close()
+        stack.close()
 
 
 # ---------------------------------------------------------------------------

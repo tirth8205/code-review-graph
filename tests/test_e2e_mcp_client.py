@@ -469,6 +469,50 @@ def test_shared_cli_interns_equivalent_input_manifests_across_worktrees(tmp_path
         )
     with sqlite3.connect(database) as db:
         assert db.execute("SELECT COUNT(*) FROM crg_graph_inputs").fetchone() == (1,)
+        assert db.execute("SELECT COUNT(DISTINCT generation_id) "
+                          "FROM crg_generation_bindings").fetchone() == (1,)
+
+    def query(root, *args, environment=env, check=True):
+        completed = subprocess.run(
+            [sys.executable, "-m", "code_review_graph", "query", *args, "--repo", str(root)],
+            env=environment, capture_output=True, check=check, text=True, timeout=30,
+        )
+        if not check:
+            return completed
+        result = json.loads(completed.stdout)
+        # Local row IDs are not identities across materializations. Compare
+        # every returned symbol and relation by its qualified identity.
+        for key in ("results", "edges"):
+            for row in result[key]:
+                row.pop("id", None)
+            result[key].sort(key=lambda row: json.dumps(row, sort_keys=True))
+        return result
+
+    checks = (("file_summary", "pkg/service.py"), ("imports_of", "pkg/service.py"),
+              ("callers_of", "compute_total"))
+    before = {args: query(repo, *args) for args in checks}
+    for args, expected in before.items():
+        assert query(repo, *args, "--generation-ref", "refs/heads/main") == expected
+
+    _git(repo, "checkout", "-qb", "feature")
+    (repo / "pkg" / "service.py").write_text("def only_on_feature(): return 3\n", encoding="utf-8")
+    _git(repo, "add", "pkg/service.py")
+    _git(repo, "commit", "-qm", "Divergent feature")
+    build = [sys.executable, "-m", "code_review_graph", "build", "--repo", str(repo)]
+    subprocess.run(build, env=env, check=True, capture_output=True, timeout=30)
+    clean = _server_env(tmp_path / "clean-home")
+    clean.pop("CRG_SHARED_DB", None)
+    subprocess.run(build, env=clean, check=True, capture_output=True, timeout=30)
+    for args in checks:
+        assert query(repo, *args, "--generation-ref", "refs/heads/feature") == query(
+            repo, *args, environment=clean,
+        )
+    _git(repo, "checkout", "-q", "main")
+    for args, expected in before.items():
+        assert query(repo, *args, "--generation-ref", "refs/heads/main") == expected
+        assert query(repo, *args) == expected
+    missing = query(sibling, *checks[0], "--generation-ref", "refs/heads/feature", check=False)
+    assert missing.returncode != 0 and "No published graph generation" in missing.stderr
 
 
 @pytest.mark.e2e
@@ -500,6 +544,16 @@ def test_shared_cli_reuses_watcher_reconciliation(tmp_path):
                 cli("query", "file_summary", relative), env=env, text=True, timeout=30,
             ))
             assert "reconciled_by_watch" in {row["name"] for row in query["results"]}
+            (repo / relative).write_text("def published_by_event(): return 2\n", encoding="utf-8")
+            while True:
+                generation = json.loads(subprocess.check_output(
+                    cli("query", "file_summary", relative, "--generation-ref", "refs/heads/main"),
+                    env=env, text=True, timeout=30,
+                ))
+                if "published_by_event" in {row["name"] for row in generation["results"]}:
+                    break
+                assert watcher.poll() is None and time.monotonic() < deadline
+                time.sleep(0.1)
         finally:
             watcher.terminate()
             watcher.wait(timeout=15)
@@ -526,12 +580,17 @@ def test_shared_cli_crash_rolls_back_written_rows(tmp_path):
         graph = json.loads(run("query", "file_summary", "pkg/view.py"))
         return {node["name"] for node in graph["results"] if node["kind"] == "Function"}
 
-    def input_manifests():
+    def publication():
         with sqlite3.connect(env["CRG_SHARED_DB"]) as db:
-            return {row[0] for row in db.execute("SELECT digest FROM crg_graph_inputs")}
+            manifests = {row[0] for row in db.execute("SELECT digest FROM crg_graph_inputs")}
+            bindings = db.execute(
+                "SELECT ref, generation_id FROM crg_generation_bindings",
+            ).fetchall()
+            generations = db.execute("SELECT COUNT(*) FROM crg_graph_generations").fetchone()[0]
+            return manifests, bindings, generations
 
-    previous = input_manifests()
-    assert len(previous) == 1
+    previous = publication()
+    assert len(previous[0]) == previous[2] == 1
     entered = tmp_path / "entered"
     producer = """
 import sys, time
@@ -561,16 +620,18 @@ main()
                 time.sleep(.02)
             assert entered.exists()
             assert symbols() == {"previous_symbol"}
-            assert input_manifests() == previous
+            assert publication() == previous
         finally:
             if child.poll() is None:
                 child.kill()
             child.wait(timeout=10)
     assert symbols() == {"previous_symbol"}
-    assert input_manifests() == previous
+    assert publication() == previous
     run("update")
     assert symbols() == {"replacement_symbol"}
-    assert len(input_manifests() - previous) == 1
+    current = publication()
+    assert len(current[0] - previous[0]) == 1
+    assert current[1] != previous[1] and current[2] == 2
     assert list(tmp_path.rglob("*.db")) == [tmp_path / "shared.db"]
 
 
@@ -692,7 +753,7 @@ main()
 async def test_mcp_shared_sqlite_isolates_sibling_worktrees(tmp_path, monkeypatch):
     repo = _make_fixture_repo(tmp_path)
     sibling = tmp_path / "sibling"
-    _git(repo, "worktree", "add", "-q", "--detach", str(sibling))
+    _git(repo, "worktree", "add", "-q", "-b", "sibling", str(sibling))
     db = tmp_path / "shared.db"
     relative_path = "pkg/view.py"
     for root, name in ((repo, "left_symbol"), (sibling, "right_symbol")):
@@ -719,6 +780,16 @@ async def test_mcp_shared_sqlite_isolates_sibling_worktrees(tmp_path, monkeypatc
                         if row["kind"] == "Function"] == [name]
                 assert all(_posix(row["file_path"]) == (root / relative_path).as_posix()
                            for row in result["results"])
+                ref = "refs/heads/main" if root == repo else "refs/heads/sibling"
+                historical = _payload(await _call(session, "query_graph_tool", {
+                    "pattern": "file_summary", "target": relative_path, "repo_root": str(root),
+                    "generation_ref": ref,
+                }))
+                assert historical["status"] == "ok", historical
+                fields = ("qualified_name", "file_path", "line_start", "line_end")
+                assert {tuple(row[key] for key in fields) for row in historical["results"]} == {
+                    tuple(row[key] for key in fields) for row in result["results"]
+                }
                 search = _payload(await _call(session, "semantic_search_nodes_tool", {
                     "query": name, "repo_root": str(root),
                 }))

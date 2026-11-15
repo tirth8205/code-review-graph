@@ -394,6 +394,12 @@ shared setting with a per-command `--data-dir`. Launch the VS Code extension
 host with the same setting to read the selected workspace checkout from the
 shared database.
 
+Use `code-review-graph query file_summary path.py --generation-ref refs/heads/main`
+to read the last published structural view of that ref for the selected
+checkout. The MCP `query_graph_tool` accepts the same `generation_ref`. This
+view includes symbols and relations; search, flows and embeddings continue
+to use the active checkout index.
+
 The watcher uses the same completion record as CLI and MCP refreshes.
 A checkout, input snapshot and indexing profile must match before a
 completed refresh can be reused. The kernel releases the write lock on

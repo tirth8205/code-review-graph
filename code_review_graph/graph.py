@@ -1787,7 +1787,7 @@ class GraphStore:
         return changed
 
     @contextmanager
-    def _read_transaction(self) -> Iterator[None]:
+    def read_snapshot(self, *, strict: bool = False) -> Iterator[None]:
         """Hold one snapshot for the duration of a multi-statement read.
 
         The connection runs with ``isolation_level=None``, so without this
@@ -1808,6 +1808,8 @@ class GraphStore:
         try:
             self._conn.execute("BEGIN DEFERRED")
         except sqlite3.OperationalError as exc:  # pragma: no cover - defensive
+            if strict:
+                raise
             logger.debug("Could not open a read transaction: %s", exc)
             yield
             return
@@ -2143,6 +2145,59 @@ class GraphStore:
             line=edge.line,
             extra=edge.extra,
         )
+
+    def publish_generation(self, branch: str, head: str) -> str:
+        """Publish immutable node and edge content inside a shared refresh."""
+        from .shared_generations import git_ref, publish
+
+        if self.checkout is None or not isinstance(self._conn, CheckoutConnection):
+            raise GraphStoreError("Generation publication requires a shared checkout")
+        if not self._conn.refresh_active:
+            raise GraphStoreError("Generation publication requires an active refresh")
+        return publish(
+            self._conn, self.checkout, git_ref(branch, head), head,
+            self.get_metadata("last_updated") or "",
+        )
+
+    def historical_ref_for_checkout(self) -> str | None:
+        """Return the live Git ref when the native view was built on another ref."""
+        if self.checkout is None:
+            return None
+        from .incremental import _git_branch_info
+        from .shared_generations import git_ref
+
+        requested = git_ref(*_git_branch_info(self.checkout))
+        stored = git_ref(
+            self.get_metadata("git_branch") or "", self.get_metadata("git_head_sha") or "",
+        )
+        return requested if requested != stored else None
+
+    @contextmanager
+    def open_generation(self, ref: str) -> Iterator[GraphStore]:
+        """Open the published nodes and edges for a ref as a native query store.
+
+        IDs are local to this materialization. Search, flow and embedding
+        projections are not included in this structural snapshot.
+        """
+        from .shared_generations import read
+
+        if self.checkout is None:
+            raise GraphStoreError("Generation lookup requires a shared checkout")
+        head, built_at, rows = read(self._conn, self.checkout, ref)
+        with GraphStore(":memory:", read_only=False) as snapshot:
+            snapshot.set_metadata("repo_root", str(self.checkout))
+            snapshot.set_metadata("git_head_sha", head)
+            snapshot.set_metadata("last_updated", built_at)
+            snapshot._conn.execute("BEGIN")
+            for kind, row in rows:
+                fields = ", ".join(row)
+                marks = ", ".join("?" for _ in row)
+                snapshot._conn.execute(
+                    f"INSERT INTO {kind} ({fields}, updated_at) VALUES ({marks}, 0)",
+                    tuple(row.values()),
+                )
+            snapshot._conn.commit()
+            yield snapshot
 
     def record_graph_inputs(self, digest: str, paths: int) -> None:
         """Intern a verified input manifest in the shared refresh transaction."""
@@ -5117,7 +5172,7 @@ class GraphStore:
         breakdowns still sum to the totals when a watcher commits partway
         through (issue: `status` printing numbers that do not add up).
         """
-        with self._read_transaction():
+        with self.read_snapshot():
             return self._get_stats_locked()
 
     def _get_stats_locked(self) -> GraphStats:

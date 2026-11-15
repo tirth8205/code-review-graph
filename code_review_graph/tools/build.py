@@ -70,6 +70,7 @@ class _RefreshInputs(NamedTuple):
     request: str
     manifest_sha256: str
     paths: int
+    anchor: tuple[str, str]
 
 
 def _publish_refresh(
@@ -78,6 +79,7 @@ def _publish_refresh(
     if store.checkout is not None:
         store.record_graph_inputs(inputs.manifest_sha256, inputs.paths)
         result["input_manifest_sha256"] = inputs.manifest_sha256
+        result["generation_sha256"] = store.publish_generation(*inputs.anchor)
     store.set_metadata(REFRESH_REQUEST_KEY, json.dumps({
         "request": inputs.request, "result": result, "finished": time.time_ns(),
     }))
@@ -128,7 +130,8 @@ def _refresh_request(
         return path, state.st_mtime_ns, state.st_ctime_ns, digest.hexdigest()
 
     stamps = [stamp(path) for path in sorted(paths)]
-    payload = (_git_branch_info(root), profile, stamps)
+    anchor = _git_branch_info(root)
+    payload = (anchor, profile, stamps)
     # Keep the input key independent of checkout/branch and file timestamps.
     # The invocation's full/incremental and base options govern cooperation
     # but are not inputs to the resulting index. Resolver dependencies are
@@ -139,6 +142,7 @@ def _refresh_request(
         hashlib.sha256(json.dumps(payload).encode()).hexdigest(),
         hashlib.sha256(json.dumps(manifest).encode()).hexdigest(),
         len(stamps),
+        anchor,
     )
 
 
