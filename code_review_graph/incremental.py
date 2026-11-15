@@ -26,7 +26,11 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Callable, Iterable, NamedTuple, Optional
 
 from . import install_plan
-from .build_state import advance_to_postprocess_pending
+from .build_state import (
+    BUILD_COMPLETE,
+    BUILD_STATE_KEY,
+    advance_to_postprocess_pending,
+)
 from .constants import GIT_TIMEOUT as _GIT_TIMEOUT
 from .constants import (
     discovery_timeout,
@@ -5009,44 +5013,53 @@ def _create_watch_handler(
                 self.last_event_at = time.time()
                 self.events_seen += len(events)
                 try:
-                    if shared_database() is not None:
+                    if store.checkout is not None and _git_branch_info(repo_root) != (
+                        store.get_metadata("git_branch") or "",
+                        store.get_metadata("git_head_sha") or "",
+                    ):
                         from .tools.build import refresh_shared_watch
 
                         refresh_shared_watch(repo_root, store, follow, on_files_updated)
-                        # The native watch planner still follows directory and symlink changes.
                         ignore_patterns[:] = _load_ignore_patterns(repo_root)
                         if follow:
                             self._remember_followed()
                         return
-                    patterns_before = ignore_patterns
-                    files_updated, newly_included = self._refresh_ignore_patterns(events)
-                    changed_files = sorted(
-                        newly_included
-                        | {path for event in events for path in self._event_paths(event)}
-                    )
-                    if changed_files:
-                        result = incremental_update(
-                            repo_root,
-                            store,
-                            changed_files=changed_files,
-                            reconcile_stale=False,
-                            follow_symlinks=follow,
+                    # An ordinary file event already gives the work set. Keep
+                    # shared publication atomic without rehashing the checkout.
+                    with store.refresh():
+                        patterns_before = ignore_patterns
+                        files_updated, newly_included = self._refresh_ignore_patterns(events)
+                        changed_files = sorted(
+                            newly_included
+                            | {path for event in events for path in self._event_paths(event)}
                         )
-                        _raise_watch_update_errors(result, "incremental update")
-                        files_updated += result["files_updated"]
-                    if follow:
-                        links_changed, contents_changed = self._touches_followed(events)
-                        links_changed = links_changed or ignore_patterns is not patterns_before
-                        if links_changed or contents_changed:
-                            files_updated += self._reconcile_followed()
-                    if (
-                        files_updated > 0
-                        # A project file change parses nothing but can rebind
-                        # C# calls in unchanged files; the binder marks flows.
-                        or (changed_files and store.get_metadata("csharp_flows_dirty") == "1")
-                    ):
-                        if on_files_updated is not None:
-                            _raise_watch_postprocess_warnings(on_files_updated(store))
+                        if changed_files:
+                            result = incremental_update(
+                                repo_root,
+                                store,
+                                changed_files=changed_files,
+                                reconcile_stale=False,
+                                follow_symlinks=follow,
+                            )
+                            _raise_watch_update_errors(result, "incremental update")
+                            files_updated += result["files_updated"]
+                        if follow:
+                            links_changed, contents_changed = self._touches_followed(events)
+                            links_changed = links_changed or ignore_patterns is not patterns_before
+                            if links_changed or contents_changed:
+                                files_updated += self._reconcile_followed()
+                        if (
+                            files_updated > 0
+                            # A project file change parses nothing but can rebind
+                            # C# calls in unchanged files; the binder marks flows.
+                            or (changed_files and store.get_metadata("csharp_flows_dirty") == "1")
+                        ):
+                            store.invalidate_refresh()
+                            if on_files_updated is not None:
+                                _raise_watch_postprocess_warnings(on_files_updated(store))
+                                if store.checkout is not None:
+                                    store.set_metadata("postprocess_level", "full")
+                                    store.set_metadata(BUILD_STATE_KEY, BUILD_COMPLETE)
                 except BaseException as exc:
                     self.failure = exc
                 finally:

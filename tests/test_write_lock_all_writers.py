@@ -460,6 +460,32 @@ def test_watch_batch_failure_still_lets_go_of_the_lock(repo):
     assert _lock_is_free(repo)
 
 
+def test_shared_watch_edit_does_not_read_unaffected_source(repo, tmp_path, monkeypatch):
+    db = tmp_path / "shared.db"
+    monkeypatch.setenv("CRG_SHARED_DB", str(db))
+    touched = []
+    original_open = Path.open
+
+    def record_source(path, *args, **kwargs):
+        if path == repo / "drop.py":
+            touched.append(path)
+        return original_open(path, *args, **kwargs)
+
+    with GraphStore(db, checkout=repo) as store:
+        assert incremental.full_build(repo, store)["errors"] == []
+        handler = incremental._create_watch_handler(repo, store, None)
+        event = _edit(repo, "eventScopedSymbol")
+        monkeypatch.setattr(Path, "open", record_source)
+        handler.process([event])
+        handler.raise_if_failed()
+
+    with GraphStore(db, checkout=repo, read_only=True) as reader:
+        assert "eventScopedSymbol" in {
+            node.name for node in reader.get_nodes_by_file(str(repo / "keep.py"))
+        }
+    assert not touched
+
+
 def test_a_recursive_watch_is_not_woken_by_its_own_write_lock(repo):
     """Taking the lock rewrites ``write.lock``. A watch on the whole repository
     sees that, and acting on it took the lock again, once a debounce, for ever."""

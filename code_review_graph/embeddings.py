@@ -1235,6 +1235,10 @@ class EmbeddingStore:
                 "TEXT NOT NULL DEFAULT 'unknown'"
             )
 
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_embeddings_provider_hash "
+            "ON embeddings (provider, text_hash)"
+        )
         self._conn.commit()
 
     def __enter__(self) -> "EmbeddingStore":
@@ -1257,49 +1261,48 @@ class EmbeddingStore:
         if not self.provider:
             return 0
 
-        # Filter to nodes that need embedding
-        to_embed: list[tuple[GraphNode, str, str]] = []
         provider_name = self.provider.name
-
+        existing = dict(self._conn.execute(
+            "SELECT qualified_name, text_hash FROM embeddings WHERE provider = ?",
+            (provider_name,),
+        ))
+        by_hash: dict[str, tuple[str, list[str]]] = {}
         for node in nodes:
             if node.kind == "File":
                 continue
             text = _node_to_text(node)
             text_hash = hashlib.sha256(text.encode()).hexdigest()
-
-            existing = self._conn.execute(
-                "SELECT text_hash, provider FROM embeddings WHERE qualified_name = ?",
-                (node.qualified_name,),
-            ).fetchone()
-
-            # Re-embed if text changed OR provider changed
-            if (existing and existing["text_hash"] == text_hash
-                    and existing["provider"] == provider_name):
-                continue
-            to_embed.append((node, text, text_hash))
-
-        if not to_embed:
-            return 0
+            if existing.get(node.qualified_name) != text_hash:
+                by_hash.setdefault(text_hash, (text, []))[1].append(node.qualified_name)
 
         embedded = 0
-        for i in range(0, len(to_embed), batch_size):
-            batch = to_embed[i:i + batch_size]
-            texts = [t for _, t, _ in batch]
-            vectors = self.provider.embed(texts)
-
-            for (node, _text, text_hash), vec in zip(batch, vectors):
-                blob = _encode_vector(vec)
-                self._conn.execute(
-                    """
-                    INSERT OR REPLACE INTO embeddings
-                        (qualified_name, vector, text_hash, provider)
-                    VALUES (?, ?, ?, ?)
-                    """,
-                    (node.qualified_name, blob, text_hash, provider_name),
-                )
-                embedded += 1
-
+        hashes = list(by_hash)
+        for start in range(0, len(hashes), batch_size):
+            batch = hashes[start:start + batch_size]
+            marks = ",".join("?" for _ in batch)
+            # An older index may contain conflicting vectors for one key.
+            # Only reuse a key when the stored payload agrees across its links.
+            vectors = dict(self._conn.execute(
+                "SELECT text_hash, vector FROM embeddings WHERE provider = ? "
+                f"AND text_hash IN ({marks}) GROUP BY text_hash HAVING COUNT(DISTINCT vector)=1",
+                (provider_name, *batch),
+            ))
+            missing = [key for key in batch if key not in vectors]
+            if missing:
+                computed = self.provider.embed([by_hash[key][0] for key in missing])
+                vectors.update((key, _encode_vector(vec)) for key, vec in
+                               zip(missing, computed, strict=True))
+            rows = [
+                (name, vectors[key], key, provider_name)
+                for key in batch for name in by_hash[key][1]
+            ]
+            self._conn.executemany(
+                "INSERT OR REPLACE INTO embeddings (qualified_name, vector, text_hash, provider) "
+                "VALUES (?, ?, ?, ?)",
+                rows,
+            )
             self._conn.commit()
+            embedded += len(rows)
 
         return embedded
 

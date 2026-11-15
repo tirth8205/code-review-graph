@@ -41,6 +41,7 @@ from ..incremental import (
     resolve_incremental_base,
 )
 from ..locking import WriteLock, write_lock_path
+from ..postprocessing import populate_signatures
 from ..shared_sqlite import CheckoutConnection, shared_database
 from ._common import _get_store, _resolve_root
 
@@ -429,28 +430,7 @@ def _run_postprocess(
     timing: dict[str, float] = {}
     stage_started = time.perf_counter()
     try:
-        rows = store.get_nodes_without_signature()
-        signature_rows: list[tuple[str, int]] = []
-        for row in rows:
-            node_id, name, kind, params, ret = (
-                row[0],
-                row[1],
-                row[2],
-                row[3],
-                row[4],
-            )
-            if kind in ("Function", "Test"):
-                sig = f"def {name}({params or ''})"
-                if ret:
-                    sig += f" -> {ret}"
-            elif kind == "Class":
-                sig = f"class {name}"
-            else:
-                sig = name
-            signature_rows.append((sig[:512], node_id))
-        # Single transaction via executemany instead of one autocommitted
-        # UPDATE per node (issue #721).
-        store.update_node_signatures(signature_rows)
+        populate_signatures(store)
         build_result["signatures_updated"] = True
     except (sqlite3.OperationalError, TypeError, KeyError) as e:
         logger.warning("Signature computation failed: %s", e)
@@ -1128,28 +1108,7 @@ def run_postprocess(
                 )
 
             try:
-                rows = store.get_nodes_without_signature()
-                signature_rows: list[tuple[str, int]] = []
-                for row in rows:
-                    node_id, name, kind, params, ret = (
-                        row[0],
-                        row[1],
-                        row[2],
-                        row[3],
-                        row[4],
-                    )
-                    if kind in ("Function", "Test"):
-                        sig = f"def {name}({params or ''})"
-                        if ret:
-                            sig += f" -> {ret}"
-                    elif kind == "Class":
-                        sig = f"class {name}"
-                    else:
-                        sig = name
-                    signature_rows.append((sig[:512], node_id))
-                # Single transaction via executemany instead of one autocommitted
-                # UPDATE per node (issue #721).
-                store.update_node_signatures(signature_rows)
+                populate_signatures(store)
                 result["signatures_updated"] = True
             except (sqlite3.OperationalError, TypeError, KeyError) as e:
                 logger.warning("Signature computation failed: %s", e)

@@ -108,6 +108,10 @@ test-review-analysis:
 test-embedding-notices:
 	uv run --locked --extra dev pytest tests/test_embedding_refresh_skip_notice.py tests/test_yaml_locale_files.py -q --tb=short
 
+.PHONY: test-embeddings
+test-embeddings:
+	uv run --locked --extra dev pytest tests/test_embeddings.py tests/test_embedding_refresh.py -q --tb=short
+
 .PHONY: test-baseline-compat
 test-baseline-compat:
 	uv run --locked --extra dev pytest tests/test_readme_parity.py tests/test_released_shapes.py tests/test_numeric_reports.py tests/test_registered_data_dir_recovery.py -q --tb=short

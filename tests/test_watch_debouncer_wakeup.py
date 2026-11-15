@@ -17,12 +17,12 @@ from __future__ import annotations
 
 import threading
 import time
-from types import SimpleNamespace
 
 import pytest
 from watchdog.events import FileModifiedEvent
 
 from code_review_graph import incremental
+from code_review_graph.graph import GraphStore
 
 _BOUND = incremental._DEBOUNCE_SECONDS + 5.0
 
@@ -77,6 +77,12 @@ def source(tmp_path):
     return path
 
 
+@pytest.fixture
+def store(tmp_path):
+    with GraphStore(tmp_path / "graph.db") as graph:
+        yield graph
+
+
 def _stop_bounded(handler) -> threading.Thread:
     """Stop the handler on a helper thread; a hang must fail the test, not wedge it."""
     stopper = threading.Thread(target=handler.stop, name="debouncer-stopper", daemon=True)
@@ -86,14 +92,11 @@ def _stop_bounded(handler) -> threading.Thread:
 
 
 def test_event_queued_before_the_consumer_first_waits_is_processed(
-    tmp_path, source, held_debouncers, updates,
+    tmp_path, source, held_debouncers, updates, store,
 ):
     release, held, _stop_sent = held_debouncers
     calls, done = updates
-    # Only the path the write lock sits beside; anything else would fail loudly.
-    handler = incremental._create_watch_handler(
-        tmp_path, SimpleNamespace(db_path=tmp_path / "graph.db"), None,
-    )
+    handler = incremental._create_watch_handler(tmp_path, store, None)
     handler.start()
     try:
         assert len(held) == 1, "the debouncer thread was not intercepted"
@@ -117,13 +120,11 @@ def test_event_queued_before_the_consumer_first_waits_is_processed(
 
 
 def test_stop_before_the_consumer_first_waits_does_not_hang(
-    tmp_path, held_debouncers, updates,
+    tmp_path, held_debouncers, updates, store,
 ):
     release, held, stop_sent = held_debouncers
     calls, _done = updates
-    handler = incremental._create_watch_handler(
-        tmp_path, SimpleNamespace(db_path=tmp_path / "graph.db"), None,
-    )
+    handler = incremental._create_watch_handler(tmp_path, store, None)
     handler.start()
     assert len(held) == 1
     stopper = threading.Thread(target=handler.stop, name="debouncer-stopper", daemon=True)

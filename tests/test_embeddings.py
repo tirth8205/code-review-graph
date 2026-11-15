@@ -7,6 +7,7 @@ import sqlite3
 import sys
 import threading
 import time
+from dataclasses import replace
 from email.message import Message
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import MagicMock, patch
@@ -243,6 +244,28 @@ class TestEmbeddingStore:
             assert [len(call) for call in provider.calls] == [2, 2, 1]
             assert store.count() == 5
             store.close()
+
+    def test_same_document_reuses_vector_for_new_symbols_and_after_reopen(self, tmp_path):
+        db = tmp_path / "embeddings.db"
+        provider = MagicMock(name="provider")
+        provider.name = "test:document"
+        provider.embed.return_value = [[1.0, 0.0]]
+        provider.embed_query.return_value = [1.0, 0.0]
+        original = self._make_node(1)
+        equivalent = replace(original, id=2, file_path="other.py",
+                             qualified_name="other.py::func_1")
+        moved = replace(original, id=3, file_path="moved.py",
+                        qualified_name="moved.py::func_1")
+        with patch("code_review_graph.embeddings.get_provider", return_value=provider):
+            with EmbeddingStore(db) as store:
+                assert store.embed_nodes([original, equivalent]) == 2
+            provider.embed.assert_called_once_with([_node_to_text(original)])
+            with EmbeddingStore(db) as reopened:
+                assert reopened.embed_nodes([moved]) == 1
+                assert set(reopened.search("test")) == {
+                    (node.qualified_name, 1.0) for node in (original, equivalent, moved)
+                }
+            provider.embed.assert_called_once()
 
     def test_embed_nodes_preserves_completed_batches_on_later_failure(self, tmp_path):
         db = tmp_path / "embeddings.db"
