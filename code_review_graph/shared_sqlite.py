@@ -12,10 +12,12 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from . import shared_vectors
 from .errors import GraphStoreError
 from .migrations import RETIRED_TABLES
 
 SHARED_DB_ENV = "CRG_SHARED_DB"
+_SHARED_VERSION = 2
 
 
 class UnbuiltCheckoutError(GraphStoreError):
@@ -24,7 +26,7 @@ class UnbuiltCheckoutError(GraphStoreError):
 _TABLES = frozenset({
     "nodes", "edges", "metadata", "flows", "flow_memberships", "communities",
     "nodes_fts",
-    "nodes_fts_state", "embeddings",
+    "nodes_fts_state", "embeddings", "embeddings_before_payloads",
 }) | RETIRED_TABLES
 _TOKEN = re.compile(
     r"--[^\n]*|/\*[\s\S]*?\*/|'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|\b\w+\b",
@@ -36,7 +38,7 @@ def _qualify_sql(prefix: str, sql: str) -> str:
     """Reuse bounded SQL translations by checkout and statement."""
     def qualify(match: re.Match[str]) -> str:
         token = match[0]
-        if token in _TABLES or token.startswith("idx_"):
+        if token in _TABLES or token.startswith(("idx_", "trg_")):
             return prefix + token
         if token in {"'nodes'", "'embeddings'"}:
             return "'" + prefix + token[1:-1] + "'"
@@ -139,13 +141,24 @@ def verify_shared_file(conn: CheckoutConnection, path: Path, *, initialize: bool
             row[0] for row in conn.execute("SELECT name FROM sqlite_schema WHERE type='table'")
         }
         if "_crg_shared" in tables:
-            if [row[0] for row in conn.execute("SELECT version FROM _crg_shared")] != [1]:
+            versions = [row[0] for row in conn.execute("SELECT version FROM _crg_shared")]
+            if versions not in ([1], [_SHARED_VERSION]):
                 raise GraphStoreError(f"Unsupported CRG shared schema in {path}")
+            if versions == [1] and initialize:
+                prefix = conn._prefix
+                try:
+                    for table in sorted(tables):
+                        if re.fullmatch(r"crg_[0-9a-f]{64}_embeddings", table):
+                            conn._prefix = table.removesuffix("embeddings")
+                            shared_vectors.initialize(conn)
+                finally:
+                    conn._prefix = prefix
+                conn.execute("UPDATE _crg_shared SET version=?", (_SHARED_VERSION,))
         elif tables or not initialize:
             raise GraphStoreError(f"{path} is not a CRG shared database")
         else:
             conn.execute("CREATE TABLE _crg_shared (version INTEGER PRIMARY KEY)")
-            conn.execute("INSERT INTO _crg_shared VALUES (1)")
+            conn.execute("INSERT INTO _crg_shared VALUES (?)", (_SHARED_VERSION,))
         if initialize:
             conn.commit()
     except BaseException:

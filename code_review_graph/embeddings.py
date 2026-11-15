@@ -27,8 +27,10 @@ from typing import Any
 from urllib.parse import urlparse
 
 from . import __version__ as _crg_version
+from . import shared_vectors
 from .constants import release_os_memory
 from .graph import GraphNode, GraphStore, node_to_dict
+from .repository_identity import repository_scopes
 
 logger = logging.getLogger(__name__)
 
@@ -1209,7 +1211,8 @@ class EmbeddingStore:
         self.provider = get_provider(provider, model=model)
         self.available = self.provider is not None
         self.db_path = Path(db_path)
-        self._shared = graph_store is not None and graph_store.checkout is not None
+        self._checkout = graph_store.checkout if graph_store is not None else None
+        self._shared = self._checkout is not None
         self._conn = (
             graph_store._conn if self._shared and graph_store is not None
             else sqlite3.connect(
@@ -1217,23 +1220,24 @@ class EmbeddingStore:
             )
         )
         self._conn.row_factory = sqlite3.Row
-        if self._shared and graph_store is not None and graph_store.read_only:
-            self._conn_file_id = self._file_identity(self.db_path)
-            return
-        self._conn.execute("PRAGMA cache_size=-2000")
-        self._conn.execute(_EMBEDDINGS_SCHEMA)
         # The file this connection holds open. If graph.db is later replaced,
         # the connection keeps reading the old file; see _cached_vectors().
         self._conn_file_id = self._file_identity(self.db_path)
-
-        # Migration for existing DBs missing the provider column
-        try:
-            self._conn.execute("SELECT provider FROM embeddings LIMIT 1")
-        except sqlite3.OperationalError:
-            self._conn.execute(
-                "ALTER TABLE embeddings ADD COLUMN provider "
-                "TEXT NOT NULL DEFAULT 'unknown'"
-            )
+        self._normalized = False
+        if self._shared:
+            if graph_store is not None and graph_store.read_only:
+                self._normalized = "payload_id" in shared_vectors.columns(self._conn)
+                return
+            shared_vectors.initialize(self._conn)
+            self._normalized = True
+        else:
+            self._conn.execute("PRAGMA cache_size=-2000")
+            self._conn.execute(_EMBEDDINGS_SCHEMA)
+            if "provider" not in shared_vectors.columns(self._conn):
+                self._conn.execute(
+                    "ALTER TABLE embeddings ADD COLUMN provider "
+                    "TEXT NOT NULL DEFAULT 'unknown'"
+                )
 
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_embeddings_provider_hash "
@@ -1277,16 +1281,20 @@ class EmbeddingStore:
 
         embedded = 0
         hashes = list(by_hash)
+        scopes = repository_scopes(self._checkout) if hashes and self._checkout else ()
         for start in range(0, len(hashes), batch_size):
             batch = hashes[start:start + batch_size]
-            marks = ",".join("?" for _ in batch)
-            # An older index may contain conflicting vectors for one key.
-            # Only reuse a key when the stored payload agrees across its links.
-            vectors = dict(self._conn.execute(
-                "SELECT text_hash, vector FROM embeddings WHERE provider = ? "
-                f"AND text_hash IN ({marks}) GROUP BY text_hash HAVING COUNT(DISTINCT vector)=1",
-                (provider_name, *batch),
-            ))
+            if self._normalized:
+                vectors = shared_vectors.reusable(self._conn, provider_name, batch, scopes)
+            else:
+                marks = ",".join("?" for _ in batch)
+                # Conflicting legacy rows do not establish a reusable vector.
+                vectors = dict(self._conn.execute(
+                    "SELECT text_hash, vector FROM embeddings WHERE provider = ? "
+                    f"AND text_hash IN ({marks}) GROUP BY text_hash "
+                    "HAVING COUNT(DISTINCT vector)=1",
+                    (provider_name, *batch),
+                ))
             missing = [key for key in batch if key not in vectors]
             if missing:
                 computed = self.provider.embed([by_hash[key][0] for key in missing])
@@ -1296,15 +1304,30 @@ class EmbeddingStore:
                 (name, vectors[key], key, provider_name)
                 for key in batch for name in by_hash[key][1]
             ]
-            self._conn.executemany(
-                "INSERT OR REPLACE INTO embeddings (qualified_name, vector, text_hash, provider) "
-                "VALUES (?, ?, ?, ?)",
-                rows,
-            )
-            self._conn.commit()
+            if self._normalized:
+                shared_vectors.link(self._conn, rows, scopes, set(missing))
+            else:
+                self._conn.executemany(
+                    "INSERT OR REPLACE INTO embeddings "
+                    "(qualified_name, vector, text_hash, provider) "
+                    "VALUES (?, ?, ?, ?)",
+                    rows,
+                )
+                self._conn.commit()
             embedded += len(rows)
 
         return embedded
+
+    def _vector_rows(self, provider_name: str) -> sqlite3.Cursor:
+        if self._normalized:
+            return self._conn.execute(
+                "SELECT e.qualified_name, p.vector FROM embeddings e "
+                "JOIN crg_vector_payloads p ON p.id=e.payload_id WHERE e.provider=?",
+                (provider_name,),
+            )
+        return self._conn.execute(
+            "SELECT qualified_name, vector FROM embeddings WHERE provider=?", (provider_name,)
+        )
 
     @staticmethod
     def _iter_scores(
@@ -1387,10 +1410,7 @@ class EmbeddingStore:
         blob_size = dims * 4  # float32 components, see _encode_vector
         names: list[str] = []
         chunk_scores: list[Any] = []
-        cursor = self._conn.execute(
-            "SELECT qualified_name, vector FROM embeddings WHERE provider = ?",
-            (provider_name,),
-        )
+        cursor = self._vector_rows(provider_name)
         while True:
             rows = cursor.fetchmany(_SEARCH_CHUNK_ROWS)
             if not rows:
@@ -1482,10 +1502,7 @@ class EmbeddingStore:
         names: list[str] = []
         rows: list[int] = []
         blobs: list[bytes] = []
-        for name, blob in self._conn.execute(
-            "SELECT qualified_name, vector FROM embeddings WHERE provider = ?",
-            (provider_name,),
-        ):
+        for name, blob in self._vector_rows(provider_name):
             if len(blob) == blob_size:
                 rows.append(len(names))
                 blobs.append(blob)
@@ -1542,10 +1559,7 @@ class EmbeddingStore:
     ) -> list[tuple[str, float]]:
         """Score every stored vector one component at a time (no numpy)."""
         # Process in chunks, only matching current provider
-        cursor = self._conn.execute(
-            "SELECT qualified_name, vector FROM embeddings WHERE provider = ?",
-            (provider_name,),
-        )
+        cursor = self._vector_rows(provider_name)
         return heapq.nlargest(
             limit,
             self._iter_scores(cursor, query_vec),

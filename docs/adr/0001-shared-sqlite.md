@@ -9,6 +9,19 @@ communities; SQLite stores all of them in the same WAL database. Existing
 single-checkout indexes stay where they are. Rebuild from source to populate
 the shared file.
 
+Shared schema version 2 stores each exact embedding payload once and keeps
+symbol links scoped to the checkout. A writer migrates version 1 vector
+tables in one transaction, preserving legacy links without inferring Git
+provenance. New payloads are eligible for reuse through a common Git
+directory or a directly shared read remote. Reusing a vector does not publish
+it under a different remote.
+
+`prune` previews orphan vector removal with the selected shared database.
+`CRG_RETENTION_DAYS`, `CRG_RETENTION_PERCENT`, and `CRG_RETENTION_MAX_MIB`
+default to 7, 10, and 512. The effective orphan budget is the smaller
+space limit; active links are never pruned. Use `prune --apply --compact`
+to reclaim physical space explicitly outside the watcher.
+
 A refresh owns the native writer lock for that file and publishes its changes
 together in one transaction. An interrupted writer loses the kernel lock and
 its uncommitted changes. A caller may reuse a completion only for its own

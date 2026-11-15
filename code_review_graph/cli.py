@@ -2802,6 +2802,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="With --apply, also delete orphaned external data dirs",
     )
     prune_cmd.add_argument("--config", default=None, help="Alternate watch.toml path")
+    prune_cmd.add_argument(
+        "--compact", action="store_true",
+        help="With --apply, compact the selected shared SQLite file",
+    )
 
     vstore_prune = vstore_sub.add_parser(
         "prune", help="Apply LRU/TTL retention to the store (report unless --apply)"
@@ -3315,7 +3319,13 @@ def _dispatch() -> None:
         from .prune import prune
 
         config_path = Path(args.config).expanduser() if args.config else None
-        prune_report = prune(config_path=config_path, apply=args.apply, data_dirs=args.data_dirs)
+        try:
+            prune_report = prune(
+                config_path=config_path, apply=args.apply, data_dirs=args.data_dirs,
+                compact=args.compact,
+            )
+        except ValueError as exc:
+            ap.error(str(exc))
         for path in prune_report.removed_registry:
             print(f"registry: {path}")
         for path in prune_report.removed_watch:

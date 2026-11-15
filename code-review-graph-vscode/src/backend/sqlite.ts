@@ -199,7 +199,7 @@ export class SqliteReader {
     if (this.prefix) {
       try {
         const rows = this.db.prepare('SELECT version FROM _crg_shared').all() as { version: number }[];
-        if (rows.length !== 1 || rows[0].version !== 1) {
+        if (rows.length !== 1 || ![1, 2].includes(rows[0].version)) {
           throw new Error('Unsupported CRG shared database format');
         }
       } catch (error) {
