@@ -31,7 +31,7 @@ from .shared_sqlite import (
 if TYPE_CHECKING:
     import networkx as nx
 
-    from .parser import EdgeInfo, NodeInfo
+    from .parser import CodeParser, EdgeInfo, NodeInfo
     from .shared_parser_facts import SharedPythonFacts
 
 from .build_state import REFRESH_REQUEST_KEY
@@ -1162,13 +1162,13 @@ class GraphStore:
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'nodes'"
         ).fetchone() is not None
 
-    def shared_python_facts(self) -> SharedPythonFacts | None:
+    def shared_python_facts(self, parser: CodeParser) -> SharedPythonFacts | None:
         """Use this writer's transaction for shared source-only Python facts."""
         if self.checkout is None or self.read_only:
             return None
         from .shared_parser_facts import SharedPythonFacts
 
-        return SharedPythonFacts(self._conn, self.checkout.resolve())
+        return SharedPythonFacts(self._conn, self.checkout.resolve(), parser)
 
     @contextmanager
     def refresh(self) -> Iterator[None]:

@@ -35,7 +35,10 @@ calls/imports only; paths, aliases and resolved targets never enter the
 payload. The build looks up the facts before dispatching a Python file to
 a worker, with the same direct Git membership rule as embeddings. Workers
 still parse with Tree-sitter and resolve imports against the requesting
-checkout. Tree-sitter trees remain in the bounded worker-local cache.
+checkout. The Python method-scope pass also shares colliding lexical
+scopes, keyed by byte offset, Tree-sitter package and grammar profile.
+Workers use their native syntax tree for the remaining passes; the writer
+persists newly found scopes without permitting workers to write SQLite.
 
 AI Hub selects and supervises the engine; it does not own graph data or
 refresh leases. Its runtime acceptance and activation remain governed by

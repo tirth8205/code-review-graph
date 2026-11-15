@@ -612,7 +612,15 @@ def extract_python_syntax_facts(source: bytes) -> PythonSyntaxFacts:
 _cached_python_syntax_facts = lru_cache(maxsize=128)(extract_python_syntax_facts)
 
 
-_python_facts_override: ContextVar[tuple[bytes, PythonSyntaxFacts] | None] = ContextVar(
+@dataclass
+class PreparedPythonFacts:
+    """Portable evidence with a slot for Tree-sitter facts on a cache miss."""
+
+    syntax: PythonSyntaxFacts
+    method_scopes: dict[int, str] | None
+
+
+_python_facts_override: ContextVar[tuple[bytes, PreparedPythonFacts] | None] = ContextVar(
     "python_syntax_facts", default=None,
 )
 
@@ -620,7 +628,7 @@ _python_facts_override: ContextVar[tuple[bytes, PythonSyntaxFacts] | None] = Con
 def _python_syntax_facts(source: bytes) -> PythonSyntaxFacts:
     prepared = _python_facts_override.get()
     if prepared is not None and prepared[0] is source:
-        return prepared[1]
+        return prepared[1].syntax
     return _cached_python_syntax_facts(source)
 
 
@@ -4167,7 +4175,7 @@ class CodeParser:
         return self.parse_bytes(path, source)
 
     def parse_with_python_facts(
-        self, path: Path, source: bytes, facts: PythonSyntaxFacts,
+        self, path: Path, source: bytes, facts: PreparedPythonFacts,
     ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
         """Bind portable facts to these exact bytes while resolving locally."""
         token = _python_facts_override.set((source, facts))
@@ -4362,8 +4370,16 @@ class CodeParser:
         import_map, defined_names = self._collect_file_scope(
             tree.root_node, language, source, file_path_str,
         )
-        self._index_ambiguous_method_scopes(tree.root_node, language, import_map)
         if language == "python":
+            prepared = _python_facts_override.get()
+            facts = prepared[1] if prepared is not None and prepared[0] is source else None
+            scopes = facts.method_scopes if facts is not None else None
+            if scopes is None:
+                scopes = self._extract_ambiguous_method_scopes(tree.root_node)
+                if facts is not None:
+                    facts.method_scopes = scopes
+            import_map.update((f"__crg_method_scope__:{offset}", scope)
+                              for offset, scope in scopes.items())
             self._expand_python_star_imports(
                 tree.root_node, file_path_str, import_map,
             )
@@ -16861,7 +16877,7 @@ class CodeParser:
             recursive_class = self._julia_scope_join(enclosing_class, name)
         elif language in ("python", "cpp"):
             # Python keeps its legacy leaf spelling unless a same-leaf class
-            # actually collides; ``_index_ambiguous_method_scopes`` carries
+            # actually collides; ``_extract_ambiguous_method_scopes`` carries
             # the full chain for exactly those methods (#999). C++ pins
             # legacy nested-class keys while its namespace-aware function
             # scopes stay complete (test_cpp_overload_identity).
@@ -16878,18 +16894,13 @@ class CodeParser:
         )
         return True
 
-    def _index_ambiguous_method_scopes(self, root, language: str, import_map: dict) -> None:
+    def _extract_ambiguous_method_scopes(self, root) -> dict[int, str]:
         """Carry full method scopes only where legacy leaf scopes would collide.
 
-        The per-file import map already carries internal resolver metadata.
-        Keeping this index there avoids parser-instance state leaking between
-        files (including recursive parsing). The tree is visited once.
-
-        Python only: a Ruby class already descends with its full lexical scope,
-        so its methods cannot collide on a leaf.
+        Byte offsets are stable for identical source and grammar. Use them
+        instead of process-local Tree-sitter node IDs.
         """
-        if language != "python":
-            return
+        language = "python"
         scopes: dict[str, set[str]] = {}
         methods: list[tuple[int, str, str]] = []
         pending = [(root, "")]
@@ -16901,11 +16912,17 @@ class CodeParser:
                     scope = f"{scope}.{name}" if scope else name
                     scopes.setdefault(name, set()).add(scope)
             if node.type in self._function_types[language] and scope:
-                methods.append((node.id, scope.rsplit(".", 1)[-1], scope))
+                methods.append((node.start_byte, scope.rsplit(".", 1)[-1], scope))
             pending.extend((child, scope) for child in reversed(node.named_children))
-        for node_id, leaf, scope in methods:
-            if len(scopes.get(leaf, ())) > 1:
-                import_map[f"__crg_method_scope__:{node_id}"] = scope
+        return {offset: scope for offset, leaf, scope in methods
+                if len(scopes.get(leaf, ())) > 1}
+
+    def python_method_scope_profile(self) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
+        custom = self._custom_languages.get("python")
+        return (
+            custom.grammar if custom else "python", tuple(self._class_types["python"]),
+            tuple(self._function_types["python"]),
+        )
 
     def _extract_functions(
         self,
@@ -17008,7 +17025,7 @@ class CodeParser:
         parent_name = enclosing_class
         container_scope = enclosing_class
         if language == "python" and import_map is not None:
-            parent_name = import_map.get(f"__crg_method_scope__:{child.id}", parent_name)
+            parent_name = import_map.get(f"__crg_method_scope__:{child.start_byte}", parent_name)
             # A Class node's identity is its direct parent plus its own name,
             # however deep it sits, so CONTAINS must use the same two parts.
             container_scope = (

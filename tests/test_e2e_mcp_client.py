@@ -402,6 +402,12 @@ def test_shared_cli_reuses_python_facts_but_resolves_imports_locally(tmp_path):
         "    from dependency import Annotation\n"
         "def invoke(argument):\n"
         "    return value(argument)\n"
+        "class Outer:\n"
+        "    class Service:\n"
+        "        def run(self): return invoke(1)\n"
+        "class Other:\n"
+        "    class Service:\n"
+        "        def run(self): return invoke(2)\n"
     )
 
     def cli(root, *args, **overrides):
@@ -435,6 +441,11 @@ def test_shared_cli_reuses_python_facts_but_resolves_imports_locally(tmp_path):
         }
         built = cli(root, "build", "--skip-postprocess", **worker_env)
         assert f"Python syntax facts: {reused} reused, {extracted} extracted" in built.stderr
+        assert f"Tree-sitter method scopes: {reused} reused, {extracted} extracted" in built.stderr
+        summary = json.loads(cli(root, "query", "file_summary", "consumer.py").stdout)
+        methods = {row["qualified_name"].split("::", 1)[1] for row in summary["results"]
+                   if row["name"] == "run"}
+        assert methods == {"Outer.Service.run", "Other.Service.run"}
         imports = json.loads(cli(root, "query", "imports_of", "consumer.py").stdout)
         targets = {_posix(row["import_target"]) for row in imports["results"]}
         assert target.as_posix() in targets

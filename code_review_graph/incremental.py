@@ -48,7 +48,7 @@ from .locking import WriteLock, write_lock_path
 from .shared_sqlite import shared_database
 
 if TYPE_CHECKING:
-    from .parser import CodeParser, PythonSyntaxFacts
+    from .parser import CodeParser, PreparedPythonFacts
     from .shared_parser_facts import SharedPythonFacts
 
 
@@ -2969,7 +2969,7 @@ def _observe_source(path: Path) -> _SourceObservation:
 _ParseJob = (
     tuple[str, str]
     | tuple[str, str, _SourceObservation | None]
-    | tuple[str, str, _SourceObservation, "PythonSyntaxFacts"]
+    | tuple[str, str, _SourceObservation, "PreparedPythonFacts"]
 )
 _ParseResult = tuple[str, list, list, str | None, str]
 
@@ -3002,7 +3002,10 @@ def _parse_jobs(
     # Bound the amount of source bytes read ahead in the shared store.
     jobs = map(job, paths)
     while batch := list(islice(jobs, _MAX_PARSE_WORKERS * 20)):
-        yield from executor.map(_parse_single_file, batch, chunksize=20)
+        for result, new_scopes in executor.map(_parse_shared_job, batch, chunksize=20):
+            if new_scopes is not None:
+                cache.remember(root / result[0], result[4], new_scopes)
+            yield result
 
 
 def _parse_observation(
@@ -3012,7 +3015,11 @@ def _parse_observation(
     raw, digest = observation
     if cache is not None and parser.detect_language(path, raw) == "python":
         if (facts := cache.get(path, raw, digest)) is not None:
-            return parser.parse_with_python_facts(path, raw, facts)
+            missing = facts.method_scopes is None
+            result = parser.parse_with_python_facts(path, raw, facts)
+            if missing and facts.method_scopes is not None:
+                cache.remember(path, digest, facts.method_scopes)
+            return result
     return parser.parse_bytes(path, raw)
 
 
@@ -3043,6 +3050,14 @@ def _parse_single_file(
         return (rel_path, nodes, edges, None, fhash)
     except Exception as e:
         return (rel_path, [], [], str(e), "")
+
+
+def _parse_shared_job(args: _ParseJob) -> tuple[_ParseResult, dict[int, str] | None]:
+    """Return new structural evidence to the SQLite writer process."""
+    facts = args[3] if len(args) == 4 else None
+    missing = facts is not None and facts.method_scopes is None
+    result = _parse_single_file(args)
+    return result, facts.method_scopes if missing and facts is not None and not result[3] else None
 
 
 def _canonical_repo_root(repo_root: Path) -> Path:
@@ -3085,7 +3100,7 @@ def full_build(
     files, followed, followed_dirs = _collect_files(
         repo_root, recurse_submodules, follow_symlinks,
     )
-    facts_cache = store.shared_python_facts() if files and shared_database() else None
+    facts_cache = store.shared_python_facts(parser) if files and shared_database() else None
     stale_files = _reconcile_stale_files(repo_root, store, files)
     # Recorded before parsing: a record ahead of the graph is harmless, one
     # behind it would let a file outlive the link that brought it in.
@@ -3604,7 +3619,7 @@ def incremental_update(
 
     use_serial = os.environ.get("CRG_SERIAL_PARSE", "") == "1"
     parsed_files = 0
-    facts_cache = store.shared_python_facts() if to_parse and shared_database() else None
+    facts_cache = store.shared_python_facts(parser) if to_parse and shared_database() else None
 
     if use_serial or len(to_parse) < 8:
         for rel_path in to_parse:
