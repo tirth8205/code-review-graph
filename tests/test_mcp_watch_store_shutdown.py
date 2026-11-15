@@ -7,13 +7,10 @@ the store, observer and update/post-processing boundaries with instrumented
 doubles. Event gates hold work while the transport returns or raises; every
 thread is released and joined during teardown. No SQLite connection is opened.
 
-Post-processing cases are conditional on the callback API added by #1108; that
-independent PR is unnecessary for the shutdown fix itself.
 """
 
 from __future__ import annotations
 
-import inspect
 import json
 import sqlite3
 import threading
@@ -31,7 +28,6 @@ _STOP_TIMEOUT = 0.2  # shortened join timeout, so "join with timeout, then close
 
 STARTUP = ("startup_reconciliation", "startup_post_processing")
 BATCH = ("event_batch", "batch_post_processing")
-POST_PROCESSING = ("startup_post_processing", "batch_post_processing")
 
 
 class _Trace:
@@ -73,6 +69,9 @@ class InstrumentedStore:
     def get_file_marker_paths(self) -> list[str]:
         """No File markers yet, so watch()'s root check passes."""
         return []
+
+    def get_metadata(self, _key: str) -> None:
+        return None
 
     def close(self) -> None:
         with self._lock:
@@ -125,7 +124,6 @@ class Harness:
         self.release = threading.Event()
         self.held_on_thread: str | None = None
         self.transport_returned = threading.Event()
-        self.escape = threading.Event()
         self.handed_stops: list[threading.Event] = []
         self.sqlite_connects: list[tuple] = []
         self.main_error: BaseException | None = None
@@ -154,11 +152,10 @@ class Harness:
 
         real_watch = incremental.watch
 
-        def watch_with_test_exit(repo_root, store, on_files_updated=None, stop_event=None):
-            if stop_event is not None:
-                self.handed_stops.append(stop_event)
+        def watch_with_test_exit(repo_root, store, *, on_files_updated, stop_event):
+            self.handed_stops.append(stop_event)
             return real_watch(repo_root, store, on_files_updated=on_files_updated,
-                              stop_event=stop_event if stop_event is not None else self.escape)
+                              stop_event=stop_event)
 
         monkeypatch.setattr(incremental, "watch", watch_with_test_exit)
 
@@ -188,7 +185,7 @@ class Harness:
             store.leave()
             self.trace.record("watcher_operation_finished", operation=operation)
 
-    def _update(self, repo_root, store, *, changed_files, **_kwargs):
+    def _update(self, repo_root, store, *, changed_files=None, **_kwargs):
         if changed_files:
             self._use(store, "event_batch")
             return {"files_updated": len(changed_files), "errors": []}
@@ -232,7 +229,6 @@ class Harness:
 
     def release_and_join(self) -> list[str]:
         self.release.set()
-        self.escape.set()
         for stop in self.handed_stops:
             stop.set()
         started = [t for t in threading.enumerate() if t not in self.threads_before]
@@ -244,11 +240,7 @@ class Harness:
 
 @pytest.fixture(params=STARTUP + BATCH)
 def harness(request, tmp_path, monkeypatch):
-    phase = request.param
-    forwards = "on_files_updated" in inspect.signature(incremental.start_watch_thread).parameters
-    if phase in POST_PROCESSING and not forwards:
-        pytest.skip("this revision runs no post-processing in MCP auto-watch")
-    h = Harness(tmp_path, monkeypatch, phase)
+    h = Harness(tmp_path, monkeypatch, request.param)
     yield h
     leftover = h.release_and_join()
     cleanup = {

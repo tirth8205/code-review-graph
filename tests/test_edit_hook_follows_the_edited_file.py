@@ -58,7 +58,7 @@ def _give_graph(repo: Path) -> None:
 
 def _targets(monkeypatch, payload: dict) -> list[Path]:
     calls: list[Path] = []
-    monkeypatch.setattr(hook_update, "_update_repo", calls.append)
+    monkeypatch.setattr(hook_update, "_update_repo", lambda root, **_: calls.append(root))
     monkeypatch.setattr(hook_update.sys, "stdin", io.StringIO(json.dumps(payload)))
     hook_update.run_update_hook()
     return calls

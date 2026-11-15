@@ -21,11 +21,19 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, Any, Optional
 
+from .shared_sqlite import (
+    CheckoutConnection,
+    UnbuiltCheckoutError,
+    shared_database,
+    verify_shared_file,
+)
+
 if TYPE_CHECKING:
     import networkx as nx
 
     from .parser import EdgeInfo, NodeInfo
 
+from .build_state import REFRESH_REQUEST_KEY
 from .constants import (
     BFS_ENGINE,
     CALLER_TEST_ROUTE_DEPTH,
@@ -1012,9 +1020,13 @@ class GraphStore:
         db_path: str | Path,
         *,
         read_only: bool | None = None,
+        checkout: Path | None = None,
     ) -> None:
         self.db_path = Path(db_path)
         self.read_only = read_only_requested() if read_only is None else read_only
+        self.checkout = checkout if shared_database() == self.db_path.resolve() else None
+        if shared_database() == self.db_path.resolve() and self.checkout is None:
+            raise GraphStoreError("Opening a shared graph requires a checkout")
         conn: sqlite3.Connection | None = None
         try:
             if self.read_only:
@@ -1024,11 +1036,12 @@ class GraphStore:
                         "Run `code-review-graph build` first."
                     )
                 conn = sqlite3.connect(
-                    self._read_only_uri(),
+                    self.db_path.as_uri() + "?mode=ro" if self.checkout else self._read_only_uri(),
                     uri=True,
                     timeout=30,
                     check_same_thread=False,
                     isolation_level=None,
+                    factory=CheckoutConnection,
                 )
             else:
                 # Inside the try on purpose: an unwritable data directory
@@ -1038,7 +1051,12 @@ class GraphStore:
                 conn = sqlite3.connect(
                     str(self.db_path), timeout=30, check_same_thread=False,
                     isolation_level=None,  # Disable implicit transactions (#135)
+                    factory=CheckoutConnection,
                 )
+            if self.checkout is not None:
+                assert isinstance(conn, CheckoutConnection)
+                verify_shared_file(conn, self.db_path, initialize=not self.read_only)
+                conn.bind(self.checkout)
             conn.row_factory = sqlite3.Row
             if not self.read_only:
                 conn.execute("PRAGMA journal_mode=WAL")
@@ -1047,12 +1065,14 @@ class GraphStore:
             # FILE keeps the impact-radius working tables reclaimable; the
             # compile-time default is memory on some SQLite builds.
             conn.execute("PRAGMA temp_store=FILE")
-            empty_schema = _assert_usable_database(conn, self.db_path)
-            if self.read_only and conn.execute(
-                "SELECT 1 FROM sqlite_master "
-                "WHERE type = 'table' AND name = 'nodes'"
-            ).fetchone() is None:
-                raise GraphStoreError(
+            has_schema = self.has_checkout_schema(conn)
+            empty_schema = (
+                not has_schema if self.checkout is not None
+                else _assert_usable_database(conn, self.db_path)
+            )
+            if self.read_only and not has_schema:
+                error_type = UnbuiltCheckoutError if self.checkout is not None else GraphStoreError
+                raise error_type(
                     f"No graph found at {self.db_path}. "
                     "Run `code-review-graph build` first."
                 )
@@ -1134,6 +1154,22 @@ class GraphStore:
         # Identifies the read transaction currently open on this connection,
         # so a reader cannot roll back a transaction a writer took from it.
         self._active_read_txn: object | None = None
+
+    @staticmethod
+    def has_checkout_schema(conn: sqlite3.Connection) -> bool:
+        return conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'nodes'"
+        ).fetchone() is not None
+
+    @contextmanager
+    def refresh(self) -> Iterator[None]:
+        """Publish a complete shared refresh or roll it back on failure."""
+        if self.checkout is None:
+            yield
+            return
+        assert isinstance(self._conn, CheckoutConnection)
+        with self._conn.refresh():
+            yield
 
     def _read_only_uri(self) -> str:
         """Open SQLite without creating or updating any database sidecar."""
@@ -2099,6 +2135,11 @@ class GraphStore:
             extra=edge.extra,
         )
 
+    def invalidate_refresh(self) -> None:
+        """Remove a completion before explicitly changing the shared graph."""
+        if self.checkout is not None:
+            self._conn.execute("DELETE FROM metadata WHERE key = ?", (REFRESH_REQUEST_KEY,))
+
     def set_metadata(self, key: str, value: str) -> None:
         self._conn.execute(
             "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)", (key, value)
@@ -2185,6 +2226,14 @@ class GraphStore:
         else:
             rows = self._conn.execute("SELECT * FROM nodes").fetchall()
         return [self._row_to_node(r) for r in rows]
+
+    def iter_file_edges(self, file_path: str) -> Iterator[GraphEdge]:
+        """Yield edges contributed by a file, including non-symbol sources."""
+        for row in self._conn.execute(
+            "SELECT * FROM edges WHERE file_path = ? ORDER BY id",
+            (normalize_file_path(file_path),),
+        ):
+            yield self._row_to_edge(row)
 
     def get_edges_by_source(self, qualified_name: str) -> list[GraphEdge]:
         return list(self.iter_edges_by_source(qualified_name))
@@ -5579,10 +5628,10 @@ class GraphStore:
         if column not in ("source_qualified", "target_qualified"):
             raise ValueError(f"not an edge end: {column!r}")
         rows = self._conn.execute(  # nosec B608
-            f"SELECT {column} AS name, COUNT(*) AS edges FROM edges GROUP BY {column}"
+            f"SELECT {column} AS name, COUNT(*) AS edge_count FROM edges GROUP BY {column}"
         )
         for row in rows:
-            yield row["name"], row["edges"]
+            yield row["name"], row["edge_count"]
 
     def iter_edge_targets_from(self, sources: Iterable[str]) -> Iterator[str]:
         """Yield the target of every edge leaving one of *sources*."""
@@ -5882,7 +5931,7 @@ def _sanitize_name(s: str, max_len: int = 256) -> str:
 
 
 def node_to_dict(n: GraphNode) -> dict:
-    result = {
+    result: dict[str, Any] = {
         "id": n.id, "kind": n.kind, "name": _sanitize_name(n.name),
         "qualified_name": _sanitize_name(n.qualified_name), "file_path": n.file_path,
         "line_start": n.line_start, "line_end": n.line_end,

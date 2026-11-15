@@ -8,10 +8,15 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
+import stat
+import tempfile
 import threading
 from collections import OrderedDict
 from pathlib import Path
+
+from filelock import FileLock
 
 from .constants import crg_home
 
@@ -38,28 +43,59 @@ class Registry:
         self._path = path or default_registry_path()
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
+        self._file_lock = FileLock(
+            self._path.with_name(f"{self._path.name}.lock"),
+            fallback_to_soft=False,
+        )
         self._repos: list[dict[str, str]] = []
         self._load()
 
     def _load(self) -> None:
         """Load registry from disk."""
         if self._path.exists():
-            try:
-                data = json.loads(self._path.read_text(encoding="utf-8", errors="replace"))
-                self._repos = data.get("repos", [])
-            except (json.JSONDecodeError, KeyError, TypeError):
-                logger.warning("Invalid registry file, starting fresh: %s", self._path)
-                self._repos = []
+            data = json.loads(self._path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict) or not isinstance(data.get("repos"), list):
+                raise ValueError(f"Registry must contain a repos array: {self._path}")
+            repos = data["repos"]
+            if any(
+                not isinstance(entry, dict)
+                or not isinstance(entry.get("path"), str)
+                or any(not isinstance(value, str) for value in entry.values())
+                for entry in repos
+            ):
+                raise ValueError(
+                    f"Registry entries must contain string paths and values: {self._path}"
+                )
+            self._repos = repos
         else:
             self._repos = []
 
     def _save(self) -> None:
-        """Write registry to disk."""
+        """Publish a complete registry while the caller holds the mutation lock."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
         data = {"repos": self._repos}
-        self._path.write_text(
-            json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-        )
+        body = (json.dumps(data, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+        mode = stat.S_IMODE(self._path.stat().st_mode) if self._path.exists() else None
+        temporary: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb", dir=self._path.parent,
+                prefix=f".{self._path.name}.", suffix=".tmp", delete=False,
+            ) as handle:
+                temporary = Path(handle.name)
+                handle.write(body)
+                handle.flush()
+                os.fsync(handle.fileno())
+            if mode is not None:
+                temporary.chmod(mode)
+            os.replace(temporary, self._path)
+        except BaseException:
+            if temporary is not None:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    logger.error("Registry temporary cleanup failed: %s", temporary, exc_info=True)
+            raise
 
     def register(
         self, path: str, alias: str | None = None, data_dir: str | None = None,
@@ -94,18 +130,21 @@ class Registry:
                 f"(no .git, .svn, or .code-review-graph): {resolved}"
             )
 
-        with self._lock:
+        with self._lock, self._file_lock:
+            self._load()
             # Check for duplicate path
             str_path = str(resolved)
             for entry in self._repos:
                 if entry["path"] == str_path:
+                    before = dict(entry)
                     # Update alias and/or data_dir if provided
                     if alias:
                         entry["alias"] = alias
                     if data_dir:
                         entry["data_dir"] = str(Path(data_dir).resolve())
-                    self._save()
-                    return entry
+                    if entry != before:
+                        self._save()
+                    return dict(entry)
 
             new_entry: dict[str, str] = {"path": str_path}
             if alias:
@@ -125,7 +164,8 @@ class Registry:
         Returns:
             True if an entry was removed, False otherwise.
         """
-        with self._lock:
+        with self._lock, self._file_lock:
+            self._load()
             resolved = str(Path(path_or_alias).resolve())
             original_len = len(self._repos)
             self._repos = [
@@ -145,7 +185,8 @@ class Registry:
             List of dicts with 'path' and optional 'alias' keys.
         """
         with self._lock:
-            return list(self._repos)
+            self._load()
+            return [dict(entry) for entry in self._repos]
 
     def find_by_alias(self, alias: str) -> dict[str, str] | None:
         """Look up a repository by its alias.
@@ -157,6 +198,7 @@ class Registry:
             The matching entry, or None.
         """
         with self._lock:
+            self._load()
             for entry in self._repos:
                 if entry.get("alias") == alias:
                     return dict(entry)
@@ -173,6 +215,7 @@ class Registry:
         """
         resolved = str(Path(path).resolve())
         with self._lock:
+            self._load()
             for entry in self._repos:
                 if entry["path"] == resolved:
                     return dict(entry)
@@ -191,12 +234,14 @@ class Registry:
         resolved = str(Path(path).resolve())
         data_resolved = str(Path(data_dir).resolve())
 
-        with self._lock:
+        with self._lock, self._file_lock:
+            self._load()
             # Check for existing entry
             for entry in self._repos:
                 if entry["path"] == resolved:
-                    entry["data_dir"] = data_resolved
-                    self._save()
+                    if entry.get("data_dir") != data_resolved:
+                        entry["data_dir"] = data_resolved
+                        self._save()
                     return dict(entry)
 
             # Create new entry if not found
@@ -219,6 +264,7 @@ class Registry:
         """
         resolved = str(Path(path).resolve())
         with self._lock:
+            self._load()
             for entry in self._repos:
                 if entry["path"] == resolved:
                     return entry.get("data_dir")

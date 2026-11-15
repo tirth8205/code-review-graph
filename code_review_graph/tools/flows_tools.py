@@ -8,7 +8,7 @@ from typing import Any
 from ..flows import get_flow_by_id, get_flows
 from ..hints import generate_hints, get_session
 from ..incremental import followed_files, path_within_repo
-from ._common import _bounded, _get_store, _shown_of, _validate_positive_int
+from ._common import _bounded, _get_store_for_read, _shown_of, _validate_positive_int
 
 # ---------------------------------------------------------------------------
 # Tool 10: list_flows  [EXPLORE]
@@ -53,7 +53,10 @@ def list_flows(
     """
     _validate_positive_int(limit, "limit")
 
-    store, root = _get_store(repo_root)
+    store, root, not_built = _get_store_for_read(repo_root)
+    if not_built is not None:
+        return not_built
+    assert store is not None and root is not None
     try:
         # Count every matching flow, then keep the bounded prefix — the same
         # "count all, return a prefix" contract query.py uses for max_results.
@@ -141,7 +144,10 @@ def get_flow(
     _validate_positive_int(max_steps, "max_steps")
     _validate_positive_int(max_source_lines, "max_source_lines")
 
-    store, root = _get_store(repo_root)
+    store, root, not_built = _get_store_for_read(repo_root)
+    if not_built is not None:
+        return not_built
+    assert store is not None and root is not None
     try:
         flow: dict | None = None
 

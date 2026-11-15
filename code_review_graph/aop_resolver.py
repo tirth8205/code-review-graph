@@ -324,13 +324,7 @@ def resolve_aop_advice(store: "GraphStore") -> dict:
     """
     conn = store._conn
 
-    java_files: set[str] = {
-        row["file_path"]
-        for row in conn.execute(
-            "SELECT DISTINCT file_path FROM nodes WHERE language = 'java'"
-        ).fetchall()
-    }
-    if not java_files:
+    if not store.has_nodes_for_language("java"):
         return {
             "aspects_indexed": 0,
             "advice_resolved": 0,

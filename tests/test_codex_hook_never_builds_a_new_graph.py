@@ -33,7 +33,12 @@ def _repo(tmp_path: Path, name: str = "repo") -> Path:
 
 def _run(monkeypatch, payload: dict, *, existing_only: bool) -> list[Path]:
     calls: list[Path] = []
-    monkeypatch.setattr(hook_update, "_update_repo", calls.append)
+    def record(root: Path, *, existing_only: bool) -> None:
+        assert existing_only == mode
+        calls.append(root)
+
+    mode = existing_only
+    monkeypatch.setattr(hook_update, "_update_repo", record)
     monkeypatch.setattr(hook_update.sys, "stdin", io.StringIO(json.dumps(payload)))
     hook_update.run_update_hook(existing_only=existing_only)
     return calls

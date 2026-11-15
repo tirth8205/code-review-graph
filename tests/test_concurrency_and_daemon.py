@@ -2390,7 +2390,7 @@ build_or_update_graph(full_rebuild=True, repo_root=sys.argv[1], postprocess="non
             assert probe.acquire(), "forked parsers retained the dead build's lock"
             probe.release()
             recovered = _crg(
-                "update", "--repo", str(repo), "--skip-flows",
+                "build", "--repo", str(repo), "--skip-flows",
                 env={**env, "CRG_SERIAL_PARSE": "1"},
             )
             assert recovered.returncode == 0, recovered.stderr
@@ -2492,7 +2492,11 @@ build_or_update_graph(full_rebuild=True, repo_root=sys.argv[1], postprocess="non
         home = tmp_path / "home"
         repo = _make_repo(tmp_path / "repo", 12)
         env = _isolated_env(home)
-        db = _seed_empty_db(repo)
+        built = _crg("build", "--repo", str(repo), "--skip-flows", env=env)
+        assert built.returncode == 0, built.stderr
+        db = _db_path(repo)
+        (repo / "src" / "new.py").write_text("def added():\n    return 42\n", encoding="utf-8")
+        subprocess.run(["git", "add", "src/new.py"], cwd=repo, check=True, env=_git_env())
 
         holder = subprocess.Popen(
             [sys.executable, "-c", _WRITE_LOCK_HOLDER, str(db), "60"],
@@ -2520,14 +2524,18 @@ build_or_update_graph(full_rebuild=True, repo_root=sys.argv[1], postprocess="non
 
         recovered = _crg("update", "--repo", str(repo), env=env)
         assert recovered.returncode == 0, recovered.stderr
-        assert _counts(db)["files"] == 12
+        assert _counts(db)["files"] == 13
 
     def test_wait_blocks_until_the_holder_finishes(self, tmp_path: Path) -> None:
         """A caller who asks to wait gets the work done, not a silent skip."""
         home = tmp_path / "home"
         repo = _make_repo(tmp_path / "repo", 12)
         env = _isolated_env(home)
-        db = _seed_empty_db(repo)
+        built = _crg("build", "--repo", str(repo), "--skip-flows", env=env)
+        assert built.returncode == 0, built.stderr
+        db = _db_path(repo)
+        (repo / "src" / "new.py").write_text("def added():\n    return 42\n", encoding="utf-8")
+        subprocess.run(["git", "add", "src/new.py"], cwd=repo, check=True, env=_git_env())
 
         lock = WriteLock(db)
         assert lock.acquire()
@@ -2542,7 +2550,7 @@ build_or_update_graph(full_rebuild=True, repo_root=sys.argv[1], postprocess="non
         # work instead of reporting contention.
         assert waited_for >= 1.5, f"did not wait for the holder: {waited_for:.1f}s"
         assert "already running" not in (waited.stdout + waited.stderr)
-        assert _counts(db)["files"] == 12
+        assert _counts(db)["files"] == 13
         assert _integrity(db) == "ok"
 
     def test_builds_of_different_repositories_do_not_block_each_other(
@@ -2633,7 +2641,7 @@ build_or_update_graph(full_rebuild=True, repo_root=sys.argv[1], postprocess="non
         assert rebuilt.returncode == 0, rebuilt.stderr
         assert "Post-processing:" in rebuilt.stdout
 
-    def test_a_burst_of_concurrent_updates_builds_the_graph_once(
+    def test_a_burst_of_concurrent_updates_refreshes_the_graph(
         self, tmp_path: Path
     ) -> None:
         """The regression this lock exists for: a burst must not stack parses.
@@ -2645,7 +2653,11 @@ build_or_update_graph(full_rebuild=True, repo_root=sys.argv[1], postprocess="non
         home = tmp_path / "home"
         repo = _make_repo(tmp_path / "repo", 12)
         env = _isolated_env(home)
-        db = _seed_empty_db(repo)
+        built = _crg("build", "--repo", str(repo), "--skip-flows", env=env)
+        assert built.returncode == 0, built.stderr
+        db = _db_path(repo)
+        (repo / "src" / "new.py").write_text("def added():\n    return 42\n", encoding="utf-8")
+        subprocess.run(["git", "add", "src/new.py"], cwd=repo, check=True, env=_git_env())
 
         burst = [
             subprocess.Popen(
@@ -2681,5 +2693,5 @@ build_or_update_graph(full_rebuild=True, repo_root=sys.argv[1], postprocess="non
         # pass on the old code too and pin nothing.
         assert skipped, "no run contended: the burst did not overlap"
         assert len(skipped) < len(results)
-        assert _counts(db)["files"] == 12
+        assert _counts(db)["files"] == 13
         assert _integrity(db) == "ok"

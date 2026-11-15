@@ -97,25 +97,39 @@ def _flock_supported() -> bool:
     return sys.platform != "win32"
 
 
-def _flock(handle: Any, blocking: bool) -> bool:
-    """Take an exclusive lock on *handle*. Returns False when it is held."""
-    import fcntl
+if sys.platform == "win32":
+    def _lock_file(handle: Any, blocking: bool) -> bool:
+        """Lock the first byte until the descriptor closes, even for an empty file."""
+        import msvcrt
 
-    flags = fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
-    try:
-        fcntl.flock(handle.fileno(), flags)
-    except OSError as exc:
-        if exc.errno in (errno.EACCES, errno.EAGAIN):
-            return False
-        raise
-    return True
+        handle.seek(0)
+        try:
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK, 1)
+        except OSError as exc:
+            if exc.errno in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                return False
+            raise
+        return True
+else:
+    def _lock_file(handle: Any, blocking: bool) -> bool:
+        """Take an exclusive lock on the open file description."""
+        import fcntl
+
+        flags = fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
+        try:
+            fcntl.flock(handle.fileno(), flags)
+        except OSError as exc:
+            if exc.errno in (errno.EACCES, errno.EAGAIN):
+                return False
+            raise
+        return True
 
 
 def read_write_lock_holder(db_path: Path) -> int | None:
     """Return the PID that recorded itself as the lock holder, if any.
 
-    Only meaningful while the lock is actually held: a released lock is
-    truncated by [_WriteLock.release], so an empty file reads as ``None``.
+    Read only after kernel contention. A dead process can leave this text
+    behind, so it never participates in lock acquisition.
     """
     try:
         raw = write_lock_path(db_path).read_text(encoding="utf-8").strip()
@@ -136,9 +150,10 @@ class WriteLock:
     the overlap testable without spawning a second process.
     """
 
-    def __init__(self, db_path: Path) -> None:
+    def __init__(self, db_path: Path, *, owner_path: Path | None = None) -> None:
         self.db_path = db_path
-        self.path = write_lock_path(db_path)
+        self.path = owner_path if owner_path is not None else write_lock_path(db_path)
+        self._strict = owner_path is not None
         self._handle: Any = None
 
     @property
@@ -148,33 +163,19 @@ class WriteLock:
     def acquire(self, *, blocking: bool = False) -> bool:
         """Claim the lock, or report that somebody else holds it.
 
-        Returns True when this instance owns the lock afterwards. On platforms
-        without ``flock`` this is a no-op that reports success, so behaviour
-        there is exactly what it was before this module existed.
+        Returns True when this instance owns the lock afterwards. Windows
+        uses a byte-range lock for both checkout ownership and graph writes.
         """
         if self._handle is not None:
             return True
-        if not _flock_supported():  # pragma: no cover - POSIX in CI
-            return True
-        try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            handle = open(self.path, "a+", encoding="utf-8")  # noqa: SIM115
-        except OSError as exc:
-            # A lock file we cannot even open must not fail the build: losing
-            # the guard degrades to the old behaviour, which is what the user
-            # asked for anyway.
-            logger.warning("Cannot open write lock %s: %s", self.path, exc)
-            return True
+        use_flock = _flock_supported()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(self.path, "a+", encoding="utf-8")  # noqa: SIM115
         self._handle = handle
         _open_locks.add(self)
         acquired = False
         try:
-            acquired = _flock(handle, blocking)
-        except OSError as exc:
-            # No lock support is not a competing writer, and it must not fail
-            # the build either. Degrade like a lock file that cannot be opened.
-            logger.warning("Cannot lock %s: %s", self.path, exc)
-            return True
+            acquired = _lock_file(handle, blocking)
         finally:
             if not acquired:
                 self._handle = None
@@ -182,7 +183,8 @@ class WriteLock:
                 handle.close()
         if not acquired:
             return False
-        self._record_holder(handle)
+        if not self._strict and use_flock:
+            self._record_holder(handle)
         return True
 
     def _record_holder(self, handle: Any) -> None:
@@ -206,14 +208,15 @@ class WriteLock:
         _open_locks.discard(self)
         if handle is None:
             return
+        if not self._strict and _flock_supported():
+            try:
+                handle.seek(0)
+                handle.truncate()
+                handle.flush()
+            except OSError:  # pragma: no cover - best-effort cleanup
+                pass
         try:
-            handle.seek(0)
-            handle.truncate()
-            handle.flush()
-        except OSError:  # pragma: no cover - best-effort cleanup
-            pass
-        try:
-            handle.close()  # closing the description releases the flock
+            handle.close()  # closing the descriptor releases the lock
         except OSError:  # pragma: no cover - best-effort cleanup
             pass
 

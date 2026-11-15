@@ -1,10 +1,4 @@
-"""PyPI gets only code that reached ``main`` (crg-4eb.4).
-
-``publish.yml`` runs on any published release, and a release can name a tag
-on any branch. A tag cut from ``staging`` or a feature branch would ship code
-no promotion ever reviewed. The workflow now checks the tagged commit is on
-``origin/main`` before it builds anything.
-"""
+"""Fork release assets must come from the tagged dc-use package revision."""
 
 from __future__ import annotations
 
@@ -17,8 +11,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-PUBLISH = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "publish.yml"
-GATE = "Refuse a tag that is not on main"
+PUBLISH = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "release-assets.yml"
+GATE = "Verify dc-use release provenance"
 
 needs_git_and_bash = pytest.mark.skipif(
     shutil.which("git") is None or shutil.which("bash") is None or sys.platform == "win32",
@@ -28,7 +22,7 @@ needs_git_and_bash = pytest.mark.skipif(
 
 def _steps() -> list[dict]:
     doc = yaml.safe_load(PUBLISH.read_text(encoding="utf-8"))
-    return doc["jobs"]["publish"]["steps"]
+    return doc["jobs"]["assets"]["steps"]
 
 
 def _names() -> list[str]:
@@ -39,7 +33,7 @@ def test_the_check_runs_before_the_build_and_the_upload():
     names = _names()
     assert GATE in names
     assert names.index(GATE) < names.index("Build package")
-    assert names.index(GATE) < names.index("Publish to PyPI")
+    assert names.index(GATE) < names.index("Upload release assets")
 
 
 def test_the_checkout_has_the_history_the_check_needs():
@@ -60,19 +54,23 @@ def _git(cwd: Path, *args: str) -> str:
 
 @pytest.fixture()
 def clone(tmp_path: Path) -> Path:
-    """A clone of an origin whose ``main`` has one commit and ``staging`` one more."""
+    """A dc-use release and a newer commit that has not reached integration."""
     work = tmp_path / "work"
     work.mkdir()
-    _git(work, "init", "-q", "-b", "main")
+    _git(work, "init", "-q", "-b", "dc-use")
     (work / "a.txt").write_text("a\n", encoding="utf-8")
-    _git(work, "add", "a.txt")
-    _git(work, "commit", "-q", "-m", "on main")
-    _git(work, "tag", "-a", "v1.0.0", "-m", "v1.0.0")
+    (work / "pyproject.toml").write_text(
+        '[project]\nname = "fixture"\nversion = "1.0.0+dc.1"\n', encoding="utf-8"
+    )
+    _git(work, "add", "a.txt", "pyproject.toml")
+    _git(work, "commit", "-q", "-m", "on dc-use")
+    for tag in ("v1.0.0-dc.1", "v1.0.0", "v1.0.0-dc.2"):
+        _git(work, "tag", "-a", tag, "-m", tag)
     _git(work, "checkout", "-q", "-b", "staging")
     (work / "b.txt").write_text("b\n", encoding="utf-8")
     _git(work, "add", "b.txt")
     _git(work, "commit", "-q", "-m", "only on staging")
-    _git(work, "tag", "-a", "v1.1.0", "-m", "v1.1.0")
+    _git(work, "tag", "-a", "v1.1.0-dc.1", "-m", "v1.1.0-dc.1")
     origin = tmp_path / "origin.git"
     _git(tmp_path, "clone", "-q", "--bare", str(work), str(origin))
     clone = tmp_path / "clone"
@@ -90,14 +88,35 @@ def _run_gate(clone: Path, tag: str) -> subprocess.CompletedProcess[str]:
 
 
 @needs_git_and_bash
-def test_a_tag_on_main_is_published(clone: Path):
-    result = _run_gate(clone, "v1.0.0")
+def test_a_matching_tag_on_dc_use_is_published(clone: Path):
+    result = _run_gate(clone, "v1.0.0-dc.1")
     assert result.returncode == 0, result.stdout + result.stderr
 
 
 @needs_git_and_bash
-def test_a_tag_that_is_not_on_main_is_refused(clone: Path):
-    result = _run_gate(clone, "v1.1.0")
+def test_a_tag_that_is_not_on_dc_use_is_refused(clone: Path):
+    result = _run_gate(clone, "v1.1.0-dc.1")
     assert result.returncode != 0
-    assert "v1.1.0" in result.stdout + result.stderr
-    assert "main" in result.stdout + result.stderr
+    assert "v1.1.0-dc.1" in result.stdout + result.stderr
+    assert "dc-use" in result.stdout + result.stderr
+
+
+@needs_git_and_bash
+@pytest.mark.parametrize("tag", ["v1.0.0", "v1.0.0-dc.2"])
+def test_package_version_must_match_the_fork_tag(clone: Path, tag: str):
+    result = _run_gate(clone, tag)
+    assert result.returncode != 0
+    assert "does not match dc package" in result.stdout + result.stderr
+
+
+@needs_git_and_bash
+def test_checkout_must_match_the_release_tag(clone: Path):
+    _git(clone, "checkout", "-q", "--detach", "v1.1.0-dc.1")
+    script = next(s for s in _steps() if s.get("name") == GATE)["run"]
+    result = subprocess.run(
+        ["bash", "-c", script], cwd=clone,
+        env={**os.environ, "TAG": "v1.0.0-dc.1"},
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode != 0
+    assert "checked-out commit" in result.stdout + result.stderr

@@ -7,6 +7,7 @@
  */
 
 import * as assert from 'assert';
+import { execFileSync } from 'node:child_process';
 import { after, before, describe, it } from 'node:test';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -497,4 +498,35 @@ describe('SqliteReader', () => {
       new SqliteReader('/nonexistent/path/to/database.db');
     });
   });
+});
+
+it('reads isolated checkouts written by the CRG CLI', { skip: !process.env.CRG_TEST_CLI }, () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'crg-shared-consumer-'));
+  const shared = path.join(root, 'shared.db');
+  try {
+    const checkouts = ['left', 'right'].map(name => {
+      const repo = path.join(root, name);
+      fs.mkdirSync(repo);
+      fs.writeFileSync(path.join(repo, 'app.py'), `def ${name}_only(): return 1\n`);
+      execFileSync(process.env.CRG_TEST_CLI!, ['build', '--repo', repo], {
+        env: { ...process.env, CRG_SHARED_DB: shared, CRG_HOME: path.join(root, 'home') },
+        timeout: 30_000,
+      });
+      return repo;
+    });
+    for (const [index, repo] of checkouts.entries()) {
+      const reader = new SqliteReader(shared, repo);
+      try {
+        assert.equal(reader.checkSchemaCompatibility(), undefined);
+        assert.deepEqual(reader.searchNodes('_only').map(node => node.name), [
+          index === 0 ? 'left_only' : 'right_only',
+        ]);
+      } finally {
+        reader.close();
+      }
+    }
+    assert.deepEqual(fs.readdirSync(root).filter(name => name.endsWith('.db')), ['shared.db']);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

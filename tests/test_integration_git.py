@@ -84,8 +84,7 @@ def git_repo(tmp_path: Path) -> Path:
 
     # Second commit — modify the file
     py_file.write_text(
-        "def greet():\n    return 'hello'\n\n"
-        "def farewell():\n    return 'goodbye'\n"
+        "def greet():\n    return 'hello'\n\ndef farewell():\n    return 'goodbye'\n"
     )
     _git(repo, "add", "hello.py")
     _git(repo, "commit", "-m", "add farewell function")
@@ -125,14 +124,9 @@ def test_get_changed_files_preserves_unicode_path(
     source = git_repo_with_unicode_path / "café.py"
     source.write_text("value = 2\n", encoding="utf-8")
     assert _git(git_repo_with_unicode_path, "add", "--", "café.py").returncode == 0
-    assert (
-        _git(git_repo_with_unicode_path, "commit", "-m", "modify unicode path").returncode
-        == 0
-    )
+    assert _git(git_repo_with_unicode_path, "commit", "-m", "modify unicode path").returncode == 0
 
-    assert get_changed_files(git_repo_with_unicode_path, base="HEAD~1") == [
-        "café.py"
-    ]
+    assert get_changed_files(git_repo_with_unicode_path, base="HEAD~1") == ["café.py"]
 
 
 def test_get_staged_and_unstaged_preserves_unicode_path(
@@ -395,14 +389,9 @@ def test_git_discovery_preserves_literal_separator_characters(
     for name in names:
         (git_repo_with_unicode_path / name).write_text("value = 1\n")
     assert _git(git_repo_with_unicode_path, "add", "--", *names).returncode == 0
-    assert (
-        _git(git_repo_with_unicode_path, "commit", "-m", "add literal paths").returncode
-        == 0
-    )
+    assert _git(git_repo_with_unicode_path, "commit", "-m", "add literal paths").returncode == 0
 
-    assert set(
-        get_changed_files(git_repo_with_unicode_path, base="HEAD~1")
-    ) == set(names)
+    assert set(get_changed_files(git_repo_with_unicode_path, base="HEAD~1")) == set(names)
 
     for name in names:
         (git_repo_with_unicode_path / name).write_text("value = 2\n")
@@ -497,9 +486,7 @@ def test_incremental_update_real_git(git_repo: Path) -> None:
 
         # Move back to tip (second commit) and do incremental update
         _git(git_repo, "checkout", "-")
-        result = incremental_update(
-            git_repo, store, changed_files=["hello.py"]
-        )
+        result = incremental_update(git_repo, store, changed_files=["hello.py"])
         assert result["files_updated"] >= 1
         assert "hello.py" in result["changed_files"]
 
@@ -647,8 +634,13 @@ def git_repo_with_submodule(tmp_path: Path) -> Path:
     _git(parent, "add", "main.py")
     _git(parent, "commit", "-m", "parent initial")
     _git(
-        parent, "-c", "protocol.file.allow=always",
-        "submodule", "add", str(lib_repo), "lib",
+        parent,
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        str(lib_repo),
+        "lib",
     )
     _git(parent, "commit", "-m", "add lib submodule")
 
@@ -659,9 +651,7 @@ def test_get_all_tracked_files_without_recurse(
     git_repo_with_submodule: Path,
 ) -> None:
     """Without recurse_submodules, submodule files are NOT listed."""
-    files = get_all_tracked_files(
-        git_repo_with_submodule, recurse_submodules=False
-    )
+    files = get_all_tracked_files(git_repo_with_submodule, recurse_submodules=False)
     assert "main.py" in files
     # Submodule entry appears as a gitlink, not as individual files
     assert not any(f.startswith("lib/") for f in files)
@@ -671,9 +661,7 @@ def test_get_all_tracked_files_with_recurse(
     git_repo_with_submodule: Path,
 ) -> None:
     """With recurse_submodules=True, submodule files ARE listed."""
-    files = get_all_tracked_files(
-        git_repo_with_submodule, recurse_submodules=True
-    )
+    files = get_all_tracked_files(git_repo_with_submodule, recurse_submodules=True)
     assert "main.py" in files
     assert "lib/util.py" in files
 
@@ -682,9 +670,7 @@ def test_collect_all_files_with_recurse(
     git_repo_with_submodule: Path,
 ) -> None:
     """collect_all_files with recurse_submodules includes submodule code."""
-    files = collect_all_files(
-        git_repo_with_submodule, recurse_submodules=True
-    )
+    files = collect_all_files(git_repo_with_submodule, recurse_submodules=True)
     assert "main.py" in files
     assert "lib/util.py" in files
 
@@ -697,19 +683,13 @@ def test_full_build_with_recurse_submodules(
     db_path.parent.mkdir(parents=True, exist_ok=True)
     store = GraphStore(db_path)
     try:
-        result = full_build(
-            git_repo_with_submodule, store, recurse_submodules=True
-        )
+        result = full_build(git_repo_with_submodule, store, recurse_submodules=True)
         assert result["files_parsed"] >= 2  # main.py + lib/util.py
         assert result["errors"] == []
 
         # Verify both parent and submodule nodes exist
-        parent_nodes = store.get_nodes_by_file(
-            str(git_repo_with_submodule / "main.py")
-        )
-        sub_nodes = store.get_nodes_by_file(
-            str(git_repo_with_submodule / "lib" / "util.py")
-        )
+        parent_nodes = store.get_nodes_by_file(str(git_repo_with_submodule / "main.py"))
+        sub_nodes = store.get_nodes_by_file(str(git_repo_with_submodule / "lib" / "util.py"))
         assert len(parent_nodes) > 0
         assert len(sub_nodes) > 0
     finally:
@@ -759,17 +739,9 @@ def test_incremental_rename_matches_a_fresh_full_rebuild(
         full_store = GraphStore(tmp_path / "full.db")
         full_build(repo, full_store)
 
-        assert set(incremental_store.get_all_files()) == set(
-            full_store.get_all_files()
-        )
-        assert (
-            incremental_store.get_stats().total_nodes
-            == full_store.get_stats().total_nodes
-        )
-        assert (
-            incremental_store.get_stats().total_edges
-            == full_store.get_stats().total_edges
-        )
+        assert set(incremental_store.get_all_files()) == set(full_store.get_all_files())
+        assert incremental_store.get_stats().total_nodes == full_store.get_stats().total_nodes
+        assert incremental_store.get_stats().total_edges == full_store.get_stats().total_edges
     finally:
         incremental_store.close()
         if full_store is not None:
@@ -1073,7 +1045,7 @@ def test_update_auto_base_across_divergent_branch_switch(tmp_path: Path) -> None
     assert {"sibling_only.py", "main_one.py", "main_two.py"} <= changed
 
 
-def test_update_without_usable_anchor_falls_back_to_full_rebuild(
+def test_update_without_usable_anchor_requires_explicit_rebuild(
     tmp_path: Path,
 ) -> None:
     repo = _init_repo(tmp_path)
@@ -1089,35 +1061,28 @@ def test_update_without_usable_anchor_falls_back_to_full_rebuild(
         store.close()
 
     _commit_file(repo, "epsilon")
-    res = build_or_update_graph(
-        full_rebuild=False, repo_root=str(repo), base=None, postprocess="none"
-    )
-    assert res["build_type"] == "full"
-    assert res["base_resolved"] is None
+    with pytest.raises(RuntimeError, match="no usable Git base"):
+        build_or_update_graph(
+            full_rebuild=False, repo_root=str(repo), base=None, postprocess="none"
+        )
 
 
-def test_update_missing_graph_ignores_explicit_incremental_base(
+def test_update_missing_graph_requires_explicit_build(
     tmp_path: Path,
 ) -> None:
     repo = _init_repo(tmp_path)
     _commit_file(repo, "beta")
 
-    res = build_or_update_graph(
-        full_rebuild=False,
-        repo_root=str(repo),
-        base="HEAD~1",
-        postprocess="none",
-    )
-
-    assert res["build_type"] == "full"
-    assert res["base_resolved"] is None
-    assert res["files_parsed"] == 2
-    with GraphStore(repo / ".code-review-graph" / "graph.db") as store:
-        assert store.get_nodes_by_file(str(repo / "a.py"))
-        assert store.get_nodes_by_file(str(repo / "beta.py"))
+    with pytest.raises(RuntimeError, match="requires an existing graph"):
+        build_or_update_graph(
+            full_rebuild=False,
+            repo_root=str(repo),
+            base="HEAD~1",
+            postprocess="none",
+        )
 
 
-def test_update_repairs_existing_empty_graph(
+def test_update_rejects_existing_empty_graph(
     tmp_path: Path,
 ) -> None:
     repo = _init_repo(tmp_path)
@@ -1126,28 +1091,21 @@ def test_update_repairs_existing_empty_graph(
         pass
     _commit_file(repo, "beta")
 
-    res = build_or_update_graph(
-        full_rebuild=False,
-        repo_root=str(repo),
-        base="HEAD~1",
-        postprocess="none",
-    )
-
-    assert res["build_type"] == "full"
-    assert res["base_resolved"] is None
-    assert res["files_parsed"] == 2
-    with GraphStore(graph_path) as store:
-        assert store.get_nodes_by_file(str(repo / "a.py"))
-        assert store.get_nodes_by_file(str(repo / "beta.py"))
+    with pytest.raises(RuntimeError, match="requires an existing graph"):
+        build_or_update_graph(
+            full_rebuild=False,
+            repo_root=str(repo),
+            base="HEAD~1",
+            postprocess="none",
+        )
 
 
-def test_status_then_update_builds_complete_queryable_graph(
+def test_status_then_update_requires_explicit_build(
     tmp_path: Path,
     monkeypatch,
     capsys,
 ) -> None:
     from code_review_graph import cli
-    from code_review_graph.tools.query import query_graph
 
     repo = tmp_path / "queryable-repo"
     repo.mkdir()
@@ -1203,12 +1161,10 @@ def test_status_then_update_builds_complete_queryable_graph(
             "--skip-postprocess",
         ],
     )
-    cli.main()
-
-    assert "Full rebuild" in capsys.readouterr().out
-    result = query_graph("callers_of", "target", repo_root=str(repo))
-    assert result["status"] == "ok"
-    assert {item["name"] for item in result["results"]} == {"recent", "stable"}
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main()
+    assert exc_info.value.code == 1
+    assert "requires an existing graph" in capsys.readouterr().err
 
 
 def test_update_explicit_base_bypasses_auto_resolution(tmp_path: Path) -> None:
@@ -1236,9 +1192,7 @@ def test_mcp_tool_base_defaults_to_none() -> None:
     assert inspect.signature(fn).parameters["base"].default is None
 
 
-def test_cli_update_brief_default_base_does_not_crash(
-    tmp_path: Path, capsys, monkeypatch
-) -> None:
+def test_cli_update_brief_default_base_does_not_crash(tmp_path: Path, capsys, monkeypatch) -> None:
     """`update --brief` with no explicit --base must not crash. The base now
     defaults to None, which the brief impact path cannot pass to git directly;
     it has to reuse the resolved base."""
@@ -1283,15 +1237,12 @@ def test_update_auto_base_multi_commit_rename_matches_full_rebuild(
     (package / "__init__.py").write_text("", encoding="utf-8")
     old_module = package / "service.py"
     old_module.write_text(
-        "def provide():\n"
-        "    return 'value'\n",
+        "def provide():\n    return 'value'\n",
         encoding="utf-8",
     )
     importer = repo / "app.py"
     importer.write_text(
-        "from pkg.service import provide\n\n"
-        "def run():\n"
-        "    return provide()\n",
+        "from pkg.service import provide\n\ndef run():\n    return provide()\n",
         encoding="utf-8",
     )
     _git_ok(repo, "add", ".")
@@ -1317,9 +1268,7 @@ def test_update_auto_base_multi_commit_rename_matches_full_rebuild(
 
     # Commit 2: update the existing importer.
     importer.write_text(
-        "from pkg.core import provide\n\n"
-        "def run():\n"
-        "    return provide()\n",
+        "from pkg.core import provide\n\ndef run():\n    return provide()\n",
         encoding="utf-8",
     )
     _git_ok(repo, "add", "app.py")
@@ -1328,9 +1277,7 @@ def test_update_auto_base_multi_commit_rename_matches_full_rebuild(
     # Commit 3: add another importing file.
     new_consumer = repo / "worker.py"
     new_consumer.write_text(
-        "from pkg.core import provide\n\n"
-        "def work():\n"
-        "    return provide()\n",
+        "from pkg.core import provide\n\ndef work():\n    return provide()\n",
         encoding="utf-8",
     )
     _git_ok(repo, "add", "worker.py")
@@ -1400,10 +1347,7 @@ def test_update_auto_base_multi_commit_rename_matches_full_rebuild(
         assert incremental_store.get_nodes_by_file(str(new_module))
         incremental_nodes = node_snapshot(incremental_store)
         incremental_edges = edge_snapshot(incremental_store)
-        assert all(
-            str(old_module) not in repr(edge)
-            for edge in incremental_edges
-        )
+        assert all(str(old_module) not in repr(edge) for edge in incremental_edges)
 
     fresh_data = tmp_path / "fresh-data"
     monkeypatch.setenv("CRG_DATA_DIR", str(fresh_data))

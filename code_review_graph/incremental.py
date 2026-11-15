@@ -39,6 +39,7 @@ from .csharp_resolver import restore_csharp_references
 from .errors import ChangeDiscoveryError, GraphRootMismatchError, GraphStoreError
 from .graph import GraphStore
 from .locking import WriteLock, write_lock_path
+from .shared_sqlite import shared_database
 
 if TYPE_CHECKING:
     from .parser import CodeParser
@@ -67,7 +68,7 @@ _MAX_PARSE_WORKERS = env_int("CRG_PARSE_WORKERS", min(os.cpu_count() or 4, 8))
 # This is deliberately separate from ``sys.stdin.isatty()``: CI, cron, and
 # redirected CLI builds also have non-TTY stdin, but do not share the MCP
 # transport's file-descriptor lifetime problem.
-_MCP_STDIO_ACTIVE = False
+_MCP_STDIO_ACTIVE: bool = False
 
 # Each process-pool worker runs this module in its own process, while each
 # thread-pool worker needs isolated parser state.  A thread-local cache covers
@@ -92,13 +93,13 @@ def _windows_console_handle(fileno: int) -> bool:
     try:
         import ctypes
         import msvcrt
-    except ImportError:
-        return False
-    try:
-        handle = msvcrt.get_osfhandle(fileno)
-        mode = ctypes.c_uint32()
-        return bool(ctypes.windll.kernel32.GetConsoleMode(handle, ctypes.byref(mode)))
-    except (AttributeError, OSError, ValueError, ctypes.ArgumentError):
+        try:
+            handle = msvcrt.get_osfhandle(fileno)
+            mode = ctypes.c_uint32()
+            return bool(ctypes.windll.kernel32.GetConsoleMode(handle, ctypes.byref(mode)))
+        except ctypes.ArgumentError:
+            return False
+    except (ImportError, AttributeError, OSError, ValueError):
         return False
 
 
@@ -693,30 +694,25 @@ def get_data_dir(repo_root: Path, *, create: bool = True) -> Path:
     files never get committed. Both are idempotent. Pass ``create=False``
     when resolving the path for a read-only existence check.
     """
-    # Check registry first
-    try:
-        from .registry import Registry, default_registry_path
+    from .registry import Registry, default_registry_path
 
-        # Registry construction creates its parent directory. A read-only
-        # lookup must skip it entirely when no registry file exists.
-        if create or default_registry_path().is_file():
-            registry_data_dir = Registry().get_data_dir_for_repo(str(repo_root))
-            if registry_data_dir:
-                data_dir = Path(registry_data_dir).resolve()
-                local_dir = repo_root / ".code-review-graph"
-                if not data_dir.exists() and (local_dir / "graph.db").is_file():
-                    logger.warning(
-                        "Registered graph directory %s is missing; falling back to "
-                        "normal resolution (local graph: %s).",
-                        data_dir, local_dir,
-                    )
-                else:
-                    if create:
-                        _create_data_dir(data_dir)
-                    return data_dir
-    except Exception as exc:
-        # If registry lookup fails, log and fall through to other methods
-        logger.debug("Registry lookup failed for %s: %s", repo_root, exc)
+    # Registry construction creates its parent directory. A read-only
+    # lookup must skip it entirely when no registry file exists.
+    if create or default_registry_path().is_file():
+        registry_data_dir = Registry().get_data_dir_for_repo(str(repo_root))
+        if registry_data_dir:
+            data_dir = Path(registry_data_dir).resolve()
+            local_dir = repo_root / ".code-review-graph"
+            if not data_dir.exists() and (local_dir / "graph.db").is_file():
+                logger.warning(
+                    "Registered graph directory %s is missing; falling back to "
+                    "normal resolution (local graph: %s).",
+                    data_dir, local_dir,
+                )
+            else:
+                if create:
+                    _create_data_dir(data_dir)
+                return data_dir
 
     # Check environment variable
     env_override = os.environ.get("CRG_DATA_DIR", "").strip()
@@ -740,6 +736,8 @@ def get_db_path(repo_root: Path, *, read_only: bool = False) -> Path:
     ``read_only=True`` to resolve the current path without creating a data
     directory, migrating a legacy database, or deleting side-files.
     """
+    if (shared := shared_database()) is not None:
+        return shared
     forced_read_only = read_only_requested()
     no_writes = read_only or forced_read_only
     crg_dir = get_data_dir(repo_root, create=not no_writes)
@@ -764,6 +762,8 @@ def get_db_path(repo_root: Path, *, read_only: bool = False) -> Path:
 def _prepare_db_path(repo_root: Path, new_db: Path) -> None:
     """Prepare an already resolved database path, under the writer's lock."""
     _create_data_dir(new_db.parent)
+    if shared_database() == new_db:
+        return
 
     # Migrate legacy database if present (only meaningful when the
     # legacy file sits at the repo root — if CRG_DATA_DIR is set we
@@ -2837,7 +2837,7 @@ def _single_hop_dependents(store: GraphStore, file_path: str) -> set[str]:
 
 # These languages are parsed by bounded fallbacks or config readers, so no
 # grammar package is loaded for them and probing one only costs a subprocess.
-_NO_GRAMMAR_LANGUAGES = frozenset({"rescript", "vbnet", "yaml", "properties"})
+_NO_GRAMMAR_LANGUAGES = frozenset({"rescript", "vbnet", "yaml", "properties", "liquid", "xslt"})
 
 
 def _prewarm_parser_probes(parser: Any, rel_paths: list[str]) -> None:
@@ -2847,7 +2847,7 @@ def _prewarm_parser_probes(parser: Any, rel_paths: list[str]) -> None:
     except Exception:
         return
     probe_fn = getattr(parser_mod, "_parser_load_probe_succeeds", None)
-    if getattr(probe_fn, "__qualname__", "") != "_parser_load_probe_succeeds":
+    if not callable(probe_fn) or probe_fn.__qualname__ != "_parser_load_probe_succeeds":
         return
     ext_map = getattr(parser, "_extension_map", None)
     if not isinstance(ext_map, dict):
@@ -2991,6 +2991,8 @@ def full_build(
     recurse_submodules: bool | None = None,
     enrich: bool | None = None,
     follow_symlinks: bool | None = None,
+    *,
+    classify_edges: bool = True,
 ) -> dict:
     """Full rebuild of the entire graph.
 
@@ -3005,8 +3007,10 @@ def full_build(
         follow_symlinks: If True, also index files in symlinked folders,
             under paths inside the repository. When *None*, falls back to the
             ``CRG_FOLLOW_SYMLINKS`` env var. Default: off.
+        classify_edges: Disable only when the caller classifies after post-processing.
     """
     repo_root = _canonical_repo_root(repo_root)
+    _assert_graph_matches_root(repo_root, store)
     parser = _get_code_parser_cls()(repo_root)
     files, followed, followed_dirs = _collect_files(
         repo_root, recurse_submodules, follow_symlinks,
@@ -3122,7 +3126,8 @@ def full_build(
     scoped_stats = _run_scoped_resolver(store, repo_root)
     jedi_stats = _run_jedi_enrichment(store, repo_root, enrich=enrich)
     _relink_stored_edges(store, repo_root, followed_dirs)
-    _refresh_target_resolution(store)
+    if classify_edges:
+        _refresh_target_resolution(store)
     store.set_metadata(_DEPENDENTS_PENDING_KEY, "[]")
     # Storing is over: every file that could be parsed has its rows. Recorded
     # before the anchor and before post-processing, so a process killed from
@@ -3489,7 +3494,9 @@ def incremental_update(
     lifecycle_paths = expand_changed_file_paths(
         store, lifecycle_inputs, repo_root=repo_root,
     )
-    community_by_qn = capture_community_assignments(store, lifecycle_paths)
+    community_by_qn = (
+        capture_community_assignments(store, lifecycle_paths) if lifecycle_paths else {}
+    )
     cleared_entry_qns: set[str] = set()
     flow_node_ids: dict[int, str] = {}
 
@@ -3577,10 +3584,11 @@ def incremental_update(
 
     # Remap surviving community IDs onto replacement nodes, drop orphan flow
     # rows, and remove community rows that no longer have any members.
-    remap_community_assignments(store, community_by_qn)
-    remap_flow_node_ids(store, flow_node_ids)
-    purge_orphan_flow_data(store)
-    purge_empty_communities(store)
+    if reconcile_stale or parsed_files or removed_files:
+        remap_community_assignments(store, community_by_qn)
+        remap_flow_node_ids(store, flow_node_ids)
+        purge_orphan_flow_data(store)
+        purge_empty_communities(store)
 
     flow_entry_point_qns = sorted(cleared_entry_qns)
     communities_were_affected = (
@@ -3723,19 +3731,21 @@ class _WatchDebouncer(threading.Thread):
     unconditionally, so an event or a stop that arrives between ``start()``
     and that first wait is notified to nobody and then slept on.  The
     observer starts before startup work, so that event can be the only one.
+    Identical immutable events share one queue entry; reconciliation reads the
+    current filesystem rather than replaying each notification.
     """
 
     def __init__(self, interval: float, callback: Callable[[list[Any]], None]) -> None:
         super().__init__(name="crg-watch-debouncer", daemon=True)
         self._interval = interval
         self._callback = callback
-        self._events: list[Any] = []
+        self._events: dict[Any, None] = {}
         self._stopping = False
         self._cond = threading.Condition()
 
     def handle_event(self, event: Any) -> None:
         with self._cond:
-            self._events.append(event)
+            self._events[event] = None
             self._cond.notify()
 
     def requeue(self, events: list[Any]) -> None:
@@ -3745,7 +3755,7 @@ class _WatchDebouncer(threading.Thread):
         with the condition released, so a stop still gets through meanwhile.
         """
         with self._cond:
-            self._events[:0] = events
+            self._events = dict.fromkeys(events) | self._events
             self._cond.notify()
 
     def stop(self) -> None:
@@ -3766,7 +3776,8 @@ class _WatchDebouncer(threading.Thread):
                             break
                 if self._stopping:
                     break
-                events, self._events = self._events, []
+                events = list(self._events)
+                self._events.clear()
                 # Called with the condition held, as watchdog does: events
                 # arriving meanwhile wait in handle_event for the next batch.
                 self._callback(events)
@@ -4998,6 +5009,15 @@ def _create_watch_handler(
                 self.last_event_at = time.time()
                 self.events_seen += len(events)
                 try:
+                    if shared_database() is not None:
+                        from .tools.build import refresh_shared_watch
+
+                        refresh_shared_watch(repo_root, store, follow, on_files_updated)
+                        # The native watch planner still follows directory and symlink changes.
+                        ignore_patterns[:] = _load_ignore_patterns(repo_root)
+                        if follow:
+                            self._remember_followed()
+                        return
                     patterns_before = ignore_patterns
                     files_updated, newly_included = self._refresh_ignore_patterns(events)
                     changed_files = sorted(
@@ -5019,14 +5039,14 @@ def _create_watch_handler(
                         links_changed = links_changed or ignore_patterns is not patterns_before
                         if links_changed or contents_changed:
                             files_updated += self._reconcile_followed()
-                    if on_files_updated is not None and (
+                    if (
                         files_updated > 0
                         # A project file change parses nothing but can rebind
                         # C# calls in unchanged files; the binder marks flows.
                         or (changed_files and store.get_metadata("csharp_flows_dirty") == "1")
                     ):
-                        postprocess_result = on_files_updated(store)
-                        _raise_watch_postprocess_warnings(postprocess_result)
+                        if on_files_updated is not None:
+                            _raise_watch_postprocess_warnings(on_files_updated(store))
                 except BaseException as exc:
                     self.failure = exc
                 finally:
@@ -5180,6 +5200,29 @@ def watch(
     on_files_updated: Optional[Callable] = None,
     stop_event: threading.Event | None = None,
     follow_symlinks: bool | None = None,
+    startup_lock: threading.Lock | None = None,
+) -> None:
+    """Run a filesystem observer with exclusive checkout ownership."""
+    from .daemon import watch_health_path
+
+    repo_root = _canonical_repo_root(repo_root)
+    owner_path = watch_health_path(repo_root).with_suffix(".lock")
+    owner = WriteLock(store.db_path, owner_path=owner_path)
+    if not owner.acquire():
+        raise RuntimeError(f"Another watcher already owns {repo_root}")
+    try:
+        _watch(repo_root, store, on_files_updated, stop_event, follow_symlinks, startup_lock)
+    finally:
+        owner.release()
+
+
+def _watch(
+    repo_root: Path,
+    store: GraphStore,
+    on_files_updated: Optional[Callable],
+    stop_event: threading.Event | None,
+    follow_symlinks: bool | None,
+    startup_lock: threading.Lock | None,
 ) -> None:
     """Watch for file changes and auto-update the graph.
 
@@ -5210,10 +5253,6 @@ def watch(
     from watchdog.events import DirCreatedEvent, DirDeletedEvent
     from watchdog.observers import Observer
 
-    # One boundary, once: ``--repo .`` reaches here relative, and every path
-    # comparison below — stored file paths, watch keys, event paths — assumes
-    # they are all spelled the same way.
-    repo_root = _canonical_repo_root(repo_root)
     # Refuse a graph built for another root before anything can queue a write
     # to it.  Startup reconciliation checks this too, but only once the
     # observer below is running: a batch captured meanwhile waits on the
@@ -5254,18 +5293,39 @@ def watch(
         with handler.serialized():
             observer.start()
             observer_started = True
-            write_lock = WriteLock(store.db_path)
-            if _wait_for_watch_write_lock(write_lock, supervisor, stop_event):
-                try:
-                    initial = incremental_update(
-                        repo_root, store, changed_files=[], follow_symlinks=follow_symlinks,
-                    )
-                    _raise_watch_update_errors(initial, "initial watch reconciliation")
-                    if initial["files_updated"] > 0 and on_files_updated is not None:
-                        postprocess_result = on_files_updated(store)
-                        _raise_watch_postprocess_warnings(postprocess_result)
-                finally:
-                    write_lock.release()
+            if startup_lock is not None:
+                while not startup_lock.acquire(timeout=_WATCH_TICK_SECONDS):
+                    if stop_event is not None and stop_event.is_set():
+                        raise KeyboardInterrupt
+                    dead_threads, _ = supervisor.check_liveness()
+                    if dead_threads:
+                        raise RuntimeError(f"watch observer stopped while queued: {dead_threads}")
+                    supervisor.report_health(observer_alive=True, phase="queued")
+            try:
+                write_lock = WriteLock(store.db_path)
+                if _wait_for_watch_write_lock(write_lock, supervisor, stop_event):
+                    try:
+                        if shared_database() is not None:
+                            from .tools.build import refresh_shared_watch
+
+                            refresh_shared_watch(
+                                repo_root, store, follow_symlinks, on_files_updated,
+                            )
+                        else:
+                            base = store.get_metadata("git_head_sha")
+                            initial = incremental_update(
+                                repo_root, store, base=base or "HEAD",
+                                follow_symlinks=follow_symlinks,
+                            )
+                            _raise_watch_update_errors(initial, "initial watch reconciliation")
+                            if initial["files_updated"] > 0 and on_files_updated is not None:
+                                postprocess_result = on_files_updated(store)
+                                _raise_watch_postprocess_warnings(postprocess_result)
+                    finally:
+                        write_lock.release()
+            finally:
+                if startup_lock is not None:
+                    startup_lock.release()
     except BaseException:
         # Outside the lock, so a batch already waiting can finish; stopping the
         # debouncer joins it, and no writer outlives this call.

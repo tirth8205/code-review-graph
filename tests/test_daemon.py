@@ -142,6 +142,18 @@ class TestConfigParsing:
         assert len(cfg.repos) == 1
         assert cfg.repos[0].path == str(repo_a.resolve())
 
+    def test_load_config_rejects_two_aliases_for_one_checkout(self, tmp_path):
+        repo = tmp_path / "repo"
+        (repo / ".git").mkdir(parents=True)
+        config_file = tmp_path / "watch.toml"
+        config_file.write_text(
+            f'[[repos]]\npath = "{repo.as_posix()}"\nalias = "first"\n'
+            f'[[repos]]\npath = "{repo.as_posix()}/."\nalias = "second"\n',
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="configured twice: first and second"):
+            load_config(config_file)
+
     def test_load_config_no_git_dir(self, tmp_path):
         """Repos without .git or .code-review-graph are skipped."""
         bare = tmp_path / "bare-dir"
@@ -825,7 +837,9 @@ class TestWatchDaemon:
             daemon.reconcile(config)
 
             # beta should have been registered in the registry
-            mock_registry.register.assert_called_once_with(config.repos[1].path, alias="beta")
+            mock_registry.register.assert_called_once_with(
+                config.repos[1].path, alias="beta", data_dir=None
+            )
 
             # beta should have been built (no graph.db)
             assert mock_run.call_count == 1
@@ -864,7 +878,9 @@ class TestWatchDaemon:
             daemon.reconcile(config)
 
             # beta should have been registered
-            mock_registry.register.assert_called_once_with(config.repos[1].path, alias="beta")
+            mock_registry.register.assert_called_once_with(
+                config.repos[1].path, alias="beta", data_dir=None
+            )
 
             # No build should have been triggered (graph.db exists)
             mock_run.assert_not_called()
@@ -979,7 +995,7 @@ class TestWatchDaemon:
 
             # alpha should be registered at the new path
             mock_registry.register.assert_called_once_with(
-                str(new_repo), alias="alpha"
+                str(new_repo), alias="alpha", data_dir=None
             )
 
             # alpha should be built (new path has no graph.db)

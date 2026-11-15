@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -55,7 +56,8 @@ End Namespace
         assert convert.extra["vbnet_type_parameters"] == ["TResult"]
 
     def test_relationships_and_calls_resolve_case_insensitively_to_graph_nodes(
-        self, tmp_path,
+        self,
+        tmp_path,
     ):
         path = tmp_path / "Repository.vb"
         nodes, edges = _parse(
@@ -107,10 +109,14 @@ End Namespace
         assert store.get_node(helper_qn) is not None
 
         repository_edges = store.get_edges_by_source(repository_qn)
-        assert any(edge.kind == "INHERITS" and edge.target_qualified == base_qn
-                   for edge in repository_edges)
-        assert any(edge.kind == "IMPLEMENTS" and edge.target_qualified == interface_qn
-                   for edge in repository_edges)
+        assert any(
+            edge.kind == "INHERITS" and edge.target_qualified == base_qn
+            for edge in repository_edges
+        )
+        assert any(
+            edge.kind == "IMPLEMENTS" and edge.target_qualified == interface_qn
+            for edge in repository_edges
+        )
 
         assert any(
             edge.kind == "CALLS" and edge.target_qualified == helper_qn
@@ -161,7 +167,8 @@ def _has_verilog_parser() -> bool:
 
 
 @pytest.mark.skipif(
-    not _has_verilog_parser(), reason="verilog tree-sitter grammar not installed",
+    not _has_verilog_parser(),
+    reason="verilog tree-sitter grammar not installed",
 )
 class TestSystemVerilogReconciliation:
     def test_module_signals_are_indexed_but_function_locals_are_not(self, tmp_path):
@@ -189,9 +196,7 @@ endmodule
         )
 
         signals = {
-            (node.name, node.parent_name): node
-            for node in nodes
-            if node.extra.get("verilog_kind")
+            (node.name, node.parent_name): node for node in nodes if node.extra.get("verilog_kind")
         }
         assert ("clk", "Signals") in signals
         assert ("ready", "Signals") in signals
@@ -280,15 +285,9 @@ endmodule
         assert stats.nodes_by_kind.get("Signal") == 2
         dead_names = {item["name"] for item in find_dead_code(store)}
         assert dead_names.isdisjoint({"clk", "value"})
-        assert all(
-            not node.extra.get("verilog_kind")
-            for node in detect_entry_points(store)
-        )
+        assert all(not node.extra.get("verilog_kind") for node in detect_entry_points(store))
         impact = store.get_impact_radius([str(path)])
-        assert all(
-            not node.extra.get("verilog_kind")
-            for node in impact["impacted_nodes"]
-        )
+        assert all(not node.extra.get("verilog_kind") for node in impact["impacted_nodes"])
         store.close()
 
 
@@ -320,17 +319,12 @@ impl MemoryRepository {
         )
 
         concrete = [
-            node for node in nodes
-            if node.kind == "Class" and node.name == "MemoryRepository"
+            node for node in nodes if node.kind == "Class" and node.name == "MemoryRepository"
         ]
         assert len(concrete) == 1
         assert concrete[0].line_start == 5
         assert any(node.kind == "Class" and node.name == "Repository" for node in nodes)
-        methods = {
-            (node.name, node.parent_name)
-            for node in nodes
-            if node.kind == "Function"
-        }
+        methods = {(node.name, node.parent_name) for node in nodes if node.kind == "Function"}
         assert ("new", "MemoryRepository") in methods
         assert ("duplicate", "MemoryRepository") in methods
         assert ("save", "MemoryRepository") in methods
@@ -339,9 +333,7 @@ impl MemoryRepository {
         duplicate_qn = f"{path.as_posix()}::MemoryRepository.duplicate"
         new_qn = f"{path.as_posix()}::MemoryRepository.new"
         assert any(
-            edge.kind == "CALLS"
-            and edge.source == duplicate_qn
-            and edge.target == new_qn
+            edge.kind == "CALLS" and edge.source == duplicate_qn and edge.target == new_qn
             for edge in edges
         )
 
@@ -365,8 +357,7 @@ impl MemoryRepository {
         src.mkdir()
         db = src / "db.rs"
         db.write_text(
-            "pub struct Repository;\n"
-            "impl Repository { pub fn new<T>() -> Self { Self } }\n",
+            "pub struct Repository;\nimpl Repository { pub fn new<T>() -> Self { Self } }\n",
             encoding="utf-8",
         )
         lib = src / "lib.rs"
@@ -419,9 +410,7 @@ impl MemoryRepository {
 
         parser = CodeParser(repo_root=tmp_path)
         _, edges = parser.parse_file(nested)
-        targets = {
-            edge.target for edge in edges if edge.kind == "IMPORTS_FROM"
-        }
+        targets = {edge.target for edge in edges if edge.kind == "IMPORTS_FROM"}
         assert targets == {
             nested.resolve().as_posix(),
             parent.resolve().as_posix(),
@@ -483,12 +472,13 @@ impl MemoryRepository {
         assert imports[0].target == "fake::Helper"
 
     def test_full_and_incremental_builds_keep_resolved_rust_calls(
-        self, tmp_path, monkeypatch,
+        self,
+        tmp_path,
+        monkeypatch,
     ):
         from code_review_graph.incremental import full_build, incremental_update
 
         monkeypatch.setenv("CRG_SERIAL_PARSE", "1")
-        (tmp_path / ".git").mkdir()
         (tmp_path / "Cargo.toml").write_text(
             '[package]\nname = "demo"\nversion = "0.1.0"\n',
             encoding="utf-8",
@@ -497,17 +487,16 @@ impl MemoryRepository {
         src.mkdir()
         db = src / "db.rs"
         db.write_text(
-            "pub struct Repository;\n"
-            "impl Repository { pub fn new() -> Self { Self } }\n",
+            "pub struct Repository;\nimpl Repository { pub fn new() -> Self { Self } }\n",
             encoding="utf-8",
         )
         lib = src / "lib.rs"
         lib.write_text(
-            "mod db;\n"
-            "use crate::db::Repository;\n"
-            "pub fn build() { Repository::new(); }\n",
+            "mod db;\nuse crate::db::Repository;\npub fn build() { Repository::new(); }\n",
             encoding="utf-8",
         )
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
         target = f"{db.resolve().as_posix()}::Repository.new"
         caller = f"{lib.resolve().as_posix()}::build"
 
@@ -528,7 +517,9 @@ impl MemoryRepository {
                 encoding="utf-8",
             )
             updated = incremental_update(
-                tmp_path, store, changed_files=["src/lib.rs"],
+                tmp_path,
+                store,
+                changed_files=["src/lib.rs"],
             )
             assert updated["errors"] == []
             assert any(
@@ -543,7 +534,8 @@ impl MemoryRepository {
 
 class TestPHPScopedCallReconciliation:
     def test_same_file_and_self_calls_resolve_without_cross_class_collisions(
-        self, tmp_path,
+        self,
+        tmp_path,
     ):
         path = tmp_path / "Services.php"
         _, edges = _parse(
@@ -567,8 +559,7 @@ class SecondService {
         targets = {
             edge.target
             for edge in edges
-            if edge.kind == "CALLS"
-            and edge.source == f"{path.as_posix()}::SecondService.dispatch"
+            if edge.kind == "CALLS" and edge.source == f"{path.as_posix()}::SecondService.dispatch"
         }
         assert targets == {
             f"{path.as_posix()}::SecondService.run",
@@ -576,7 +567,8 @@ class SecondService {
         }
 
     def test_import_alias_and_fully_qualified_calls_use_composer_evidence(
-        self, tmp_path,
+        self,
+        tmp_path,
     ):
         (tmp_path / "composer.json").write_text(
             '{"autoload":{"psr-4":{"App\\\\":"app/"}}}',
@@ -606,12 +598,14 @@ class SecondService {
         _, edges = CodeParser(repo_root=tmp_path).parse_file(caller)
         target = f"{mailer.resolve().as_posix()}::Mailer.send"
         calls = [
-            edge for edge in edges
+            edge
+            for edge in edges
             if edge.kind == "CALLS" and edge.source.endswith("::SignupController.register")
         ]
         assert [edge.target for edge in calls].count(target) == 2
         assert {edge.extra["scoped_resolution"] for edge in calls} == {
-            "import", "fully_qualified",
+            "import",
+            "fully_qualified",
         }
 
     def test_global_cross_file_call_without_evidence_stays_unresolved(self, tmp_path):
@@ -631,12 +625,13 @@ class SecondService {
         assert calls[0].target == "Mailer::send"
 
     def test_incremental_update_reresolves_only_changed_php_file(
-        self, tmp_path, monkeypatch,
+        self,
+        tmp_path,
+        monkeypatch,
     ):
         from code_review_graph.incremental import full_build, incremental_update
 
         monkeypatch.setenv("CRG_SERIAL_PARSE", "1")
-        (tmp_path / ".git").mkdir()
         (tmp_path / "composer.json").write_text(
             '{"autoload":{"psr-4":{"App\\\\":"app/"}}}',
             encoding="utf-8",
@@ -644,16 +639,16 @@ class SecondService {
         mailer = tmp_path / "app" / "Mailer.php"
         mailer.parent.mkdir()
         mailer.write_text(
-            "<?php namespace App; "
-            "class Mailer { public static function send(): void {} }\n",
+            "<?php namespace App; class Mailer { public static function send(): void {} }\n",
             encoding="utf-8",
         )
         caller = tmp_path / "app" / "Signup.php"
         source = (
-            "<?php namespace App; use App\\Mailer; "
-            "function register(): void { Mailer::send(); }\n"
+            "<?php namespace App; use App\\Mailer; function register(): void { Mailer::send(); }\n"
         )
         caller.write_text(source, encoding="utf-8")
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
         target = f"{mailer.resolve().as_posix()}::Mailer.send"
 
         store = GraphStore(":memory:")
@@ -661,7 +656,9 @@ class SecondService {
             assert full_build(tmp_path, store)["errors"] == []
             caller.write_text(source.replace("function", "\nfunction"), encoding="utf-8")
             result = incremental_update(
-                tmp_path, store, changed_files=["app/Signup.php"],
+                tmp_path,
+                store,
+                changed_files=["app/Signup.php"],
             )
             assert result["errors"] == []
             assert any(

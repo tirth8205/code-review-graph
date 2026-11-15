@@ -109,7 +109,7 @@ def refactor_func(
             )
             if detail_level == "minimal":
                 edits = _project(edits, _MINIMAL_EDIT_FIELDS)
-            result = {
+            result: dict[str, Any] = {
                 "status": "ok",
                 "summary": (
                     f"Rename preview: {old_name} -> {new_name}, "

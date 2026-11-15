@@ -18,7 +18,13 @@ from pathlib import Path
 from code_review_graph.skills import _SKILLS, generate_skills
 
 REPO_ROOT = Path(__file__).parents[1]
-SKILL_NAMES = ["explore-codebase", "review-changes", "debug-issue", "refactor-safely"]
+SKILL_NAMES = [
+    "build-graph",
+    "explore-codebase",
+    "review-changes",
+    "debug-issue",
+    "refactor-safely",
+]
 
 _BACKTICK = re.compile(r"`([^`]+)`")
 _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -128,5 +134,5 @@ def test_generate_skills_overwrites_stale_content(tmp_path):
     assert "get_flow_tool" in refreshed
 
 
-def test_skills_dict_covers_exactly_four_known_skills():
+def test_skills_dict_covers_exactly_the_known_skills():
     assert sorted(f.removesuffix(".md") for f in _SKILLS) == sorted(SKILL_NAMES)

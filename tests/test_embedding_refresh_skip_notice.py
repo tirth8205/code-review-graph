@@ -490,16 +490,16 @@ class TestWatchTellsTheUser:
 
 
 class TestNoChangeUpdateEdgeCases:
-    def test_an_empty_table_left_by_graph_stats_is_still_a_skip(self, tmp_path, monkeypatch):
-        """``list_graph_stats`` opens an EmbeddingStore, which creates an empty table."""
+    def test_graph_stats_does_not_initialize_embeddings(self, tmp_path, monkeypatch):
         from code_review_graph.tools.query import list_graph_stats
 
         repo = _git_repo(tmp_path, monkeypatch)
         build_or_update_graph(full_rebuild=True, repo_root=str(repo))
-        with patch("code_review_graph.embeddings.get_provider", return_value=None):
+        with patch("code_review_graph.embeddings.get_provider") as get_provider:
             stats = list_graph_stats(repo_root=str(repo))
+        get_provider.assert_not_called()
         assert stats["status"] == "ok"
-        assert _embeddings_table_exists(repo)
+        assert not _embeddings_table_exists(repo)
 
         with patch("code_review_graph.embeddings.get_provider") as get_provider:
             result = build_or_update_graph(repo_root=str(repo), **PAIR)

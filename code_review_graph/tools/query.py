@@ -18,7 +18,6 @@ from ..constants import (
 )
 from ..context_history import CallInfo
 from ..context_savings import attach_context_savings, estimate_file_tokens
-from ..embeddings import EmbeddingStore
 from ..errors import ChangeDiscoveryError
 from ..graph import (
     IMPACT_RESOLUTIONS,
@@ -39,11 +38,10 @@ from ..hints import generate_hints, get_session
 from ..incremental import (
     discover_review_changes,
     followed_files,
-    get_db_path,
     path_within_repo,
 )
 from ..parser import is_test_file, normalize_file_path, repo_relative_path
-from ..search import hybrid_search
+from ..search import count_stored_embeddings, hybrid_search
 from ..uncertainty import (
     empty_impact_confidence,
     empty_query_confidence,
@@ -54,7 +52,7 @@ from ._common import (
     _BUILTIN_CALL_NAMES,
     _bounded,
     _error_response,
-    _get_store,
+    _get_store_for_read,
     _resolve_graph_file_paths,
     _resolve_graph_file_paths_with_unmatched,
     _shown_of,
@@ -779,7 +777,10 @@ def get_impact_radius(
             f"resolution must be one of {list(IMPACT_RESOLUTIONS)}, got {resolution!r}"
         )
 
-    store, root = _get_store(repo_root)
+    store, root, not_built = _get_store_for_read(repo_root)
+    if not_built is not None:
+        return not_built
+    assert store is not None and root is not None
     try:
         if changed_files is None:
             changed_files, base = discover_review_changes(root, base)
@@ -1059,24 +1060,20 @@ def query_graph(
             f"resolution must be one of {list(QUERY_RESOLUTIONS)}, got {resolution!r}"
         )
 
-    store, root = _get_store(repo_root)
-    try:
-        if pattern not in _QUERY_PATTERNS:
-            return {
-                "status": "error",
-                "error": (
-                    f"Unknown pattern '{pattern}'. "
-                    f"Available: {list(_QUERY_PATTERNS.keys())}"
-                ),
-            }
+    if pattern not in _QUERY_PATTERNS:
+        return _error_response(
+            f"Unknown pattern '{pattern}'. Available: {list(_QUERY_PATTERNS.keys())}"
+        )
+    if pattern == "path_to" and not to:
+        return _error_response("path_to needs to: the node or file to reach.")
 
+    store, root, not_built = _get_store_for_read(repo_root)
+    if not_built is not None:
+        return not_built
+    assert store is not None and root is not None
+    try:
         minimal = detail_level == "minimal"
-        if pattern == "path_to":
-            if not to:
-                return {
-                    "status": "error",
-                    "error": "path_to needs to: the node or file to reach.",
-                }
+        if pattern == "path_to" and to:
             return _query_route(store, root, target, to, minimal)
         response_limit = min(max_results, 5) if minimal else max_results
         results: list[dict[str, Any]] = []
@@ -1394,7 +1391,7 @@ def query_graph(
                     or "::" not in e.target_qualified
                     or (node is not None and node.language == "cpp")
                 ):
-                    unresolved = (
+                    candidates = (
                         e.extra.get("ambiguous_targets")
                         or e.extra.get("unresolved_targets")
                     )
@@ -1405,7 +1402,7 @@ def query_graph(
                     }
                     first_sighting = e.target_qualified not in described_targets
                     described_targets.add(e.target_qualified)
-                    if isinstance(unresolved, list) and first_sighting:
+                    if isinstance(candidates, list) and first_sighting:
                         candidate_resolution = (
                             "ambiguous"
                             if e.extra.get("ambiguous_targets")
@@ -1414,14 +1411,14 @@ def query_graph(
                         result["resolution"] = candidate_resolution
                         result["candidates"] = [
                             _sanitize_name(candidate)
-                            for candidate in unresolved[:20]
+                            for candidate in candidates[:20]
                             if isinstance(candidate, str)
                         ]
                         candidate_count = e.extra.get(
                             f"{candidate_resolution}_target_count",
                         )
                         if not isinstance(candidate_count, int):
-                            candidate_count = len(unresolved)
+                            candidate_count = len(candidates)
                         result["candidate_count"] = candidate_count
                         result["candidates_truncated"] = bool(
                             e.extra.get(
@@ -2029,7 +2026,10 @@ def semantic_search_nodes(
     )
     window = shown_limit * _SEARCH_WINDOW_FACTOR
 
-    store, root = _get_store(repo_root)
+    store, root, not_built = _get_store_for_read(repo_root)
+    if not_built is not None:
+        return not_built
+    assert store is not None and root is not None
     try:
         mode_out: list[str] = []
         ranked = hybrid_search(
@@ -2145,7 +2145,10 @@ def list_graph_stats(repo_root: str | None = None) -> dict[str, Any]:
     Returns:
         Total nodes, edges, breakdown by kind, languages, and last update time.
     """
-    store, root = _get_store(repo_root)
+    store, root, not_built = _get_store_for_read(repo_root)
+    if not_built is not None:
+        return not_built
+    assert store is not None and root is not None
     try:
         stats = store.get_stats()
 
@@ -2177,18 +2180,9 @@ def list_graph_stats(repo_root: str | None = None) -> dict[str, Any]:
             f"{calls_by_resolution['unresolved']} unresolved"
         )
 
-        # Add embedding info if available
-        emb_store = EmbeddingStore(get_db_path(root))
-        try:
-            emb_count = emb_store.count()
-            summary_parts.append("")
-            summary_parts.append(f"Embeddings: {emb_count} nodes embedded")
-            if not emb_store.available:
-                summary_parts.append(
-                    "  (install sentence-transformers for semantic search)"
-                )
-        finally:
-            emb_store.close()
+        emb_count = count_stored_embeddings(store._conn)
+        summary_parts.append("")
+        summary_parts.append(f"Embeddings: {emb_count} nodes embedded")
 
         return {
             "status": "ok",
@@ -2245,7 +2239,10 @@ def find_large_functions(
         _MAX_LARGE_FUNCTIONS_MINIMAL if minimal else _MAX_LARGE_FUNCTIONS_STANDARD,
     )
 
-    store, root = _get_store(repo_root)
+    store, root, not_built = _get_store_for_read(repo_root)
+    if not_built is not None:
+        return not_built
+    assert store is not None and root is not None
     try:
         total = store.count_nodes_by_size(
             min_lines=min_lines,
@@ -2340,7 +2337,10 @@ def traverse_graph_func(
     _validate_positive_int(token_budget, "token_budget")
     token_budget = min(token_budget, _MAX_TRAVERSAL_TOKEN_BUDGET)
 
-    store, root = _get_store(repo_root)
+    store, root, not_built = _get_store_for_read(repo_root)
+    if not_built is not None:
+        return not_built
+    assert store is not None and root is not None
     try:
         result_ids: list[int] = []
         results = hybrid_search(store, query, limit=1, _out_ids=result_ids)

@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import stat
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -1442,6 +1443,7 @@ def test_every_report_line_reads_right_in_a_dry_run_and_a_real_run(
     fake_repo: Path, fake_home: Path
 ) -> None:
     """A dry run printed "would removed ..." for most actions."""
+    subprocess.run(["git", "init", "-q"], cwd=fake_repo, check=True)
     _write_json(fake_repo / ".mcp.json", {"mcpServers": {"code-review-graph": {}}})
     _write_json(
         fake_repo / ".claude" / "settings.json",

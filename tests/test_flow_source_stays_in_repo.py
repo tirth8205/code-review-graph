@@ -17,7 +17,10 @@ def test_flow_does_not_inline_outside_cached_path(tmp_path):
         "steps": [{"file": str(outside), "line_start": 1, "line_end": 1}],
     }
     with (
-        patch("code_review_graph.tools.flows_tools._get_store", return_value=(MagicMock(), root)),
+        patch(
+            "code_review_graph.tools.flows_tools._get_store_for_read",
+            return_value=(MagicMock(), root, None),
+        ),
         patch("code_review_graph.tools.flows_tools.get_flow_by_id", return_value=flow),
     ):
         result = get_flow(repo_root=str(root), flow_id=1, include_source=True)

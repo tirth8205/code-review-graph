@@ -47,12 +47,13 @@ def _read_response(
 @pytest.mark.skipif(os.name == "nt", reason="select() cannot poll Windows pipes")
 def test_stdio_server_parallel_build_then_eof_exits_cleanly(tmp_path):
     """The real stdio server must build in parallel and exit cleanly on EOF."""
-    (tmp_path / ".git").mkdir()
     for index in range(10):
         (tmp_path / f"module_{index}.py").write_text(
             f"def function_{index}():\n    return {index}\n",
             encoding="utf-8",
         )
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
 
     env = os.environ.copy()
     env.pop("CRG_PARSE_EXECUTOR", None)

@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main, testing, staging]
+    branches: [main, testing, staging, dc-use]
   pull_request:
-    branches: [main, testing, staging]
+    branches: [main, testing, staging, dc-use]
   # Manual trigger for the upgrade-path job, which is far too slow and network
   # heavy for every pull request. Run it before cutting a release.
   workflow_dispatch:
@@ -195,7 +195,7 @@ jobs:
       - name: Run upgrade-path tests
         env:
           CRG_UPGRADE_TEST: "1"
-        run: pytest -m upgrade -q -rxX
+        run: pytest -m upgrade -q -rsxX
 
   minimum-dependencies:
     name: Minimum declared dependencies (${{ matrix.python-version }})
@@ -259,6 +259,7 @@ jobs:
           python -m pytest --tb=short -q
           tests/test_windows_compat.py
           tests/test_daemon.py
+          tests/test_daemon_external_graph.py
           tests/test_changes.py
           tests/test_communities.py
           tests/test_flows.py

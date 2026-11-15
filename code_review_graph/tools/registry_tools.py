@@ -6,10 +6,9 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from ..graph import GraphStore, _sanitize_name
-from ..incremental import get_db_path
+from ..graph import _sanitize_name
 from ..search import hybrid_search
-from ._common import _bounded, _shown_of, _validate_positive_int
+from ._common import _bounded, _get_store_for_read, _shown_of, _validate_positive_int
 
 logger = logging.getLogger(__name__)
 
@@ -224,12 +223,10 @@ def cross_repo_search_func(
 
         for repo_index, repo_entry in enumerate(selected):
             repo_path = Path(repo_entry["path"])
-            db_path = get_db_path(repo_path)
-            if not db_path.exists():
-                continue
-
             try:
-                store = GraphStore(str(db_path))
+                store, _, _ = _get_store_for_read(str(repo_path))
+                if store is None:
+                    continue
                 try:
                     results = hybrid_search(
                         store, query, kind=kind, limit=limit

@@ -312,6 +312,15 @@ def test_embedding_search_filters_before_its_limit(
         ))
     ]
 
+    monkeypatch.setattr(embeddings_module, "get_provider", lambda *args, **kwargs: None)
+    with embeddings_module.EmbeddingStore(store.db_path) as index:
+        index._conn.executemany(
+            "INSERT INTO embeddings (qualified_name, vector, text_hash, provider) "
+            "VALUES (?, ?, ?, ?)",
+            [(qn, b"\x00" * 4, "h", "test") for qn, _ in ranked],
+        )
+        index._conn.commit()
+
     class FakeEmbeddingStore:
         available = True
 

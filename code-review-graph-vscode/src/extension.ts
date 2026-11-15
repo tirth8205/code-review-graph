@@ -25,6 +25,10 @@ let scmDecorationProvider: ScmDecorationProvider | undefined;
  * Checks `.code-review-graph/graph.db` first, then falls back to `.code-review-graph.db`.
  */
 function findGraphDb(workspaceRoot: string): string | undefined {
+  if (process.env.CRG_SHARED_DB) {
+    const shared = path.resolve(process.env.CRG_SHARED_DB);
+    return fs.existsSync(shared) ? shared : undefined;
+  }
   const primary = path.join(workspaceRoot, ".code-review-graph", "graph.db");
   if (fs.existsSync(primary)) {
     return primary;
@@ -64,7 +68,7 @@ function getWorkspaceRoot(): string | undefined {
 async function navigateToNode(node: GraphNode): Promise<void> {
   const workspaceRoot = getWorkspaceRoot();
   const filePath = workspaceRoot
-    ? path.join(workspaceRoot, node.filePath)
+    ? path.resolve(workspaceRoot, node.filePath)
     : node.filePath;
 
   const doc = await vscode.workspace.openTextDocument(filePath);
@@ -789,7 +793,7 @@ async function reinitialize(
   }
 
   sqliteReader?.close();
-  sqliteReader = new SqliteReader(dbPath);
+  sqliteReader = new SqliteReader(dbPath, process.env.CRG_SHARED_DB ? workspaceRoot : undefined);
 
   // Refresh tree views
   await vscode.commands.executeCommand(
@@ -801,9 +805,10 @@ async function reinitialize(
  * Set up a FileSystemWatcher to detect changes to the graph database.
  */
 function watchGraphDb(context: vscode.ExtensionContext): void {
-  const watcher = vscode.workspace.createFileSystemWatcher(
-    "**/.code-review-graph/graph.db"
-  );
+  const shared = process.env.CRG_SHARED_DB;
+  const watcher = vscode.workspace.createFileSystemWatcher(shared
+    ? new vscode.RelativePattern(path.dirname(path.resolve(shared)), path.basename(shared) + '*')
+    : "**/.code-review-graph/graph.db");
 
   const dbPathRef = { current: "" };
   const workspaceRoot = getWorkspaceRoot();
@@ -818,24 +823,30 @@ function watchGraphDb(context: vscode.ExtensionContext): void {
     // Close and reopen to pick up external writes
     if (sqliteReader && dbPathRef.current) {
       sqliteReader.close();
-      sqliteReader = new SqliteReader(dbPathRef.current);
+      sqliteReader = new SqliteReader(dbPathRef.current, shared ? workspaceRoot : undefined);
       vscode.commands.executeCommand("codeReviewGraph.codeGraph.refresh");
     }
   });
 
   watcher.onDidCreate(async () => {
+    if (shared && sqliteReader) {
+      // SQLite can recreate the WAL before the first update is checkpointed.
+      await vscode.commands.executeCommand("codeReviewGraph.codeGraph.refresh");
+      return;
+    }
     const wsRoot = getWorkspaceRoot();
     if (wsRoot && !sqliteReader) {
       const dbPath = findGraphDb(wsRoot);
       if (dbPath) {
         dbPathRef.current = dbPath;
-        sqliteReader = new SqliteReader(dbPath);
+        sqliteReader = new SqliteReader(dbPath, shared ? wsRoot : undefined);
         vscode.commands.executeCommand("codeReviewGraph.codeGraph.refresh");
       }
     }
   });
 
   watcher.onDidDelete(() => {
+    if (shared && fs.existsSync(path.resolve(shared))) { return; }
     sqliteReader?.close();
     sqliteReader = undefined;
     dbPathRef.current = "";
@@ -901,7 +912,7 @@ export async function activate(
 
     if (dbPath) {
       // Graph database found - initialize
-      sqliteReader = new SqliteReader(dbPath);
+      sqliteReader = new SqliteReader(dbPath, process.env.CRG_SHARED_DB ? workspaceRoot : undefined);
 
       // Schema compatibility check
       const schemaWarning = sqliteReader.checkSchemaCompatibility();

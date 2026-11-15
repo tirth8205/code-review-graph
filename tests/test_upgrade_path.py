@@ -550,7 +550,7 @@ def upgrade_run(request, tmp_path_factory) -> Iterator[UpgradeRun]:
         ["git", "-C", str(REPO_ROOT), "rev-parse", "--verify", f"refs/tags/{tag}"],
     )
     if tag_exists.returncode != 0:
-        pytest.skip(f"tag {tag} is not present in this checkout (shallow clone?)")
+        pytest.fail(f"Required upgrade corpus tag {tag} is absent; fetch the upstream tags.")
 
     venv = base / "venv"
     old_dist_version, old_module_file = _install_release(version, venv, env)
@@ -763,11 +763,11 @@ def test_release_list_tracks_the_newest_tag() -> None:
         "git", "-C", str(REPO_ROOT), "tag", "--list", "v*", "--sort=-v:refname",
     ])
     if listing.returncode != 0:
-        pytest.skip("cannot list tags in this checkout")
+        pytest.fail(f"Cannot list upgrade corpus tags: {listing.stderr}")
     semver = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
     tags = [line for line in listing.stdout.split() if semver.match(line)]
     if not tags:
-        pytest.skip("no vX.Y.Z tags in this checkout")
+        pytest.fail("No vX.Y.Z corpus tags found; fetch the upstream tags.")
     newest_tested = f"v{RELEASES[0]}"
     assert newest_tested in tags, f"{newest_tested} is in RELEASES but not tagged"
     behind = [

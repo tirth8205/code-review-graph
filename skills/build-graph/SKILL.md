@@ -6,21 +6,13 @@ argument-hint: "[full]"
 
 # Build Graph
 
-Build or incrementally update the knowledge graph for this repository.
+Start with `get_minimal_context_tool` to identify the graph state. Check `code-review-graph status` against the checkout's current Git HEAD. Use `code-review-graph doctor` to diagnose an unusable graph.
 
-## Steps
+- For a missing graph, call `build_or_update_graph_tool(full_rebuild=True)`.
+- For an existing graph, call `build_or_update_graph_tool()` to refresh it.
+- If the operation reports contention, confirm the current writer has finished and verify graph freshness before relying on its results.
+- If the operation fails or reports a partial build, inspect its diagnostic before using graph-backed results.
+- If the last update skipped post-processing, call `run_postprocess_tool` before querying flows or communities.
+- Use `list_repos_tool` to identify registered repositories before using `cross_repo_search_tool`.
 
-1. Call `list_graph_stats_tool`. If `last_updated` is null, the graph has never been built.
-2. For a first build, or when the argument is `full`, call `build_or_update_graph_tool(full_rebuild=True)`. Otherwise call `build_or_update_graph_tool()` for an incremental update.
-3. Report the response: `status` (`ok`, `partial` or `error`) and `summary`. `contended` means another build of this repository is running; retry once it finishes.
-
-## When to Use
-
-- First set-up of a repository, or after a branch switch or large refactor.
-- When the graph looks stale. Hooks installed by `code-review-graph install` run an update after each edit, before each commit and after a branch switch, merge or rebase, so manual builds are rarely needed.
-
-## Notes
-
-- The database is `.code-review-graph/graph.db` in the repository root.
-- Binary files, dependency and build directories, and patterns in `.code-review-graphignore` are skipped.
-- For the list of supported languages call `get_docs_section_tool(section_name="languages")`.
+For follow-up graph queries, use `detail_level="minimal"` when source snippets are unnecessary. Read the implementation and its tests before changing code.

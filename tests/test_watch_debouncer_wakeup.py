@@ -149,13 +149,13 @@ def test_debouncer_coalesces_a_burst_in_arrival_order_and_restarts_its_timer():
     debouncer.start()
     try:
         started = time.monotonic()
-        for name in ("c", "a", "b"):
+        for name in ("c", "a", "c", "b", "a"):
             debouncer.handle_event(name)
             time.sleep(0.1)  # each event restarts the quiet interval
         assert batch_seen.wait(5)
         elapsed = time.monotonic() - started
         assert batches == [["c", "a", "b"]]
-        assert elapsed >= 0.2 + 0.3, "the batch fired before a full quiet interval"
+        assert elapsed >= 0.4 + 0.3, "the batch fired before a full quiet interval"
 
         batch_seen.clear()
         debouncer.handle_event("d")

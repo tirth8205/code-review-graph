@@ -13,7 +13,7 @@ import code_review_graph.tools.analysis_tools as analysis_module
 import code_review_graph.tools.docs as docs_module
 import code_review_graph.tools.query as query_module
 from code_review_graph.graph import GraphStore, _sanitize_name, node_to_dict
-from code_review_graph.incremental import full_build
+from code_review_graph.incremental import full_build, get_db_path
 from code_review_graph.parser import EdgeInfo, NodeInfo
 from code_review_graph.tools import (
     _validate_repo_root,
@@ -152,30 +152,27 @@ class TestTools:
         names = {r.name for r in results}
         assert "login" in names or "AuthService" in names
 
-    def test_search_mode_fts(self, monkeypatch, tmp_path):
+    def test_search_mode_fts(self, tmp_path):
         """semantic_search_nodes reports search_mode='fts' when only FTS contributes."""
-        import code_review_graph.tools.query as query_mod
         from code_review_graph.search import rebuild_fts_index
         from code_review_graph.tools.query import semantic_search_nodes
 
-        tmp_db = tmp_path / "test.db"
-        store = GraphStore(tmp_db)
+        store = GraphStore(get_db_path(tmp_path))
         store.upsert_node(NodeInfo(
             kind="Function", name="login", file_path="/repo/auth.py",
             line_start=1, line_end=10, language="python",
         ))
         store.commit()
         rebuild_fts_index(store)
+        store.close()
 
-        monkeypatch.setattr(query_mod, "_get_store", lambda repo_root=None: (store, tmp_path))
-        result = semantic_search_nodes("login")
+        result = semantic_search_nodes("login", repo_root=str(tmp_path))
         assert result["status"] == "ok"
         assert result["search_mode"] == "fts"
 
-    def test_include_source_returns_the_code(self, monkeypatch, tmp_path):
+    def test_include_source_returns_the_code(self, tmp_path):
         """include_source attaches the node's own lines, so a caller can
         answer without opening the file itself."""
-        import code_review_graph.tools.query as query_mod
         from code_review_graph.search import rebuild_fts_index
         from code_review_graph.tools.query import semantic_search_nodes
 
@@ -187,8 +184,7 @@ class TestTools:
             "    return check(user)\n",
             encoding="utf-8",
         )
-        db = tmp_path / "test.db"
-        store = GraphStore(db)
+        store = GraphStore(get_db_path(tmp_path))
         store.upsert_node(NodeInfo(
             kind="Function", name="login", file_path=str(src),
             line_start=3, line_end=4, language="python",
@@ -196,23 +192,17 @@ class TestTools:
         store.commit()
         rebuild_fts_index(store)
         store.close()
-        # Each call closes the store it is given, so hand out a fresh one.
-        monkeypatch.setattr(
-            query_mod, "_get_store", lambda repo_root=None: (GraphStore(db), tmp_path),
-        )
 
-        plain = semantic_search_nodes("login")
+        plain = semantic_search_nodes("login", repo_root=str(tmp_path))
         assert "source" not in plain["results"][0]
 
-        withsrc = semantic_search_nodes("login", include_source=True)
+        withsrc = semantic_search_nodes("login", repo_root=str(tmp_path), include_source=True)
         hit = withsrc["results"][0]
         assert hit["source"] == "def login(user):\n    return check(user)"
         assert hit["source_lines"] == [3, 4]
 
-    def test_expand_neighbors_returns_caller_source(self, monkeypatch, tmp_path):
+    def test_expand_neighbors_returns_caller_source(self, tmp_path):
         """One call answers "how does X work": the hit plus the code each side."""
-        import code_review_graph.tools.query as query_mod
-        from code_review_graph.graph import EdgeInfo
         from code_review_graph.search import rebuild_fts_index
         from code_review_graph.tools.query import semantic_search_nodes
 
@@ -225,8 +215,7 @@ class TestTools:
             "    return 200\n",
             encoding="utf-8",
         )
-        db = tmp_path / "test.db"
-        store = GraphStore(db)
+        store = GraphStore(get_db_path(tmp_path))
         for name, ls, le in (("wsgi_app", 1, 2), ("dispatch", 4, 5)):
             store.upsert_node(NodeInfo(
                 kind="Function", name=name, file_path=str(src),
@@ -242,80 +231,68 @@ class TestTools:
         store.commit()
         rebuild_fts_index(store)
         store.close()
-        monkeypatch.setattr(
-            query_mod, "_get_store", lambda repo_root=None: (GraphStore(db), tmp_path),
-        )
 
         hit = semantic_search_nodes(
-            "dispatch", include_source=True, expand_neighbors=True,
+            "dispatch", repo_root=str(tmp_path), include_source=True, expand_neighbors=True,
         )["results"][0]
         assert hit["name"] == "dispatch"
         callers = hit.get("callers") or []
         assert [c["name"] for c in callers] == ["wsgi_app"]
         assert "return dispatch(env)" in callers[0]["source"]
 
-    def test_include_source_caps_long_nodes(self, monkeypatch, tmp_path):
+    def test_include_source_caps_long_nodes(self, tmp_path):
         """A huge node is truncated and says so rather than blowing the budget."""
-        import code_review_graph.tools.query as query_mod
         from code_review_graph.search import rebuild_fts_index
         from code_review_graph.tools.query import semantic_search_nodes
 
         src = tmp_path / "big.py"
         src.write_text("\n".join(f"line{i}" for i in range(500)), encoding="utf-8")
-        store = GraphStore(tmp_path / "test.db")
+        store = GraphStore(get_db_path(tmp_path))
         store.upsert_node(NodeInfo(
             kind="Function", name="sprawl", file_path=str(src),
             line_start=1, line_end=500, language="python",
         ))
         store.commit()
         rebuild_fts_index(store)
-        monkeypatch.setattr(
-            query_mod, "_get_store", lambda repo_root=None: (store, tmp_path),
-        )
+        store.close()
 
-        hit = semantic_search_nodes("sprawl", include_source=True)["results"][0]
+        hit = semantic_search_nodes(
+            "sprawl", repo_root=str(tmp_path), include_source=True,
+        )["results"][0]
         assert hit["source_truncated"] is True
         assert len(hit["source"].splitlines()) <= 60
 
-    def test_include_source_ignored_for_minimal(self, monkeypatch, tmp_path):
+    def test_include_source_ignored_for_minimal(self, tmp_path):
         """detail_level="minimal" stays minimal."""
-        import code_review_graph.tools.query as query_mod
         from code_review_graph.search import rebuild_fts_index
         from code_review_graph.tools.query import semantic_search_nodes
 
         src = tmp_path / "auth.py"
         src.write_text("def login(user):\n    return 1\n", encoding="utf-8")
-        store = GraphStore(tmp_path / "test.db")
+        store = GraphStore(get_db_path(tmp_path))
         store.upsert_node(NodeInfo(
             kind="Function", name="login", file_path=str(src),
             line_start=1, line_end=2, language="python",
         ))
         store.commit()
         rebuild_fts_index(store)
-        monkeypatch.setattr(
-            query_mod, "_get_store", lambda repo_root=None: (store, tmp_path),
-        )
+        store.close()
 
         out = semantic_search_nodes(
-            "login", include_source=True, detail_level="minimal",
+            "login", repo_root=str(tmp_path), include_source=True, detail_level="minimal",
         )
         assert all("source" not in r for r in out["results"])
 
     @staticmethod
-    def _search_store(monkeypatch, tmp_path, build):
+    def _search_store(tmp_path, build):
         """Fill a graph with *build*, and make searches open a fresh store on it."""
-        import code_review_graph.tools.query as query_mod
         from code_review_graph.search import rebuild_fts_index
 
-        db = tmp_path / "test.db"
-        store = GraphStore(db)
+        store = GraphStore(get_db_path(tmp_path))
         build(store)
         store.commit()
         rebuild_fts_index(store)
         store.close()
-        monkeypatch.setattr(
-            query_mod, "_get_store", lambda repo_root=None: (GraphStore(db), tmp_path),
-        )
 
     @staticmethod
     def _fn(src, name, start, end):
@@ -324,20 +301,22 @@ class TestTools:
             line_start=start, line_end=end, language="python",
         )
 
-    def test_include_source_lines_match_the_parser(self, monkeypatch, tmp_path):
+    def test_include_source_lines_match_the_parser(self, tmp_path):
         """A form feed is not a new line to the parser, so must not shift the slice."""
         from code_review_graph.tools.query import semantic_search_nodes
 
         src = tmp_path / "ff.py"
         src.write_text("import os\n\x0c\ndef real():\n    return 1\n", encoding="utf-8")
         self._search_store(
-            monkeypatch, tmp_path, lambda s: s.upsert_node(self._fn(src, "real", 3, 4)),
+            tmp_path, lambda s: s.upsert_node(self._fn(src, "real", 3, 4)),
         )
 
-        hit = semantic_search_nodes("real", include_source=True)["results"][0]
+        hit = semantic_search_nodes(
+            "real", repo_root=str(tmp_path), include_source=True,
+        )["results"][0]
         assert hit["source"] == "def real():\n    return 1"
 
-    def test_include_source_skips_notebooks(self, monkeypatch, tmp_path):
+    def test_include_source_skips_notebooks(self, tmp_path):
         """Notebook line numbers are not file line numbers: no snippet beats a wrong one."""
         from code_review_graph.tools.query import semantic_search_nodes
 
@@ -354,13 +333,15 @@ class TestTools:
             store.upsert_node(self._fn(ipynb, "nb_fn", 1, 2))
             store.upsert_node(self._fn(dbx, "dbx_fn", 2, 3))
 
-        self._search_store(monkeypatch, tmp_path, build)
+        self._search_store(tmp_path, build)
 
         for name in ("nb_fn", "dbx_fn"):
-            hit = semantic_search_nodes(name, include_source=True)["results"][0]
+            hit = semantic_search_nodes(
+                name, repo_root=str(tmp_path), include_source=True,
+            )["results"][0]
             assert "source" not in hit
 
-    def test_include_source_caps_characters(self, monkeypatch, tmp_path):
+    def test_include_source_caps_characters(self, tmp_path):
         """One minified line must not get past a budget counted in lines."""
         from code_review_graph.tools.query import (
             _MAX_SEARCH_SOURCE_CHARS_PER_NODE,
@@ -370,16 +351,17 @@ class TestTools:
         src = tmp_path / "min.py"
         src.write_text("huge = '" + "x" * 500_000 + "'\n", encoding="utf-8")
         self._search_store(
-            monkeypatch, tmp_path, lambda s: s.upsert_node(self._fn(src, "huge", 1, 1)),
+            tmp_path, lambda s: s.upsert_node(self._fn(src, "huge", 1, 1)),
         )
 
-        hit = semantic_search_nodes("huge", include_source=True)["results"][0]
+        hit = semantic_search_nodes(
+            "huge", repo_root=str(tmp_path), include_source=True,
+        )["results"][0]
         assert len(hit["source"]) == _MAX_SEARCH_SOURCE_CHARS_PER_NODE
         assert hit["source_truncated"] is True
 
-    def test_expand_neighbors_gets_budget_before_lower_hits(self, monkeypatch, tmp_path):
+    def test_expand_neighbors_gets_budget_before_lower_hits(self, tmp_path):
         """Twelve long hits used to spend it all, so nothing got its callers."""
-        from code_review_graph.graph import EdgeInfo
         from code_review_graph.tools.query import semantic_search_nodes
 
         src = tmp_path / "many.py"
@@ -397,17 +379,15 @@ class TestTools:
                     file_path=str(src), line=3001 + i,
                 ))
 
-        self._search_store(monkeypatch, tmp_path, build)
+        self._search_store(tmp_path, build)
 
         results = semantic_search_nodes(
-            "widget", include_source=True, expand_neighbors=True,
+            "widget", repo_root=str(tmp_path), include_source=True, expand_neighbors=True,
         )["results"]
         assert all(hit["callers"][0]["name"] == "caller_fn" for hit in results[:3])
 
     def test_expand_neighbors_stops_when_budget_is_gone(self, monkeypatch, tmp_path):
         """Thousands of edges must not mean thousands of lookups for no source."""
-        import code_review_graph.tools.query as query_mod
-        from code_review_graph.graph import EdgeInfo
         from code_review_graph.tools.query import semantic_search_nodes
 
         src = tmp_path / "hub.py"
@@ -424,8 +404,8 @@ class TestTools:
                     file_path=str(src), line=i,
                 ))
 
-        self._search_store(monkeypatch, tmp_path, build)
-        monkeypatch.setattr(query_mod, "_MAX_EXPANDED_SOURCE_LINES", 60)
+        self._search_store(tmp_path, build)
+        monkeypatch.setattr(query_module, "_MAX_EXPANDED_SOURCE_LINES", 60)
         calls = []
         real_get_node = GraphStore.get_node
         monkeypatch.setattr(
@@ -433,14 +413,13 @@ class TestTools:
         )
 
         result = semantic_search_nodes(
-            "hub", include_source=True, expand_neighbors=True, limit=1,
+            "hub", repo_root=str(tmp_path), include_source=True, expand_neighbors=True, limit=1,
         )
         assert calls == []
         assert result["source_omitted"] == 1
 
-    def test_expand_neighbors_finds_edges_of_long_names(self, monkeypatch, tmp_path):
+    def test_expand_neighbors_finds_edges_of_long_names(self, tmp_path):
         """Edges are keyed on the whole name, not the 256 characters a hit shows."""
-        from code_review_graph.graph import EdgeInfo
         from code_review_graph.tools.query import semantic_search_nodes
 
         long_name = "a" * 300
@@ -460,10 +439,10 @@ class TestTools:
                 file_path=str(src), line=2,
             ))
 
-        self._search_store(monkeypatch, tmp_path, build)
+        self._search_store(tmp_path, build)
 
         hit = semantic_search_nodes(
-            long_name, include_source=True, expand_neighbors=True,
+            long_name, repo_root=str(tmp_path), include_source=True, expand_neighbors=True,
         )["results"][0]
         assert [c["name"] for c in hit["callees"]] == ["callee"]
 
@@ -2371,9 +2350,6 @@ class TestBuildPostprocessResolvesBareEndpoints:
         self.store.set_metadata(BUILD_STATE_KEY, POSTPROCESS_PENDING)
         self.store.close()
         result = build_module.run_postprocess(
-            flows=False,
-            communities=False,
-            fts=False,
             repo_root=str(self.repo),
         )
 
@@ -2888,9 +2864,9 @@ class TestGraphProvenance:
         assert envelope["built_on_branch"] == "main"
 
 
-def test_impact_radius_tool_exposes_best_first_scores(monkeypatch, tmp_path):
+def test_impact_radius_tool_exposes_best_first_scores(tmp_path):
     """The public tool adds scores without changing the stored node schema."""
-    store = GraphStore(tmp_path / "impact.db")
+    store = GraphStore(get_db_path(tmp_path))
     seed = "/seed.py::seed"
     caller = "/caller.py::caller"
     importer = "/importer.py::importer"
@@ -2913,14 +2889,7 @@ def test_impact_radius_tool_exposes_best_first_scores(monkeypatch, tmp_path):
     ))
     store.commit()
 
-    monkeypatch.setattr(
-        query_module, "_get_store", lambda _repo_root: (store, tmp_path),
-    )
-    monkeypatch.setattr(
-        query_module,
-        "_resolve_graph_file_paths",
-        lambda _store, _root, _files: ["/seed.py"],
-    )
+    store.close()
 
     result = query_module.get_impact_radius(
         changed_files=["seed.py"], repo_root=str(tmp_path),

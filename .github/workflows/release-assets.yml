@@ -1,0 +1,69 @@
+name: Release assets
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  assets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+
+      - name: Verify dc-use release provenance
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin refs/heads/dc-use:refs/remotes/origin/dc-use
+          commit=$(git rev-parse HEAD)
+          tagged=$(git rev-parse --verify "refs/tags/${TAG}^{commit}")
+          if [ "$commit" != "$tagged" ] || ! git merge-base --is-ancestor "$commit" origin/dc-use; then
+            echo "::error::Release tag ${TAG} must select the checked-out commit on dc-use."
+            exit 1
+          fi
+          python - <<'PY'
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          if sys.version_info < (3, 11):
+              import tomli as tomllib
+          else:
+              import tomllib
+
+          version = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+          expected_tag = "v" + version.replace("+dc.", "-dc.")
+          if not re.fullmatch(r"\d+\.\d+\.\d+\+dc\.[1-9]\d*", version) or os.environ["TAG"] != expected_tag:
+              raise SystemExit(f"Release tag {os.environ['TAG']} does not match dc package {version}.")
+          print(f"Verified {expected_tag}: package {version} from dc-use.")
+          PY
+
+      - name: Build package
+        run: |
+          pip install build
+          python -m build
+
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum -- * > SHA256SUMS.txt
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release upload "$TAG" dist/* --repo "$GH_REPO"

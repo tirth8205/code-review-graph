@@ -1648,7 +1648,7 @@ _SKILLS: dict[str, dict[str, str]] = {
 def generate_skills(repo_root: Path, skills_dir: Path | None = None) -> Path:
     """Generate Claude Code skill files.
 
-    Creates `.claude/skills/` directory with 4 skill markdown files,
+    Creates `.claude/skills/` directory with the registered skill files,
     each containing frontmatter and instructions.
 
     Args:
@@ -1672,6 +1672,8 @@ def generate_skills(repo_root: Path, skills_dir: Path | None = None) -> Path:
             "---\n\n"
             f"{skill['body']}\n"
         )
+        if skill_name in DOCUMENTARY_SKILLS:
+            content = render_documentary_skill_markdown(skill_name)
         install_plan.write_text(path, content)
         logger.info("Wrote skill: %s", path)
 
@@ -1689,27 +1691,22 @@ DOCUMENTARY_SKILLS: dict[str, dict[str, str]] = {
         "argument_hint": "[full]",
         "title": "Build Graph",
         "body": (
-            "Build or incrementally update the knowledge graph for this repository.\n\n"
-            "## Steps\n\n"
-            "1. Call `list_graph_stats_tool`. If `last_updated` is null, the graph has never been "
-            "built.\n"
-            "2. For a first build, or when the argument is `full`, call "
-            "`build_or_update_graph_tool(full_rebuild=True)`. Otherwise call "
-            "`build_or_update_graph_tool()` for an incremental update.\n"
-            "3. Report the response: `status` (`ok`, `partial` or `error`) and `summary`. "
-            "`contended` means another build of this repository is running; retry once it "
-            "finishes.\n\n"
-            "## When to Use\n\n"
-            "- First set-up of a repository, or after a branch switch or large refactor.\n"
-            "- When the graph looks stale. Hooks installed by `code-review-graph install` run an "
-            "update after each edit, before each commit and after a branch switch, merge or "
-            "rebase, so manual builds are rarely needed.\n\n"
-            "## Notes\n\n"
-            "- The database is `.code-review-graph/graph.db` in the repository root.\n"
-            "- Binary files, dependency and build directories, and patterns in "
-            "`.code-review-graphignore` are skipped.\n"
-            "- For the list of supported languages call "
-            "`get_docs_section_tool(section_name=\"languages\")`."
+            "Start with `get_minimal_context_tool` to identify the graph state. "
+            "Check `code-review-graph status` against the checkout's current Git HEAD. "
+            "Use `code-review-graph doctor` to diagnose an unusable graph.\n\n"
+            "- For a missing graph, call `build_or_update_graph_tool(full_rebuild=True)`.\n"
+            "- For an existing graph, call `build_or_update_graph_tool()` to refresh it.\n"
+            "- If the operation reports contention, confirm the current writer has finished "
+            "and verify graph freshness before relying on its results.\n"
+            "- If the operation fails or reports a partial build, inspect its diagnostic "
+            "before using graph-backed results.\n"
+            "- If the last update skipped post-processing, call `run_postprocess_tool` "
+            "before querying flows or communities.\n"
+            "- Use `list_repos_tool` to identify registered repositories before using "
+            "`cross_repo_search_tool`.\n\n"
+            "For follow-up graph queries, use `detail_level=\"minimal\"` when source "
+            "snippets are unnecessary. Read the implementation and its tests "
+            "before changing code."
         ),
     },
     "review-delta": {
@@ -1793,6 +1790,9 @@ DOCUMENTARY_SKILLS: dict[str, dict[str, str]] = {
         ),
     },
 }
+
+
+_SKILLS["build-graph.md"] = {"name": "build-graph", **DOCUMENTARY_SKILLS["build-graph"]}
 
 
 def render_documentary_skill_markdown(slug: str) -> str:
@@ -2441,12 +2441,13 @@ def _exit_warning(hook_path: Path, command: str) -> None:
     )
 
 
-def _git_hooks_dir(repo_root: Path) -> Path | None:
+def _git_hooks_dir(repo_root: Path, *, required: bool = False) -> Path | None:
     """Return the directory git runs hooks from, or None when there is none.
 
     Resolved via ``git rev-parse --git-path hooks`` so linked worktrees,
     submodules and ``core.hooksPath`` are honoured, with the legacy
     ``.git/hooks`` lookup as the fallback when git itself is unavailable.
+    An explicit hook installation requires Git's answer and propagates errors.
     """
     try:
         result = subprocess.run(
@@ -2457,12 +2458,22 @@ def _git_hooks_dir(repo_root: Path) -> Path | None:
             cwd=str(repo_root),
             timeout=10,
             stdin=subprocess.DEVNULL,
+            check=required,
         )
         if result.returncode == 0 and result.stdout.strip():
             # Output is relative to repo_root (".git/hooks", a core.hooksPath
             # value such as ".husky") or absolute (linked worktrees).
-            return repo_root / result.stdout.strip()
+            path = repo_root / result.stdout.strip()
+            if path.resolve() == Path(os.devnull).resolve():
+                if required:
+                    raise RuntimeError("git hooks are disabled by core.hooksPath")
+                return None
+            return path
+        if required:
+            raise RuntimeError("git returned an empty hooks path")
     except (subprocess.TimeoutExpired, OSError) as exc:
+        if required:
+            raise
         logger.warning("git unavailable (%s); falling back to .git/hooks resolution.", exc)
 
     git_dir = repo_root / ".git"
@@ -2474,7 +2485,7 @@ def _git_hooks_dir(repo_root: Path) -> Path | None:
     return git_dir / "hooks"
 
 
-def install_git_hook(repo_root: Path) -> Path | None:
+def install_git_hook(repo_root: Path, *, required: bool = True) -> Path | None:
     """Install a git pre-commit hook that prints a risk summary before each commit.
 
     Called automatically by ``code-review-graph install``.
@@ -2488,9 +2499,8 @@ def install_git_hook(repo_root: Path) -> Path | None:
     Creates ``pre-commit`` if it doesn't exist, or appends to an existing
     one — the hook is appended, not overwritten, preserving any hooks
     already there. A hook that ends with a top-level ``exit`` gets the block
-    just before that line, where it still runs. Falls back to the legacy
-    ``.git/hooks`` resolution when git itself is unavailable. Returns None
-    when no hooks directory can be determined. A block written by any past
+    just before that line, where it still runs. Git resolution errors propagate.
+    A block written by any past
     release is upgraded in place, and a hand-edited one is left alone. The
     installed hook skips automatic checks in linked worktrees, where an
     implicit update could build a duplicate graph for a different branch;
@@ -2498,7 +2508,7 @@ def install_git_hook(repo_root: Path) -> Path | None:
     Detection relies only on ``git rev-parse --absolute-git-dir`` (Git 2.13),
     not on newer options.
     """
-    hooks_dir = _git_hooks_dir(repo_root)
+    hooks_dir = _git_hooks_dir(repo_root, required=required)
     if hooks_dir is None:
         return None
 

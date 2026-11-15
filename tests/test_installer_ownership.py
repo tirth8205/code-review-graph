@@ -8,6 +8,7 @@ user-owned in the path of a merge and demands it comes back out intact.
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -1017,8 +1018,9 @@ ORPHAN_HOOK = (
 
 
 def test_install_refuses_a_block_whose_end_marker_was_deleted(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     hooks = tmp_path / ".git" / "hooks"
-    hooks.mkdir(parents=True)
+    hooks.mkdir(parents=True, exist_ok=True)
     hook = hooks / "pre-commit"
     hook.write_text(ORPHAN_HOOK, encoding="utf-8")
 

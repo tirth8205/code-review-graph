@@ -28,6 +28,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -363,6 +364,312 @@ async def test_mcp_client_full_review_journey(tmp_path: Path) -> None:
             # this is what keeps the test independent of the host machine.
             assert repos["repos"] == [], repos
             assert repos["summary"].startswith("0 registered repository")
+
+
+@pytest.mark.e2e
+def test_shared_postprocess_invalidates_previous_refresh(tmp_path):
+    repo = _make_fixture_repo(tmp_path)
+    env = {**_server_env(tmp_path / "home"), "CRG_SHARED_DB": str(tmp_path / "shared.db")}
+
+    def run(*args):
+        return subprocess.check_output(
+            [sys.executable, "-m", "code_review_graph", *args, "--repo", str(repo)],
+            env=env, text=True, timeout=30,
+        )
+
+    run("build")
+    mixed = subprocess.run(
+        [sys.executable, "-m", "code_review_graph", "status",
+         "--repo", str(repo), "--data-dir", str(tmp_path / "other")],
+        env=env, capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert mixed.returncode == 2
+    assert "Select either CRG_SHARED_DB or --data-dir" in mixed.stderr
+    run("update")
+    assert "Reused the completed refresh" in run("update")
+    run("postprocess")
+    assert "Reused the completed refresh" not in run("update")
+    assert "Reused the completed refresh" in run("update")
+
+
+@pytest.mark.e2e
+def test_shared_cli_reuses_watcher_reconciliation(tmp_path):
+    repo = _make_fixture_repo(tmp_path)
+    env = {**_server_env(tmp_path / "home"), "CRG_SHARED_DB": str(tmp_path / "shared.db")}
+
+    def cli(*args):
+        return [sys.executable, "-m", "code_review_graph", *args, "--repo", str(repo)]
+
+    subprocess.check_call(cli("build"), env=env, timeout=30)
+    relative = "pkg/view.py"
+    (repo / relative).write_text("def reconciled_by_watch(): return 1\n", encoding="utf-8")
+    log = tmp_path / "watch.log"
+    with log.open("wb") as output, subprocess.Popen(
+        cli("watch"), env={**env, "CRG_WATCH_HEALTH_INTERVAL": "1"},
+        stdout=output, stderr=subprocess.STDOUT,
+    ) as watcher:
+        try:
+            deadline = time.monotonic() + 30
+            while "Watching " not in log.read_text(encoding="utf-8"):
+                assert watcher.poll() is None, log.read_text(encoding="utf-8")
+                assert time.monotonic() < deadline, log.read_text(encoding="utf-8")
+                time.sleep(0.1)
+            assert "Reused the completed refresh" in subprocess.check_output(
+                cli("update"), env=env, text=True, timeout=30,
+            )
+            query = json.loads(subprocess.check_output(
+                cli("query", "file_summary", relative), env=env, text=True, timeout=30,
+            ))
+            assert "reconciled_by_watch" in {row["name"] for row in query["results"]}
+        finally:
+            watcher.terminate()
+            watcher.wait(timeout=15)
+
+
+@pytest.mark.e2e
+def test_shared_cli_crash_rolls_back_written_rows(tmp_path):
+    repo = _make_fixture_repo(tmp_path)
+    env = {**_server_env(tmp_path / "home"), "CRG_SERIAL_PARSE": "1",
+           "CRG_SHARED_DB": str(tmp_path / "shared.db")}
+    cli = [sys.executable, "-m", "code_review_graph"]
+
+    def run(*args):
+        return subprocess.check_output(
+            [*cli, *args, "--repo", str(repo)], env=env, text=True, timeout=20,
+        )
+
+    source = repo / "pkg" / "view.py"
+    source.write_text("def previous_symbol(): return 1\n", encoding="utf-8")
+    run("build")
+    source.write_text("def replacement_symbol(): return 2\n", encoding="utf-8")
+
+    def symbols():
+        graph = json.loads(run("query", "file_summary", "pkg/view.py"))
+        return {node["name"] for node in graph["results"] if node["kind"] == "Function"}
+
+    entered = tmp_path / "entered"
+    producer = """
+import sys, time
+from pathlib import Path
+from code_review_graph.cli import main
+from code_review_graph.graph import GraphStore
+
+marker, path = Path(sys.argv.pop(1)), Path(sys.argv.pop(1))
+real_write = GraphStore.store_file_nodes_edges
+def pause(self, file_path, *args, **kwargs):
+    result = real_write(self, file_path, *args, **kwargs)
+    if Path(file_path) == path:
+        marker.touch()
+        time.sleep(30)
+    return result
+GraphStore.store_file_nodes_edges = pause
+main()
+"""
+    with subprocess.Popen(
+        [sys.executable, "-c", producer, str(entered), str(source),
+         "update", "--repo", str(repo)], env=env,
+    ) as child:
+        try:
+            deadline = time.monotonic() + 15
+            while not entered.exists() and child.poll() is None and time.monotonic() < deadline:
+                time.sleep(.02)
+            assert entered.exists()
+            assert symbols() == {"previous_symbol"}
+        finally:
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=10)
+    assert symbols() == {"previous_symbol"}
+    run("update")
+    assert symbols() == {"replacement_symbol"}
+    assert list(tmp_path.rglob("*.db")) == [tmp_path / "shared.db"]
+
+
+@pytest.mark.parametrize("outcome", ["reused", "crash", "different-profile", "new-edit"])
+async def test_cli_and_mcp_complete_a_contended_refresh(tmp_path, outcome):
+    repo = _make_fixture_repo(tmp_path)
+    crg_home = tmp_path / "refresh-home"
+    crg_home.mkdir()
+    env = {**_server_env(crg_home), "CRG_SERIAL_PARSE": "1"}
+    if outcome == "new-edit":
+        env["CRG_SHARED_DB"] = str(tmp_path / "shared.db")
+    # Keep the production parser and writer; pause the CLI process after
+    # it has taken the kernel lock and started parsing.
+    producer = """
+import sys, time
+from pathlib import Path
+from code_review_graph.cli import main
+from code_review_graph.parser import CodeParser
+
+entered, resume = map(Path, sys.argv[1:3])
+del sys.argv[1:3]
+real_parse = CodeParser.parse_bytes
+def pause(self, path, source):
+    result = real_parse(self, path, source)
+    if Path(path).name == "core.py" and not entered.exists():
+        entered.touch()
+        until = time.monotonic() + 60
+        while not resume.exists() and time.monotonic() < until:
+            time.sleep(0.02)
+        if not resume.exists():
+            raise TimeoutError("fixture never resumed the parser")
+    return result
+CodeParser.parse_bytes = pause
+main()
+"""
+    entered, resume = (tmp_path / name for name in ("entered", "resume"))
+    with subprocess.Popen(
+        [sys.executable, "-c", producer, str(entered), str(resume),
+         "build", "--wait", "--skip-postprocess", "--repo", str(repo)],
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    ) as child:
+        try:
+            deadline = time.monotonic() + 60
+            while not entered.exists() and child.poll() is None and time.monotonic() < deadline:
+                await asyncio.sleep(.02)
+            assert entered.exists()
+            if outcome == "new-edit":
+                status = subprocess.run(
+                    [sys.executable, "-m", "code_review_graph", "status", "--json",
+                     "--repo", str(repo)],
+                    env=env, capture_output=True, text=True, timeout=15, check=False,
+                )
+                assert status.returncode == 1 and "No committed graph" in status.stderr
+            params = _server_params(repo, crg_home)
+            params.env = {**env, "TEST_REFRESH_WAITER": str(tmp_path / "waiting")}
+            waiter = """
+import os
+from pathlib import Path
+from code_review_graph.cli import main
+from code_review_graph.tools import build
+
+previous = build._previous_refresh
+def mark(*args):
+    result = previous(*args)
+    Path(os.environ["TEST_REFRESH_WAITER"]).touch()
+    return result
+build._previous_refresh = mark
+main()
+"""
+            params.args = ["-c", waiter, *params.args[2:]]
+            async with stdio_client(params) as (read, write):
+                async with ClientSession(
+                    read, write, read_timeout_seconds=read_timeout(CALL_TIMEOUT),
+                ) as session:
+                    await asyncio.wait_for(session.initialize(), timeout=CALL_TIMEOUT)
+                    join = asyncio.create_task(_call(session, "build_or_update_graph_tool", {
+                        "full_rebuild": True,
+                        "postprocess": "minimal" if outcome == "different-profile" else "none",
+                        "wait_for_lock": True,
+                    }))
+                    deadline = time.monotonic() + 45
+                    while not (tmp_path / "waiting").exists():
+                        assert not join.done() and child.poll() is None
+                        assert time.monotonic() < deadline
+                        await asyncio.sleep(.02)
+                    if outcome == "crash":
+                        child.kill()
+                    else:
+                        if outcome == "new-edit":
+                            (repo / "pkg" / "core.py").write_text(
+                                CORE_PY + "\ndef arrived_during_refresh(): return 1\n",
+                                encoding="utf-8",
+                            )
+                        resume.touch()
+                    result = _payload(await join)
+                    assert result["status"] == "ok", result
+                    if outcome == "reused":
+                        assert result["refresh_reused"] is True, result
+                        assert result["files_parsed"] == 0
+                    else:
+                        assert "refresh_reused" not in result, result
+                        assert result["files_parsed"] > 0
+                    query = _payload(await _call(session, "query_graph_tool", {
+                        "pattern": "file_summary", "target": "pkg/core.py",
+                    }))
+                    names = {node["name"] for node in query["results"]}
+                    assert "compute_total" in names
+                    if outcome == "new-edit":
+                        assert "arrived_during_refresh" in names
+        finally:
+            resume.touch()
+            stdout, stderr = child.communicate(timeout=20)
+        if outcome != "crash":
+            assert child.returncode == 0, stdout + stderr
+        else:
+            assert child.returncode != 0
+
+
+async def test_mcp_shared_sqlite_isolates_sibling_worktrees(tmp_path, monkeypatch):
+    repo = _make_fixture_repo(tmp_path)
+    sibling = tmp_path / "sibling"
+    _git(repo, "worktree", "add", "-q", "--detach", str(sibling))
+    db = tmp_path / "shared.db"
+    relative_path = "pkg/view.py"
+    for root, name in ((repo, "left_symbol"), (sibling, "right_symbol")):
+        (root / relative_path).write_text(f"def {name}(): return 1\n", encoding="utf-8")
+        _git(root, "add", relative_path)
+
+    monkeypatch.setenv("CRG_SHARED_DB", str(db))
+    crg_home = tmp_path / "crg-home"
+    crg_home.mkdir()
+    async with stdio_client(
+        _server_params(repo, crg_home, multi_worktree=True)
+    ) as (read, write):
+        async with ClientSession(
+            read, write, read_timeout_seconds=read_timeout(CALL_TIMEOUT),
+        ) as session:
+            await asyncio.wait_for(session.initialize(), timeout=CALL_TIMEOUT)
+
+            async def query(root: Path, name: str, excluded: str) -> None:
+                result = _payload(await _call(session, "query_graph_tool", {
+                    "pattern": "file_summary", "target": relative_path, "repo_root": str(root),
+                }))
+                assert result["status"] == "ok", result
+                assert [row["name"] for row in result["results"]
+                        if row["kind"] == "Function"] == [name]
+                assert all(_posix(row["file_path"]) == (root / relative_path).as_posix()
+                           for row in result["results"])
+                search = _payload(await _call(session, "semantic_search_nodes_tool", {
+                    "query": name, "repo_root": str(root),
+                }))
+                assert name in {node["name"] for node in search["results"]}, search
+                other = _payload(await _call(session, "semantic_search_nodes_tool", {
+                    "query": excluded, "repo_root": str(root),
+                }))
+                assert excluded not in {node["name"] for node in other["results"]}, other
+
+            async def refresh(root: Path, *, full: bool) -> dict:
+                result = _payload(await _call(session, "build_or_update_graph_tool", {
+                    "full_rebuild": full, "repo_root": str(root), "wait_for_lock": True,
+                }))
+                assert result["status"] == "ok", result
+                return result
+
+            await asyncio.gather(refresh(repo, full=True), refresh(sibling, full=True))
+            await query(repo, "left_symbol", "right_symbol")
+            await query(sibling, "right_symbol", "left_symbol")
+            assert list(tmp_path.rglob("*.db")) == [db]
+
+            source = sibling / relative_path
+            source.write_text("def right_wip(): return 42\n", encoding="utf-8")
+            await refresh(sibling, full=False)
+            await query(sibling, "right_wip", "right_symbol")
+            await query(repo, "left_symbol", "right_wip")
+            assert list(tmp_path.rglob("*.db")) == [db]
+
+            await asyncio.to_thread(
+                subprocess.check_call,
+                [sys.executable, "-m", "code_review_graph", "forget", relative_path,
+                 "--repo", str(sibling)],
+                env=_server_env(crg_home), timeout=30,
+            )
+            forgotten = _payload(await _call(session, "semantic_search_nodes_tool", {
+                "query": "right_wip", "repo_root": str(sibling),
+            }))
+            assert "right_wip" not in {row["name"] for row in forgotten["results"]}, forgotten
+            await query(repo, "left_symbol", "right_wip")
+            assert list(tmp_path.rglob("*.db")) == [db]
 
 
 async def test_mcp_multi_worktree_routes_parallel_graphs(tmp_path: Path) -> None:

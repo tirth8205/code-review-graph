@@ -367,18 +367,69 @@ def test_watch_batch_waits_out_another_writer_and_is_not_lost(repo, held):
             handler.stop()
 
 
-def test_watch_batch_retried_behind_a_writer_is_counted_once(repo, held):
+def test_watch_reuses_graph_rows_already_refreshed_by_command(repo):
+    event = _edit(repo, "updatedByCommand")
+    db = incremental.get_db_path(repo)
+    postprocessed = []
+    with GraphStore(db) as watcher_store:
+        handler = incremental._create_watch_handler(repo, watcher_store, postprocessed.append)
+        with GraphStore(db) as command_store:
+            changed = incremental.incremental_update(repo, command_store, changed_files=["keep.py"])
+            assert changed["files_updated"] == 1
+        handler.process([event])
+        handler.raise_if_failed()
+
+    assert "updatedByCommand" in _names(repo, repo / "keep.py")
+    assert postprocessed == []
+
+
+def test_full_refresh_completes_a_minimal_build_without_source_edits(repo):
+    from code_review_graph.tools.build import build_or_update_graph
+
+    subprocess.run(
+        ["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+         "-c", "commit.gpgsign=false", "commit", "-qm", "fixture"],
+        cwd=repo, check=True, capture_output=True,
+    )
+    minimal = build_or_update_graph(True, str(repo), postprocess="minimal")
+    assert minimal["status"] == "ok"
+    full = build_or_update_graph(repo_root=str(repo))
+    assert full["status"] == "ok"
+    assert full["files_updated"] == 0
+    assert "flows_detected" in full
+    repeated = build_or_update_graph(repo_root=str(repo))
+    assert repeated["status"] == "ok"
+    assert repeated["files_updated"] == 0
+    assert "flows_detected" not in repeated
+
+
+def test_watch_coalesces_edits_after_deferring_a_batch(repo, held, monkeypatch):
+    deferred = threading.Event()
+    requeue = incremental._WatchDebouncer.requeue
+
+    def signal_requeue(debouncer, events):
+        requeue(debouncer, events)
+        deferred.set()
+
+    monkeypatch.setattr(incremental._WatchDebouncer, "requeue", signal_requeue)
+    postprocessed = []
     with GraphStore(incremental.get_db_path(repo)) as store:
-        handler = incremental._create_watch_handler(repo, store, None)
+        handler = incremental._create_watch_handler(repo, store, postprocessed.append)
         handler.start()
         try:
-            handler.dispatch(_edit(repo, "countedOnce"))
-            time.sleep(0.5)
+            handler.dispatch(_edit(repo, "supersededEdit"))
+            assert deferred.wait(_BOUND), "the observer did not defer its batch"
+            for _ in range(20):
+                handler.dispatch(_edit(repo, "finalEdit"))
             held.release()
-            assert _wait_for(lambda: "countedOnce" in _names(repo, repo / "keep.py"))
-            assert handler.events_seen == 1
+            assert _wait_for(lambda: "finalEdit" in _names(repo, repo / "keep.py"))
         finally:
             handler.stop()
+        handler.raise_if_failed()
+
+    assert "supersededEdit" not in _names(repo, repo / "keep.py")
+    assert handler.events_seen == 1
+    assert len(postprocessed) == 1
 
 
 def test_watch_can_stop_while_a_batch_waits_for_the_lock(repo, held):
@@ -473,6 +524,17 @@ def test_watch_startup_waits_out_another_writer(repo, held, monkeypatch):
 
         held.release()
         assert _wait_for(lambda: "offlineEdit" in _names(repo, repo / "keep.py"))
+    finally:
+        _finish(thread, stop, store)
+    assert outcome == {}
+
+
+def test_watch_startup_indexes_file_created_while_offline(repo, monkeypatch):
+    source = repo / "offline_new.py"
+    source.write_text("def offlineNew():\n    return 1\n", encoding="utf-8")
+    thread, stop, store, outcome = _run_watch(monkeypatch, repo)
+    try:
+        assert _wait_for(lambda: "offlineNew" in _names(repo, source))
     finally:
         _finish(thread, stop, store)
     assert outcome == {}

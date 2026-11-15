@@ -785,6 +785,8 @@ def store_flows(store: GraphStore, flows: list[dict]) -> int:
                 ),
             )
             flow_id = cursor.lastrowid
+            if flow_id is None:
+                raise RuntimeError("Inserted flow did not return a row ID")
             membership_rows.extend(
                 (flow_id, node_id, position)
                 for position, node_id in enumerate(node_ids)
@@ -971,6 +973,8 @@ def incremental_trace_flows(
                     ),
                 )
                 flow_id = cursor.lastrowid
+                if flow_id is None:
+                    raise RuntimeError("Inserted flow did not return a row ID")
                 membership_rows.extend(
                     (flow_id, node_id, position)
                     for position, node_id in enumerate(node_ids)

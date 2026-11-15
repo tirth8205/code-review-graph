@@ -416,10 +416,15 @@ def _gaps(
             str(g.get("qualified_name") or "") for g in gaps
         )
     }
-    rows = []
+    rows: list[dict[str, Any]] = []
     for gap in gaps:
         shown = str(gap.get("qualified_name") or "")
-        node = own.get((shown, gap.get("file"), gap.get("line_start"))) or by_name.get(shown)
+        file, line = gap.get("file"), gap.get("line_start")
+        node = (
+            own.get((shown, file, line))
+            if isinstance(file, str) and isinstance(line, int) else None
+        )
+        node = node or by_name.get(shown)
         qualified_name = node.qualified_name if node is not None else shown
         rows.append({
             "qualified_name": _sanitize_name(qualified_name),

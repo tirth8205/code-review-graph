@@ -8,6 +8,8 @@
  * Uses `better-sqlite3` with prepared statements for performance.
  */
 
+import { createHash } from 'node:crypto';
+import { realpathSync } from 'node:fs';
 import type BetterSqlite3 from 'better-sqlite3';
 
 type DatabaseType = BetterSqlite3.Database;
@@ -159,16 +161,21 @@ const RETRY_BACKOFF_MS = 100;
 
 export class SqliteReader {
   private db: DatabaseType | null = null;
+  private readonly prefix: string;
+
+  private table(name: 'nodes' | 'edges' | 'metadata' | 'embeddings'): string {
+    return this.prefix + name;
+  }
 
   /**
    * Create a SqliteReader with retry logic that does not block the event loop.
    * Prefer this over the constructor when calling from async code.
    */
-  static async create(dbPath: string): Promise<SqliteReader> {
+  static async create(dbPath: string, checkout?: string): Promise<SqliteReader> {
     let lastError: unknown;
     for (let attempt = 0; attempt < MAX_OPEN_RETRIES; attempt++) {
       try {
-        return new SqliteReader(dbPath);
+        return new SqliteReader(dbPath, checkout);
       } catch (err) {
         lastError = err;
         if (attempt < MAX_OPEN_RETRIES - 1) {
@@ -181,11 +188,25 @@ export class SqliteReader {
     throw lastError;
   }
 
-  constructor(dbPath: string) {
+  constructor(dbPath: string, checkout?: string) {
+    const root = checkout ? realpathSync.native(checkout) : undefined;
+    const identity = process.platform === 'win32' ? root?.toLowerCase() : root;
+    this.prefix = identity ? 'crg_' + createHash('sha256').update(identity).digest('hex') + '_' : '';
     // The Python side sets WAL mode. A read-only open cannot change the
     // journal mode, and trying fails with SQLITE_READONLY.
     this.db = new Database(dbPath, { readonly: true });
     this.db.pragma('busy_timeout = 5000');
+    if (this.prefix) {
+      try {
+        const rows = this.db.prepare('SELECT version FROM _crg_shared').all() as { version: number }[];
+        if (rows.length !== 1 || rows[0].version !== 1) {
+          throw new Error('Unsupported CRG shared database format');
+        }
+      } catch (error) {
+        this.close();
+        throw error;
+      }
+    }
   }
 
   /**
@@ -201,14 +222,14 @@ export class SqliteReader {
         .all() as Array<{ name: string }>;
       const tableNames = new Set(tables.map((t) => t.name));
 
-      if (!tableNames.has('nodes') || !tableNames.has('edges')) {
+      if (!tableNames.has(this.table('nodes')) || !tableNames.has(this.table('edges'))) {
         return 'Database is missing required tables (nodes/edges). Rebuild required.';
       }
 
       // Check for schema_version in metadata if it exists
-      if (tableNames.has('metadata')) {
+      if (tableNames.has(this.table('metadata'))) {
         const row = this.db
-          .prepare("SELECT value FROM metadata WHERE key = 'schema_version'")
+          .prepare(`SELECT value FROM ${this.table('metadata')} WHERE key = 'schema_version'`)
           .get() as { value: string } | undefined;
         if (row) {
           const version = parseInt(row.value, 10);
@@ -240,9 +261,9 @@ export class SqliteReader {
     try {
       const row = this.db
         .prepare(
-          "SELECT name FROM sqlite_master WHERE type='table' AND name='nodes'"
+          "SELECT name FROM sqlite_master WHERE type='table' AND name=?"
         )
-        .get() as { name: string } | undefined;
+        .get(this.table('nodes')) as { name: string } | undefined;
       return row !== undefined;
     } catch {
       return false;
@@ -257,7 +278,7 @@ export class SqliteReader {
   getAllFiles(): string[] {
     const rows = this._db()
       .prepare(
-        "SELECT DISTINCT file_path FROM nodes WHERE kind = 'File' ORDER BY file_path"
+        `SELECT DISTINCT file_path FROM ${this.table('nodes')} WHERE kind = 'File' ORDER BY file_path`
       )
       .all() as FilePathRow[];
     return rows.map((r) => r.file_path);
@@ -267,7 +288,7 @@ export class SqliteReader {
   getNodesByFile(filePath: string): GraphNode[] {
     const rows = this._db()
       .prepare(
-        'SELECT * FROM nodes WHERE file_path = ? ORDER BY line_start'
+        `SELECT * FROM ${this.table('nodes')} WHERE file_path = ? ORDER BY line_start`
       )
       .all(filePath) as NodeRow[];
     return rows.map((r) => this._rowToNode(r));
@@ -276,7 +297,7 @@ export class SqliteReader {
   /** Single node lookup by qualified_name. */
   getNode(qualifiedName: string): GraphNode | undefined {
     const row = this._db()
-      .prepare('SELECT * FROM nodes WHERE qualified_name = ?')
+      .prepare(`SELECT * FROM ${this.table('nodes')} WHERE qualified_name = ?`)
       .get(qualifiedName) as NodeRow | undefined;
     return row ? this._rowToNode(row) : undefined;
   }
@@ -290,7 +311,7 @@ export class SqliteReader {
   getNodeAtCursor(filePath: string, line: number): GraphNode | undefined {
     const row = this._db()
       .prepare(
-        `SELECT * FROM nodes
+        `SELECT * FROM ${this.table('nodes')}
          WHERE file_path = ? AND line_start <= ? AND line_end >= ?
          ORDER BY (line_end - line_start) ASC
          LIMIT 1`
@@ -304,7 +325,7 @@ export class SqliteReader {
     const pattern = `%${query}%`;
     const rows = this._db()
       .prepare(
-        'SELECT * FROM nodes WHERE name LIKE ? OR qualified_name LIKE ? LIMIT ?'
+        `SELECT * FROM ${this.table('nodes')} WHERE name LIKE ? OR qualified_name LIKE ? LIMIT ?`
       )
       .all(pattern, pattern, limit) as NodeRow[];
     return rows.map((r) => this._rowToNode(r));
@@ -317,7 +338,7 @@ export class SqliteReader {
   /** Outgoing edges from a node. */
   getEdgesBySource(qualifiedName: string): GraphEdge[] {
     const rows = this._db()
-      .prepare('SELECT * FROM edges WHERE source_qualified = ?')
+      .prepare(`SELECT * FROM ${this.table('edges')} WHERE source_qualified = ?`)
       .all(qualifiedName) as EdgeRow[];
     return rows.map((r) => this._rowToEdge(r));
   }
@@ -325,7 +346,7 @@ export class SqliteReader {
   /** Incoming edges to a node. */
   getEdgesByTarget(qualifiedName: string): GraphEdge[] {
     const rows = this._db()
-      .prepare('SELECT * FROM edges WHERE target_qualified = ?')
+      .prepare(`SELECT * FROM ${this.table('edges')} WHERE target_qualified = ?`)
       .all(qualifiedName) as EdgeRow[];
     return rows.map((r) => this._rowToEdge(r));
   }
@@ -342,7 +363,7 @@ export class SqliteReader {
     const placeholders = qns.map(() => '?').join(',');
     const rows = this._db()
       .prepare(
-        `SELECT * FROM edges
+        `SELECT * FROM ${this.table('edges')}
          WHERE source_qualified IN (${placeholders})
            AND target_qualified IN (${placeholders})`
       )
@@ -359,36 +380,36 @@ export class SqliteReader {
     const db = this._db();
 
     const totalNodes = (
-      db.prepare('SELECT COUNT(*) AS cnt FROM nodes').get() as CountRow
+      db.prepare(`SELECT COUNT(*) AS cnt FROM ${this.table('nodes')}`).get() as CountRow
     ).cnt;
 
     const totalEdges = (
-      db.prepare('SELECT COUNT(*) AS cnt FROM edges').get() as CountRow
+      db.prepare(`SELECT COUNT(*) AS cnt FROM ${this.table('edges')}`).get() as CountRow
     ).cnt;
 
     const nodesByKind: Record<string, number> = {};
     const nkRows = db
-      .prepare('SELECT kind, COUNT(*) AS cnt FROM nodes GROUP BY kind')
+      .prepare(`SELECT kind, COUNT(*) AS cnt FROM ${this.table('nodes')} GROUP BY kind`)
       .all() as KindCountRow[];
     for (const r of nkRows) { nodesByKind[r.kind] = r.cnt; }
 
     const edgesByKind: Record<string, number> = {};
     const ekRows = db
-      .prepare('SELECT kind, COUNT(*) AS cnt FROM edges GROUP BY kind')
+      .prepare(`SELECT kind, COUNT(*) AS cnt FROM ${this.table('edges')} GROUP BY kind`)
       .all() as KindCountRow[];
     for (const r of ekRows) { edgesByKind[r.kind] = r.cnt; }
 
     const languages = (
       db
         .prepare(
-          "SELECT DISTINCT language FROM nodes WHERE language IS NOT NULL AND language != ''"
+          `SELECT DISTINCT language FROM ${this.table('nodes')} WHERE language IS NOT NULL AND language != ''`
         )
         .all() as LanguageRow[]
     ).map((r) => r.language);
 
     const filesCount = (
       db
-        .prepare("SELECT COUNT(*) AS cnt FROM nodes WHERE kind = 'File'")
+        .prepare(`SELECT COUNT(*) AS cnt FROM ${this.table('nodes')} WHERE kind = 'File'`)
         .get() as CountRow
     ).cnt;
 
@@ -398,7 +419,7 @@ export class SqliteReader {
     let embeddingsCount = 0;
     try {
       embeddingsCount = (
-        db.prepare('SELECT COUNT(*) AS cnt FROM embeddings').get() as CountRow
+        db.prepare(`SELECT COUNT(*) AS cnt FROM ${this.table('embeddings')}`).get() as CountRow
       ).cnt;
     } catch {
       // embeddings table does not exist -- that is fine
@@ -419,7 +440,7 @@ export class SqliteReader {
   /** Read a single key from the metadata table. */
   getMetadata(key: string): string | undefined {
     const row = this._db()
-      .prepare('SELECT value FROM metadata WHERE key = ?')
+      .prepare(`SELECT value FROM ${this.table('metadata')} WHERE key = ?`)
       .get(key) as MetadataRow | undefined;
     return row?.value;
   }
@@ -536,7 +557,7 @@ export class SqliteReader {
     const where = conditions.join(' AND ');
     const rows = this._db()
       .prepare(
-        `SELECT * FROM nodes WHERE ${where} ` + // nosec
+        `SELECT * FROM ${this.table('nodes')} WHERE ${where} ` + // nosec
         'ORDER BY (line_end - line_start + 1) DESC LIMIT ?',
       )
       .all(...params) as NodeRow[];

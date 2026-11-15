@@ -1629,24 +1629,19 @@ def analyze_changes(
     changed_yaml_paths = [n for n in changed_nodes if n.kind == "YamlPath"]
     changed_json_paths = [n for n in changed_nodes if n.kind == "JsonPath"]
 
-    # Cap to prevent O(N*M) query explosion on large PRs.
-    _max_funcs = env_int("CRG_MAX_CHANGED_FUNCS", 500)
-    funcs_truncated = len(changed_funcs) > _max_funcs
+    changed_functions_total = len(changed_funcs)
+    _max_funcs = _change_bound("CRG_MAX_CHANGED_FUNCS")
+    funcs_truncated = _max_funcs is not None and changed_functions_total > _max_funcs
     if funcs_truncated:
         changed_funcs = changed_funcs[:_max_funcs]
 
-    _max_yaml_paths = env_int("CRG_MAX_CHANGED_YAML_PATHS", 200)
-    yaml_paths_truncated = len(changed_yaml_paths) > _max_yaml_paths
-    if yaml_paths_truncated:
-        changed_yaml_paths = changed_yaml_paths[:_max_yaml_paths]
-    json_paths_truncated = len(changed_json_paths) > _max_yaml_paths
-    if json_paths_truncated:
-        changed_json_paths = changed_json_paths[:_max_yaml_paths]
-
     # Keep one public YAML metadata contract. ``node_to_dict`` owns
     # sanitization and output limits for query and change analysis.
-    yaml_path_results = [node_to_dict(node) for node in changed_yaml_paths]
-    json_path_results = [node_to_dict(node) for node in changed_json_paths]
+    max_paths = _change_bound("CRG_MAX_CHANGED_YAML_PATHS")
+    yaml_path_results = [node_to_dict(node) for node in changed_yaml_paths[:max_paths]]
+    json_path_results = [node_to_dict(node) for node in changed_json_paths[:max_paths]]
+    yaml_paths_truncated = len(yaml_path_results) < len(changed_yaml_paths)
+    json_paths_truncated = len(json_path_results) < len(changed_json_paths)
 
     # Classify test coverage before scoring: the same answer decides both the
     # gap report and the coverage term of every node's risk score, and doing
@@ -1837,19 +1832,19 @@ def analyze_changes(
         )
     if funcs_truncated:
         summary_parts.append(
-            f"  - Warning: analysis capped at {_max_funcs} functions "
+            f"  - Warning: analysis limited to {_max_funcs} of "
+            f"{changed_functions_total} changed functions "
             f"(set CRG_MAX_CHANGED_FUNCS to adjust)"
         )
-    if yaml_paths_truncated:
-        summary_parts.append(
-            f"  - Warning: analysis capped at {_max_yaml_paths} YAML paths "
-            f"(set CRG_MAX_CHANGED_YAML_PATHS to adjust)"
-        )
-    if json_paths_truncated:
-        summary_parts.append(
-            f"  - Warning: analysis capped at {_max_yaml_paths} JSON paths "
-            f"(set CRG_MAX_CHANGED_YAML_PATHS to adjust)"
-        )
+    for format_name, shown, total in (
+        ("YAML", len(yaml_path_results), len(changed_yaml_paths)),
+        ("JSON", len(json_path_results), len(changed_json_paths)),
+    ):
+        if shown < total:
+            summary_parts.append(
+                f"  - Showing {shown} of {total} changed {format_name} paths "
+                "(set CRG_MAX_CHANGED_YAML_PATHS to adjust)"
+            )
     if ranges_unavailable:
         summary_parts.append(
             "  - Warning: line-level diff unavailable, whole files scored "
@@ -1894,7 +1889,10 @@ def analyze_changes(
         "removed_symbols": deletion_review.removed,
         "removed_symbols_total": deletion_review.removed_total,
         "review_priorities": review_priorities,
+        "changed_functions_total": changed_functions_total,
         "functions_truncated": funcs_truncated,
+        "changed_yaml_paths_total": len(changed_yaml_paths),
+        "changed_json_paths_total": len(changed_json_paths),
         "yaml_paths_truncated": yaml_paths_truncated,
         "json_paths_truncated": json_paths_truncated,
         "diff_ranges_unavailable": ranges_unavailable,
@@ -1990,3 +1988,14 @@ def format_brief(
     for index, priority in enumerate(priorities, 1):
         lines.append(f"  {index}. {_brief_priority_line(store, priority, root)}")
     return "\n".join(lines)
+
+
+def _change_bound(name: str) -> int | None:
+    """Read an optional positive limit; unset leaves the analysis complete."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return None
+    bound = int(raw)
+    if bound < 1:
+        raise ValueError(f"{name} must be a positive integer, got {raw!r}")
+    return bound

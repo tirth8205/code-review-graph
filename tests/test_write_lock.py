@@ -7,11 +7,37 @@ import sys
 import pytest
 
 from code_review_graph import cli
-from code_review_graph.graph import CorruptGraphDatabaseError
+from code_review_graph.daemon import watch_health_path
+from code_review_graph.graph import CorruptGraphDatabaseError, GraphStore
+from code_review_graph.incremental import watch
 from code_review_graph.locking import WriteLock
 from code_review_graph.tools.build import build_or_update_graph, run_postprocess
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="POSIX flock")
+
+
+def test_watch_refuses_existing_checkout_owner_and_releases_after_failure(tmp_path, monkeypatch):
+    from code_review_graph import incremental
+
+    db = tmp_path / "graph.db"
+    owner_path = watch_health_path(tmp_path).with_suffix(".lock")
+    owner = WriteLock(db, owner_path=owner_path)
+
+    def fail_watch(*args):
+        raise RuntimeError("observer setup failed")
+
+    monkeypatch.setattr(incremental, "_watch", fail_watch)
+    with GraphStore(db) as store:
+        assert owner.acquire()
+        try:
+            with pytest.raises(RuntimeError, match="already owns"):
+                watch(tmp_path, store)
+        finally:
+            owner.release()
+        with pytest.raises(RuntimeError, match="observer setup failed"):
+            watch(tmp_path, store)
+    assert owner.acquire()
+    owner.release()
 
 
 @pytest.mark.parametrize("blocking", [False, True])
@@ -30,9 +56,9 @@ def test_only_lock_contention_is_reported_as_a_skip(tmp_path, monkeypatch, error
         if error in (errno.EAGAIN, errno.EACCES):
             assert lock.acquire(blocking=blocking) is False
         else:
-            # No flock support: run without the lock, as with a lock file that
-            # cannot be opened. It must not stop the build.
-            assert lock.acquire(blocking=blocking) is True
+            with pytest.raises(OSError) as caught:
+                lock.acquire(blocking=blocking)
+            assert caught.value.errno == error
     assert not lock.held
     # A failed acquisition must leave the instance reusable.
     assert lock.acquire()
@@ -113,11 +139,15 @@ def test_initialization_failure_releases_the_write_lock(tmp_path, call):
 
 
 @pytest.mark.parametrize("command", ["build", "update", "postprocess"])
-def test_writers_still_accept_a_plain_directory(tmp_path, monkeypatch, capsys, command):
-    """They reach tool validation first now, so they must set up the marker it wants."""
+def test_writers_still_accept_a_plain_directory(tmp_path, monkeypatch, command):
+    """A plain directory supports writes, with a prior build for update."""
     repo = tmp_path / "plain"
     repo.mkdir()
     (repo / "app.py").write_text("def app():\n    return 1\n", encoding="utf-8")
+    if command == "update":
+        monkeypatch.setattr(sys, "argv", ["crg", "build", "--repo", str(repo)])
+        cli.main()
+        (repo / ".code-review-graph" / "write.lock").unlink()
     monkeypatch.setattr(sys, "argv", ["crg", command, "--repo", str(repo)])
 
     cli.main()

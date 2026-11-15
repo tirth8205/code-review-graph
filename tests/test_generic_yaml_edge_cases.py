@@ -14,7 +14,6 @@ from pathlib import Path, PureWindowsPath
 
 import pytest
 
-import code_review_graph.parser as parser_module
 from code_review_graph.changes import analyze_changes, map_changes_to_nodes
 from code_review_graph.cli import build_parser
 from code_review_graph.graph import GraphStore, node_to_dict
@@ -368,13 +367,6 @@ def test_parse_is_deterministic(tmp_path: Path) -> None:
         )
 
     assert snapshot() == snapshot()
-
-
-def test_missing_pyyaml_degrades_to_no_nodes(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(parser_module, "_yaml", None)
-
-    assert CodeParser().parse_bytes(tmp_path / "x.yml", b"a: 1\n") == ([], [])
-    assert CodeParser().parse_bytes(tmp_path / "application.yml", b"a: 1\n") == ([], [])
 
 
 def test_oversized_file_is_skipped_but_limit_is_inclusive(tmp_path: Path) -> None:

@@ -1204,17 +1204,24 @@ class EmbeddingStore:
         db_path: str | Path,
         provider: str | None = None,
         model: str | None = None,
+        graph_store: GraphStore | None = None,
     ) -> None:
         self.provider = get_provider(provider, model=model)
         self.available = self.provider is not None
         self.db_path = Path(db_path)
-        self._conn = sqlite3.connect(
-            str(self.db_path), timeout=30, check_same_thread=False,
-            isolation_level=None,
+        self._shared = graph_store is not None and graph_store.checkout is not None
+        self._conn = (
+            graph_store._conn if self._shared and graph_store is not None
+            else sqlite3.connect(
+                str(self.db_path), timeout=30, check_same_thread=False, isolation_level=None,
+            )
         )
         self._conn.row_factory = sqlite3.Row
+        if self._shared and graph_store is not None and graph_store.read_only:
+            self._conn_file_id = self._file_identity(self.db_path)
+            return
         self._conn.execute("PRAGMA cache_size=-2000")
-        self._conn.executescript(_EMBEDDINGS_SCHEMA)
+        self._conn.execute(_EMBEDDINGS_SCHEMA)
         # The file this connection holds open. If graph.db is later replaced,
         # the connection keeps reading the old file; see _cached_vectors().
         self._conn_file_id = self._file_identity(self.db_path)
@@ -1237,6 +1244,8 @@ class EmbeddingStore:
         self.close()
 
     def close(self) -> None:
+        if self._shared:
+            return
         try:
             self._conn.execute("PRAGMA shrink_memory")
         except sqlite3.Error:
@@ -1428,7 +1437,7 @@ class EmbeddingStore:
         On Windows that means ``graph.db`` cannot be deleted or replaced
         while it is open; :meth:`clear_vector_cache` releases it.
         """
-        if os.environ.get("CRG_VECTOR_CACHE", "").strip() != "1":
+        if self._shared or os.environ.get("CRG_VECTOR_CACHE", "").strip() != "1":
             return None
         if self._conn.in_transaction:
             return None
@@ -1655,6 +1664,7 @@ def refresh_embeddings(
         graph_store.db_path,
         provider=provider,
         model=model,
+        **({"graph_store": graph_store} if graph_store.checkout is not None else {}),
     )
     try:
         if not embedding_store.available or embedding_store.provider is None:

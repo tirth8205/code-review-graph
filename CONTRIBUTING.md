@@ -58,9 +58,36 @@ The `minimum-dependencies` job installs every direct dependency at the lowest ve
 4. Update docs where behaviour changed (README, `docs/`, docstrings). README.md has four translations: README.zh-CN.md, README.ja-JP.md, README.ko-KR.md and README.hi-IN.md. If you add or remove a heading, change a code block or a link, or add or remove a table row in README.md, make the same change in all four. `tests/test_readme_parity.py` checks this. Add a bullet under `## [Unreleased]` in `CHANGELOG.md` for anything a user will notice, in user terms, not function names. Changes only contributors see (tests, CI, internal names) go under `### Internal`.
 5. Open a pull request against `staging` (the default branch, so GitHub picks it for you). The template asks for the linked issue, what changed and why, and the commands you ran.
 
-## Branching and promotion
+## Managed forks
 
-The repository keeps three long-lived branches. Code moves in one direction only:
+Managed forks keep `main` as a commit-for-commit mirror of the canonical
+upstream `main`. Set `dc-use` as the default branch and enable Actions with
+the repository token allowed to update the mirror. The **Sync upstream main**
+workflow runs every six hours and on demand. It only fast-forwards; a rewrite
+or fork-only commit on `main` fails the job. Restrict human writes to `main`
+using the host ruleset, and confirm the workflow can update it before calling
+the mirror operational.
+
+| Change | Branch and destination |
+|---|---|
+| General fix or feature | Cut a focused branch from upstream `staging`; send the PR directly to upstream `staging`. |
+| Local policy, packaging, or consumer integration | Cut a focused branch from `dc-use`; use a reviewed PR into `dc-use`. |
+| Large integration or third-party work | Use a dedicated `dc/superfork/<scope>` branch. Record the source revision, keep that code separate from upstream contributions, and merge the reviewed integration into `dc-use`. |
+
+Bring new upstream revisions into `dc-use` through an integration PR. Remove
+local patches when upstream carries equivalent behavior. Keep `main` free of
+release, consumer, and workflow changes specific to the fork.
+
+Cut stable fork releases from CI-verified commits on `dc-use` using
+`v<upstream-version>-dc.<N>`, with `N` a positive integer. For example,
+`v2.4.0-dc.3` packages Python version `2.4.0+dc.3`. Run the released-version
+upgrade gate before publishing. The release asset workflow verifies the tag,
+package version and `dc-use` ancestry, then attaches the wheel, source archive
+and checksums.
+
+## Upstream branching and promotion
+
+The upstream repository keeps three long-lived branches. Code moves in one direction only:
 
 ```
 feature branch --PR--> staging --PR--> testing --PR--> main --tag--> PyPI

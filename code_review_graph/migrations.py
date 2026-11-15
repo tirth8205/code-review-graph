@@ -332,6 +332,9 @@ def _migrate_v5(conn: sqlite3.Connection) -> None:
             _progress("Migration v5: created nodes_fts FTS5 virtual table")
 
 
+RETIRED_TABLES = frozenset({"community_summaries", "flow_snapshots", "risk_index"})
+
+
 def _migrate_v6(conn: sqlite3.Connection) -> None:
     """v6: Add pre-computed summary tables for token-efficient queries."""
     conn.execute("""

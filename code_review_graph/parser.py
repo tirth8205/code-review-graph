@@ -20,17 +20,25 @@ import subprocess
 import sys
 import threading
 from bisect import bisect_left, bisect_right
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path, PurePath
 from typing import Any, NamedTuple, Optional
 
+from tree_sitter import Language, Parser, Tree
+
 try:
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10
     import tomli as tomllib  # type: ignore[import-not-found,no-redef]
+
+import yaml as _yaml  # type: ignore[import-untyped]
+from yaml import MappingNode as _YamlMapping
+from yaml import ScalarNode as _YamlScalar
+from yaml import SequenceNode as _YamlSequence
+from yaml.events import AliasEvent as _YamlAliasEvent  # type: ignore[import-untyped]
 
 from .config_keys import is_spring_config_path, normalize_spring_config_key
 from .constants import (
@@ -46,18 +54,6 @@ from .constants import (
 )
 from .custom_languages import CustomLanguage, load_custom_languages
 from .npm_alias_resolver import NpmAliasResolver
-
-try:
-    import yaml as _yaml  # type: ignore[import-untyped]
-    from yaml import MappingNode as _YamlMapping
-    from yaml import ScalarNode as _YamlScalar
-    from yaml import SequenceNode as _YamlSequence
-    from yaml.events import AliasEvent as _YamlAliasEvent  # type: ignore[import-untyped]
-except ImportError:
-    _yaml = None  # type: ignore[assignment]
-    _YamlMapping = _YamlSequence = _YamlScalar = None  # type: ignore[assignment,misc]
-    _YamlAliasEvent = None  # type: ignore[assignment,misc]
-
 from .tsconfig_resolver import TsconfigResolver
 from .workspace_resolver import WorkspaceResolver
 
@@ -3798,6 +3794,29 @@ _POWERSHELL_RANGE_RE = re.compile(
 _POWERSHELL_SCOPE_RE = re.compile(r"^(?:global|local|private|script):", re.IGNORECASE)
 
 
+_SYNTAX_TREES = threading.local()
+
+
+def _parse_syntax(parser: Parser, source: bytes) -> Tree:
+    """Reuse syntax within one worker, without retaining checkout state."""
+    grammar = parser.language
+    if grammar is None or len(source) > 32_768:
+        return parser.parse(source)
+    cache: OrderedDict[tuple[Language, bytes], Tree]
+    if not hasattr(_SYNTAX_TREES, "cache"):
+        _SYNTAX_TREES.cache = OrderedDict()
+    cache = _SYNTAX_TREES.cache
+    key = (grammar, source)
+    if key in cache:
+        cache.move_to_end(key)
+        return cache[key]
+    tree = parser.parse(source)
+    cache[key] = tree
+    if len(cache) > 64:
+        cache.popitem(last=False)
+    return tree
+
+
 class CodeParser:
     """Parses source files using Tree-sitter and extracts structural information."""
 
@@ -4146,7 +4165,7 @@ class CodeParser:
                 cpp_parser = self._get_parser("cpp")
                 if cpp_parser is not None:
                     cpp_source = self._mask_cpp_qt_macros(source)
-                    cpp_tree = cpp_parser.parse(cpp_source)
+                    cpp_tree = _parse_syntax(cpp_parser, cpp_source)
                     if self._has_cpp_header_evidence(cpp_tree.root_node):
                         language = "cpp"
                         parser = cpp_parser
@@ -4218,8 +4237,6 @@ class CodeParser:
         # name alone is not enough evidence; fall back to generic YAML so a
         # repository's ordinary tasks/*.yml files still get structural nodes.
         if language == "ansible":
-            if _yaml is None:
-                return [], []
             file_type = _ansible_file_type(path)
             # Variable and role-metadata files are identified by Ansible's
             # directory contract. Task/handler paths are not sufficient on
@@ -4232,8 +4249,6 @@ class CodeParser:
         # Spring configuration: only conventional application files reach
         # this branch. Generic YAML and arbitrary .properties files stay out.
         if language == "spring_config":
-            if _yaml is None:
-                return [], []
             is_yaml = path.suffix.lower() in (".yaml", ".yml")
             # ``locales/en/application.yml`` is a catalogue, not Spring config.
             if is_yaml and _is_locale_yaml(path, self._repo_root):
@@ -4249,8 +4264,6 @@ class CodeParser:
         # scalar values. PyYAML is already a runtime dependency for the
         # specialised Ansible and Spring parsers.
         if language == "yaml":
-            if _yaml is None:
-                return [], []
             return self._parse_yaml(path, source)
 
         # JSON: the same value-free paths, and data files stay out.
@@ -4263,7 +4276,7 @@ class CodeParser:
             return [], []
 
         if tree is None:
-            tree = parser.parse(parse_source)
+            tree = _parse_syntax(parser, parse_source)
         nodes: list[NodeInfo] = []
         edges: list[EdgeInfo] = []
         file_path_str = normalize_file_path(path)
@@ -5268,12 +5281,8 @@ class CodeParser:
                             parts.pop()
                     elif part not in ("", "."):
                         parts.append(part)
-                try:
-                    candidate = self._repo_root.joinpath(*parts).resolve()
-                    found = bool(parts) and candidate.is_file()
-                except (OSError, RuntimeError):
-                    found = False
-                if found:
+                candidate = self._repo_root.joinpath(*parts).resolve()
+                if parts and candidate.is_file():
                     canonical = normalize_file_path(candidate)
                     if canonical not in self._excluded_files:
                         resolved = canonical
@@ -5713,7 +5722,9 @@ class CodeParser:
                     cell.cell_index, current_line, current_line + cell_line_count - 1,
                 ))
                 code_chunks.append(cell.source)
-                current_line += cell_line_count + 1
+                # The separator adds a blank line only if the cell already
+                # ends with a newline.
+                current_line += cell_line_count + int(cell.source.endswith("\n"))
 
             concatenated = "\n".join(code_chunks)
             concat_bytes = concatenated.encode("utf-8")
@@ -7432,8 +7443,8 @@ class CodeParser:
             line = clean_text[: m.start()].count("\n") + 1
             qualified = f"{file_path_str}::{name}"
             line_end = line
-            if is_plsql:
-                body_end = self._plsql_block_end(clean_text, m.end(), name)
+            body_end = self._plsql_block_end(clean_text, m.end(), name) if is_plsql else None
+            if body_end is not None:
                 line_end = clean_text[:body_end].count("\n") + 1
             nodes.append(NodeInfo(
                 kind="Function",
@@ -7451,7 +7462,7 @@ class CodeParser:
                 file_path=file_path_str,
                 line=line,
             ))
-            if is_plsql:
+            if body_end is not None:
                 self._extract_plsql_calls(
                     clean_text, m.end(), body_end, qualified, file_path_str, edges,
                 )
@@ -8208,7 +8219,9 @@ class CodeParser:
                 # function; otherwise preserve the existing bare-name
                 # resolution behavior.
                 member_call = edge.extra.get("member_call")
-                member_candidates = symbols.get(member_call, [])
+                member_candidates = (
+                    symbols.get(member_call, []) if isinstance(member_call, str) else []
+                )
                 if member_candidates:
                     edge = EdgeInfo(
                         kind=edge.kind,
@@ -9118,11 +9131,10 @@ class CodeParser:
                     "receiver_type": type_name,
                     "receiver_resolution": evidence_kind,
                 })
-                resolved_target = target
-                if target is None:
-                    # Only the type is known; the target stays as written.
-                    resolved_target = edge.target
-                elif evidence_kind == "constructed_receiver" or language == "csharp":
+                resolved_target = edge.target if target is None else target
+                if target is not None and (
+                    evidence_kind == "constructed_receiver" or language == "csharp"
+                ):
                     # Keep PHP/C# parse-only CALLS output backward-compatible
                     # (bare method target) while preserving the receiver
                     # class scope for the graph-wide resolver.
@@ -9214,12 +9226,11 @@ class CodeParser:
             if node.type == "class_definition":
                 name_node = node.child_by_field_name("name")
                 if name_node is not None:
-                    owner_class = name_node.text.decode(
-                        "utf-8", errors="replace",
-                    )
-                    if owner_class in class_names:
-                        ambiguous_property_classes.add(owner_class)
-                    class_names.add(owner_class)
+                    class_name: str = name_node.text.decode("utf-8", errors="replace")
+                    owner_class = class_name
+                    if class_name in class_names:
+                        ambiguous_property_classes.add(class_name)
+                    class_names.add(class_name)
                 in_function = False
             elif (
                 node.type == "function_definition"
@@ -9883,7 +9894,7 @@ class CodeParser:
                     if name_node is not None
                     else owner_class
                 )
-                if name_node is not None:
+                if nested_class is not None and name_node is not None:
                     if nested_class in class_names:
                         ambiguous_classes.add(nested_class)
                     class_names.add(nested_class)
@@ -21082,7 +21093,7 @@ class CodeParser:
                     )
                     module = resolved or module
 
-                def _bind(local_name: str, imported_name: str) -> None:
+                def _bind(local_name: str, imported_name: str, module: str = module) -> None:
                     if imported_name in submodules and package_dir is not None:
                         target = self._python_submodule_file(
                             package_dir, imported_name,

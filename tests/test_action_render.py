@@ -77,9 +77,7 @@ def test_md_escape_caps_length():
 
 def test_relativize_strips_github_workspace(monkeypatch):
     monkeypatch.setenv("GITHUB_WORKSPACE", "/home/runner/work/repo/repo")
-    out = render.relativize_path(
-        "/home/runner/work/repo/repo/code_review_graph/embeddings.py"
-    )
+    out = render.relativize_path("/home/runner/work/repo/repo/code_review_graph/embeddings.py")
     assert out == "code_review_graph/embeddings.py"
 
 
@@ -93,9 +91,7 @@ def test_relativize_keeps_symbol_suffix(monkeypatch):
 
 def test_relativize_handles_workspace_with_trailing_slash(monkeypatch):
     monkeypatch.setenv("GITHUB_WORKSPACE", "/home/runner/work/repo/repo/")
-    out = render.relativize_path(
-        "/home/runner/work/repo/repo/pkg/mod.py::fn"
-    )
+    out = render.relativize_path("/home/runner/work/repo/repo/pkg/mod.py::fn")
     assert out == "pkg/mod.py::fn"
 
 
@@ -111,8 +107,7 @@ def test_relativize_falls_back_to_repo_segment_without_env(monkeypatch):
     monkeypatch.delenv("GITHUB_WORKSPACE", raising=False)
     monkeypatch.setenv("GITHUB_REPOSITORY", "owner/code-review-graph")
     out = render.relativize_path(
-        "/home/runner/work/code-review-graph/code-review-graph/"
-        "scripts/render_pr_comment.py::main"
+        "/home/runner/work/code-review-graph/code-review-graph/scripts/render_pr_comment.py::main"
     )
     assert out == "scripts/render_pr_comment.py::main"
 
@@ -460,8 +455,19 @@ def test_max_flows_cap(report):
 
 def test_truncated_analysis_note(report):
     report["functions_truncated"] = True
+    report["changed_functions_total"] = len(report["changed_functions"]) + 7
     body = render.render_markdown(report)
     assert "CRG_MAX_CHANGED_FUNCS" in body
+    assert (
+        f"covered {len(report['changed_functions'])} of "
+        f"{report['changed_functions_total']} changed functions"
+    ) in body
+
+
+def test_complete_analysis_has_no_truncation_note(report):
+    assert report["functions_truncated"] is False
+    body = render.render_markdown(report)
+    assert "CRG_MAX_CHANGED_FUNCS" not in body
 
 
 def test_markdown_injection_in_names_is_escaped(report):
@@ -483,8 +489,12 @@ def test_body_size_capped():
     huge = {
         "risk_score": 0.5,
         "review_priorities": [
-            {"qualified_name": f"mod.py::fn_{i}" + "x" * 100, "risk_score": 0.5,
-             "file_path": "mod.py", "line_start": i}
+            {
+                "qualified_name": f"mod.py::fn_{i}" + "x" * 100,
+                "risk_score": 0.5,
+                "file_path": "mod.py",
+                "line_start": i,
+            }
             for i in range(5000)
         ],
     }

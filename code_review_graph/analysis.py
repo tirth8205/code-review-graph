@@ -42,7 +42,7 @@ def find_hub_nodes(store: GraphStore, top_n: int = 10) -> list[dict]:
     nodes = store.get_all_nodes(exclude_files=True)
     community_map = store.get_all_community_ids()
 
-    scored = []
+    scored: list[dict] = []
     for n in nodes:
         qn = n.qualified_name
         ind = in_degree.get(qn, 0)
@@ -62,7 +62,7 @@ def find_hub_nodes(store: GraphStore, top_n: int = 10) -> list[dict]:
         })
 
     scored.sort(
-        key=lambda x: x.get("total_degree", 0),  # type: ignore[arg-type,return-value]
+        key=lambda x: x["total_degree"],
         reverse=True,
     )
     return scored[:top_n]

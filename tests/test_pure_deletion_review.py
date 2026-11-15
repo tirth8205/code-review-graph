@@ -417,8 +417,8 @@ def test_detect_changes_tool_reports_removed_symbols_in_both_modes(make_repo):
 def test_removed_symbols_stay_inside_the_detect_changes_budget(make_repo):
     """Many removed symbols, each with many users, still cost a bounded amount.
 
-    The hard ceilings are 25 symbols per response and 3 users per symbol;
-    ``tests/test_token_budget.py`` pins both numbers.
+    The caller limits the response to 25 symbols; each symbol samples up to
+    three users and reports the full count.
     """
     from code_review_graph.tools.review import detect_changes_func
 
@@ -435,7 +435,7 @@ def test_removed_symbols_stay_inside_the_detect_changes_budget(make_repo):
     incremental_update(repo, store, base="HEAD", changed_files=["lib.py"])
 
     worst = detect_changes_func(
-        base="HEAD", repo_root=str(repo), max_results=10**6,
+        base="HEAD", repo_root=str(repo), max_results=25,
         include_source=True, max_flows=10**6,
     )
 

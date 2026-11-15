@@ -22,6 +22,7 @@ from unittest.mock import patch
 import pytest
 
 from code_review_graph import cli
+from code_review_graph.errors import GraphStoreError
 from code_review_graph.graph import GraphStore
 from code_review_graph.incremental import full_build, get_data_dir, get_db_path
 from code_review_graph.registry import Registry, default_registry_path
@@ -244,17 +245,16 @@ def test_symlinked_repo_root_falls_back_to_local_graph(tmp_path):
 # --- error paths ------------------------------------------------------------
 
 
-def test_uncreatable_registered_dir_without_local_graph_falls_through(tmp_path):
-    """Unchanged by #1080: a registration that cannot be created is a failed
-    registry lookup, which falls through to normal resolution."""
+def test_uncreatable_registered_dir_without_local_graph_reports_the_error(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     blocker = tmp_path / "blocker"
     blocker.write_text("a file, not a directory", encoding="utf-8")
     Registry().set_data_dir(str(repo), str(blocker / "data"))
 
-    assert get_data_dir(repo) == repo / ".code-review-graph"
-    assert (repo / ".code-review-graph").is_dir()
+    with pytest.raises(GraphStoreError, match="cannot create the graph data directory"):
+        get_data_dir(repo)
+    assert not (repo / ".code-review-graph").exists()
     assert blocker.is_file()
 
 

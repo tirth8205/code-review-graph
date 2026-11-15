@@ -21,7 +21,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -208,6 +208,124 @@ class WatchRepo:
     """Short name for this repo (derived from directory name when not specified)."""
 
 
+    data_dir: str = ""
+    """Per-repo graph data dir (rendered as ``CRG_DATA_DIR`` in the watcher env)."""
+
+    recurse_submodules: bool = False
+    """Watch with ``CRG_RECURSE_SUBMODULES=1``."""
+
+    embedding: str = ""
+    """Per-repo embedding model (rendered as ``CRG_EMBEDDING_MODEL``)."""
+
+    discover_worktrees: bool = False
+    """Include live linked Git worktrees in the daemon's desired watchers."""
+
+    activity_ttl_seconds: int = 0
+    """Retire idle discovered watchers; zero keeps them running."""
+
+
+@dataclass(frozen=True)
+class _CheckoutActivity:
+    head: str
+    branch_ref: str | None
+    last_active: float
+    last_event: float
+    idle_stamp: bytes | None = None
+
+
+def _watch_targets(
+    repos: list[WatchRepo], activity: dict[str, _CheckoutActivity],
+) -> dict[str, WatchRepo]:
+    """Expand opted-in roots without inheriting a parent's database directory."""
+    from .multi_worktree import discover_worktrees, worktree_edit_stamp
+
+    targets = {repo.alias: repo for repo in repos}
+    roots = {Path(repo.path).resolve() for repo in repos}
+    discovered: dict[str, _CheckoutActivity] = {}
+    now = time.time()
+    for repo in repos:
+        if not repo.discover_worktrees:
+            continue
+        if os.environ.get("CRG_DATA_DIR", "").strip():
+            raise ValueError("discover_worktrees cannot use a shared CRG_DATA_DIR override")
+        for checkout in discover_worktrees(Path(repo.path)):
+            if checkout.root in roots:
+                continue
+            path = str(checkout.root)
+            alias = f"{repo.alias}-wt-{hashlib.sha256(os.fsencode(path)).hexdigest()[:16]}"
+            if alias in targets:
+                raise ValueError(f"Discovered worktree alias conflicts: {alias}")
+            roots.add(checkout.root)
+            if repo.activity_ttl_seconds:
+                previous = activity.get(alias)
+                health = read_watch_health(path) or {}
+                raw_event = health.get("last_event_at")
+                event = float(raw_event) if isinstance(raw_event, (int, float)) else 0.0
+                if not 0 < event <= now:
+                    event = 0.0
+                if previous is None or (previous.head, previous.branch_ref) != (
+                    checkout.head, checkout.branch_ref,
+                ):
+                    current = _CheckoutActivity(checkout.head, checkout.branch_ref, now, event)
+                elif event > previous.last_event:
+                    current = replace(
+                        previous, last_active=max(previous.last_active, event), last_event=event,
+                        idle_stamp=None,
+                    )
+                else:
+                    current = previous
+                if now - current.last_active >= repo.activity_ttl_seconds:
+                    stamp = worktree_edit_stamp(checkout.root)
+                    if current.idle_stamp is None:
+                        # Keep the observer through one more reconciliation.
+                        # Edits after this baseline must survive retirement.
+                        current = replace(current, idle_stamp=stamp)
+                    elif stamp == current.idle_stamp:
+                        discovered[alias] = current
+                        continue
+                    else:
+                        current = replace(current, last_active=now, idle_stamp=None)
+                discovered[alias] = current
+            targets[alias] = replace(
+                repo, path=path, alias=alias, data_dir="", discover_worktrees=False,
+                activity_ttl_seconds=0,
+            )
+    activity.clear()
+    activity.update(discovered)
+    return targets
+
+
+def _has_committed_graph(root: Path) -> bool:
+    """Check the selected checkout, not merely the shared file's existence."""
+    from .graph import GraphStore
+    from .incremental import get_db_path
+    from .shared_sqlite import UnbuiltCheckoutError, shared_database
+    from .tools._common import _graph_is_built
+
+    path = get_db_path(root, read_only=True)
+    if not path.is_file():
+        return False
+    if path != shared_database():
+        return True
+    try:
+        with GraphStore(path, checkout=root, read_only=True) as store:
+            return _graph_is_built(store)
+    except UnbuiltCheckoutError:
+        return False
+
+
+def watcher_env(repo: WatchRepo) -> dict[str, str]:
+    """Build the child environment honoring per-repo overrides."""
+    env = dict(os.environ)
+    if repo.data_dir:
+        env["CRG_DATA_DIR"] = repo.data_dir
+    if repo.recurse_submodules:
+        env["CRG_RECURSE_SUBMODULES"] = "1"
+    if repo.embedding:
+        env["CRG_EMBEDDING_MODEL"] = repo.embedding
+    return env
+
+
 @dataclass
 class DaemonConfig:
     """Top-level daemon configuration."""
@@ -266,6 +384,7 @@ def load_config(path: Path | None = None) -> DaemonConfig:
     # -- [[repos]] array ----------------------------------------------------
     repos: list[WatchRepo] = []
     seen_aliases: set[str] = set()
+    seen_paths: dict[Path, str] = {}
 
     for entry in raw.get("repos", []):
         repo_path_str: str = entry.get("path", "")
@@ -297,8 +416,26 @@ def load_config(path: Path | None = None) -> DaemonConfig:
             logger.warning("Skipping duplicate alias '%s' for repo %s", alias, repo_path)
             continue
 
+        if repo_path in seen_paths:
+            raise ValueError(
+                f"Checkout {repo_path} is configured twice: {seen_paths[repo_path]} and {alias}"
+            )
         seen_aliases.add(alias)
-        repos.append(WatchRepo(path=str(repo_path), alias=alias))
+        seen_paths[repo_path] = alias
+        ttl = entry.get("activity_ttl_seconds", 0)
+        if type(ttl) is not int or ttl < 0:
+            raise ValueError(f"Invalid activity_ttl_seconds for {alias}: expected non-negative int")
+        repos.append(
+            WatchRepo(
+                path=str(repo_path),
+                alias=alias,
+                data_dir=entry.get("data_dir", ""),
+                recurse_submodules=entry.get("recurse_submodules", False),
+                embedding=entry.get("embedding", ""),
+                discover_worktrees=entry.get("discover_worktrees", False),
+                activity_ttl_seconds=ttl,
+            )
+        )
 
     return DaemonConfig(
         session_name=session_name,
@@ -363,6 +500,16 @@ def _serialize_toml(config: DaemonConfig) -> str:
         lines.append("[[repos]]")
         lines.append(f"path = {_toml_str(repo.path)}")
         lines.append(f"alias = {_toml_str(repo.alias)}")
+        if repo.data_dir:
+            lines.append(f"data_dir = {_toml_str(repo.data_dir)}")
+        if repo.recurse_submodules:
+            lines.append("recurse_submodules = true")
+        if repo.embedding:
+            lines.append(f"embedding = {_toml_str(repo.embedding)}")
+        if repo.discover_worktrees:
+            lines.append("discover_worktrees = true")
+        if repo.activity_ttl_seconds:
+            lines.append(f"activity_ttl_seconds = {repo.activity_ttl_seconds}")
     lines.append("")  # trailing newline
     return "\n".join(lines)
 
@@ -1095,6 +1242,12 @@ class ConfigWatcher:
                     if Path(event.src_path).resolve() == watcher._config_path.resolve():
                         watcher._on_config_changed()
 
+                on_created = on_modified
+
+                def on_moved(self, event: Any) -> None:
+                    if Path(event.dest_path).resolve() == watcher._config_path.resolve():
+                        watcher._on_config_changed()
+
             handler = _Handler()
             self._observer = Observer()
             self._observer.schedule(
@@ -1190,10 +1343,12 @@ class WatchDaemon:
         self._state_path: Path = default_state_path()
         self._children: dict[str, subprocess.Popen[bytes]] = {}
         self._current_repos: dict[str, WatchRepo] = {}
+        self._checkout_activity: dict[str, _CheckoutActivity] = {}
         self._config_watcher: ConfigWatcher | None = None
         self._health_thread: threading.Thread | None = None
         self._health_stop: threading.Event = threading.Event()
         self._lock: threading.Lock = threading.Lock()
+        self._reconcile_lock = threading.Lock()
         self._restarts: dict[str, dict[str, float]] = {}
         self._windows_job: _WindowsJob | None = (
             _WindowsJob() if sys.platform == "win32" else None
@@ -1211,21 +1366,21 @@ class WatchDaemon:
         from .registry import Registry
 
         registry = Registry()
-        for repo in self._config.repos:
-            registry.register(repo.path, alias=repo.alias)
+        targets = _watch_targets(self._config.repos, self._checkout_activity)
+        for repo in targets.values():
+            registry.register(repo.path, alias=repo.alias, data_dir=repo.data_dir or None)
 
         # Build initial graph for repos that lack a database
-        for repo in self._config.repos:
-            db_path = Path(repo.path) / ".code-review-graph" / "graph.db"
-            if not db_path.exists():
+        for repo in targets.values():
+            if not _has_committed_graph(Path(repo.path)) and self._existing_watcher(repo) is None:
                 self._initial_build(repo)
 
         # Spawn a watcher child for every repo
-        for repo in self._config.repos:
+        for repo in targets.values():
             self._start_watcher(repo)
 
         # Track current state
-        self._current_repos = {r.alias: r for r in self._config.repos}
+        self._current_repos = targets
 
         # Persist child PIDs to disk for cross-process status queries
         self._save_state()
@@ -1236,7 +1391,7 @@ class WatchDaemon:
         # Start health checker to auto-restart dead watchers
         self.start_health_checker()
 
-        msg = f"Daemon started — watching {len(self._config.repos)} repo(s)"
+        msg = f"Daemon started — watching {len(targets)} repo(s)"
         logger.info(msg)
         print(msg)  # noqa: T201
 
@@ -1261,6 +1416,12 @@ class WatchDaemon:
                 self._windows_job.close()
 
     def reconcile(self, new_config: DaemonConfig | None = None) -> None:
+        """Serialize configuration reloads and periodic worktree discovery."""
+        with self._reconcile_lock:
+            if not self._health_stop.is_set():
+                self._reconcile(new_config)
+
+    def _reconcile(self, new_config: DaemonConfig | None) -> None:
         """Reconcile running watchers with the (possibly updated) config.
 
         Child processes are started, stopped, or restarted to match the
@@ -1270,7 +1431,7 @@ class WatchDaemon:
         if new_config is not None:
             self._config = new_config
 
-        desired: dict[str, WatchRepo] = {r.alias: r for r in self._config.repos}
+        desired = _watch_targets(self._config.repos, self._checkout_activity)
         current: set[str] = set(self._current_repos.keys())
 
         to_add: set[str] = desired.keys() - current
@@ -1278,8 +1439,10 @@ class WatchDaemon:
         to_update: set[str] = {
             alias
             for alias in desired.keys() & current
-            if desired[alias].path != self._current_repos[alias].path
+            if desired[alias] != self._current_repos[alias]
         }
+        if not (to_add or to_remove or to_update):
+            return
 
         # Register new/updated repos and build graphs *before* acquiring
         # the lock so that long-running builds don't block health checks.
@@ -1291,15 +1454,19 @@ class WatchDaemon:
             repos_needing_build: list[WatchRepo] = []
             for alias in to_add | to_update:
                 repo = desired[alias]
-                registry.register(repo.path, alias=repo.alias)
-                db_path = Path(repo.path) / ".code-review-graph" / "graph.db"
-                if not db_path.exists():
+                registry.register(repo.path, alias=repo.alias, data_dir=repo.data_dir or None)
+                if (not _has_committed_graph(Path(repo.path))
+                        and self._existing_watcher(repo) is None):
                     repos_needing_build.append(repo)
 
             for repo in repos_needing_build:
+                if self._health_stop.is_set():
+                    return
                 self._initial_build(repo)
 
         with self._lock:
+            if self._health_stop.is_set():
+                return
             # Remove stale watchers
             for alias in to_remove:
                 proc = self._children.pop(alias, None)
@@ -1323,8 +1490,9 @@ class WatchDaemon:
                 self._start_watcher(repo)
                 self._current_repos[alias] = repo
 
-        # Persist updated state
-        self._save_state()
+            # Persist under the child lock so shutdown cannot clear the state
+            # and then have an in-flight reconciliation recreate it.
+            self._save_state()
 
         logger.info(
             "Reconcile complete — added: %d, removed: %d, updated: %d",
@@ -1448,6 +1616,11 @@ class WatchDaemon:
             self._health_stop.wait(_HEALTH_CHECK_INTERVAL)
             if self._health_stop.is_set():
                 break
+            if any(repo.discover_worktrees for repo in self._config.repos):
+                try:
+                    self.reconcile()
+                except (RuntimeError, ValueError, OSError):
+                    logger.exception("Periodic worktree reconciliation failed")
             self._check_health()
 
     def _restart_delay(self, alias: str) -> float:
@@ -1490,6 +1663,8 @@ class WatchDaemon:
                 proc = self._children.get(alias)
                 if proc is None or proc.poll() is not None:
                     self._children.pop(alias, None)
+                    if self._existing_watcher(repo) is not None:
+                        continue
                     state = self._restarts.get(alias, {})
                     now = time.monotonic()
                     if now < float(state.get("next_attempt", 0.0)):
@@ -1700,6 +1875,7 @@ class WatchDaemon:
             proc = subprocess.Popen(
                 cmd,
                 cwd=repo.path,
+                env=watcher_env(repo),
                 stdout=log_fd,
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,
@@ -1808,6 +1984,7 @@ class WatchDaemon:
         result = subprocess.run(
             cmd,
             capture_output=True,
+            env=watcher_env(repo),
             text=True,
             check=False,
         )

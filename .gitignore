@@ -105,8 +105,14 @@ scratch/
 .beads-credential-key
 
 # Local tool configuration
-.codex/
+.codex/*
+!.codex/config.toml
+!.codex/hooks.json
 .serena/
 
 # Maintainer-only local agent rules
 CLAUDE.local.md
+
+# Gas City
+.beads/*
+!.beads/identity.toml

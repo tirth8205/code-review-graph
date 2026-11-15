@@ -11,6 +11,8 @@ from ..embeddings import EmbeddingStore, embed_all_nodes
 from ..incremental import _prepare_db_path, find_project_root, get_db_path
 from ._common import (
     _get_store,
+    _get_store_for_read,
+    _not_built_response,
     _resolve_root,
     _validate_positive_int,
     _validate_repo_root,
@@ -84,52 +86,56 @@ def embed_graph(
             _prepare_db_path(root, db_path)
         store, root = _get_store(str(root), db_path=db_path)
         try:
-            try:
-                emb_store = EmbeddingStore(db_path, provider=provider, model=model)
-            except ValueError as exc:
-                # Unknown provider name or missing provider env vars — surface
-                # as a structured error rather than a traceback.
-                logger.error("embed_graph: %s", exc)
-                return {"status": "error", "error": str(exc)}
-            try:
-                if not emb_store.available:
-                    if provider in ("openai", "google", "minimax", "voyage"):
-                        err = (
-                            f"The '{provider}' embedding provider is not available. "
-                            "Check the required environment variables "
-                            "(see README and `get_provider()` docstring) and that "
-                            "the endpoint is reachable."
-                        )
-                    else:
-                        err = (
-                            "The local embedding provider needs sentence-transformers. "
-                            "Install with: pip install "
-                            "\"code-review-graph[embeddings]\" — "
-                            "or switch provider to 'openai' / 'google' / 'minimax' "
-                            "/ 'voyage'."
-                        )
-                    return {"status": "error", "error": err}
+            with store.refresh():
+                try:
+                    emb_store = EmbeddingStore(
+                        db_path, provider=provider, model=model,
+                        **({"graph_store": store} if store.checkout is not None else {}),
+                    )
+                except ValueError as exc:
+                    # Unknown provider name or missing provider env vars — surface
+                    # as a structured error rather than a traceback.
+                    logger.error("embed_graph: %s", exc)
+                    return {"status": "error", "error": str(exc)}
+                try:
+                    if not emb_store.available:
+                        if provider in ("openai", "google", "minimax", "voyage"):
+                            err = (
+                                f"The '{provider}' embedding provider is not available. "
+                                "Check the required environment variables "
+                                "(see README and `get_provider()` docstring) and that "
+                                "the endpoint is reachable."
+                            )
+                        else:
+                            err = (
+                                "The local embedding provider needs sentence-transformers. "
+                                "Install with: pip install "
+                                "\"code-review-graph[embeddings]\" — "
+                                "or switch provider to 'openai' / 'google' / 'minimax' "
+                                "/ 'voyage'."
+                            )
+                        return {"status": "error", "error": err}
 
-                newly_embedded = embed_all_nodes(store, emb_store)
-                total = emb_store.count()
-                search_status = (
-                    "Semantic search is now active."
-                    if total > 0
-                    else "No embeddings are available for semantic search."
-                )
+                    newly_embedded = embed_all_nodes(store, emb_store)
+                    total = emb_store.count()
+                    search_status = (
+                        "Semantic search is now active."
+                        if total > 0
+                        else "No embeddings are available for semantic search."
+                    )
 
-                return {
-                    "status": "ok",
-                    "summary": (
-                        f"Embedded {newly_embedded} new node(s). "
-                        f"Total embeddings: {total}. "
-                        f"{search_status}"
-                    ),
-                    "newly_embedded": newly_embedded,
-                    "total_embeddings": total,
-                }
-            finally:
-                emb_store.close()
+                    return {
+                        "status": "ok",
+                        "summary": (
+                            f"Embedded {newly_embedded} new node(s). "
+                            f"Total embeddings: {total}. "
+                            f"{search_status}"
+                        ),
+                        "newly_embedded": newly_embedded,
+                        "total_embeddings": total,
+                    }
+                finally:
+                    emb_store.close()
         finally:
             store.close()
     finally:
@@ -141,9 +147,7 @@ def embed_graph(
 # ---------------------------------------------------------------------------
 
 
-def get_docs_section(
-    section_name: str, repo_root: str | None = None
-) -> dict[str, Any]:
+def get_docs_section(section_name: str, repo_root: str | None = None) -> dict[str, Any]:
     """Return a specific section from the LLM-optimized reference.
 
     Used by skills and Claude Code to load only the exact documentation
@@ -164,11 +168,7 @@ def get_docs_section(
     search_roots: list[Path] = []
 
     # Wheel install: docs are packaged inside code_review_graph/docs.
-    in_pkg_docs = (
-        Path(__file__).parent.parent
-        / "docs"
-        / "LLM-OPTIMIZED-REFERENCE.md"
-    )
+    in_pkg_docs = Path(__file__).parent.parent / "docs" / "LLM-OPTIMIZED-REFERENCE.md"
     if repo_root:
         try:
             search_roots.append(_validate_repo_root(Path(repo_root)))
@@ -185,11 +185,7 @@ def get_docs_section(
             search_roots.append(project_root)
 
     # Editable/source-tree fallback: docs live next to code_review_graph/.
-    pkg_docs = (
-        Path(__file__).parent.parent.parent
-        / "docs"
-        / "LLM-OPTIMIZED-REFERENCE.md"
-    )
+    pkg_docs = Path(__file__).parent.parent.parent / "docs" / "LLM-OPTIMIZED-REFERENCE.md"
     if pkg_docs.exists():
         pkg_root = pkg_docs.parent.parent
         if pkg_root not in search_roots:
@@ -213,15 +209,19 @@ def get_docs_section(
                 }
 
     available = [
-        "usage", "review-delta", "review-pr", "commands",
-        "legal", "watch", "embeddings", "languages", "troubleshooting",
+        "usage",
+        "review-delta",
+        "review-pr",
+        "commands",
+        "legal",
+        "watch",
+        "embeddings",
+        "languages",
+        "troubleshooting",
     ]
     return {
         "status": "not_found",
-        "error": (
-            f"Section '{section_name}' not found. "
-            f"Available: {', '.join(available)}"
-        ),
+        "error": (f"Section '{section_name}' not found. Available: {', '.join(available)}"),
     }
 
 
@@ -251,15 +251,13 @@ def generate_wiki_func(
     from ..incremental import get_data_dir
     from ..wiki import generate_wiki
 
-    store, root = _get_store(repo_root)
+    store, root, not_built = _get_store_for_read(repo_root)
+    if store is None or root is None:
+        return not_built if not_built is not None else _not_built_response()
     try:
         wiki_dir = get_data_dir(root) / "wiki"
         result = generate_wiki(store, wiki_dir, force=force)
-        total = (
-            result["pages_generated"]
-            + result["pages_updated"]
-            + result["pages_unchanged"]
-        )
+        total = result["pages_generated"] + result["pages_updated"] + result["pages_unchanged"]
         return {
             "status": "ok",
             "summary": (

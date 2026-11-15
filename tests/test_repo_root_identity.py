@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, patch
@@ -16,8 +17,9 @@ from code_review_graph.incremental import full_build, incremental_update
 def test_incremental_update_survives_mixed_repo_root_spellings(tmp_path: Path, monkeypatch) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
-    (repo / ".git").mkdir()
     (repo / "app.py").write_text("def main() -> None:\n    pass\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "app.py"], cwd=repo, check=True)
     monkeypatch.chdir(repo)
 
     store = GraphStore(repo / ".code-review-graph" / "graph.db")
@@ -33,13 +35,15 @@ def test_incremental_update_survives_mixed_repo_root_spellings(tmp_path: Path, m
         store.close()
 
 
-def test_incremental_update_refuses_total_root_mismatch_without_purging(
-    tmp_path: Path,
+@pytest.mark.parametrize("reconcile", [full_build, incremental_update])
+def test_graph_writers_refuse_root_mismatch_without_purging(
+    tmp_path: Path, reconcile,
 ) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
-    (repo / ".git").mkdir()
     (repo / "app.py").write_text("def main() -> None:\n    pass\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "app.py"], cwd=repo, check=True)
     wrong_root = tmp_path / "wrong-root"
     wrong_root.mkdir()
     store = GraphStore(repo / ".code-review-graph" / "graph.db")
@@ -48,7 +52,7 @@ def test_incremental_update_refuses_total_root_mismatch_without_purging(
         before = store.get_all_files()
 
         with pytest.raises(RuntimeError, match="different repository root"):
-            incremental_update(wrong_root, store, changed_files=[])
+            reconcile(wrong_root, store)
 
         assert store.get_all_files() == before
     finally:

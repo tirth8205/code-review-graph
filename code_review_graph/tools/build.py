@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import os
 import sqlite3
 import time
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -14,16 +18,22 @@ from ..build_state import (
     BUILD_STATE_KEY,
     INCOMPLETE_BUILD_STATES,
     POSTPROCESS_PENDING,
+    REFRESH_REQUEST_KEY,
     advance_to_postprocess_pending,
     graph_contents_are_complete,
     read_build_state,
 )
 from ..constants import normalize_file_path
+from ..graph import GraphStore
 from ..incremental import (
     VERIFIED_FILE_COUNT_KEY,
+    _git_branch_info,
     _prepare_db_path,
+    _raise_watch_postprocess_warnings,
+    _raise_watch_update_errors,
     collect_all_files,
     detect_vcs,
+    follow_symlinks_enabled,
     full_build,
     get_all_tracked_files,
     get_db_path,
@@ -31,9 +41,103 @@ from ..incremental import (
     resolve_incremental_base,
 )
 from ..locking import WriteLock, write_lock_path
+from ..shared_sqlite import CheckoutConnection, shared_database
 from ._common import _get_store, _resolve_root
 
+_UPDATE_REQUIRES_GRAPH = "incremental update requires an existing graph; run build explicitly"
+
 logger = logging.getLogger(__name__)
+
+
+def _refresh_profile(
+    full: bool, base: str | None, postprocess: str, recurse: bool | None,
+    enrich: bool | None, follow: bool | None,
+) -> tuple[Any, ...]:
+    return (
+        full, base, postprocess, recurse, enrich, follow_symlinks_enabled(follow),
+        tuple(sorted((key, value) for key, value in os.environ.items()
+                     if key.startswith("CRG_") and key not in {
+                         "CRG_REPO_ROOT", "CRG_PARSE_EXECUTOR", "CRG_SERIAL_PARSE",
+                         "CRG_PARSE_WORKERS", "CRG_FOLLOW_SYMLINKS",
+                         "CRG_DATA_DIR", "CRG_HOME", "CRG_WATCH_HEALTH_INTERVAL",
+                         "CRG_WATCH_HEALTH_STALE",
+                     })),
+    )
+
+
+def _completed_refresh(request: str, result: dict[str, Any]) -> str:
+    return json.dumps({"request": request, "result": result, "finished": time.time_ns()})
+
+
+def refresh_shared_watch(root: Path, store: GraphStore, follow: bool | None, callback) -> None:
+    """Publish a watcher update while the caller holds the shared writer lock."""
+    profile = _refresh_profile(False, None, "full", None, None, follow)
+    request = _refresh_request(root, None, follow, profile)
+    with store.refresh():
+        if (completed := store.get_metadata(REFRESH_REQUEST_KEY)) and (
+            json.loads(completed)["request"] == request
+        ):
+            return
+        store.invalidate_refresh()
+        base = store.get_metadata("git_head_sha")
+        if not base and not store.get_metadata("last_build_type"):
+            result = full_build(root, store, follow_symlinks=follow)
+        else:
+            result = incremental_update(root, store, base=base or "HEAD", follow_symlinks=follow)
+        _raise_watch_update_errors(result, "shared refresh")
+        if callback is not None:
+            _raise_watch_postprocess_warnings(callback(store))
+            store.set_metadata("postprocess_level", "full")
+            store.set_metadata(BUILD_STATE_KEY, BUILD_COMPLETE)
+            if request == _refresh_request(root, None, follow, profile):
+                result.update(status="ok", build_type="incremental", base_resolved=base)
+                store.set_metadata(REFRESH_REQUEST_KEY, _completed_refresh(request, result))
+
+
+def _refresh_request(
+    root: Path, recurse: bool | None, follow: bool | None, profile: tuple[Any, ...],
+) -> str:
+    """Identify the worktree snapshot and resolved request before waiting."""
+    from ..custom_languages import CONFIG_RELATIVE_PATH
+
+    paths = set(collect_all_files(root, recurse, follow))
+    paths.update(path for path in (
+        CONFIG_RELATIVE_PATH.as_posix(), ".code-review-graphignore",
+    ) if (root / path).is_file())
+
+    def stamp(path: str) -> tuple[str, int, int, str]:
+        with (root / path).open("rb") as source:
+            state = os.fstat(source.fileno())
+            digest = hashlib.sha256()
+            for block in iter(lambda: source.read(128 * 1024), b""):
+                digest.update(block)
+        return path, state.st_mtime_ns, state.st_ctime_ns, digest.hexdigest()
+
+    payload = (
+        _git_branch_info(root),
+        profile,
+        [stamp(path) for path in sorted(paths)],
+    )
+    return hashlib.sha256(json.dumps(payload).encode()).hexdigest()
+
+
+def _previous_refresh(db_path: Path, root: Path) -> str | None:
+    if not db_path.is_file():
+        return None
+    with closing(sqlite3.connect(
+        db_path.as_uri() + "?mode=ro", uri=True, factory=CheckoutConnection,
+    )) as conn:
+        if db_path == shared_database():
+            conn.bind(root)
+        if not conn.execute(
+            "SELECT 1 FROM sqlite_schema WHERE name=? AND type='table'",
+            (conn.table("metadata"),),
+        ).fetchone():
+            return None
+        row = conn.execute(
+            "SELECT value FROM metadata WHERE key=?", (REFRESH_REQUEST_KEY,),
+        ).fetchone()
+        return row[0] if row else None
 
 _PARTIAL_GRAPH_MIN_FILES = 8
 _PARTIAL_GRAPH_MAX_COVERAGE = 0.25
@@ -156,6 +260,14 @@ def _report_refresh_skipped(result: dict[str, Any], warnings: list[str]) -> None
     result["embeddings_refresh_skipped"] = True
 
 
+def _has_postprocess_failure(warnings: list[str]) -> bool:
+    if not warnings:
+        return False
+    from code_review_graph.embeddings import REFRESH_SKIPPED_WARNING
+
+    return any(warning != REFRESH_SKIPPED_WARNING for warning in warnings)
+
+
 # SQLITE_BUSY and SQLITE_LOCKED are the only two primary result codes that
 # mean "somebody else holds it, come back later".  Extended result codes carry
 # their detail in the high bits, so the low byte is what identifies the family.
@@ -260,6 +372,7 @@ def _run_postprocess(
     build_result["postprocess_level"] = postprocess
 
     if postprocess == "none":
+        store.set_metadata("postprocess_level", "none")
         _run_embedding_refresh(
             store,
             build_result,
@@ -383,6 +496,8 @@ def _run_postprocess(
             model=embedding_model,
         )
         build_result["postprocess_timing"] = timing
+        if not _has_postprocess_failure(warnings):
+            store.set_metadata("postprocess_level", postprocess)
         return warnings
 
     # -- Expensive: flows + communities (only for "full") --
@@ -553,254 +668,332 @@ def build_or_update_graph(
     """
     root = _resolve_root(repo_root)
     db_path = get_db_path(root, read_only=True)
-    lock, contended = _lock_or_skip(db_path, wait_for_lock)
-    if contended is not None:
-        return contended
+    if db_path == shared_database():
+        wait_for_lock = True
+    lock = WriteLock(db_path)
+    waiting = not lock.acquire()
+    if waiting and not wait_for_lock:
+        return _write_skipped_response(db_path, lock.holder_pid())
     store = None
     try:
+        before = None
+        request: str | None = None
+        request_profile: tuple[Any, ...] = ()
+        if (wait_for_lock or db_path == shared_database()) and not (
+            embedding_provider or embedding_model
+        ):
+            request_profile = _refresh_profile(
+                full_rebuild, base, postprocess, recurse_submodules, enrich, follow_symlinks,
+            )
+            before = _previous_refresh(db_path.resolve(), root) if waiting else None
+            request = _refresh_request(root, recurse_submodules, follow_symlinks, request_profile)
+        if not lock.acquire(blocking=wait_for_lock):
+            return _write_skipped_response(db_path, lock.holder_pid())
         recovery_reason: str | None = None
+        if not full_rebuild and not db_path.is_file():
+            raise RuntimeError(_UPDATE_REQUIRES_GRAPH)
         _prepare_db_path(root, db_path)
         store, root = _get_store(
             str(root), db_path=db_path, recover_corrupt=full_rebuild and recover_corrupt
         )
-        if not full_rebuild and not store.has_nodes():
-            full_rebuild = True
-
-        # A previous run that died before post-processing left a current anchor
-        # over a half-derived graph. Preserve the visible incomplete marker,
-        # but only rebuild source files when storage itself was interrupted.
-        interrupted = build_was_interrupted(store)
-        if not graph_contents_are_complete(read_build_state(store)) and not full_rebuild:
-            logger.warning(
-                "Previous build stopped before all source files were stored; rebuilding"
+        with store.refresh():
+            completed = store.get_metadata(REFRESH_REQUEST_KEY)
+            can_join = (waiting and completed != before) or (
+                store.checkout is not None and not full_rebuild
             )
-            full_rebuild = True
+            if can_join and request is not None and completed:
+                prior = json.loads(completed)
+                if (
+                    prior["request"] == request
+                    and request == _refresh_request(
+                        root, recurse_submodules, follow_symlinks, request_profile,
+                    )
+                ):
+                    return {
+                        **prior["result"], "files_parsed": 0, "files_updated": 0,
+                        "refresh_reused": True,
+                        "summary": "Reused the completed refresh for the requested checkout.",
+                    }
+            if completed:
+                if store.checkout is not None:
+                    store.invalidate_refresh()
+                else:
+                    store.set_metadata(REFRESH_REQUEST_KEY, "")
 
-        # An automatic (base is None) incremental update resolves its diff base
-        # to the last-synced commit. When no usable anchor exists, fall back to
-        # a full rebuild rather than a wrong HEAD~1 diff that could report the
-        # graph as up to date while it is actually stale.
-        base_resolved: str | None = base
-        if not full_rebuild and base is None:
-            base_resolved = resolve_incremental_base(root, store)
-            if base_resolved is None:
+            def publish(result: dict[str, Any]) -> dict[str, Any]:
+                if store.checkout is not None and (
+                    result["status"] != "ok" or result.get("warnings")
+                ):
+                    raise RuntimeError(result.get("warnings") or result["summary"])
+                if (
+                    request is not None and result["status"] == "ok" and not result.get("warnings")
+                    and request == _refresh_request(
+                        root, recurse_submodules, follow_symlinks, request_profile,
+                    )
+                ):
+                    store.set_metadata(
+                        REFRESH_REQUEST_KEY,
+                        _completed_refresh(request, result),
+                    )
+                return result
+
+            if (
+                not full_rebuild and not store.has_nodes()
+                and not store.get_metadata("last_build_type")
+            ):
+                raise RuntimeError(_UPDATE_REQUIRES_GRAPH)
+
+            # A previous run that died before post-processing left a current anchor
+            # over a half-derived graph. Preserve the visible incomplete marker,
+            # but only rebuild source files when storage itself was interrupted.
+            interrupted = build_was_interrupted(store)
+            if not graph_contents_are_complete(read_build_state(store)) and not full_rebuild:
+                logger.warning(
+                    "Previous build stopped before all source files were stored; rebuilding"
+                )
                 full_rebuild = True
 
-        if (
-            not full_rebuild
-            and _should_rebuild_partial_graph(root, store, recurse_submodules)
-        ):
-            full_rebuild = True
-            recovery_reason = "partial_graph"
+            # An automatic (base is None) incremental update resolves its diff base
+            # to the last-synced commit. A missing anchor requires an explicit
+            # build rather than diffing against an unrelated revision.
+            base_resolved: str | None = base
+            if not full_rebuild and base is None:
+                base_resolved = resolve_incremental_base(root, store)
+                if base_resolved is None:
+                    raise RuntimeError(
+                        "incremental update has no usable Git base; run build explicitly"
+                    )
 
-        previous_state = store.get_metadata(BUILD_STATE_KEY)
-        store.set_metadata(BUILD_STATE_KEY, BUILD_IN_PROGRESS)
-
-        if full_rebuild:
-            result = full_build(
-                root, store, recurse_submodules, enrich=enrich,
-                follow_symlinks=follow_symlinks,
-            )
-            failed = [str(item.get("file", "?")) for item in result["errors"]]
-            summary = (
-                f"Full build complete: parsed {result['files_parsed']} files, "
-                f"created {result['total_nodes']} nodes and "
-                f"{result['total_edges']} edges."
-            )
-            if failed:
-                summary += f" {len(failed)} file(s) failed to parse: {failed}."
-            build_result = {
-                **result,
-                "status": "partial" if failed else "ok",
-                "build_type": "full",
-                "base_resolved": None,
-                "summary": summary,
-            }
-            if recovery_reason is not None:
-                build_result["recovery_reason"] = recovery_reason
-        else:
-            try:
-                result = incremental_update(
-                    root, store, base=base_resolved, enrich=enrich,
-                    follow_symlinks=follow_symlinks,
-                )
-            except RuntimeError as exc:
-                # Change discovery or root validation failed before anything was
-                # stored; report it the way every other failure is reported.
-                # Nothing was written, so the previous completeness verdict
-                # still holds — do not leave the graph flagged as half built.
-                if previous_state is not None:
-                    store.set_metadata(BUILD_STATE_KEY, previous_state)
-                return {
-                    "status": "error",
-                    "build_type": "incremental",
-                    "base_resolved": base_resolved,
-                    "files_updated": 0,
-                    "errors": [],
-                    "error": str(exc),
-                    "summary": f"Incremental update failed: {exc}",
-                    "postprocess_level": postprocess,
-                }
-            failed = [str(item.get("file", "?")) for item in result["errors"]]
-            if result["files_updated"] == 0 and not failed and not (
-                postprocess == "full" and store.get_metadata("csharp_flows_dirty") == "1"
+            if (
+                not full_rebuild
+                and _should_rebuild_partial_graph(root, store, recurse_submodules)
             ):
-                summary = (
-                    "No changes detected. Graph is up to date."
-                    if result.get("freshness_advanced")
-                    else "No graph changes detected. Freshness metadata was not advanced."
+                full_rebuild = True
+                recovery_reason = "partial_graph"
+
+            previous_state = store.get_metadata(BUILD_STATE_KEY)
+            store.set_metadata(BUILD_STATE_KEY, BUILD_IN_PROGRESS)
+
+            if full_rebuild:
+                result = full_build(
+                    root, store, recurse_submodules, enrich=enrich,
+                    follow_symlinks=follow_symlinks, classify_edges=store.checkout is None,
                 )
-                if postprocess == "none":
-                    # An explicit skip should not turn an existing state into
-                    # a claim that derived data was checked. No source rows
-                    # changed, so restore the state that was present before
-                    # this no-op update began.
-                    store.set_metadata(BUILD_STATE_KEY, previous_state or "")
-                    noop_result = {
+                failed = [str(item.get("file", "?")) for item in result["errors"]]
+                summary = (
+                    f"Full build complete: parsed {result['files_parsed']} files, "
+                    f"created {result['total_nodes']} nodes and "
+                    f"{result['total_edges']} edges."
+                )
+                if failed:
+                    summary += f" {len(failed)} file(s) failed to parse: {failed}."
+                build_result = {
+                    **result,
+                    "status": "partial" if failed else "ok",
+                    "build_type": "full",
+                    "base_resolved": None,
+                    "summary": summary,
+                }
+                if recovery_reason is not None:
+                    build_result["recovery_reason"] = recovery_reason
+            else:
+                assert base_resolved is not None
+                try:
+                    result = incremental_update(
+                        root, store, base=base_resolved, enrich=enrich,
+                        follow_symlinks=follow_symlinks,
+                    )
+                except RuntimeError as exc:
+                    if store.checkout is not None:
+                        raise
+                    # Change discovery or root validation failed before anything was
+                    # stored; report it the way every other failure is reported.
+                    # Nothing was written, so the previous completeness verdict
+                    # still holds — do not leave the graph flagged as half built.
+                    if previous_state is not None:
+                        store.set_metadata(BUILD_STATE_KEY, previous_state)
+                    return {
+                        "status": "error",
+                        "build_type": "incremental",
+                        "base_resolved": base_resolved,
+                        "files_updated": 0,
+                        "errors": [],
+                        "error": str(exc),
+                        "summary": f"Incremental update failed: {exc}",
+                        "postprocess_level": postprocess,
+                    }
+                failed = [str(item.get("file", "?")) for item in result["errors"]]
+                if result["files_updated"] == 0 and not failed and not (
+                    postprocess == "full" and store.get_metadata("csharp_flows_dirty") == "1"
+                ):
+                    summary = (
+                        "No changes detected. Graph is up to date."
+                        if result.get("freshness_advanced")
+                        else "No graph changes detected. Freshness metadata was not advanced."
+                    )
+                    if postprocess == "none":
+                        # An explicit skip should not turn an existing state into
+                        # a claim that derived data was checked. No source rows
+                        # changed, so restore the state that was present before
+                        # this no-op update began.
+                        store.set_metadata(BUILD_STATE_KEY, previous_state or "")
+                        noop_result = {
+                            **result,
+                            "status": "ok",
+                            "build_type": "incremental",
+                            "base_resolved": base_resolved,
+                            "summary": summary,
+                            "postprocess_level": postprocess,
+                        }
+                        # Match the other no-op levels: an explicit request should
+                        # report that there is no embedding index to refresh.
+                        if embedding_provider and embedding_model:
+                            from code_review_graph.embeddings import has_embeddings
+
+                            if not has_embeddings(store):
+                                noop_warnings: list[str] = []
+                                _report_refresh_skipped(noop_result, noop_warnings)
+                                noop_result["warnings"] = noop_warnings
+                        return publish(noop_result)
+
+                    # Older builds could leave FTS drift behind a complete marker.
+                    # Reconcile it even when Git has no source changes, while
+                    # keeping the no-op path away from the expensive flow and
+                    # community passes. A pending marker may also mean flows or
+                    # communities were interrupted; honor the requested level in
+                    # that case so a default update can finish the full repair.
+                    pending = previous_state == POSTPROCESS_PENDING
+                    previous_level = store.get_metadata("postprocess_level")
+                    upgrade = postprocess == "full" and previous_level in {"none", "minimal"}
+                    repair = pending or upgrade
+                    postprocess_level = postprocess if repair else "minimal"
+                    build_result = {
                         **result,
                         "status": "ok",
                         "build_type": "incremental",
                         "base_resolved": base_resolved,
                         "summary": summary,
-                        "postprocess_level": postprocess,
                     }
-                    # Match the other no-op levels: an explicit request should
-                    # report that there is no embedding index to refresh.
-                    if embedding_provider and embedding_model:
+                    advance_to_postprocess_pending(store)
+                    warnings = _run_postprocess(
+                        store,
+                        build_result,
+                        postprocess_level,
+                        full_rebuild=False,
+                        changed_files=None,
+                        repo_root=str(root),
+                        # The run that left the marker may have changed nodes. A
+                        # complete graph has no resolver or embedding work to do,
+                        # and hooks run this path after every edit.
+                        embedding_provider=embedding_provider if repair else None,
+                        embedding_model=embedding_model if repair else None,
+                        skip_resolvers=not repair,
+                    )
+                    if warnings:
+                        build_result["warnings"] = warnings
+                    if build_result.get("postprocess_failed"):
+                        build_result["status"] = "partial"
+                    if (
+                        not build_result.get("postprocess_contended")
+                        and not _has_postprocess_failure(warnings)
+                    ):
+                        if previous_level == "full" and not repair:
+                            store.set_metadata("postprocess_level", previous_level)
+                        store.set_metadata(BUILD_STATE_KEY, BUILD_COMPLETE)
+                    build_result["repaired_interrupted_build"] = interrupted
+                    if not repair and embedding_provider and embedding_model:
                         from code_review_graph.embeddings import has_embeddings
 
                         if not has_embeddings(store):
-                            noop_warnings: list[str] = []
-                            _report_refresh_skipped(noop_result, noop_warnings)
-                            noop_result["warnings"] = noop_warnings
-                    return noop_result
-
-                # Older builds could leave FTS drift behind a complete marker.
-                # Reconcile it even when Git has no source changes, while
-                # keeping the no-op path away from the expensive flow and
-                # community passes. A pending marker may also mean flows or
-                # communities were interrupted; honor the requested level in
-                # that case so a default update can finish the full repair.
-                pending = previous_state == POSTPROCESS_PENDING
-                postprocess_level = postprocess if pending else "minimal"
+                            embedding_warnings: list[str] = []
+                            _report_refresh_skipped(build_result, embedding_warnings)
+                            build_result.setdefault("warnings", []).extend(embedding_warnings)
+                    build_result["postprocess_level"] = postprocess_level
+                    return publish(build_result)
+                summary = (
+                    f"Incremental update: {result['files_updated']} files re-parsed, "
+                    f"{result['total_nodes']} nodes and "
+                    f"{result['total_edges']} edges updated. "
+                    f"Changed: {result['changed_files']}. "
+                    f"Dependents also updated: {result['dependent_files']}."
+                )
+                if failed:
+                    summary += (
+                        f" {len(failed)} file(s) failed to parse and keep their "
+                        f"previous graph rows: {failed}."
+                    )
                 build_result = {
                     **result,
-                    "status": "ok",
+                    "status": "partial" if failed else "ok",
                     "build_type": "incremental",
                     "base_resolved": base_resolved,
                     "summary": summary,
                 }
-                advance_to_postprocess_pending(store)
-                warnings = _run_postprocess(
-                    store,
-                    build_result,
-                    postprocess_level,
-                    full_rebuild=False,
-                    changed_files=None,
-                    repo_root=str(root),
-                    # The run that left the marker may have changed nodes. A
-                    # complete graph has no resolver or embedding work to do,
-                    # and hooks run this path after every edit.
-                    embedding_provider=embedding_provider if pending else None,
-                    embedding_model=embedding_model if pending else None,
-                    skip_resolvers=not pending,
+
+            # Every file that could be stored is stored, so what is still
+            # outstanding is derived data alone. Recording that distinction here is
+            # what lets an explicit ``postprocess`` tell a graph it can genuinely
+            # repair from one whose files never all landed. ``full_build`` already
+            # advances it before writing the anchor, so a kill in the gap between
+            # the two is on the right side of the line; this covers the
+            # incremental path and is a no-op when the state is already advanced.
+            advance_to_postprocess_pending(store)
+
+            # Pass changed_files + pre-replacement flow/community capture for
+            # incremental postprocess (#569). A pending marker means derived tables
+            # may be missing across the whole graph, so that case recomputes them
+            # from all stored rows, while source parsing stays incremental.
+            changed = None
+            entry_qns = None
+            communities_affected = False
+            # Internal, and can run to thousands of names: not for the response.
+            flow_entry_qns = build_result.pop("flow_entry_point_qns", None)
+            if not full_rebuild and previous_state != POSTPROCESS_PENDING:
+                changed = list(result.get("changed_files") or [])
+                changed.extend(result.get("dependent_files") or [])
+                entry_qns = list(flow_entry_qns or [])
+                communities_affected = bool(
+                    result.get("communities_were_affected")
                 )
-                if warnings:
-                    build_result["warnings"] = warnings
-                if build_result.get("postprocess_failed"):
-                    build_result["status"] = "partial"
-                if not build_result.get("postprocess_contended"):
-                    store.set_metadata(BUILD_STATE_KEY, BUILD_COMPLETE)
-                build_result["repaired_interrupted_build"] = interrupted
-                if not pending and embedding_provider and embedding_model:
-                    from code_review_graph.embeddings import has_embeddings
-
-                    if not has_embeddings(store):
-                        embedding_warnings: list[str] = []
-                        _report_refresh_skipped(build_result, embedding_warnings)
-                        build_result.setdefault("warnings", []).extend(embedding_warnings)
-                build_result["postprocess_level"] = postprocess_level
-                return build_result
-            summary = (
-                f"Incremental update: {result['files_updated']} files re-parsed, "
-                f"{result['total_nodes']} nodes and "
-                f"{result['total_edges']} edges updated. "
-                f"Changed: {result['changed_files']}. "
-                f"Dependents also updated: {result['dependent_files']}."
+            warnings = _run_postprocess(
+                store,
+                build_result,
+                postprocess,
+                full_rebuild=full_rebuild,
+                changed_files=changed,
+                repo_root=str(root),
+                embedding_provider=embedding_provider,
+                embedding_model=embedding_model,
+                entry_point_qns=entry_qns,
+                communities_were_affected=communities_affected,
             )
-            if failed:
-                summary += (
-                    f" {len(failed)} file(s) failed to parse and keep their "
-                    f"previous graph rows: {failed}."
+            if warnings:
+                build_result["warnings"] = warnings
+            # A genuine SQLite failure is not something the next run repairs, so it
+            # is reported now rather than hidden behind an "ok" status.
+            if build_result.get("postprocess_failed"):
+                build_result["status"] = "partial"
+            # Last thing written, after post-processing: only now is the graph
+            # genuinely what its freshness metadata claims.  A stage that lost the
+            # write lock keeps the marker set so the next run redoes it, rather
+            # than leaving an empty FTS index behind a "complete" verdict.
+            if (
+                build_result["status"] == "ok"
+                and not _has_postprocess_failure(warnings)
+                and postprocess != "none"
+            ):
+                store.set_metadata(BUILD_STATE_KEY, BUILD_COMPLETE)
+            elif postprocess == "none" and failed:
+                # A partial update can store some changed rows while another file
+                # fails. Keep derived data visibly pending so a later update can
+                # repair FTS/flows/communities for the rows that were stored.
+                rows_changed = result.get("files_updated", 0) or result.get("files_parsed", 0)
+                store.set_metadata(
+                    BUILD_STATE_KEY,
+                    POSTPROCESS_PENDING if rows_changed else (previous_state or ""),
                 )
-            build_result = {
-                **result,
-                "status": "partial" if failed else "ok",
-                "build_type": "incremental",
-                "base_resolved": base_resolved,
-                "summary": summary,
-            }
-
-        # Every file that could be stored is stored, so what is still
-        # outstanding is derived data alone. Recording that distinction here is
-        # what lets an explicit ``postprocess`` tell a graph it can genuinely
-        # repair from one whose files never all landed. ``full_build`` already
-        # advances it before writing the anchor, so a kill in the gap between
-        # the two is on the right side of the line; this covers the
-        # incremental path and is a no-op when the state is already advanced.
-        advance_to_postprocess_pending(store)
-
-        # Pass changed_files + pre-replacement flow/community capture for
-        # incremental postprocess (#569). A pending marker means derived tables
-        # may be missing across the whole graph, so that case recomputes them
-        # from all stored rows, while source parsing stays incremental.
-        changed = None
-        entry_qns = None
-        communities_affected = False
-        # Internal, and can run to thousands of names: not for the response.
-        flow_entry_qns = build_result.pop("flow_entry_point_qns", None)
-        if not full_rebuild and previous_state != POSTPROCESS_PENDING:
-            changed = list(result.get("changed_files") or [])
-            changed.extend(result.get("dependent_files") or [])
-            entry_qns = list(flow_entry_qns or [])
-            communities_affected = bool(
-                result.get("communities_were_affected")
-            )
-        warnings = _run_postprocess(
-            store,
-            build_result,
-            postprocess,
-            full_rebuild=full_rebuild,
-            changed_files=changed,
-            repo_root=str(root),
-            embedding_provider=embedding_provider,
-            embedding_model=embedding_model,
-            entry_point_qns=entry_qns,
-            communities_were_affected=communities_affected,
-        )
-        if warnings:
-            build_result["warnings"] = warnings
-        # A genuine SQLite failure is not something the next run repairs, so it
-        # is reported now rather than hidden behind an "ok" status.
-        if build_result.get("postprocess_failed"):
-            build_result["status"] = "partial"
-        # Last thing written, after post-processing: only now is the graph
-        # genuinely what its freshness metadata claims.  A stage that lost the
-        # write lock keeps the marker set so the next run redoes it, rather
-        # than leaving an empty FTS index behind a "complete" verdict.
-        if not build_result.get("postprocess_contended") and postprocess != "none":
-            store.set_metadata(BUILD_STATE_KEY, BUILD_COMPLETE)
-        elif postprocess == "none" and failed:
-            # A partial update can store some changed rows while another file
-            # fails. Keep derived data visibly pending so a later update can
-            # repair FTS/flows/communities for the rows that were stored.
-            rows_changed = result.get("files_updated", 0) or result.get("files_parsed", 0)
-            store.set_metadata(
-                BUILD_STATE_KEY,
-                POSTPROCESS_PENDING if rows_changed else (previous_state or ""),
-            )
-        build_result["repaired_interrupted_build"] = interrupted
-        return build_result
+            build_result["repaired_interrupted_build"] = interrupted
+            return publish(build_result)
     finally:
         try:
             if store is not None:
@@ -909,150 +1102,161 @@ def run_postprocess(
     try:
         _prepare_db_path(root, db_path)
         store, _root = _get_store(str(root), db_path=db_path)
-        # Read before anything runs: the stages below rebuild derived data
-        # from whatever nodes are stored, and none of them can put back a file
-        # the interrupted build never parsed.
-        state_before = read_build_state(store)
-        graph_complete = graph_contents_are_complete(state_before)
+        with store.refresh():
+            store.invalidate_refresh()
+            # Read before anything runs: the stages below rebuild derived data
+            # from whatever nodes are stored, and none of them can put back a file
+            # the interrupted build never parsed.
+            state_before = read_build_state(store)
+            graph_complete = graph_contents_are_complete(state_before)
 
-        try:
-            resolved = store.resolve_bare_call_targets()
-            resolved += store.resolve_bare_tested_by_sources()
-            result["bare_edges_resolved"] = resolved
-            result["cpp_scoped_edges_resolved"] = (
-                store.resolve_cpp_scoped_call_targets()
-            )
-            # Resolvers rewrite bare targets into qualified ones, so the
-            # stored certainty column is only correct once they have run.
-            store.refresh_target_resolution()
-        except sqlite3.OperationalError as e:
-            logger.warning("Call-target resolution failed: %s", e)
-            _note_contention(result, e)
-            warnings.append(
-                f"Call-target resolution failed: {type(e).__name__}: {e}"
-            )
-
-        try:
-            rows = store.get_nodes_without_signature()
-            signature_rows: list[tuple[str, int]] = []
-            for row in rows:
-                node_id, name, kind, params, ret = (
-                    row[0],
-                    row[1],
-                    row[2],
-                    row[3],
-                    row[4],
+            try:
+                resolved = store.resolve_bare_call_targets()
+                resolved += store.resolve_bare_tested_by_sources()
+                result["bare_edges_resolved"] = resolved
+                result["cpp_scoped_edges_resolved"] = (
+                    store.resolve_cpp_scoped_call_targets()
                 )
-                if kind in ("Function", "Test"):
-                    sig = f"def {name}({params or ''})"
-                    if ret:
-                        sig += f" -> {ret}"
-                elif kind == "Class":
-                    sig = f"class {name}"
-                else:
-                    sig = name
-                signature_rows.append((sig[:512], node_id))
-            # Single transaction via executemany instead of one autocommitted
-            # UPDATE per node (issue #721).
-            store.update_node_signatures(signature_rows)
-            result["signatures_updated"] = True
-        except (sqlite3.OperationalError, TypeError, KeyError) as e:
-            logger.warning("Signature computation failed: %s", e)
-            _note_contention(result, e)
-            warnings.append(f"Signature computation failed: {type(e).__name__}: {e}")
-
-        if fts:
-            try:
-                from code_review_graph.search import rebuild_fts_index
-
-                fts_count = rebuild_fts_index(store)
-                result["fts_indexed"] = fts_count
-            except (sqlite3.OperationalError, ImportError) as e:
-                store.rollback()
-                logger.warning("FTS index rebuild failed: %s", e)
+                # Resolvers rewrite bare targets into qualified ones, so the
+                # stored certainty column is only correct once they have run.
+                store.refresh_target_resolution()
+            except sqlite3.OperationalError as e:
+                logger.warning("Call-target resolution failed: %s", e)
                 _note_contention(result, e)
-                warnings.append(f"FTS index rebuild failed: {type(e).__name__}: {e}")
-
-        if flows:
-            try:
-                from code_review_graph.flows import store_flows as _store_flows
-                from code_review_graph.flows import trace_flows as _trace_flows
-
-                traced = _trace_flows(store)
-                count = _store_flows(store, traced)
-                result["flows_detected"] = count
-            except (sqlite3.OperationalError, ImportError) as e:
-                store.rollback()
-                logger.warning("Flow detection failed: %s", e)
-                _note_contention(result, e)
-                warnings.append(f"Flow detection failed: {type(e).__name__}: {e}")
-
-        if communities:
-            try:
-                from code_review_graph.communities import (
-                    detect_communities as _detect_communities,
-                )
-                from code_review_graph.communities import (
-                    store_communities as _store_communities,
+                warnings.append(
+                    f"Call-target resolution failed: {type(e).__name__}: {e}"
                 )
 
-                comms = _detect_communities(store)
-                count = _store_communities(store, comms)
-                result["communities_detected"] = count
-            except (sqlite3.OperationalError, ImportError) as e:
-                store.rollback()
-                logger.warning("Community detection failed: %s", e)
+            try:
+                rows = store.get_nodes_without_signature()
+                signature_rows: list[tuple[str, int]] = []
+                for row in rows:
+                    node_id, name, kind, params, ret = (
+                        row[0],
+                        row[1],
+                        row[2],
+                        row[3],
+                        row[4],
+                    )
+                    if kind in ("Function", "Test"):
+                        sig = f"def {name}({params or ''})"
+                        if ret:
+                            sig += f" -> {ret}"
+                    elif kind == "Class":
+                        sig = f"class {name}"
+                    else:
+                        sig = name
+                    signature_rows.append((sig[:512], node_id))
+                # Single transaction via executemany instead of one autocommitted
+                # UPDATE per node (issue #721).
+                store.update_node_signatures(signature_rows)
+                result["signatures_updated"] = True
+            except (sqlite3.OperationalError, TypeError, KeyError) as e:
+                logger.warning("Signature computation failed: %s", e)
                 _note_contention(result, e)
-                warnings.append(f"Community detection failed: {type(e).__name__}: {e}")
+                warnings.append(f"Signature computation failed: {type(e).__name__}: {e}")
 
-        _run_embedding_refresh(
-            store,
-            result,
-            warnings,
-            provider=embedding_provider,
-            model=embedding_model,
-        )
+            if fts:
+                try:
+                    from code_review_graph.search import rebuild_fts_index
 
-        store.set_metadata(
-            "last_postprocessed_at",
-            time.strftime("%Y-%m-%dT%H:%M:%S"),
-        )
-        # The marker clears when, and only when, post-processing finished over
-        # a graph that holds every file.  Two conditions, both explicit:
-        #
-        # * The build that stored the graph got as far as storing all of it.
-        #   An explicit postprocess is the hand repair for a build that died
-        #   after that point, and must be able to finish it. Refusing on any
-        #   warning meant it could not repair the very failures people reach
-        #   for it to repair.  But it cannot conjure back files a dead build
-        #   never parsed, so over an ``in-progress`` graph it is not a repair
-        #   at all: the derived data it writes is complete for a graph that is
-        #   missing files, and calling that healthy is the same lie from the
-        #   other side.
-        # * No stage lost the SQLite write lock.  Contention is transient and
-        #   the lost stage has to be redone, so the marker stays set for it.
-        if not graph_complete:
-            warning = (
-                "The last build stopped before every file was stored, so the "
-                "graph is still incomplete. Post-processing rebuilt what it "
-                "could from the stored nodes; run 'code-review-graph build' "
-                "to finish the graph itself."
+                    fts_count = rebuild_fts_index(store)
+                    result["fts_indexed"] = fts_count
+                except (sqlite3.OperationalError, ImportError) as e:
+                    store.rollback()
+                    logger.warning("FTS index rebuild failed: %s", e)
+                    _note_contention(result, e)
+                    warnings.append(f"FTS index rebuild failed: {type(e).__name__}: {e}")
+
+            if flows:
+                try:
+                    from code_review_graph.flows import store_flows as _store_flows
+                    from code_review_graph.flows import trace_flows as _trace_flows
+
+                    traced = _trace_flows(store)
+                    count = _store_flows(store, traced)
+                    result["flows_detected"] = count
+                except (sqlite3.OperationalError, ImportError) as e:
+                    store.rollback()
+                    logger.warning("Flow detection failed: %s", e)
+                    _note_contention(result, e)
+                    warnings.append(f"Flow detection failed: {type(e).__name__}: {e}")
+
+            if communities:
+                try:
+                    from code_review_graph.communities import (
+                        detect_communities as _detect_communities,
+                    )
+                    from code_review_graph.communities import (
+                        store_communities as _store_communities,
+                    )
+
+                    comms = _detect_communities(store)
+                    count = _store_communities(store, comms)
+                    result["communities_detected"] = count
+                except (sqlite3.OperationalError, ImportError) as e:
+                    store.rollback()
+                    logger.warning("Community detection failed: %s", e)
+                    _note_contention(result, e)
+                    warnings.append(f"Community detection failed: {type(e).__name__}: {e}")
+
+            _run_embedding_refresh(
+                store,
+                result,
+                warnings,
+                provider=embedding_provider,
+                model=embedding_model,
             )
-            logger.warning(warning)
-            warnings.append(warning)
-            result["build_incomplete"] = True
-            result["status"] = "partial"
-            result["summary"] = (
-                "Post-processing ran, but the graph is missing files from an "
-                "unfinished build. Run a full build to repair it."
+
+            store.set_metadata(
+                "last_postprocessed_at",
+                time.strftime("%Y-%m-%dT%H:%M:%S"),
             )
-        else:
-            if not result.get("postprocess_contended"):
+            # The marker clears when, and only when, post-processing finished over
+            # a graph that holds every file.  Two conditions, both explicit:
+            #
+            # * The build that stored the graph got as far as storing all of it.
+            #   An explicit postprocess is the hand repair for a build that died
+            #   after that point, and must be able to finish it. Refusing on any
+            #   warning meant it could not repair the very failures people reach
+            #   for it to repair.  But it cannot conjure back files a dead build
+            #   never parsed, so over an ``in-progress`` graph it is not a repair
+            #   at all: the derived data it writes is complete for a graph that is
+            #   missing files, and calling that healthy is the same lie from the
+            #   other side.
+            # * No stage lost the SQLite write lock.  Contention is transient and
+            #   the lost stage has to be redone, so the marker stays set for it.
+            if not graph_complete:
+                warning = (
+                    "The last build stopped before every file was stored, so the "
+                    "graph is still incomplete. Post-processing rebuilt what it "
+                    "could from the stored nodes; run 'code-review-graph build' "
+                    "to finish the graph itself."
+                )
+                logger.warning(warning)
+                warnings.append(warning)
+                result["build_incomplete"] = True
+                result["status"] = "partial"
+                result["summary"] = (
+                    "Post-processing ran, but the graph is missing files from an "
+                    "unfinished build. Run a full build to repair it."
+                )
+            elif _has_postprocess_failure(warnings):
+                store.set_metadata(BUILD_STATE_KEY, POSTPROCESS_PENDING)
+                result["status"] = "partial"
+                result["summary"] = "Post-processing has unresolved warnings."
+            elif fts and flows and communities:
+                store.set_metadata("postprocess_level", "full")
                 store.set_metadata(BUILD_STATE_KEY, BUILD_COMPLETE)
-            result["summary"] = "Post-processing complete."
-        if warnings:
-            result["warnings"] = warnings
-        return result
+                result["summary"] = "Post-processing complete."
+            else:
+                # A selective repair must not promote an incomplete generation.
+                result["summary"] = "Selected post-processing steps complete."
+            if warnings:
+                result["warnings"] = warnings
+            if store.checkout is not None and result["status"] == "partial":
+                raise RuntimeError(result["summary"])
+            return result
     finally:
         try:
             if store is not None:

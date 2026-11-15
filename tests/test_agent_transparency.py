@@ -13,6 +13,7 @@ import code_review_graph.main as main_module
 import code_review_graph.tools._common as common_module
 import code_review_graph.tools.query as query_module
 from code_review_graph.graph import GraphStore
+from code_review_graph.incremental import get_db_path
 from code_review_graph.parser import EdgeInfo, NodeInfo
 from code_review_graph.tools.query import query_graph, semantic_search_nodes
 
@@ -219,10 +220,8 @@ class TestBoundedQueryResults:
         def materializing_lookup(*args, **kwargs):
             raise AssertionError("query_graph must use the streaming edge API")
 
-        monkeypatch.setattr(store, "get_edges_by_target", materializing_lookup)
-        monkeypatch.setattr(
-            query_module, "_get_store", lambda _repo_root: (store, root),
-        )
+        store.close()
+        monkeypatch.setattr(GraphStore, "get_edges_by_target", materializing_lookup)
 
         result = query_graph(
             "callers_of", target, str(root), max_results=2,
@@ -562,8 +561,8 @@ def test_semantic_search_minimal_reports_hidden_returned_results(tmp_path):
     assert result["results_omitted"] == 5
 
 
-def test_impact_minimal_reports_nodes_omitted(tmp_path, monkeypatch):
-    store = GraphStore(tmp_path / "impact.db")
+def test_impact_minimal_reports_nodes_omitted(tmp_path):
+    store = GraphStore(get_db_path(tmp_path))
     seed = "/seed.py::seed"
     store.upsert_node(NodeInfo(
         kind="Function", name="seed", file_path="/seed.py",
@@ -582,14 +581,7 @@ def test_impact_minimal_reports_nodes_omitted(tmp_path, monkeypatch):
         ))
     store.commit()
 
-    monkeypatch.setattr(
-        query_module, "_get_store", lambda _repo_root: (store, tmp_path),
-    )
-    monkeypatch.setattr(
-        query_module,
-        "_resolve_graph_file_paths",
-        lambda _store, _root, _files: ["/seed.py"],
-    )
+    store.close()
 
     result = query_module.get_impact_radius(
         changed_files=["seed.py"],
