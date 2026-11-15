@@ -1,8 +1,8 @@
 name: Release assets
 
 on:
-  release:
-    types: [published]
+  push:
+    tags: ['v*-dc.*']
 
 permissions:
   contents: write
@@ -22,7 +22,7 @@ jobs:
 
       - name: Verify dc-use release provenance
         env:
-          TAG: ${{ github.event.release.tag_name }}
+          TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           git fetch --no-tags origin refs/heads/dc-use:refs/remotes/origin/dc-use
@@ -57,13 +57,30 @@ jobs:
 
       - name: Checksums
         run: |
+          git rev-parse HEAD > dist/RELEASE-COMMIT.txt
           cd dist
           sha256sum -- * > SHA256SUMS.txt
 
       - name: Upload release assets
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.release.tag_name }}
+          TAG: ${{ github.ref_name }}
           GH_REPO: ${{ github.repository }}
         run: |
-          gh release upload "$TAG" dist/* --repo "$GH_REPO"
+          set -euo pipefail
+          expected=$(cat dist/RELEASE-COMMIT.txt)
+          remote_commit() {
+            local ref="refs/tags/$TAG"
+            git ls-remote --exit-code origin "$ref" "$ref^{}" |
+              awk -v ref="$ref" '
+                $2 == ref { direct = $1 }
+                $2 == ref "^{}" { peeled = $1 }
+                END { if (!direct) exit 1; print (peeled ? peeled : direct) }
+              '
+          }
+          observed=$(remote_commit)
+          test "$observed" = "$expected"
+          gh release create "$TAG" dist/* --repo "$GH_REPO" --verify-tag \
+            --draft --notes-from-tag
+          observed=$(remote_commit)
+          test "$observed" = "$expected"
