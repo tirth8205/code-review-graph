@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.4.0-dc.3] - 2026-11-15
+
+### Changed
+
+- Creating a graph database now initializes its schema in one transaction,
+  reducing disk synchronization while preserving the same schema version.
+- Indexing deeply nested HTML no longer looks up the parent from the tree
+  root for every opening tag.
+
+### Fixed
+
+- OpenCode version detection now keeps the probe's logs and caches out of
+  the user profile, so `install --dry-run` leaves it unchanged.
+
 ## [2.4.0-dc.2] - 2026-11-15
 
 ### Fixed

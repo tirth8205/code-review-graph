@@ -835,8 +835,8 @@ def _describe_open_failure(db_path: Path, exc: Exception) -> str:
     )
 
 
-def _assert_usable_database(conn: sqlite3.Connection, db_path: Path) -> None:
-    """Refuse a SQLite file this build cannot honestly answer from.
+def _assert_usable_database(conn: sqlite3.Connection, db_path: Path) -> bool:
+    """Refuse an unusable file and report whether the schema is empty.
 
     Two cases that both used to be accepted in silence:
 
@@ -877,6 +877,7 @@ def _assert_usable_database(conn: sqlite3.Connection, db_path: Path) -> None:
             "different copy: `code-review-graph doctor` lists each one and "
             "its version."
         )
+    return not tables
 
 
 class CorruptGraphDatabaseError(GraphStoreError):
@@ -1064,9 +1065,12 @@ class GraphStore:
             # FILE keeps the impact-radius working tables reclaimable; the
             # compile-time default is memory on some SQLite builds.
             conn.execute("PRAGMA temp_store=FILE")
-            if self.checkout is None:
-                _assert_usable_database(conn, self.db_path)
-            if self.read_only and not self.has_checkout_schema(conn):
+            has_schema = self.has_checkout_schema(conn)
+            empty_schema = (
+                not has_schema if self.checkout is not None
+                else _assert_usable_database(conn, self.db_path)
+            )
+            if self.read_only and not has_schema:
                 error_type = UnbuiltCheckoutError if self.checkout is not None else GraphStoreError
                 raise error_type(
                     f"No graph found at {self.db_path}. "
@@ -1083,16 +1087,7 @@ class GraphStore:
                 )
             self._conn = conn
             if not self.read_only:
-                self._init_schema()
-                # Ensure schema_version is set, then run pending migrations
-                if get_schema_version(self._conn) < 1:
-                    # Fresh DB — metadata table just created by _init_schema
-                    self._conn.execute(
-                        "INSERT OR IGNORE INTO metadata (key, value) "
-                        "VALUES ('schema_version', '1')"
-                    )
-                    self._conn.commit()
-                run_migrations(self._conn)
+                self._init_schema(empty_schema=empty_schema)
         except (sqlite3.Error, OSError, GraphStoreError) as exc:
             # A corrupt file, a foreign SQLite file, or a data directory this
             # process cannot write to used to escape as a raw traceback from
@@ -1195,9 +1190,15 @@ class GraphStore:
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.close()
 
-    def _init_schema(self) -> None:
-        self._conn.executescript(_SCHEMA_SQL)
-        self._conn.commit()
+    def _init_schema(self, *, empty_schema: bool) -> None:
+        # Keep a newly created schema and its version in one durable commit,
+        # rather than syncing every DDL statement against empty tables.
+        with self._conn:
+            self._conn.executescript("BEGIN IMMEDIATE;\n" + _SCHEMA_SQL)
+            if empty_schema:
+                run_migrations(self._conn, bootstrap=True)
+        if not empty_schema:
+            run_migrations(self._conn)
 
     def _invalidate_cache(self) -> None:
         """Invalidate the cached NetworkX graph after write operations."""

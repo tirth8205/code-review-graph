@@ -24,7 +24,6 @@ These tests pin the replacement contract:
 
 from __future__ import annotations
 
-import os
 import re
 import subprocess
 from pathlib import Path
@@ -133,8 +132,8 @@ def risky_repo(tmp_path_factory) -> dict[str, Any]:
         )
 
     db_path = root / ".code-review-graph" / "graph.db"
-    os.environ["CRG_SERIAL_PARSE"] = "1"
-    with GraphStore(db_path) as store:
+    with pytest.MonkeyPatch.context() as env, GraphStore(db_path) as store:
+        env.setenv("CRG_SERIAL_PARSE", "1")
         full_build(root, store)
 
     changed = [f"{p}.py" for p in padding] + ["zzz_session_token.py"]
@@ -439,8 +438,11 @@ def hunky_repo(tmp_path_factory) -> dict[str, Any]:
     ]
     (root / "spread.py").write_text("\n".join(edited) + "\n", encoding="utf-8")
 
-    os.environ["CRG_SERIAL_PARSE"] = "1"
-    with GraphStore(root / ".code-review-graph" / "graph.db") as store:
+    with (
+        pytest.MonkeyPatch.context() as env,
+        GraphStore(root / ".code-review-graph" / "graph.db") as store,
+    ):
+        env.setenv("CRG_SERIAL_PARSE", "1")
         full_build(root, store)
 
     hunks = len(re.findall(
