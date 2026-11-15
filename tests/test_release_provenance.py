@@ -120,3 +120,32 @@ def test_checkout_must_match_the_release_tag(clone: Path):
     )
     assert result.returncode != 0
     assert "checked-out commit" in result.stdout + result.stderr
+
+
+@needs_git_and_bash
+def test_draft_gate_requires_the_exact_remote_tag(clone: Path):
+    expected = _git(clone, "rev-parse", "v1.0.0-dc.1^{commit}")
+    dist = clone / "dist"
+    dist.mkdir()
+    (dist / "RELEASE-COMMIT.txt").write_text(f"{expected}\n", encoding="utf-8")
+    colliding_tag = "v1.0.1-dc.1"
+    _git(
+        clone,
+        "push",
+        "origin",
+        f"refs/tags/v1.0.0-dc.1:refs/tags/nested/refs/tags/{colliding_tag}",
+    )
+    upload = next(s for s in _steps() if s.get("name") == "Upload release assets")
+    # Exercise the real Git gate, without invoking the external release writer.
+    gate, separator, _ = upload["run"].partition("\ngh release create ")
+    assert separator
+    for tag, accepted in (("v1.0.0-dc.1", True), (colliding_tag, False)):
+        result = subprocess.run(
+            ["bash", "-c", gate],
+            cwd=clone,
+            env={**os.environ, "TAG": tag},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert (result.returncode == 0) is accepted, result.stdout + result.stderr

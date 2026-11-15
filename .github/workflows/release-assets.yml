@@ -70,10 +70,17 @@ jobs:
           set -euo pipefail
           expected=$(cat dist/RELEASE-COMMIT.txt)
           remote_commit() {
-            git ls-remote --exit-code origin "refs/tags/$TAG" "refs/tags/$TAG^{}" |
-              awk 'NR == 1 { direct = $1 } $2 ~ /\^\{\}$/ { peeled = $1 } END { print peeled ? peeled : direct }'
+            local ref="refs/tags/$TAG"
+            git ls-remote --exit-code origin "$ref" "$ref^{}" |
+              awk -v ref="$ref" '
+                $2 == ref { direct = $1 }
+                $2 == ref "^{}" { peeled = $1 }
+                END { if (!direct) exit 1; print (peeled ? peeled : direct) }
+              '
           }
-          test "$(remote_commit)" = "$expected"
+          observed=$(remote_commit)
+          test "$observed" = "$expected"
           gh release create "$TAG" dist/* --repo "$GH_REPO" --verify-tag \
             --draft --notes-from-tag
-          test "$(remote_commit)" = "$expected"
+          observed=$(remote_commit)
+          test "$observed" = "$expected"
