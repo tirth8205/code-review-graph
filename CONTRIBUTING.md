@@ -80,7 +80,7 @@ release, consumer, and workflow changes specific to the fork.
 
 Cut stable fork releases from CI-verified commits on `dc-use` using
 `v<upstream-version>-dc.<N>`, with `N` a positive integer. For example,
-`v2.4.0-dc.1` packages Python version `2.4.0+dc.1`. Run the released-version
+`v2.4.0-dc.2` packages Python version `2.4.0+dc.2`. Run the released-version
 upgrade gate before publishing. The release asset workflow verifies the tag,
 package version and `dc-use` ancestry, then attaches the wheel, source archive
 and checksums.

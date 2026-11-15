@@ -1,5 +1,23 @@
 # Changelog
 
+## [2.4.0-dc.2] - 2026-11-15
+
+### Fixed
+
+- The VS Code extension now ships the SQLite binding for Electron 43
+  (upstream tirth8205/code-review-graph#1219; fork integration #41).
+- The released hook commands written by v2.4.0-dc.1 are recognised again, so
+  `install` upgrades and `uninstall` removes them instead of stacking a second
+  hook; the release test matrix is green (#42).
+- The minimum declared anyio floor is 4.14.2, so the minimum-dependency job no
+  longer installs the vulnerable 4.8.0 (Dependabot critical; the lock already
+  resolves 4.16.0).
+
+### Internal
+
+- Shared vector queries and checkout deletion are covered by a checkout
+  identity proof (#43).
+
 ## [Unreleased]
 
 ### Added
