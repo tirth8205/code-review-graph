@@ -7,7 +7,6 @@ on top of ``--apply`` (epic aihub-3t7yh.3.3).
 
 from __future__ import annotations
 
-import os
 import sqlite3
 import sys
 from contextlib import closing
@@ -20,6 +19,7 @@ else:
     import tomli as tomllib
 
 from . import shared_vectors
+from .constants import env_int
 from .daemon import (
     DaemonConfig,
     WatchRepo,
@@ -130,7 +130,7 @@ def remove_orphan_data_dirs(orphans: list[str]) -> list[str]:
 
 def _prune_shared_vectors(path: Path, *, apply: bool, compact: bool) -> str:
     def limit(name: str, default: int, ceiling: int | None = None) -> int:
-        value = int(os.environ.get(name, str(default)))
+        value = env_int(name, default, strict=True)
         if value < 0 or (ceiling is not None and value > ceiling):
             raise ValueError(f"Invalid retention limit {name}={value}")
         return value

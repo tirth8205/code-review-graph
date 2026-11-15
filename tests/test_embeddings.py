@@ -264,6 +264,10 @@ class TestEmbeddingStore:
             ) as store:
                 assert store.embed_nodes([deleted, kept]) == 2
                 store.remove_node(deleted.qualified_name)
+            monkeypatch.setenv("CRG_RETENTION_DAYS", "invalid")
+            with pytest.raises(ValueError, match="CRG_RETENTION_DAYS"):
+                prune(apply=True)
+            monkeypatch.setenv("CRG_RETENTION_DAYS", "7")
             assert "orphan vectors -0" in prune().summary()
             with sqlite3.connect(db) as conn:
                 conn.execute("UPDATE crg_vector_payloads SET orphaned_at=0 WHERE link_count=0")
