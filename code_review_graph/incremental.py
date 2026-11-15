@@ -2953,8 +2953,18 @@ def find_dependents(
     return DependentList(list(all_dependents))
 
 
+class _SourceObservation(NamedTuple):
+    contents: bytes
+    sha256: str
+
+
+def _observe_source(path: Path) -> _SourceObservation:
+    contents = path.read_bytes()
+    return _SourceObservation(contents, hashlib.sha256(contents).hexdigest())
+
+
 def _parse_single_file(
-    args: tuple[str, str],
+    args: tuple[str, str] | tuple[str, str, _SourceObservation | None],
 ) -> tuple[str, list, list, str | None, str]:
     """Parse one file in a process- or thread-pool worker.
 
@@ -2962,11 +2972,11 @@ def _parse_single_file(
     Must be a module-level function so ``ProcessPoolExecutor`` can
     serialise it across processes.
     """
-    rel_path, repo_root_str = args
+    rel_path, repo_root_str = args[0], args[1]
     abs_path = Path(repo_root_str) / rel_path
     try:
-        raw = abs_path.read_bytes()
-        fhash = hashlib.sha256(raw).hexdigest()
+        observation = args[2] if len(args) == 3 else None
+        raw, fhash = observation or _observe_source(abs_path)
         parser = getattr(_PARSE_WORKER_STATE, "parser", None)
         parser_repo_root = getattr(_PARSE_WORKER_STATE, "repo_root", None)
         if parser is None or parser_repo_root != repo_root_str:
@@ -3042,8 +3052,7 @@ def full_build(
             full_path = repo_root / rel_path
             parsed: tuple[list, list, str] | None = None
             try:
-                source = full_path.read_bytes()
-                fhash = hashlib.sha256(source).hexdigest()
+                source, fhash = _observe_source(full_path)
                 nodes, edges = parser.parse_bytes(full_path, source)
                 _relink_edges(edges, repo_root, followed_dirs)
                 parsed = (nodes, edges, fhash)
@@ -3365,6 +3374,19 @@ def incremental_update(
             "freshness_advanced": False,
         }
 
+    # Retain the source from a single-file event through dependency discovery
+    # and parsing. Bulk inventories keep hashes only to bound memory.
+    event_path = changed_files[0] if not reconcile_stale and len(changed_files) == 1 else None
+    event_source: _SourceObservation | None = None
+
+    def observe(rel_path: str) -> _SourceObservation:
+        nonlocal event_source
+        if rel_path == event_path:
+            if event_source is None:
+                event_source = _observe_source(repo_root / rel_path)
+            return event_source
+        return _observe_source(repo_root / rel_path)
+
     # Find dependent files (files that import from changed files)
     dependents_pending = _load_dependents_pending(store)
     dependent_files: set[str] = set(dependents_pending)
@@ -3382,7 +3404,7 @@ def incremental_update(
             try:
                 current_hash = current_hashes.get(normalize_file_path(rel_path))
                 if current_hash is None:
-                    current_hash = hashlib.sha256((repo_root / rel_path).read_bytes()).hexdigest()
+                    current_hash = observe(rel_path).sha256
                     current_hashes[normalize_file_path(rel_path)] = current_hash
                 if existing[0].file_hash == current_hash:
                     continue
@@ -3446,8 +3468,7 @@ def incremental_update(
         fhash = current_hashes.get(normalized_path)
         if fhash is None:
             try:
-                raw = abs_path.read_bytes()
-                fhash = hashlib.sha256(raw).hexdigest()
+                fhash = observe(rel_path).sha256
             except (OSError, PermissionError):
                 fhash = None
         try:
@@ -3528,8 +3549,7 @@ def incremental_update(
         for rel_path in to_parse:
             abs_path = repo_root / rel_path
             try:
-                source = abs_path.read_bytes()
-                fhash = hashlib.sha256(source).hexdigest()
+                source, fhash = observe(rel_path)
                 nodes, edges = parser.parse_bytes(abs_path, source)
             except (OSError, PermissionError) as e:
                 errors.append({"file": rel_path, "error": str(e)})
@@ -3551,7 +3571,10 @@ def incremental_update(
     else:
         # See full-build comment above for executor kind rationale.
         _prewarm_parser_probes(parser, to_parse)
-        args_list = [(rel_path, str(repo_root)) for rel_path in to_parse]
+        args_list = [
+            (rel_path, str(repo_root), event_source if rel_path == event_path else None)
+            for rel_path in to_parse
+        ]
         with _make_executor(_MAX_PARSE_WORKERS) as executor:
             for rel_path, nodes, edges, error, fhash in executor.map(
                 _parse_single_file,
