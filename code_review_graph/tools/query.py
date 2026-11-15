@@ -56,6 +56,7 @@ from ._common import (
     _get_store_for_read,
     _resolve_graph_file_paths,
     _resolve_graph_file_paths_with_unmatched,
+    _select_generation,
     _shown_of,
     _unmatched_file_warning,
     _validate_positive_int,
@@ -1076,13 +1077,8 @@ def query_graph(
         return not_built
     assert store is not None and root is not None
     stack = ExitStack()
-    stack.callback(store.close)
     try:
-        if store.checkout is not None:
-            stack.enter_context(store.read_snapshot(strict=True))
-        ref = generation_ref if generation_ref is not None else store.historical_ref_for_checkout()
-        if ref is not None:
-            store = stack.enter_context(store.open_generation(ref))
+        store = _select_generation(stack, store, ref=generation_ref)
         minimal = detail_level == "minimal"
         if pattern == "path_to" and to:
             return _query_route(store, root, target, to, minimal)
@@ -2041,7 +2037,9 @@ def semantic_search_nodes(
     if not_built is not None:
         return not_built
     assert store is not None and root is not None
+    stack = ExitStack()
     try:
+        store = _select_generation(stack, store, projections=True)
         mode_out: list[str] = []
         ranked = hybrid_search(
             store, query, kind=kind, limit=window, context_files=context_files,
@@ -2139,7 +2137,7 @@ def semantic_search_nodes(
         )
         return result
     finally:
-        store.close()
+        stack.close()
 
 
 # ---------------------------------------------------------------------------

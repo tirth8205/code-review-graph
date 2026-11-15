@@ -42,10 +42,12 @@ without needing to rescan source files for the input manifest.
 `query --generation-ref refs/heads/main` and the corresponding MCP parameter
 read the published structural generation for the requested checkout. A
 structural query also selects the current ref's generation if the native
-tables were last built on a different ref. The
-query assigns local row IDs; qualified names are the stable symbols. The
-current native graph and its derived FTS, flow, community and vector views
-still use the checkout namespace.
+tables were last built on a different ref. The VS Code reader follows the
+same ref and checkout binding. Historical search rebuilds its FTS index from
+published nodes and reads the published vector links. Historical flows
+preserve their path through qualified symbols and remap their node IDs to
+the materialized graph. The native graph remains the fast path for its
+current ref; communities still read that native index.
 
 Shared builds reuse Python AST evidence by source SHA-256 and extractor
 profile. This evidence describes local function bindings and unreachable

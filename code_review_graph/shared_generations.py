@@ -17,7 +17,7 @@ from .errors import GraphStoreError
 _NODE_COLUMNS = (
     "kind", "name", "qualified_name", "file_path", "line_start", "line_end",
     "language", "parent_name", "params", "return_type", "is_test", "file_hash",
-    "extra", "modifiers", "symbol", "docstring", "name_tokens",
+    "extra", "modifiers", "symbol", "docstring", "name_tokens", "signature",
 )
 _EDGE_COLUMNS = (
     "kind", "source_qualified", "target_qualified", "file_path", "line",
@@ -58,7 +58,9 @@ def git_ref(branch: str, head: str) -> str:
 def _path_fields(kind: str, row_kind: str) -> tuple[int, ...]:
     if kind == "edges":
         return (1, 2, 3)
-    return (1, 2, 3, _NODE_COLUMNS.index("symbol")) if row_kind == "File" else (2, 3)
+    if row_kind == "File":
+        return (1, 2, 3, _NODE_COLUMNS.index("symbol"), _NODE_COLUMNS.index("signature"))
+    return (2, 3)
 
 
 def _payloads(conn: Connection, root: Path) -> tuple[Counter[bytes], dict[bytes, str]]:
@@ -144,10 +146,113 @@ def read(
         for raw, count in rows:
             kind, data = json.loads(raw)
             for index in _path_fields(kind, data[0]):
-                if isinstance(data[index], list):
+                if index < len(data) and isinstance(data[index], list):
                     data[index] = prefix + data[index][0]
             row = dict(zip(_NODE_COLUMNS if kind == "nodes" else _EDGE_COLUMNS, data))
             for _ in range(count):
                 yield kind, row.copy()
 
     return binding[1], binding[2], materialize()
+
+
+def publish_projections(conn: Connection, root: Path, ref: str) -> None:
+    """Record the native search and flow state for the just-published binding."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS crg_generation_projections (
+            checkout BLOB NOT NULL, ref TEXT NOT NULL, data TEXT NOT NULL,
+            PRIMARY KEY (checkout, ref)
+        ) WITHOUT ROWID
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS crg_generation_projection_vectors (
+            checkout BLOB NOT NULL, ref TEXT NOT NULL, qualified_name TEXT NOT NULL,
+            provider TEXT NOT NULL, text_hash TEXT NOT NULL, payload_id INTEGER NOT NULL,
+            PRIMARY KEY (checkout, ref, qualified_name)
+        ) WITHOUT ROWID
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS crg_generation_vector_payload "
+        "ON crg_generation_projection_vectors(payload_id)",
+    )
+    checkout = _checkout_key(root)
+    conn.execute(
+        "DELETE FROM crg_generation_projection_vectors WHERE checkout=? AND ref=?",
+        (checkout, ref),
+    )
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(embeddings)")}
+    if "payload_id" in columns:
+        conn.execute(
+            "INSERT INTO crg_generation_projection_vectors "
+            "SELECT ?, ?, e.qualified_name, e.provider, e.text_hash, e.payload_id "
+            "FROM embeddings e JOIN nodes n USING (qualified_name)",
+            (checkout, ref),
+        )
+    names = dict(conn.execute("SELECT id, qualified_name FROM nodes"))
+    flows = []
+    for row in conn.execute(
+        "SELECT id, name, entry_point_id, depth, node_count, file_count, "
+        "criticality, path_json, created_at, updated_at FROM flows ORDER BY id",
+    ):
+        flow = list(row)
+        path = json.loads(flow[7])
+        if flow[2] not in names or any(node not in names for node in path):
+            raise GraphStoreError(f"Flow {flow[0]} references missing graph nodes")
+        flow[2] = names[flow[2]]
+        flow[7] = [names[node] for node in path]
+        flows.append(flow)
+    fts = conn.execute(
+        "SELECT value FROM metadata WHERE key='postprocess_level'",
+    ).fetchone()
+    conn.execute(
+        "INSERT INTO crg_generation_projections VALUES (?, ?, ?) "
+        "ON CONFLICT(checkout, ref) DO UPDATE SET data=excluded.data",
+        (_checkout_key(root), ref, json.dumps(
+            {"flows": flows, "fts": bool(fts and fts[0] in ("full", "minimal"))},
+            separators=(",", ":"),
+        )),
+    )
+
+
+def load_projections(
+    source: Connection, destination: Connection, root: Path, ref: str,
+) -> bool:
+    """Restore stored flows with IDs remapped to the materialized nodes."""
+    table = source.execute(
+        "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='crg_generation_projections'",
+    ).fetchone()
+    row = table and source.execute(
+        "SELECT data FROM crg_generation_projections WHERE checkout=? AND ref=?",
+        (_checkout_key(root), ref),
+    ).fetchone()
+    if row is None:
+        raise GraphStoreError(f"No published search and flow state for {ref}; build that ref")
+    state = json.loads(row[0])
+    ids = dict(destination.execute("SELECT qualified_name, id FROM nodes"))
+    for flow in state["flows"]:
+        path = [ids[name] for name in flow[7]]
+        flow[2], flow[7] = ids[flow[2]], json.dumps(path)
+        destination.execute("INSERT INTO flows VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", flow)
+        destination.executemany(
+            "INSERT OR IGNORE INTO flow_memberships VALUES (?, ?, ?)",
+            ((flow[0], node, position) for position, node in enumerate(path)),
+        )
+    if source.execute(
+        "SELECT 1 FROM sqlite_schema WHERE name='crg_generation_projection_vectors'",
+    ).fetchone():
+        vectors = source.execute(
+            "SELECT e.qualified_name, p.vector, e.text_hash, e.provider "
+            "FROM crg_generation_projection_vectors e "
+            "JOIN crg_vector_payloads p ON p.id=e.payload_id "
+            "WHERE e.checkout=? AND e.ref=?",
+            (_checkout_key(root), ref),
+        ) if source.execute(
+            "SELECT 1 FROM sqlite_schema WHERE name='crg_vector_payloads'",
+        ).fetchone() else ()
+        destination.execute("""
+            CREATE TABLE embeddings (
+                qualified_name TEXT PRIMARY KEY, vector BLOB NOT NULL,
+                text_hash TEXT NOT NULL, provider TEXT NOT NULL
+            )
+        """)
+        destination.executemany("INSERT INTO embeddings VALUES (?, ?, ?, ?)", vectors)
+    return bool(state["fts"])

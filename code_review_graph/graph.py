@@ -2148,16 +2148,18 @@ class GraphStore:
 
     def publish_generation(self, branch: str, head: str) -> str:
         """Publish immutable node and edge content inside a shared refresh."""
-        from .shared_generations import git_ref, publish
+        from .shared_generations import git_ref, publish, publish_projections
 
         if self.checkout is None or not isinstance(self._conn, CheckoutConnection):
             raise GraphStoreError("Generation publication requires a shared checkout")
         if not self._conn.refresh_active:
             raise GraphStoreError("Generation publication requires an active refresh")
-        return publish(
-            self._conn, self.checkout, git_ref(branch, head), head,
-            self.get_metadata("last_updated") or "",
+        ref = git_ref(branch, head)
+        digest = publish(
+            self._conn, self.checkout, ref, head, self.get_metadata("last_updated") or "",
         )
+        publish_projections(self._conn, self.checkout, ref)
+        return digest
 
     def historical_ref_for_checkout(self) -> str | None:
         """Return the live Git ref when the native view was built on another ref."""
@@ -2173,13 +2175,13 @@ class GraphStore:
         return requested if requested != stored else None
 
     @contextmanager
-    def open_generation(self, ref: str) -> Iterator[GraphStore]:
+    def open_generation(self, ref: str, *, projections: bool = False) -> Iterator[GraphStore]:
         """Open the published nodes and edges for a ref as a native query store.
 
-        IDs are local to this materialization. Search, flow and embedding
-        projections are not included in this structural snapshot.
+        Node IDs are local to this materialization. Optionally rebuild
+        the search index and load the published flow projection.
         """
-        from .shared_generations import read
+        from .shared_generations import load_projections, read
 
         if self.checkout is None:
             raise GraphStoreError("Generation lookup requires a shared checkout")
@@ -2196,7 +2198,12 @@ class GraphStore:
                     f"INSERT INTO {kind} ({fields}, updated_at) VALUES ({marks}, 0)",
                     tuple(row.values()),
                 )
+            fts = projections and load_projections(self._conn, snapshot._conn, self.checkout, ref)
             snapshot._conn.commit()
+            if fts:
+                from .search import rebuild_fts_index
+
+                rebuild_fts_index(snapshot)
             yield snapshot
 
     def record_graph_inputs(self, digest: str, paths: int) -> None:

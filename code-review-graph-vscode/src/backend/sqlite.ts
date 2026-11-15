@@ -9,7 +9,8 @@
  */
 
 import { createHash } from 'node:crypto';
-import { realpathSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import type BetterSqlite3 from 'better-sqlite3';
 
 type DatabaseType = BetterSqlite3.Database;
@@ -159,12 +160,105 @@ interface MetadataRow {
 const MAX_OPEN_RETRIES = 3;
 const RETRY_BACKOFF_MS = 100;
 
+// Keep the structural payload order aligned with the Python generation format.
+const GENERATION_COLUMNS = {
+  nodes: ['kind', 'name', 'qualified_name', 'file_path', 'line_start', 'line_end',
+    'language', 'parent_name', 'params', 'return_type', 'is_test', 'file_hash',
+    'extra', 'modifiers', 'symbol', 'docstring', 'name_tokens', 'signature'],
+  edges: ['kind', 'source_qualified', 'target_qualified', 'file_path', 'line',
+    'extra', 'confidence', 'confidence_tier', 'target_resolution'],
+} as const;
+
+export function gitHeadFile(root: string): string | undefined {
+  const dotGit = join(root, '.git');
+  const direct = join(dotGit, 'HEAD');
+  if (existsSync(direct)) return direct;
+  if (!existsSync(dotGit)) return undefined;
+  const link = readFileSync(dotGit, 'utf8').trim();
+  if (!link.startsWith('gitdir: ')) throw new Error(`Invalid Git directory link: ${dotGit}`);
+  return join(resolve(root, link.slice(8)), 'HEAD');
+}
+
 export class SqliteReader {
   private db: DatabaseType | null = null;
   private readonly prefix: string;
+  private readonly checkoutKey?: Buffer;
+  private readonly headFile?: string;
+  private readonly projectedRoot?: string;
+  private selectedGeneration?: number;
+  private selectedBinding?: string;
+  private generationSelected = false;
 
   private table(name: 'nodes' | 'edges' | 'metadata' | 'embeddings'): string {
-    return this.prefix + name;
+    this.selectCheckoutGeneration();
+    return (this.generationSelected ? 'crg_selected_' : this.prefix) + name;
+  }
+
+  private selectCheckoutGeneration(): void {
+    if (!this.db || !this.headFile || !this.checkoutKey) return;
+    const db = this.db;
+    const head = readFileSync(this.headFile, 'utf8').trim();
+    const ref = head.startsWith('ref: ') ? head.slice(5) : `detached:${head}`;
+    const meta = db.prepare(`SELECT key, value FROM ${this.prefix}metadata
+      WHERE key IN ('git_branch', 'git_head_sha')`).all() as { key: string; value: string }[];
+    const native = Object.fromEntries(meta.map(({ key, value }) => [key, value]));
+    const nativeRef = native.git_branch && native.git_branch !== 'HEAD'
+      ? `refs/heads/${native.git_branch}`
+      : native.git_head_sha ? `detached:${native.git_head_sha}` : 'unborn';
+    if (ref === nativeRef || (nativeRef === 'unborn' && !native.git_head_sha)) {
+      this.generationSelected = false;
+      return;
+    }
+
+    const hasBindings = db.prepare(
+      "SELECT 1 FROM sqlite_schema WHERE name='crg_generation_bindings'",
+    ).get();
+    const binding = hasBindings ? db.prepare(
+      'SELECT generation_id, head, built_at FROM crg_generation_bindings WHERE checkout=? AND ref=?',
+    ).get(this.checkoutKey, ref) as
+      { generation_id: number; head: string; built_at: string } | undefined : undefined;
+    if (!binding) {
+      throw new Error(`No published graph generation for ${ref}; build this checkout`);
+    }
+    const bindingKey = JSON.stringify([ref, binding.head, binding.built_at]);
+    if (binding.generation_id !== this.selectedGeneration || bindingKey !== this.selectedBinding) {
+      db.transaction(() => {
+        for (const [kind, columns] of Object.entries(GENERATION_COLUMNS)) {
+          const name = `crg_selected_${kind}`;
+          db.exec(`CREATE TEMP TABLE IF NOT EXISTS ${name} (id INTEGER PRIMARY KEY, ${columns.join(', ')});
+            DELETE FROM ${name}`);
+          const values = columns.map((_, index) => {
+            const jsonPath = `$[1][${index}]`;
+            return `CASE json_type(data, '${jsonPath}') WHEN 'array'
+              THEN @root || '/' || json_extract(data, '${jsonPath}[0]')
+              ELSE json_extract(data, '${jsonPath}') END`;
+          });
+          db.prepare(`WITH RECURSIVE rows(data, copies) AS (
+            SELECT p.data, m.multiplicity FROM crg_generation_members m
+            JOIN crg_generation_payloads p ON p.id=m.payload_id
+            WHERE m.generation_id=@generation AND json_extract(p.data, '$[0]')=@kind
+            UNION ALL SELECT data, copies-1 FROM rows WHERE copies>1
+          ) INSERT INTO ${name} (${columns.join(', ')}) SELECT ${values.join(', ')} FROM rows`)
+            .run({ root: this.projectedRoot, generation: binding.generation_id, kind });
+        }
+        db.exec(`CREATE TEMP TABLE IF NOT EXISTS crg_selected_metadata (key TEXT PRIMARY KEY, value TEXT);
+          DELETE FROM crg_selected_metadata;
+          CREATE TEMP TABLE IF NOT EXISTS crg_selected_embeddings (qualified_name TEXT);
+          DELETE FROM crg_selected_embeddings`);
+        const insertMeta = db.prepare('INSERT INTO crg_selected_metadata VALUES (?, ?)');
+        insertMeta.run('git_head_sha', binding.head);
+        insertMeta.run('git_branch', ref.startsWith('refs/heads/') ? ref.slice(11) : 'HEAD');
+        insertMeta.run('last_updated', binding.built_at);
+        if (db.prepare("SELECT 1 FROM sqlite_schema WHERE name='crg_generation_projection_vectors'").get()) {
+          db.prepare(`INSERT INTO crg_selected_embeddings
+            SELECT qualified_name FROM crg_generation_projection_vectors WHERE checkout=? AND ref=?`)
+            .run(this.checkoutKey, ref);
+        }
+      })();
+      this.selectedGeneration = binding.generation_id;
+      this.selectedBinding = bindingKey;
+    }
+    this.generationSelected = true;
   }
 
   /**
@@ -191,7 +285,10 @@ export class SqliteReader {
   constructor(dbPath: string, checkout?: string) {
     const root = checkout ? realpathSync.native(checkout) : undefined;
     const identity = process.platform === 'win32' ? root?.toLowerCase() : root;
-    this.prefix = identity ? 'crg_' + createHash('sha256').update(identity).digest('hex') + '_' : '';
+    this.checkoutKey = identity ? createHash('sha256').update(identity).digest() : undefined;
+    this.prefix = this.checkoutKey ? 'crg_' + this.checkoutKey.toString('hex') + '_' : '';
+    this.headFile = root ? gitHeadFile(root) : undefined;
+    this.projectedRoot = root?.replace(/\\/g, '/').replace(/\/$/, '');
     // The Python side sets WAL mode. A read-only open cannot change the
     // journal mode, and trying fails with SQLITE_READONLY.
     this.db = new Database(dbPath, { readonly: true });
@@ -217,8 +314,10 @@ export class SqliteReader {
     if (!this.db) { return 'Database is not open'; }
     try {
       // Check that required tables exist
+      this.selectCheckoutGeneration();
       const tables = this.db
-        .prepare("SELECT name FROM sqlite_master WHERE type='table'")
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' "
+          + "UNION ALL SELECT name FROM sqlite_temp_master WHERE type='table'")
         .all() as Array<{ name: string }>;
       const tableNames = new Set(tables.map((t) => t.name));
 
@@ -261,9 +360,10 @@ export class SqliteReader {
     try {
       const row = this.db
         .prepare(
-          "SELECT name FROM sqlite_master WHERE type='table' AND name=?"
+          "SELECT name FROM sqlite_master WHERE type='table' AND name=? "
+          + "UNION ALL SELECT name FROM sqlite_temp_master WHERE type='table' AND name=?"
         )
-        .get(this.table('nodes')) as { name: string } | undefined;
+        .get(this.table('nodes'), this.table('nodes')) as { name: string } | undefined;
       return row !== undefined;
     } catch {
       return false;

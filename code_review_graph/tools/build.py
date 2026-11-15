@@ -683,12 +683,13 @@ def build_or_update_graph(
         before = None
         request: _RefreshInputs | None = None
         request_profile: tuple[Any, ...] = ()
-        if (wait_for_lock or db_path == shared_database()) and not (
-            embedding_provider or embedding_model
-        ):
+        explicit_vectors = bool(embedding_provider or embedding_model)
+        if db_path == shared_database() or (wait_for_lock and not explicit_vectors):
             request_profile = _refresh_profile(
                 full_rebuild, base, postprocess, recurse_submodules, enrich, follow_symlinks,
             )
+            if explicit_vectors:
+                request_profile += ((embedding_provider, embedding_model),)
             before = _previous_refresh(db_path.resolve(), root) if waiting else None
             request = _refresh_request(root, recurse_submodules, follow_symlinks, request_profile)
         if not lock.acquire(blocking=wait_for_lock):
@@ -705,7 +706,7 @@ def build_or_update_graph(
             can_join = (waiting and completed != before) or (
                 store.checkout is not None and not full_rebuild
             )
-            if can_join and request is not None and completed:
+            if can_join and not explicit_vectors and request is not None and completed:
                 prior = json.loads(completed)
                 if (
                     prior["request"] == request.request
@@ -1104,6 +1105,9 @@ def run_postprocess(
         _prepare_db_path(root, db_path)
         store, _root = _get_store(str(root), db_path=db_path)
         with store.refresh():
+            anchor = _git_branch_info(root) if store.checkout is not None else None
+            if anchor is not None and store.historical_ref_for_checkout() is not None:
+                raise RuntimeError("Update this checkout before post-processing")
             store.invalidate_refresh()
             # Read before anything runs: the stages below rebuild derived data
             # from whatever nodes are stored, and none of them can put back a file
@@ -1234,8 +1238,12 @@ def run_postprocess(
                 result["summary"] = "Selected post-processing steps complete."
             if warnings:
                 result["warnings"] = warnings
-            if store.checkout is not None and result["status"] == "partial":
-                raise RuntimeError(result["summary"])
+            if anchor is not None:
+                if result["status"] == "partial":
+                    raise RuntimeError(result["summary"])
+                if _git_branch_info(root) != anchor:
+                    raise RuntimeError("Git reference changed during post-processing")
+                store.publish_generation(*anchor)
             return result
     finally:
         try:

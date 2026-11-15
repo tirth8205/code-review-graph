@@ -2,7 +2,7 @@ import * as vscode from "vscode";
 import * as path from "node:path";
 import * as fs from "node:fs";
 
-import { SqliteReader } from "./backend/sqlite";
+import { gitHeadFile, SqliteReader } from "./backend/sqlite";
 import type { GraphNode } from "./backend/sqlite";
 import { CliWrapper } from "./backend/cli";
 import {
@@ -812,6 +812,15 @@ function watchGraphDb(context: vscode.ExtensionContext): void {
 
   const dbPathRef = { current: "" };
   const workspaceRoot = getWorkspaceRoot();
+  const headFile = shared && workspaceRoot ? gitHeadFile(workspaceRoot) : undefined;
+  if (headFile) {
+    const gitHeadWatcher = vscode.workspace.createFileSystemWatcher(
+      new vscode.RelativePattern(path.dirname(headFile), path.basename(headFile)),
+    );
+    const refresh = () => vscode.commands.executeCommand("codeReviewGraph.codeGraph.refresh");
+    context.subscriptions.push(gitHeadWatcher, gitHeadWatcher.onDidChange(refresh),
+      gitHeadWatcher.onDidCreate(refresh));
+  }
   if (workspaceRoot) {
     const dbPath = findGraphDb(workspaceRoot);
     if (dbPath) {

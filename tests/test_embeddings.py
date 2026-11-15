@@ -1403,6 +1403,65 @@ def openai_loopback_server():
         thread.join(timeout=5)
 
 
+def test_shared_hybrid_search_uses_published_branch_vectors(tmp_path, openai_loopback_server):
+    base_url, requests = openai_loopback_server
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    home = tmp_path / "home"
+    env = {
+        **os.environ,
+        "CRG_HOME": str(home),
+        "CRG_SHARED_DB": str(tmp_path / "shared.db"),
+        "CRG_OPENAI_API_KEY": "local-test",
+        "CRG_OPENAI_BASE_URL": base_url,
+        "CRG_OPENAI_MODEL": "text-embedding-3-small",
+        "CRG_RETENTION_DAYS": "0",
+    }
+
+    def git(*args):
+        subprocess.run(
+            ["git", "-C", str(repo), "-c", "user.name=CRG",
+             "-c", "user.email=crg@example.invalid", "-c", "commit.gpgsign=false", *args],
+            check=True, capture_output=True, timeout=15,
+        )
+
+    def run(*args, scoped=True):
+        return subprocess.check_output(
+            [sys.executable, "-m", "code_review_graph", *args,
+             *(("--repo", str(repo)) if scoped else ())],
+            env=env, text=True, timeout=30,
+        )
+
+    source = repo / "app.py"
+    git("init", "-qb", "main")
+    source.write_text("def main_invoice(): return 1\n", encoding="utf-8")
+    git("add", "app.py")
+    git("commit", "-qm", "main")
+    run("build")
+    run("embed", "--provider", "openai", "--model", "text-embedding-3-small")
+    before = json.loads(run("search", "main_invoice"))
+    assert before["search_mode"] == "hybrid"
+    assert before["results"][0]["name"] == "main_invoice"
+
+    git("checkout", "-qb", "feature")
+    source.write_text("def feature_only(): return 2\n", encoding="utf-8")
+    git("add", "app.py")
+    git("commit", "-qm", "feature")
+    run("build")
+    run("embed", "--provider", "openai", "--model", "text-embedding-3-small")
+    with sqlite3.connect(tmp_path / "shared.db") as db:
+        assert db.execute(
+            "SELECT p.link_count FROM crg_vector_payloads p "
+            "JOIN crg_generation_projection_vectors g ON g.payload_id=p.id "
+            "WHERE g.ref='refs/heads/main'",
+        ).fetchall() == [(0,)]
+    run("prune", "--apply", scoped=False)
+    git("checkout", "-q", "main")
+    before_requests = len(requests)
+    assert json.loads(run("search", "main_invoice")) == before
+    assert [request["input"] for request in requests[before_requests:]] == [["main_invoice"]]
+
+
 class TestIsLocalhostUrl:
     """Ensure localhost detection is robust against subdomain tricks."""
 

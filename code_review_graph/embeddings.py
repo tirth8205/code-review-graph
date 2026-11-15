@@ -1216,8 +1216,9 @@ class EmbeddingStore:
         self.db_path = Path(db_path)
         self._checkout = graph_store.checkout if graph_store is not None else None
         self._shared = self._checkout is not None
+        self._borrowed = self._shared or (graph_store is not None and str(db_path) == ":memory:")
         self._conn = (
-            graph_store._conn if self._shared and graph_store is not None
+            graph_store._conn if self._borrowed and graph_store is not None
             else sqlite3.connect(
                 str(self.db_path), timeout=30, check_same_thread=False, isolation_level=None,
             )
@@ -1255,7 +1256,7 @@ class EmbeddingStore:
         self.close()
 
     def close(self) -> None:
-        if self._shared:
+        if self._borrowed:
             return
         try:
             self._conn.execute("PRAGMA shrink_memory")

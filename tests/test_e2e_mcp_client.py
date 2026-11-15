@@ -457,6 +457,12 @@ def test_shared_cli_reuses_python_facts_but_resolves_imports_locally(tmp_path):
 @pytest.mark.e2e
 def test_shared_cli_interns_equivalent_input_manifests_across_worktrees(tmp_path):
     repo = _make_fixture_repo(tmp_path)
+    source = repo / "pkg" / "service.py"
+    source.write_text(SERVICE_PY.replace(
+        '    return {"total":', '    """Reconcile aerospace invoices."""\n    return {"total":',
+    ), encoding="utf-8")
+    _git(repo, "add", "pkg/service.py")
+    _git(repo, "commit", "-qm", "Document the main entry point")
     sibling = tmp_path / "sibling"
     _git(repo, "worktree", "add", "-q", "-b", "different-branch", str(sibling))
     database = tmp_path / "shared.db"
@@ -491,6 +497,27 @@ def test_shared_cli_interns_equivalent_input_manifests_across_worktrees(tmp_path
     checks = (("file_summary", "pkg/service.py"), ("imports_of", "pkg/service.py"),
               ("callers_of", "compute_total"))
     before = {args: query(repo, *args) for args in checks}
+
+    def run_tool(*args, environment=env):
+        return json.loads(subprocess.check_output(
+            [sys.executable, "-m", "code_review_graph", *args, "--repo", str(repo)],
+            env=environment, text=True, timeout=30,
+        ))
+
+    search = run_tool("search", "aerospace")
+    assert search["results"] and search["search_mode"] == "fts"
+    assert search["results"][0]["name"] == "build_invoice"
+    flows = run_tool("flows")["flows"]
+    assert flows
+    flow_id = str(flows[0]["id"])
+
+    def steps(environment=env):
+        flow = run_tool("flow", "--id", flow_id, environment=environment)["flow"]
+        return [(step["qualified_name"], step["file"], step["line_start"])
+                for step in flow["steps"]]
+
+    main_steps = steps()
+    assert main_steps
     for args, expected in before.items():
         assert query(repo, *args, "--generation-ref", "refs/heads/main") == expected
 
@@ -508,6 +535,11 @@ def test_shared_cli_interns_equivalent_input_manifests_across_worktrees(tmp_path
             repo, *args, environment=clean,
         )
     _git(repo, "checkout", "-q", "main")
+    subprocess.run(build, env=clean, check=True, capture_output=True, timeout=30)
+    historical_search = run_tool("search", "aerospace")
+    assert historical_search == search == run_tool("search", "aerospace", environment=clean)
+    assert steps() == main_steps == steps(clean)
+    assert not run_tool("search", "only_on_feature")["results"]
     for args, expected in before.items():
         assert query(repo, *args, "--generation-ref", "refs/heads/main") == expected
         assert query(repo, *args) == expected

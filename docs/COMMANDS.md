@@ -397,8 +397,10 @@ shared database.
 Use `code-review-graph query file_summary path.py --generation-ref refs/heads/main`
 to read the last published structural view of that ref for the selected
 checkout. The MCP `query_graph_tool` accepts the same `generation_ref`. This
-view includes symbols and relations; search, flows and embeddings continue
-to use the active checkout index.
+view includes symbols and relations. Search and flow commands automatically
+select the current Git ref's published view for this checkout, as does the
+VS Code extension. If the ref has no published projection, build that ref
+first.
 
 The watcher uses the same completion record as CLI and MCP refreshes.
 A checkout, input snapshot and indexing profile must match before a

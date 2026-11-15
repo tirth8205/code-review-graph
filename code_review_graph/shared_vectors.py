@@ -176,9 +176,17 @@ def prune(
     conn: sqlite3.Connection, *, days: int, percent: int, max_bytes: int, apply: bool,
 ) -> tuple[int, int, int]:
     """Report (objects, bytes, budget) for unreachable vector payloads."""
+    retained = "link_count>0"
+    if conn.execute(
+        "SELECT 1 FROM sqlite_schema WHERE name='crg_generation_projection_vectors'",
+    ).fetchone():
+        retained += (
+            " OR EXISTS (SELECT 1 FROM crg_generation_projection_vectors g "
+            "WHERE g.payload_id=crg_vector_payloads.id)"
+        )
     active, orphan = conn.execute(
-        "SELECT COALESCE(SUM(CASE WHEN link_count>0 THEN length(vector) END),0), "
-        "COALESCE(SUM(CASE WHEN link_count=0 THEN length(vector) END),0) "
+        f"SELECT COALESCE(SUM(CASE WHEN {retained} THEN length(vector) END),0), "
+        f"COALESCE(SUM(CASE WHEN NOT ({retained}) THEN length(vector) END),0) "
         "FROM crg_vector_payloads",
     ).fetchone()
     budget = min(max_bytes, active * percent // 100) if days else 0
@@ -187,7 +195,7 @@ def prune(
     reclaimed = 0
     for payload, size, unlinked_at in conn.execute(
         "SELECT id, length(vector), orphaned_at FROM crg_vector_payloads "
-        "WHERE link_count=0 ORDER BY orphaned_at, id",
+        f"WHERE NOT ({retained}) ORDER BY orphaned_at, id",
     ):
         if days and unlinked_at is not None and unlinked_at > cutoff and orphan <= budget:
             break

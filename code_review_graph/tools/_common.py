@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import subprocess
+from contextlib import ExitStack
 from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
@@ -211,6 +212,19 @@ def _get_store_for_read(
         raise
     store.close()
     return None, None, _not_built_response()
+
+
+def _select_generation(
+    stack: ExitStack, store: GraphStore, *, ref: str | None = None, projections: bool = False,
+) -> GraphStore:
+    stack.callback(store.close)
+    if store.checkout is not None:
+        stack.enter_context(store.read_snapshot(strict=True))
+        if ref is None:
+            ref = store.historical_ref_for_checkout()
+    if ref is not None:
+        return stack.enter_context(store.open_generation(ref, projections=projections))
+    return store
 
 
 # Common JS/TS builtin method names filtered from callers_of results.
