@@ -3,7 +3,7 @@
 # declared lower bounds work, instead of hoping older releases still do.
 mcp==1.29.0
 fastmcp==3.2.4
-anyio==4.8.0
+anyio==4.14.2
 tree-sitter==0.26.0
 tree-sitter-language-pack==0.13.0
 pyyaml==6.0.2

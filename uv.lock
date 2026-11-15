@@ -679,7 +679,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "anyio", specifier = ">=4.8.0,<5" },
+    { name = "anyio", specifier = ">=4.14.2,<5" },
     { name = "code-review-graph", extras = ["communities"], marker = "extra == 'all'" },
     { name = "code-review-graph", extras = ["embeddings"], marker = "extra == 'all'" },
     { name = "code-review-graph", extras = ["enrichment"], marker = "extra == 'all'" },
