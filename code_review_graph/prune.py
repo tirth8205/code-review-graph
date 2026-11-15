@@ -18,7 +18,7 @@ if sys.version_info >= (3, 11):
 else:
     import tomli as tomllib
 
-from . import shared_vectors
+from . import shared_generations, shared_vectors
 from .constants import env_int
 from .daemon import (
     DaemonConfig,
@@ -128,7 +128,7 @@ def remove_orphan_data_dirs(orphans: list[str]) -> list[str]:
     return removed
 
 
-def _prune_shared_vectors(path: Path, *, apply: bool, compact: bool) -> str:
+def _prune_shared_artifacts(path: Path, *, apply: bool, compact: bool) -> str:
     def limit(name: str, default: int, ceiling: int | None = None) -> int:
         value = env_int(name, default, strict=True)
         if value < 0 or (ceiling is not None and value > ceiling):
@@ -152,6 +152,9 @@ def _prune_shared_vectors(path: Path, *, apply: bool, compact: bool) -> str:
                 table = conn.execute(
                     "SELECT 1 FROM sqlite_schema WHERE name='crg_vector_payloads'"
                 ).fetchone()
+                generation_count, generation_bytes, generation_budget = shared_generations.prune(
+                    conn, days=days, percent=percent, max_bytes=mib * 1024 ** 2, apply=apply,
+                )
                 count, reclaimed, budget = (
                     shared_vectors.prune(
                         conn, days=days, percent=percent, max_bytes=mib * 1024 ** 2, apply=apply,
@@ -164,7 +167,9 @@ def _prune_shared_vectors(path: Path, *, apply: bool, compact: bool) -> str:
             lock.release()
     return (
         f", vector retention {days} days/{percent}%/{mib} MiB, "
-        f"effective budget {budget} bytes, orphan vectors -{count} ({reclaimed} bytes)"
+        f"effective budget {budget} bytes, orphan vectors -{count} ({reclaimed} bytes), "
+        f"generation budget {generation_budget} bytes, "
+        f"orphan generations -{generation_count} ({generation_bytes} payload bytes)"
     )
 
 
@@ -183,7 +188,7 @@ def prune(
     if compact and (not apply or shared is None or not shared.is_file()):
         raise ValueError("--compact requires --apply and an existing CRG_SHARED_DB")
     if shared is not None and shared.is_file():
-        report.vector_retention = _prune_shared_vectors(shared, apply=apply, compact=compact)
+        report.vector_retention = _prune_shared_artifacts(shared, apply=apply, compact=compact)
     report.removed_registry = [
         str(entry.get("path", ""))
         for entry in registry.list_repos()

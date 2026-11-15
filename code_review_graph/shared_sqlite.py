@@ -7,17 +7,17 @@ import os
 import re
 import sqlite3
 from collections.abc import Iterable, Iterator
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from . import shared_vectors
+from . import shared_generations, shared_vectors
 from .errors import GraphStoreError
 from .migrations import RETIRED_TABLES
 
 SHARED_DB_ENV = "CRG_SHARED_DB"
-_SHARED_VERSION = 2
+_SHARED_VERSION = 3
 
 
 class UnbuiltCheckoutError(GraphStoreError):
@@ -136,7 +136,53 @@ class CheckoutConnection(sqlite3.Connection):
             self._atomic = self._step = False
 
 
-def verify_shared_file(conn: CheckoutConnection, path: Path, *, initialize: bool) -> None:
+def _migrate_namespaces(conn: CheckoutConnection, tables: set[str], version: int) -> None:
+    """Preserve the native checkout tables and seed confirmed current bindings."""
+    prefix = conn._prefix
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS crg_shared_migration_issues (
+            namespace TEXT PRIMARY KEY, reason TEXT NOT NULL
+        ) WITHOUT ROWID
+    """)
+    try:
+        for table in sorted(tables):
+            if not re.fullmatch(r"crg_[0-9a-f]{64}_nodes", table):
+                continue
+            namespace = table.removesuffix("nodes")
+            conn._prefix = namespace
+            if version == 1 and conn.table("embeddings") in tables:
+                shared_vectors.initialize(conn)
+            metadata = dict(conn.execute("SELECT key, value FROM metadata"))
+            if not metadata.get("last_build_type"):
+                continue
+            root = Path(metadata.get("repo_root") or ".")
+            if root.is_absolute():
+                conn.bind(root)
+            if not root.is_absolute() or conn._prefix != namespace:
+                reason = "unverified checkout root"
+            elif metadata.get("build_state") == "in-progress":
+                reason = "incomplete checkout graph"
+            else:
+                ref = shared_generations.git_ref(
+                    metadata.get("git_branch", ""), metadata.get("git_head_sha", ""),
+                )
+                head = metadata.get("git_head_sha", "")
+                shared_generations.publish(
+                    conn, root, ref, head, metadata.get("last_updated", ""),
+                )
+                shared_generations.publish_projections(conn, root, ref)
+                continue
+            conn.execute(
+                "INSERT OR REPLACE INTO crg_shared_migration_issues VALUES (?, ?)",
+                (namespace, reason),
+            )
+    finally:
+        conn._prefix = prefix
+
+
+def verify_shared_file(
+    conn: CheckoutConnection, path: Path, *, initialize: bool, validate: bool = False,
+) -> int:
     """Refuse an existing SQLite database that is not a CRG shared store."""
     if initialize:
         conn.execute("BEGIN IMMEDIATE")
@@ -146,29 +192,59 @@ def verify_shared_file(conn: CheckoutConnection, path: Path, *, initialize: bool
         }
         if "_crg_shared" in tables:
             versions = [row[0] for row in conn.execute("SELECT version FROM _crg_shared")]
-            if versions not in ([1], [_SHARED_VERSION]):
+            if versions not in ([1], [2], [_SHARED_VERSION]):
                 raise GraphStoreError(f"Unsupported CRG shared schema in {path}")
-            if versions == [1] and initialize:
-                prefix = conn._prefix
-                try:
-                    for table in sorted(tables):
-                        if re.fullmatch(r"crg_[0-9a-f]{64}_embeddings", table):
-                            conn._prefix = table.removesuffix("embeddings")
-                            shared_vectors.initialize(conn)
-                finally:
-                    conn._prefix = prefix
+            version = versions[0]
+            if version < _SHARED_VERSION and initialize:
+                shared_generations.initialize(conn)
+                _migrate_namespaces(conn, tables, version)
                 conn.execute("UPDATE _crg_shared SET version=?", (_SHARED_VERSION,))
         elif tables or not initialize:
             raise GraphStoreError(f"{path} is not a CRG shared database")
         else:
+            version = _SHARED_VERSION
+            shared_generations.initialize(conn)
             conn.execute("CREATE TABLE _crg_shared (version INTEGER PRIMARY KEY)")
             conn.execute("INSERT INTO _crg_shared VALUES (?)", (_SHARED_VERSION,))
+        if validate or (initialize and version < _SHARED_VERSION):
+            check = conn.execute("PRAGMA integrity_check").fetchall()
+            orphan = conn.execute("PRAGMA foreign_key_check").fetchone()
+            if len(check) != 1 or check[0][0] != "ok" or orphan:
+                raise GraphStoreError(f"Shared migration integrity check failed for {path}")
         if initialize:
             conn.commit()
+        return version
     except BaseException:
         if initialize:
             conn.rollback()
         raise
+
+
+def migrate_selected_database() -> tuple[int, int, int]:
+    """Migrate the existing selected shared database under the writer lock."""
+    from .locking import WriteLock
+
+    path = shared_database()
+    if path is None or not path.is_file():
+        raise GraphStoreError("migrate-shared requires an existing CRG_SHARED_DB")
+    lock = WriteLock(path)
+    if not lock.acquire():
+        raise GraphStoreError(f"Cannot migrate {path}: shared graph writer holds the lock")
+    try:
+        with closing(sqlite3.connect(
+            path.as_uri() + "?mode=rw", uri=True, isolation_level=None, factory=CheckoutConnection,
+        )) as conn:
+            verify_shared_file(conn, path, initialize=False)
+            previous = verify_shared_file(conn, path, initialize=True, validate=True)
+            issues = conn.execute(
+                "SELECT 1 FROM sqlite_schema WHERE name='crg_shared_migration_issues'",
+            ).fetchone()
+            count = conn.execute(
+                "SELECT count(*) FROM crg_shared_migration_issues",
+            ).fetchone()[0] if issues else 0
+            return previous, _SHARED_VERSION, count
+    finally:
+        lock.release()
 
 
 def connect_for_checkout(

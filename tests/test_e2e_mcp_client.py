@@ -592,6 +592,45 @@ def test_shared_cli_reuses_watcher_reconciliation(tmp_path):
 
 
 @pytest.mark.e2e
+@pytest.mark.parametrize("legacy_version", [1, 2])
+def test_shared_cli_migrate_preserves_native_rows_and_publishes_existing_ref(
+    tmp_path, legacy_version,
+):
+    repo = _make_fixture_repo(tmp_path)
+    database = tmp_path / "shared.db"
+    env = {**_server_env(tmp_path / "home"), "CRG_SHARED_DB": str(database)}
+
+    def run(*args):
+        return subprocess.check_output(
+            [sys.executable, "-m", "code_review_graph", *args],
+            env=env, text=True, timeout=30,
+        )
+
+    run("build", "--repo", str(repo))
+    before = json.loads(run("query", "imports_of", "pkg/service.py", "--repo", str(repo)))
+    with sqlite3.connect(database) as db:
+        # Model a dc.2 shared store: retain its native checkout tables.
+        tables = db.execute(
+            "SELECT name FROM sqlite_schema WHERE type='table' "
+            "AND (name GLOB 'crg_generation_*' OR name='crg_graph_generations')",
+        ).fetchall()
+        for (table,) in tables:
+            db.execute(f"DROP TABLE {table}")
+        db.execute("UPDATE _crg_shared SET version=?", (legacy_version,))
+    assert f"{legacy_version} → 3; unresolved checkout records: 0" in run("migrate-shared")
+    assert "3 → 3; unresolved checkout records: 0" in run("migrate-shared")
+    current = json.loads(run("query", "imports_of", "pkg/service.py", "--repo", str(repo)))
+    historical = json.loads(run(
+        "query", "imports_of", "pkg/service.py", "--generation-ref", "refs/heads/main",
+        "--repo", str(repo),
+    ))
+    assert current == before and current["results"] == historical["results"]
+    with sqlite3.connect(database) as db:
+        assert db.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
+        assert not db.execute("PRAGMA foreign_key_check").fetchall()
+
+
+@pytest.mark.e2e
 def test_shared_cli_crash_rolls_back_written_rows(tmp_path):
     repo = _make_fixture_repo(tmp_path)
     env = {**_server_env(tmp_path / "home"), "CRG_SERIAL_PARSE": "1",
@@ -664,6 +703,14 @@ main()
     current = publication()
     assert len(current[0] - previous[0]) == 1
     assert current[1] != previous[1] and current[2] == 2
+    gc_env = {**env, "CRG_RETENTION_DAYS": "0"}
+    for flags, expected in (((), 2), (("--apply", "--compact"), 1)):
+        report = subprocess.check_output(
+            [*cli, "prune", *flags], env=gc_env, text=True, timeout=30,
+        )
+        assert "orphan generations -1" in report
+        assert publication()[1:] == (current[1], expected)
+    assert symbols() == {"replacement_symbol"}
     assert list(tmp_path.rglob("*.db")) == [tmp_path / "shared.db"]
 
 
@@ -860,6 +907,11 @@ async def test_mcp_shared_sqlite_isolates_sibling_worktrees(tmp_path, monkeypatc
                 "query": "right_wip", "repo_root": str(sibling),
             }))
             assert "right_wip" not in {row["name"] for row in forgotten["results"]}, forgotten
+            history = _payload(await _call(session, "query_graph_tool", {
+                "pattern": "file_summary", "target": relative_path, "repo_root": str(sibling),
+                "generation_ref": "refs/heads/sibling",
+            }))
+            assert not history["results"]
             await query(repo, "left_symbol", "right_wip")
             assert list(tmp_path.rglob("*.db")) == [db]
 

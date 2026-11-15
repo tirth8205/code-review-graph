@@ -402,6 +402,14 @@ select the current Git ref's published view for this checkout, as does the
 VS Code extension. If the ref has no published projection, build that ref
 first.
 
+To upgrade a shared index from dc.2, point `CRG_SHARED_DB` at a SQLite
+backup copy and run `code-review-graph migrate-shared`. It upgrades schema
+v1/v2 to v3 in one transaction, checks integrity, and leaves the per-checkout
+native rows in place. It does not read source files or call an embedding
+provider. A reported unresolved checkout retains its native data; build
+that checkout to establish the missing provenance. Verify queries on the
+copy before replacing a service index.
+
 The watcher uses the same completion record as CLI and MCP refreshes.
 A checkout, input snapshot and indexing profile must match before a
 completed refresh can be reused. The kernel releases the write lock on
@@ -418,8 +426,9 @@ code-review-graph prune --apply
 code-review-graph prune --apply --compact
 ```
 
-The first command previews orphaned vectors eligible for removal from the
-shared store. The defaults are 7 days, 10% of live vector bytes, and a cap
+The first command previews unbound graph generations and orphaned vectors
+eligible for removal from the shared store. A generation stays live while
+any branch or worktree binds it. The defaults are 7 days, 10% of live vector bytes, and a cap
 of 512 MiB. Set `CRG_RETENTION_DAYS`, `CRG_RETENTION_PERCENT`, and
 `CRG_RETENTION_MAX_MIB` to adjust them. Setting any limit to zero retains
 no orphaned vectors. Compact explicitly when you want SQLite to reclaim

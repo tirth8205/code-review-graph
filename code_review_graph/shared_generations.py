@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
 from collections import Counter
 from collections.abc import Iterator
 from pathlib import Path
@@ -83,10 +84,38 @@ def _payloads(conn: Connection, root: Path) -> tuple[Counter[bytes], dict[bytes,
     return counts, payloads
 
 
-def publish(conn: Connection, root: Path, ref: str, head: str, built_at: str) -> str:
-    """Intern immutable rows and move only this checkout/reference binding."""
+def initialize(conn: Connection) -> None:
+    """Install the generation schema and age tracking without changing bindings."""
     for statement in _SCHEMA:
         conn.execute(statement)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS crg_generation_unbound (
+            generation_id INTEGER PRIMARY KEY, since REAL NOT NULL
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS crg_generation_members_payload "
+        "ON crg_generation_members(payload_id)",
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS crg_generation_bindings_generation "
+        "ON crg_generation_bindings(generation_id)",
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO crg_generation_unbound "
+        "SELECT g.id, ? FROM crg_graph_generations g WHERE NOT EXISTS "
+        "(SELECT 1 FROM crg_generation_bindings b WHERE b.generation_id=g.id)",
+        (time.time(),),
+    )
+
+
+def publish(conn: Connection, root: Path, ref: str, head: str, built_at: str) -> str:
+    """Intern immutable rows and move only this checkout/reference binding."""
+    checkout = _checkout_key(root)
+    previous = conn.execute(
+        "SELECT generation_id FROM crg_generation_bindings WHERE checkout=? AND ref=?",
+        (checkout, ref),
+    ).fetchone()
     counts, payloads = _payloads(conn, root)
     digest = hashlib.sha256(b"crg-graph-rows-v1\0")
     for payload, count in sorted(counts.items()):
@@ -115,8 +144,16 @@ def publish(conn: Connection, root: Path, ref: str, head: str, built_at: str) ->
         "INSERT INTO crg_generation_bindings VALUES (?, ?, ?, ?, ?) "
         "ON CONFLICT(checkout, ref) DO UPDATE SET "
         "generation_id=excluded.generation_id, head=excluded.head, built_at=excluded.built_at",
-        (_checkout_key(root), ref, head, built_at, generation),
+        (checkout, ref, head, built_at, generation),
     )
+    conn.execute("DELETE FROM crg_generation_unbound WHERE generation_id=?", (generation,))
+    if previous is not None and previous[0] != generation:
+        conn.execute(
+            "INSERT OR IGNORE INTO crg_generation_unbound "
+            "SELECT ?, ? WHERE NOT EXISTS "
+            "(SELECT 1 FROM crg_generation_bindings WHERE generation_id=?)",
+            (previous[0], time.time(), previous[0]),
+        )
     return key.hex()
 
 
@@ -256,3 +293,65 @@ def load_projections(
         """)
         destination.executemany("INSERT INTO embeddings VALUES (?, ?, ?, ?)", vectors)
     return bool(state["fts"])
+
+
+def prune(
+    conn: Connection, *, days: int, percent: int, max_bytes: int, apply: bool,
+) -> tuple[int, int, int]:
+    """Expire unbound generations, charging shared payload bytes only once."""
+    if not conn.execute(
+        "SELECT 1 FROM sqlite_schema WHERE name='crg_generation_unbound'",
+    ).fetchone():
+        return 0, 0, 0
+    active = conn.execute("""
+        SELECT COALESCE(SUM(length(CAST(p.data AS BLOB))), 0)
+        FROM crg_generation_payloads p WHERE EXISTS (
+            SELECT 1 FROM crg_generation_members m JOIN crg_generation_bindings b
+            USING (generation_id) WHERE m.payload_id=p.id
+        )
+    """).fetchone()[0]
+    budget = min(max_bytes, active * percent // 100) if days else 0
+    # Count references exclusively in dead generations. A payload shared
+    # with any active generation cannot contribute to reclaimed bytes.
+    exclusive = {
+        payload: [size, count]
+        for payload, size, count in conn.execute("""
+            SELECT p.id, length(CAST(p.data AS BLOB)), count(*)
+            FROM crg_generation_payloads p JOIN crg_generation_members m ON m.payload_id=p.id
+            WHERE NOT EXISTS (
+                SELECT 1 FROM crg_generation_members live JOIN crg_generation_bindings b
+                USING (generation_id) WHERE live.payload_id=p.id
+            )
+            GROUP BY p.id
+        """)
+    }
+    remaining = sum(value[0] for value in exclusive.values())
+    cutoff = time.time() - days * 86400
+    victims = []
+    payloads = []
+    reclaimed = 0
+    for generation, since in conn.execute("""
+        SELECT u.generation_id, u.since FROM crg_generation_unbound u
+        WHERE NOT EXISTS (
+            SELECT 1 FROM crg_generation_bindings b WHERE b.generation_id=u.generation_id
+        ) ORDER BY u.since, u.generation_id
+    """):
+        if days and percent and max_bytes and since > cutoff and remaining <= budget:
+            break
+        victims.append((generation,))
+        for (payload,) in conn.execute(
+            "SELECT payload_id FROM crg_generation_members WHERE generation_id=?", (generation,),
+        ):
+            if payload in exclusive:
+                size_and_count = exclusive[payload]
+                size_and_count[1] -= 1
+                if size_and_count[1] == 0:
+                    remaining -= size_and_count[0]
+                    reclaimed += size_and_count[0]
+                    payloads.append((payload,))
+    if apply:
+        for table in ("crg_generation_members", "crg_generation_unbound"):
+            conn.executemany(f"DELETE FROM {table} WHERE generation_id=?", victims)
+        conn.executemany("DELETE FROM crg_graph_generations WHERE id=?", victims)
+        conn.executemany("DELETE FROM crg_generation_payloads WHERE id=?", payloads)
+    return len(victims), reclaimed, budget

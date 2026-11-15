@@ -9,10 +9,13 @@ communities; SQLite stores all of them in the same WAL database. Existing
 single-checkout indexes stay where they are. Rebuild from source to populate
 the shared file.
 
-Shared schema version 2 stores each exact embedding payload once and keeps
+Shared schema version 3 stores each exact embedding payload once and keeps
 symbol links scoped to the checkout. A writer migrates version 1 vector
 tables in one transaction, preserving legacy links without inferring Git
-provenance. New payloads are eligible for reuse through a common Git
+provenance for the vectors. It seeds structural generations only for
+checkouts whose stored root matches the namespace and whose graph was
+completed. Conflicting legacy vectors without timestamps keep their
+individual links. New payloads are eligible for reuse through a common Git
 directory or a directly shared read remote. Reusing a vector does not publish
 it under a different remote.
 

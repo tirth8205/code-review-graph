@@ -241,7 +241,7 @@ class TestEmbeddingStore:
                 assert set(store.search("f")) == {("left.py::f", 1.0), ("right.py::f", 1.0)}
             provider.embed.assert_not_called()
         with sqlite3.connect(db) as conn:
-            assert conn.execute("SELECT version FROM _crg_shared").fetchone() == (2,)
+            assert conn.execute("SELECT version FROM _crg_shared").fetchone() == (3,)
             assert conn.execute("SELECT COUNT(*) FROM crg_vector_payloads").fetchone() == (1,)
             assert conn.execute("SELECT COUNT(*) FROM crg_vector_scopes").fetchone() == (0,)
 
