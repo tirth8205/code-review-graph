@@ -29,10 +29,13 @@ checkout, matching inputs and graph profile. The watcher and tool callers use
 the same writer and completion records. Data directory routing and watcher
 health reporting do not change the refresh profile for a shared file.
 
-A parser worker may reuse a syntax tree for identical preprocessed bytes
-and the same loaded grammar. It still extracts nodes and resolves names for
-each checkout. Syntax trees are retained only in a bounded worker-local
-cache; the SQLite database is the only durable graph store.
+Shared builds reuse Python AST evidence by source SHA-256 and extractor
+profile. This evidence describes local function bindings and unreachable
+calls/imports only; paths, aliases and resolved targets never enter the
+payload. The build looks up the facts before dispatching a Python file to
+a worker, with the same direct Git membership rule as embeddings. Workers
+still parse with Tree-sitter and resolve imports against the requesting
+checkout. Tree-sitter trees remain in the bounded worker-local cache.
 
 AI Hub selects and supervises the engine; it does not own graph data or
 refresh leases. Its runtime acceptance and activation remain governed by

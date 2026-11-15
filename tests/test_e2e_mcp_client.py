@@ -393,6 +393,56 @@ def test_shared_postprocess_invalidates_previous_refresh(tmp_path):
 
 
 @pytest.mark.e2e
+def test_shared_cli_reuses_python_facts_but_resolves_imports_locally(tmp_path):
+    env = {**_server_env(tmp_path / "home"), "CRG_SHARED_DB": str(tmp_path / "shared.db")}
+    importer = (
+        "from typing import TYPE_CHECKING\n"
+        "from dependency import value\n"
+        "if TYPE_CHECKING:\n"
+        "    from dependency import Annotation\n"
+        "def invoke(argument):\n"
+        "    return value(argument)\n"
+    )
+
+    def cli(root, *args, **overrides):
+        return subprocess.run(
+            [sys.executable, "-m", "code_review_graph", *args, "--repo", str(root)],
+            env={**env, **overrides}, text=True, capture_output=True, check=True, timeout=60,
+        )
+
+    cases = (
+        ("left", "dependency.py", "git@github.com:example/crg-facts.git", 0, 8),
+        ("right", "dependency/__init__.py", "https://github.com/Example/CRG-Facts", 8, 0),
+        ("unrelated", "dependency.py", "https://github.com/example/other", 0, 8),
+    )
+    for name, dependency, remote, reused, extracted in cases:
+        root = tmp_path / name
+        root.mkdir()
+        _git(root, "init")
+        _git(root, "remote", "add", "source", remote)
+        (root / "consumer.py").write_text(importer, encoding="utf-8")
+        for index in range(6):
+            (root / f"filler{index}.py").write_text(
+                f"def filler_{index}(): return {index}\n", encoding="utf-8",
+            )
+        target = root / dependency
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("def value(argument): return argument\n", encoding="utf-8")
+        _git(root, "add", ".")
+        _git(root, "commit", "-qm", "Fixture")
+        worker_env = {"CRG_SERIAL_PARSE": "1"} if name == "left" else {
+            "CRG_PARSE_EXECUTOR": "process",
+        }
+        built = cli(root, "build", "--skip-postprocess", **worker_env)
+        assert f"Python syntax facts: {reused} reused, {extracted} extracted" in built.stderr
+        imports = json.loads(cli(root, "query", "imports_of", "consumer.py").stdout)
+        targets = {_posix(row["import_target"]) for row in imports["results"]}
+        assert target.as_posix() in targets
+        assert not any(str(tmp_path / peer) in item for peer in ("left", "right", "unrelated")
+                       if peer != name for item in targets)
+
+
+@pytest.mark.e2e
 def test_shared_cli_reuses_watcher_reconciliation(tmp_path):
     repo = _make_fixture_repo(tmp_path)
     env = {**_server_env(tmp_path / "home"), "CRG_SHARED_DB": str(tmp_path / "shared.db")}

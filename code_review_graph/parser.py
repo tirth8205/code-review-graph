@@ -22,6 +22,7 @@ import threading
 from bisect import bisect_left, bisect_right
 from collections import OrderedDict, deque
 from collections.abc import Iterator
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path, PurePath
@@ -231,13 +232,9 @@ class _PythonScopeBindingVisitor(ast.NodeVisitor):
         self.names.update(node.names)
 
 def _python_function_scope_bindings(
-    source: bytes,
+    tree: ast.Module,
 ) -> dict[tuple[int, int], tuple[frozenset[str], frozenset[str]]]:
     """Return parameter and local names for each Python function position."""
-    try:
-        tree = ast.parse(source.decode("utf-8"))
-    except (SyntaxError, UnicodeDecodeError, ValueError):
-        return {}
     scopes: dict[
         tuple[int, int], tuple[frozenset[str], frozenset[str]],
     ] = {}
@@ -526,15 +523,10 @@ class _PythonUnreachableCallVisitor(ast.NodeVisitor):
         self._dead = outer_dead
 
 
-@lru_cache(maxsize=128)
 def _python_unreachable_call_positions(
-    source: bytes,
+    tree: ast.Module,
 ) -> frozenset[tuple[int, int]]:
     """Return positions of calls and attribute loads in proven-dead branches."""
-    try:
-        tree = ast.parse(source.decode("utf-8"))
-    except (SyntaxError, UnicodeDecodeError, ValueError):
-        return frozenset()
     type_checking_names, typing_modules = _python_type_checking_aliases(tree)
     visitor = _PythonUnreachableCallVisitor(
         type_checking_names,
@@ -562,19 +554,14 @@ class _PythonUnreachableImportVisitor(_PythonUnreachableCallVisitor):
             self.positions.add((node.lineno, node.col_offset))
 
 
-@lru_cache(maxsize=128)
 def _python_unreachable_import_positions(
-    source: bytes,
+    tree: ast.Module,
 ) -> frozenset[tuple[int, int]]:
     """Return positions of imports that never run, such as under ``if TYPE_CHECKING``.
 
     A bare ``TYPE_CHECKING`` counts whatever it is bound to: type checkers read
     any name spelled so as true, which is what ``TYPE_CHECKING = False`` relies on.
     """
-    try:
-        tree = ast.parse(source.decode("utf-8"))
-    except (SyntaxError, UnicodeDecodeError, ValueError):
-        return frozenset()
     type_checking_names, typing_modules = _python_type_checking_aliases(tree)
     visitor = _PythonUnreachableImportVisitor(
         type_checking_names | {"TYPE_CHECKING"},
@@ -582,6 +569,59 @@ def _python_unreachable_import_positions(
     )
     visitor.visit(tree)
     return frozenset(visitor.positions)
+
+
+class PythonSyntaxFacts(NamedTuple):
+    """Source-only Python evidence, independent of file name and import targets."""
+
+    scopes: dict[tuple[int, int], tuple[frozenset[str], frozenset[str]]]
+    dead_calls: frozenset[tuple[int, int]]
+    dead_imports: frozenset[tuple[int, int]]
+
+    def encode(self) -> str:
+        return json.dumps((
+            [(line, column, sorted(params), sorted(locals_))
+             for (line, column), (params, locals_) in sorted(self.scopes.items())],
+            sorted(self.dead_calls), sorted(self.dead_imports),
+        ), separators=(",", ":"))
+
+    @classmethod
+    def decode(cls, data: str) -> PythonSyntaxFacts:
+        scopes, calls, imports = json.loads(data)
+        return cls(
+            {(line, column): (frozenset(params), frozenset(locals_))
+             for line, column, params, locals_ in scopes},
+            frozenset((line, column) for line, column in calls),
+            frozenset((line, column) for line, column in imports),
+        )
+
+
+def extract_python_syntax_facts(source: bytes) -> PythonSyntaxFacts:
+    """Extract all reusable CPython AST evidence with one parse."""
+    try:
+        tree = ast.parse(source.decode("utf-8"))
+    except (SyntaxError, UnicodeDecodeError, ValueError):
+        return PythonSyntaxFacts({}, frozenset(), frozenset())
+    return PythonSyntaxFacts(
+        _python_function_scope_bindings(tree),
+        _python_unreachable_call_positions(tree),
+        _python_unreachable_import_positions(tree),
+    )
+
+
+_cached_python_syntax_facts = lru_cache(maxsize=128)(extract_python_syntax_facts)
+
+
+_python_facts_override: ContextVar[tuple[bytes, PythonSyntaxFacts] | None] = ContextVar(
+    "python_syntax_facts", default=None,
+)
+
+
+def _python_syntax_facts(source: bytes) -> PythonSyntaxFacts:
+    prepared = _python_facts_override.get()
+    if prepared is not None and prepared[0] is source:
+        return prepared[1]
+    return _cached_python_syntax_facts(source)
 
 
 # ---------------------------------------------------------------------------
@@ -3989,7 +4029,7 @@ class CodeParser:
             _PYTHON_RETURN_ANNOTATION_CACHE.clear()
         for _cached_fn in (
             _read_cargo_manifest,
-            _python_unreachable_call_positions,
+            _cached_python_syntax_facts,
             _read_go_mod,
             _read_gemspec_require_paths,
             _read_php_composer_psr4,
@@ -4125,6 +4165,16 @@ class CodeParser:
         except (OSError, PermissionError):
             return [], []
         return self.parse_bytes(path, source)
+
+    def parse_with_python_facts(
+        self, path: Path, source: bytes, facts: PythonSyntaxFacts,
+    ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
+        """Bind portable facts to these exact bytes while resolving locally."""
+        token = _python_facts_override.set((source, facts))
+        try:
+            return self.parse_bytes(path, source)
+        finally:
+            _python_facts_override.reset(token)
 
     def parse_bytes(self, path: Path, source: bytes) -> tuple[list[NodeInfo], list[EdgeInfo]]:
         """Parse pre-read bytes and return extracted nodes and edges.
@@ -9338,8 +9388,9 @@ class CodeParser:
         evidence: dict[tuple[int, str], tuple[str, str]] = {}
         expression_evidence: dict[tuple[int, str], list[tuple[str, str]]] = {}
         property_read_edges: list[EdgeInfo] = []
-        unreachable_positions = _python_unreachable_call_positions(source)
-        function_scopes = _python_function_scope_bindings(source)
+        facts = _python_syntax_facts(source)
+        unreachable_positions = facts.dead_calls
+        function_scopes = facts.scopes
 
         def bind_targets(
             left, value, type_node, env, class_fields, current_class,
@@ -17307,7 +17358,7 @@ class CodeParser:
         if (
             language == "python"
             and (child.start_point[0] + 1, child.start_point[1])
-            in _python_unreachable_call_positions(source)
+            in _python_syntax_facts(source).dead_calls
         ):
             return True
 
@@ -24199,7 +24250,7 @@ class CodeParser:
         """``TYPE_CHECKING`` wins: such an import never runs, even in a function."""
         if (
             (node.start_point[0] + 1, node.start_point[1])
-            in _python_unreachable_import_positions(source)
+            in _python_syntax_facts(source).dead_imports
         ):
             return IMPORT_CONTEXT_TYPE_ONLY
         current = node.parent
