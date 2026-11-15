@@ -10,7 +10,7 @@ import sqlite3
 import time
 from contextlib import closing
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from ..build_state import (
     BUILD_COMPLETE,
@@ -66,8 +66,21 @@ def _refresh_profile(
     )
 
 
-def _completed_refresh(request: str, result: dict[str, Any]) -> str:
-    return json.dumps({"request": request, "result": result, "finished": time.time_ns()})
+class _RefreshInputs(NamedTuple):
+    request: str
+    manifest_sha256: str
+    paths: int
+
+
+def _publish_refresh(
+    store: GraphStore, inputs: _RefreshInputs, result: dict[str, Any],
+) -> None:
+    if store.checkout is not None:
+        store.record_graph_inputs(inputs.manifest_sha256, inputs.paths)
+        result["input_manifest_sha256"] = inputs.manifest_sha256
+    store.set_metadata(REFRESH_REQUEST_KEY, json.dumps({
+        "request": inputs.request, "result": result, "finished": time.time_ns(),
+    }))
 
 
 def refresh_shared_watch(root: Path, store: GraphStore, follow: bool | None, callback) -> None:
@@ -76,7 +89,7 @@ def refresh_shared_watch(root: Path, store: GraphStore, follow: bool | None, cal
     request = _refresh_request(root, None, follow, profile)
     with store.refresh():
         if (completed := store.get_metadata(REFRESH_REQUEST_KEY)) and (
-            json.loads(completed)["request"] == request
+            json.loads(completed)["request"] == request.request
         ):
             return
         store.invalidate_refresh()
@@ -92,13 +105,13 @@ def refresh_shared_watch(root: Path, store: GraphStore, follow: bool | None, cal
             store.set_metadata(BUILD_STATE_KEY, BUILD_COMPLETE)
             if request == _refresh_request(root, None, follow, profile):
                 result.update(status="ok", build_type="incremental", base_resolved=base)
-                store.set_metadata(REFRESH_REQUEST_KEY, _completed_refresh(request, result))
+                _publish_refresh(store, request, result)
 
 
 def _refresh_request(
     root: Path, recurse: bool | None, follow: bool | None, profile: tuple[Any, ...],
-) -> str:
-    """Identify the worktree snapshot and resolved request before waiting."""
+) -> _RefreshInputs:
+    """Identify the worktree snapshot and its portable input manifest."""
     from ..custom_languages import CONFIG_RELATIVE_PATH
 
     paths = set(collect_all_files(root, recurse, follow))
@@ -114,12 +127,19 @@ def _refresh_request(
                 digest.update(block)
         return path, state.st_mtime_ns, state.st_ctime_ns, digest.hexdigest()
 
-    payload = (
-        _git_branch_info(root),
-        profile,
-        [stamp(path) for path in sorted(paths)],
+    stamps = [stamp(path) for path in sorted(paths)]
+    payload = (_git_branch_info(root), profile, stamps)
+    # Keep the input key independent of checkout/branch and file timestamps.
+    # The invocation's full/incremental and base options govern cooperation
+    # but are not inputs to the resulting index. Resolver dependencies are
+    # not yet all in this manifest; equality alone never authorizes reuse.
+    manifest = ("crg-graph-inputs-v1", profile[2:],
+                [(path, digest) for path, _, _, digest in stamps])
+    return _RefreshInputs(
+        hashlib.sha256(json.dumps(payload).encode()).hexdigest(),
+        hashlib.sha256(json.dumps(manifest).encode()).hexdigest(),
+        len(stamps),
     )
-    return hashlib.sha256(json.dumps(payload).encode()).hexdigest()
 
 
 def _previous_refresh(db_path: Path, root: Path) -> str | None:
@@ -657,7 +677,7 @@ def build_or_update_graph(
     store = None
     try:
         before = None
-        request: str | None = None
+        request: _RefreshInputs | None = None
         request_profile: tuple[Any, ...] = ()
         if (wait_for_lock or db_path == shared_database()) and not (
             embedding_provider or embedding_model
@@ -684,7 +704,7 @@ def build_or_update_graph(
             if can_join and request is not None and completed:
                 prior = json.loads(completed)
                 if (
-                    prior["request"] == request
+                    prior["request"] == request.request
                     and request == _refresh_request(
                         root, recurse_submodules, follow_symlinks, request_profile,
                     )
@@ -711,10 +731,7 @@ def build_or_update_graph(
                         root, recurse_submodules, follow_symlinks, request_profile,
                     )
                 ):
-                    store.set_metadata(
-                        REFRESH_REQUEST_KEY,
-                        _completed_refresh(request, result),
-                    )
+                    _publish_refresh(store, request, result)
                 return result
 
             if (

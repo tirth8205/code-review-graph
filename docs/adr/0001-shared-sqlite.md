@@ -29,6 +29,13 @@ checkout, matching inputs and graph profile. The watcher and tool callers use
 the same writer and completion records. Data directory routing and watcher
 health reporting do not change the refresh profile for a shared file.
 
+A verified CLI, MCP or startup watcher refresh also interns its input manifest
+digest and records it in its checkout's completion in the same transaction.
+The manifest uses relative paths, SHA-256 of the bytes and the indexing
+profile; it excludes file timestamps and Git anchors. It identifies matching
+inputs for future graph-generation reuse. Resolver dependencies and the
+materialized graph still belong to the checkout namespace.
+
 Shared builds reuse Python AST evidence by source SHA-256 and extractor
 profile. This evidence describes local function bindings and unreachable
 calls/imports only; paths, aliases and resolved targets never enter the

@@ -2144,6 +2144,18 @@ class GraphStore:
             extra=edge.extra,
         )
 
+    def record_graph_inputs(self, digest: str, paths: int) -> None:
+        """Intern a verified input manifest in the shared refresh transaction."""
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS crg_graph_inputs (
+                digest TEXT PRIMARY KEY, path_count INTEGER NOT NULL
+            ) WITHOUT ROWID
+        """)
+        self._conn.execute(
+            "INSERT OR IGNORE INTO crg_graph_inputs (digest, path_count) VALUES (?, ?)",
+            (digest, paths),
+        )
+
     def invalidate_refresh(self) -> None:
         """Remove a completion before explicitly changing the shared graph."""
         if self.checkout is not None:

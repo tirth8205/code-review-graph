@@ -26,6 +26,7 @@ import asyncio
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -454,6 +455,23 @@ def test_shared_cli_reuses_python_facts_but_resolves_imports_locally(tmp_path):
 
 
 @pytest.mark.e2e
+def test_shared_cli_interns_equivalent_input_manifests_across_worktrees(tmp_path):
+    repo = _make_fixture_repo(tmp_path)
+    sibling = tmp_path / "sibling"
+    _git(repo, "worktree", "add", "-q", "-b", "different-branch", str(sibling))
+    database = tmp_path / "shared.db"
+    env = {**_server_env(tmp_path / "home"), "CRG_SHARED_DB": str(database)}
+    os.utime(sibling / "pkg" / "core.py", (42, 42))
+    for root in (repo, sibling):
+        subprocess.run(
+            [sys.executable, "-m", "code_review_graph", "build", "--repo", str(root)],
+            env=env, check=True, capture_output=True, timeout=30,
+        )
+    with sqlite3.connect(database) as db:
+        assert db.execute("SELECT COUNT(*) FROM crg_graph_inputs").fetchone() == (1,)
+
+
+@pytest.mark.e2e
 def test_shared_cli_reuses_watcher_reconciliation(tmp_path):
     repo = _make_fixture_repo(tmp_path)
     env = {**_server_env(tmp_path / "home"), "CRG_SHARED_DB": str(tmp_path / "shared.db")}
@@ -508,26 +526,33 @@ def test_shared_cli_crash_rolls_back_written_rows(tmp_path):
         graph = json.loads(run("query", "file_summary", "pkg/view.py"))
         return {node["name"] for node in graph["results"] if node["kind"] == "Function"}
 
+    def input_manifests():
+        with sqlite3.connect(env["CRG_SHARED_DB"]) as db:
+            return {row[0] for row in db.execute("SELECT digest FROM crg_graph_inputs")}
+
+    previous = input_manifests()
+    assert len(previous) == 1
     entered = tmp_path / "entered"
     producer = """
 import sys, time
 from pathlib import Path
+from code_review_graph.build_state import REFRESH_REQUEST_KEY
 from code_review_graph.cli import main
 from code_review_graph.graph import GraphStore
 
-marker, path = Path(sys.argv.pop(1)), Path(sys.argv.pop(1))
-real_write = GraphStore.store_file_nodes_edges
-def pause(self, file_path, *args, **kwargs):
-    result = real_write(self, file_path, *args, **kwargs)
-    if Path(file_path) == path:
+marker = Path(sys.argv.pop(1))
+real_write = GraphStore.set_metadata
+def pause(self, key, value):
+    result = real_write(self, key, value)
+    if key == REFRESH_REQUEST_KEY:
         marker.touch()
         time.sleep(30)
     return result
-GraphStore.store_file_nodes_edges = pause
+GraphStore.set_metadata = pause
 main()
 """
     with subprocess.Popen(
-        [sys.executable, "-c", producer, str(entered), str(source),
+        [sys.executable, "-c", producer, str(entered),
          "update", "--repo", str(repo)], env=env,
     ) as child:
         try:
@@ -536,13 +561,16 @@ main()
                 time.sleep(.02)
             assert entered.exists()
             assert symbols() == {"previous_symbol"}
+            assert input_manifests() == previous
         finally:
             if child.poll() is None:
                 child.kill()
             child.wait(timeout=10)
     assert symbols() == {"previous_symbol"}
+    assert input_manifests() == previous
     run("update")
     assert symbols() == {"replacement_symbol"}
+    assert len(input_manifests() - previous) == 1
     assert list(tmp_path.rglob("*.db")) == [tmp_path / "shared.db"]
 
 
