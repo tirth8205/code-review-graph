@@ -1244,15 +1244,19 @@ class ConfigWatcher:
                     if Path(event.src_path).resolve() == watcher._config_path.resolve():
                         watcher._on_config_changed()
 
-                on_created = on_modified
+                on_created = on_deleted = on_modified
 
                 def on_moved(self, event: Any) -> None:
-                    if Path(event.dest_path).resolve() == watcher._config_path.resolve():
+                    if any(
+                        Path(path).resolve() == watcher._config_path.resolve()
+                        for path in (event.src_path, event.dest_path)
+                    ):
                         watcher._on_config_changed()
 
             handler = _Handler()
             observer = Observer()
             if isinstance(observer, PollingObserver):
+                observer = PollingObserver(timeout=self._poll_interval)
                 logger.warning(
                     "Using polling for %s: no native backend for this platform; "
                     "to restore native events, use a supported host",

@@ -400,6 +400,28 @@ completed refresh can be reused. The kernel releases the write lock on
 process death and SQLite rolls back the unfinished refresh. See
 [Shared SQLite ADR](adr/0001-shared-sqlite.md).
 
+Shared embeddings can reuse a vector when the exact input and provider
+profile match and the checkouts share a Git common directory or a fetch
+remote. Each checkout retains its own symbol links and search results.
+
+```bash
+code-review-graph prune
+code-review-graph prune --apply
+code-review-graph prune --apply --compact
+```
+
+The first command previews orphaned vectors eligible for removal from the
+shared store. The defaults are 7 days, 10% of live vector bytes, and a cap
+of 512 MiB. Set `CRG_RETENTION_DAYS`, `CRG_RETENTION_PERCENT`, and
+`CRG_RETENTION_MAX_MIB` to adjust them. Setting any limit to zero retains
+no orphaned vectors. Compact explicitly when you want SQLite to reclaim
+unused pages on disk.
+
+Workspace manifest changes use native filesystem notifications by default.
+If those notifications are unavailable, the watcher logs why polling is
+in use and how to restore native coverage. Set `CRG_WATCH_POLL_INTERVAL`
+in seconds to adjust the manifest polling interval.
+
 ## Standalone Daemon CLI (`crg-daemon`)
 
 `crg-daemon` is installed with `code-review-graph` and mirrors the

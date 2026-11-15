@@ -3,10 +3,13 @@
 import errno
 import threading
 
+import pytest
+
 from code_review_graph.daemon import ConfigWatcher
 
 
-def test_atomic_config_replacement_triggers_reload(tmp_path):
+@pytest.mark.parametrize("change", ["replace", "move_away", "delete"])
+def test_config_path_changes_trigger_reload(tmp_path, change):
     config = tmp_path / "watch.toml"
     config.write_text('[daemon]\nsession_name = "old"\n', encoding="utf-8")
     reloaded = threading.Event()
@@ -14,9 +17,14 @@ def test_atomic_config_replacement_triggers_reload(tmp_path):
     watcher.start()
     try:
         candidate = config.with_suffix(".new")
-        candidate.write_text('[daemon]\nsession_name = "new"\n', encoding="utf-8")
-        candidate.replace(config)
-        assert reloaded.wait(5), "the watcher did not see the config replacement"
+        if change == "replace":
+            candidate.write_text('[daemon]\nsession_name = "new"\n', encoding="utf-8")
+            candidate.replace(config)
+        elif change == "move_away":
+            config.replace(candidate)
+        else:
+            config.unlink()
+        assert reloaded.wait(5), f"the watcher did not see {change}"
     finally:
         watcher.stop()
 
