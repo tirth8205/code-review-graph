@@ -122,7 +122,7 @@ test-parser-process-locks:
 
 .PHONY: test-parser-reuse
 test-parser-reuse:
-	uv run --locked --extra dev pytest tests/test_parser.py -q --tb=short
+	uv run --locked --extra dev pytest tests/test_parser.py tests/test_nested_method_identities.py -q --tb=short
 
 .PHONY: test-vscode
 test-vscode:
