@@ -199,7 +199,10 @@ class TestEmbeddingStore:
                         ["git", "-C", str(root), "remote", "add", remote, url], check=True,
                     )
                 name = f"module-{index}.py::func_1"
-                node = replace(self._make_node(1), qualified_name=name)
+                node = replace(
+                    self._make_node(1), qualified_name=name,
+                    file_path=str(root / "file.py"),
+                )
                 with GraphStore(db, checkout=root) as graph, EmbeddingStore(
                     db, graph_store=graph,
                 ) as store:

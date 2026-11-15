@@ -94,7 +94,7 @@ test-review-entrypoints:
 
 .PHONY: test-watcher-lifecycle
 test-watcher-lifecycle:
-	uv run --locked --extra dev pytest tests/test_mcp_watch_store_shutdown.py tests/test_watch_set.py tests/test_windows_path_identity.py tests/test_edit_hook_follows_the_edited_file.py -q --tb=short
+	uv run --locked --extra dev pytest tests/test_config_reload.py tests/test_mcp_watch_store_shutdown.py tests/test_watch_set.py tests/test_windows_path_identity.py tests/test_edit_hook_follows_the_edited_file.py -q --tb=short
 
 .PHONY: test-unmatched-risk
 test-unmatched-risk:

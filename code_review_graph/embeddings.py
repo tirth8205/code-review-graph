@@ -1135,7 +1135,7 @@ def _split_identifier(name: str) -> str:
     return " ".join(spaced.split())
 
 
-def _node_to_text(node: GraphNode) -> str:
+def _node_to_text(node: GraphNode, *, checkout: Path | None = None) -> str:
     """Convert a node to a searchable text representation.
 
     Designed so natural-language queries land on the right node, not just on
@@ -1187,7 +1187,10 @@ def _node_to_text(node: GraphNode) -> str:
     # 8. Module / directory context from the file path — gives queries a
     # term like "routing" or "client" to anchor against.
     if node.file_path:
-        parent_dir = Path(node.file_path).parent.name
+        path = Path(node.file_path)
+        if checkout is not None and path.is_relative_to(checkout):
+            path = path.relative_to(checkout)
+        parent_dir = path.parent.name
         if parent_dir and parent_dir not in (".", "src", "lib"):
             parts.append(parent_dir)
 
@@ -1274,7 +1277,7 @@ class EmbeddingStore:
         for node in nodes:
             if node.kind == "File":
                 continue
-            text = _node_to_text(node)
+            text = _node_to_text(node, checkout=self._checkout)
             text_hash = hashlib.sha256(text.encode()).hexdigest()
             if existing.get(node.qualified_name) != text_hash:
                 by_hash.setdefault(text_hash, (text, []))[1].append(node.qualified_name)

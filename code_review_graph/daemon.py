@@ -10,6 +10,7 @@ No external dependencies beyond Python stdlib — no tmux required.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import logging
@@ -1215,13 +1216,13 @@ class ConfigWatcher:
         self,
         config_path: Path,
         callback: Callable[[], None],
-        poll_interval: int = 2,
+        poll_interval: float = 2,
     ) -> None:
         self._config_path = config_path
         self._callback = callback
         self._poll_interval = poll_interval
         self._observer: Any = None  # watchdog Observer when available
-        self._last_mtime: float = 0.0
+        self._last_version: tuple[int, int, int] | None = None
         self._poll_thread: threading.Thread | None = None
         self._stop_event: threading.Event = threading.Event()
 
@@ -1234,6 +1235,7 @@ class ConfigWatcher:
         try:
             from watchdog.events import FileSystemEventHandler
             from watchdog.observers import Observer
+            from watchdog.observers.polling import PollingObserver
 
             watcher = self
 
@@ -1249,25 +1251,45 @@ class ConfigWatcher:
                         watcher._on_config_changed()
 
             handler = _Handler()
-            self._observer = Observer()
-            self._observer.schedule(
+            observer = Observer()
+            if isinstance(observer, PollingObserver):
+                logger.warning(
+                    "Using polling for %s: no native backend for this platform; "
+                    "to restore native events, use a supported host",
+                    self._config_path,
+                )
+            observer.schedule(
                 handler,
                 str(self._config_path.parent),
                 recursive=False,
             )
-            self._observer.daemon = True
-            self._observer.start()
+            observer.daemon = True
+            observer.start()
+            self._observer = observer
             logger.info(
                 "Config watcher started (watchdog) for %s",
                 self._config_path,
             )
         except ImportError:
-            # Fallback to polling when watchdog is unavailable
-            logger.info(
-                "watchdog not available — falling back to polling for %s",
-                self._config_path,
-            )
-            self._start_polling()
+            self._polling("watchdog is unavailable", "install watchdog for this interpreter")
+        except OSError as exc:
+            if exc.errno in {errno.ENOSPC, errno.EMFILE}:
+                self._polling(str(exc), "raise the OS notification or file-descriptor limit")
+            elif exc.errno in {errno.ENOSYS, errno.ENOTSUP}:
+                self._polling(str(exc), "move the configuration to a native-event filesystem")
+            else:
+                raise
+
+    def _polling(self, reason: str, remedy: str) -> None:
+        logger.warning("Using polling for %s: %s; to restore native events, %s",
+                       self._config_path, reason, remedy)
+        self._start_polling()
+
+    def is_alive(self) -> bool:
+        """Whether the selected notification backend is still running."""
+        if self._observer is not None:
+            return bool(self._observer.is_alive())
+        return self._poll_thread is not None and self._poll_thread.is_alive()
 
     def stop(self) -> None:
         """Stop watching the config file."""
@@ -1285,24 +1307,25 @@ class ConfigWatcher:
     # ------------------------------------------------------------------
 
     def _start_polling(self) -> None:
-        """Poll the config file mtime in a background thread."""
-        if self._config_path.exists():
-            self._last_mtime = self._config_path.stat().st_mtime
+        """Poll file identity, including atomic replacement, when needed."""
+        def version() -> tuple[int, int, int] | None:
+            try:
+                stat = self._config_path.stat()
+            except FileNotFoundError:
+                return None
+            return stat.st_ino, stat.st_mtime_ns, stat.st_size
+
+        self._last_version = version()
 
         def _poll() -> None:
             while not self._stop_event.is_set():
                 self._stop_event.wait(self._poll_interval)
                 if self._stop_event.is_set():
                     break
-                try:
-                    if not self._config_path.exists():
-                        continue
-                    mtime = self._config_path.stat().st_mtime
-                    if mtime != self._last_mtime:
-                        self._last_mtime = mtime
-                        self._on_config_changed()
-                except OSError:
-                    pass
+                current = version()
+                if current != self._last_version:
+                    self._last_version = current
+                    self._on_config_changed()
 
         self._poll_thread = threading.Thread(
             target=_poll,
