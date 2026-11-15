@@ -397,7 +397,7 @@ shared database.
 Use `code-review-graph query file_summary path.py --generation-ref refs/heads/main`
 to read the last published structural view of that ref for the selected
 checkout. The MCP `query_graph_tool` accepts the same `generation_ref`. This
-view includes symbols and relations. Search and flow commands automatically
+view includes symbols and relations. Search, flows and community commands automatically
 select the current Git ref's published view for this checkout, as does the
 VS Code extension. If the ref has no published projection, build that ref
 first.
@@ -426,13 +426,17 @@ code-review-graph prune --apply
 code-review-graph prune --apply --compact
 ```
 
-The first command previews unbound graph generations and orphaned vectors
-eligible for removal from the shared store. A generation stays live while
-any branch or worktree binds it. The defaults are 7 days, 10% of live vector bytes, and a cap
-of 512 MiB. Set `CRG_RETENTION_DAYS`, `CRG_RETENTION_PERCENT`, and
-`CRG_RETENTION_MAX_MIB` to adjust them. Setting any limit to zero retains
-no orphaned vectors. Compact explicitly when you want SQLite to reclaim
-unused pages on disk.
+The first command previews unbound graph generations, parser facts, input
+manifests, and vectors. A generation stays live while a branch or worktree
+binds it. Live file hashes protect parser facts, and verified input manifests
+follow their checkout and ref. The orphan age for facts and manifests starts
+when an applied maintenance pass first sees them unbound.
+
+The defaults are 7 days, 10% of live payload bytes, and a cap of 512 MiB for
+each reported retention budget. Set `CRG_RETENTION_DAYS`,
+`CRG_RETENTION_PERCENT`, and `CRG_RETENTION_MAX_MIB` to adjust the limits.
+Setting any limit to zero retains no unbound artifacts. Compact explicitly
+to reclaim unused SQLite pages on disk.
 
 Workspace manifest changes use native filesystem notifications by default.
 If those notifications are unavailable, the watcher logs why polling is

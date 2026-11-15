@@ -77,9 +77,9 @@ def _publish_refresh(
     store: GraphStore, inputs: _RefreshInputs, result: dict[str, Any],
 ) -> None:
     if store.checkout is not None:
-        store.record_graph_inputs(inputs.manifest_sha256, inputs.paths)
-        result["input_manifest_sha256"] = inputs.manifest_sha256
         result["generation_sha256"] = store.publish_generation(*inputs.anchor)
+        store.record_graph_inputs(inputs.manifest_sha256, inputs.paths, *inputs.anchor)
+        result["input_manifest_sha256"] = inputs.manifest_sha256
     store.set_metadata(REFRESH_REQUEST_KEY, json.dumps({
         "request": inputs.request, "result": result, "finished": time.time_ns(),
     }))

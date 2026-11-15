@@ -109,6 +109,33 @@ def initialize(conn: Connection) -> None:
     )
 
 
+def bind_manifest(conn: Connection, root: Path, ref: str, digest: str, paths: int) -> None:
+    """Attach verified inputs to the checkout/ref in its publication transaction."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS crg_graph_inputs (
+            digest TEXT PRIMARY KEY, path_count INTEGER NOT NULL
+        ) WITHOUT ROWID
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS crg_graph_input_bindings (
+            checkout BLOB NOT NULL, ref TEXT NOT NULL, digest TEXT NOT NULL,
+            PRIMARY KEY (checkout, ref)
+        ) WITHOUT ROWID
+    """)
+    conn.execute("INSERT OR IGNORE INTO crg_graph_inputs VALUES (?, ?)", (digest, paths))
+    conn.execute(
+        "INSERT INTO crg_graph_input_bindings VALUES (?, ?, ?) "
+        "ON CONFLICT(checkout, ref) DO UPDATE SET digest=excluded.digest",
+        (_checkout_key(root), ref, digest),
+    )
+    if conn.execute(
+        "SELECT 1 FROM sqlite_schema WHERE name='crg_artifact_unbound'",
+    ).fetchone():
+        conn.execute(
+            "DELETE FROM crg_artifact_unbound WHERE kind='manifest' AND digest=?", (digest,),
+        )
+
+
 def publish(conn: Connection, root: Path, ref: str, head: str, built_at: str) -> str:
     """Intern immutable rows and move only this checkout/reference binding."""
     checkout = _checkout_key(root)
@@ -147,7 +174,21 @@ def publish(conn: Connection, root: Path, ref: str, head: str, built_at: str) ->
         (checkout, ref, head, built_at, generation),
     )
     conn.execute("DELETE FROM crg_generation_unbound WHERE generation_id=?", (generation,))
+    if conn.execute(
+        "SELECT 1 FROM sqlite_schema WHERE name='crg_artifact_unbound'",
+    ).fetchone():
+        conn.execute(
+            "DELETE FROM crg_artifact_unbound WHERE kind='parser' AND digest IN "
+            "(SELECT file_hash FROM nodes WHERE kind='File' AND file_hash IS NOT NULL)",
+        )
     if previous is not None and previous[0] != generation:
+        if conn.execute(
+            "SELECT 1 FROM sqlite_schema WHERE name='crg_graph_input_bindings'",
+        ).fetchone():
+            conn.execute(
+                "DELETE FROM crg_graph_input_bindings WHERE checkout=? AND ref=?",
+                (checkout, ref),
+            )
         conn.execute(
             "INSERT OR IGNORE INTO crg_generation_unbound "
             "SELECT ?, ? WHERE NOT EXISTS "
@@ -237,6 +278,17 @@ def publish_projections(conn: Connection, root: Path, ref: str) -> None:
         flow[2] = names[flow[2]]
         flow[7] = [names[node] for node in path]
         flows.append(flow)
+    communities = [list(row) for row in conn.execute(
+        "SELECT id, name, level, parent_id, cohesion, size, dominant_language, "
+        "description, created_at FROM communities ORDER BY id",
+    )]
+    members = [list(row) for row in conn.execute(
+        "SELECT community_id, qualified_name FROM nodes "
+        "WHERE community_id IS NOT NULL ORDER BY qualified_name",
+    )]
+    detector = conn.execute(
+        "SELECT value FROM metadata WHERE key='community_detector'",
+    ).fetchone()
     fts = conn.execute(
         "SELECT value FROM metadata WHERE key='postprocess_level'",
     ).fetchone()
@@ -244,7 +296,11 @@ def publish_projections(conn: Connection, root: Path, ref: str) -> None:
         "INSERT INTO crg_generation_projections VALUES (?, ?, ?) "
         "ON CONFLICT(checkout, ref) DO UPDATE SET data=excluded.data",
         (_checkout_key(root), ref, json.dumps(
-            {"flows": flows, "fts": bool(fts and fts[0] in ("full", "minimal"))},
+            {
+                "flows": flows, "fts": bool(fts and fts[0] in ("full", "minimal")),
+                "communities": communities, "community_members": members,
+                "community_detector": detector[0] if detector else None,
+            },
             separators=(",", ":"),
         )),
     )
@@ -252,6 +308,7 @@ def publish_projections(conn: Connection, root: Path, ref: str) -> None:
 
 def load_projections(
     source: Connection, destination: Connection, root: Path, ref: str,
+    *, require_communities: bool = False,
 ) -> bool:
     """Restore stored flows with IDs remapped to the materialized nodes."""
     table = source.execute(
@@ -264,6 +321,23 @@ def load_projections(
     if row is None:
         raise GraphStoreError(f"No published search and flow state for {ref}; build that ref")
     state = json.loads(row[0])
+    if require_communities:
+        if "communities" not in state:
+            raise GraphStoreError(f"No published communities for {ref}; build that ref")
+        destination.executemany(
+            "INSERT INTO communities VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            state.get("communities", ()),
+        )
+        destination.executemany(
+            "UPDATE nodes SET community_id=? WHERE qualified_name=?",
+            state.get("community_members", ()),
+        )
+        if state.get("community_detector") is not None:
+            destination.execute(
+                "INSERT INTO metadata VALUES ('community_detector', ?)",
+                (state["community_detector"],),
+            )
+        return False
     ids = dict(destination.execute("SELECT qualified_name, id FROM nodes"))
     for flow in state["flows"]:
         path = [ids[name] for name in flow[7]]

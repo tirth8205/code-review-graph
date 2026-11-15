@@ -2175,7 +2175,9 @@ class GraphStore:
         return requested if requested != stored else None
 
     @contextmanager
-    def open_generation(self, ref: str, *, projections: bool = False) -> Iterator[GraphStore]:
+    def open_generation(
+        self, ref: str, *, projections: bool = False, require_communities: bool = False,
+    ) -> Iterator[GraphStore]:
         """Open the published nodes and edges for a ref as a native query store.
 
         Node IDs are local to this materialization. Optionally rebuild
@@ -2198,7 +2200,10 @@ class GraphStore:
                     f"INSERT INTO {kind} ({fields}, updated_at) VALUES ({marks}, 0)",
                     tuple(row.values()),
                 )
-            fts = projections and load_projections(self._conn, snapshot._conn, self.checkout, ref)
+            fts = projections and load_projections(
+                self._conn, snapshot._conn, self.checkout, ref,
+                require_communities=require_communities,
+            )
             snapshot._conn.commit()
             if fts:
                 from .search import rebuild_fts_index
@@ -2206,17 +2211,13 @@ class GraphStore:
                 rebuild_fts_index(snapshot)
             yield snapshot
 
-    def record_graph_inputs(self, digest: str, paths: int) -> None:
-        """Intern a verified input manifest in the shared refresh transaction."""
-        self._conn.execute("""
-            CREATE TABLE IF NOT EXISTS crg_graph_inputs (
-                digest TEXT PRIMARY KEY, path_count INTEGER NOT NULL
-            ) WITHOUT ROWID
-        """)
-        self._conn.execute(
-            "INSERT OR IGNORE INTO crg_graph_inputs (digest, path_count) VALUES (?, ?)",
-            (digest, paths),
-        )
+    def record_graph_inputs(self, digest: str, paths: int, branch: str, head: str) -> None:
+        """Bind a verified manifest in the shared refresh transaction."""
+        from .shared_generations import bind_manifest, git_ref
+
+        if self.checkout is None:
+            raise GraphStoreError("A manifest binding requires a shared checkout")
+        bind_manifest(self._conn, self.checkout, git_ref(branch, head), digest, paths)
 
     def invalidate_refresh(self) -> None:
         """Remove a completion before explicitly changing the shared graph."""

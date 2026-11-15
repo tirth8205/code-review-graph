@@ -216,6 +216,7 @@ def _get_store_for_read(
 
 def _select_generation(
     stack: ExitStack, store: GraphStore, *, ref: str | None = None, projections: bool = False,
+    require_communities: bool = False,
 ) -> GraphStore:
     stack.callback(store.close)
     if store.checkout is not None:
@@ -223,7 +224,9 @@ def _select_generation(
         if ref is None:
             ref = store.historical_ref_for_checkout()
     if ref is not None:
-        return stack.enter_context(store.open_generation(ref, projections=projections))
+        return stack.enter_context(store.open_generation(
+            ref, projections=projections, require_communities=require_communities,
+        ))
     return store
 
 

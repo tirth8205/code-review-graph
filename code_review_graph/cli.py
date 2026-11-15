@@ -193,7 +193,8 @@ _BANNER_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         ("register", "Add a repository to the multi-repo list"),
         ("unregister", "Remove a repository from that list"),
         ("repos", "Show the listed repositories"),
-        ("prune", "Find stale registry entries and orphaned graph directories"),
+        ("migrate-shared", "Upgrade and validate the selected shared SQLite index"),
+        ("prune", "Preview retention and find stale registry entries"),
         ("vstore", "Store and retrieve graph bundles by tree hash"),
         ("eval", "Run the benchmarks"),
     )),
@@ -3332,7 +3333,7 @@ def _dispatch() -> None:
         from .shared_sqlite import migrate_selected_database
 
         before, after, issues = migrate_selected_database()
-        print(f"Shared SQLite schema {before} → {after}; unresolved checkout records: {issues}")
+        print(f"Shared SQLite schema {before} to {after}; unresolved checkout records: {issues}")
         return
 
     if args.command == "prune":

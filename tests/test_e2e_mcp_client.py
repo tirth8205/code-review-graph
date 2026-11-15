@@ -460,7 +460,7 @@ def test_shared_cli_interns_equivalent_input_manifests_across_worktrees(tmp_path
     source = repo / "pkg" / "service.py"
     source.write_text(SERVICE_PY.replace(
         '    return {"total":', '    """Reconcile aerospace invoices."""\n    return {"total":',
-    ), encoding="utf-8")
+    ) + "\n\ndef invoice_entry(items): return build_invoice(items)\n", encoding="utf-8")
     _git(repo, "add", "pkg/service.py")
     _git(repo, "commit", "-qm", "Document the main entry point")
     sibling = tmp_path / "sibling"
@@ -518,6 +518,33 @@ def test_shared_cli_interns_equivalent_input_manifests_across_worktrees(tmp_path
 
     main_steps = steps()
     assert main_steps
+
+    def community_snapshot(environment=env):
+        listed = run_tool("communities", environment=environment)
+        assert listed["status"] == "ok" and listed["communities"]
+        output = {}
+        for row in listed["communities"]:
+            detail = run_tool("community", "--id", str(row["id"]), "--members",
+                              environment=environment)
+            assert detail["status"] == "ok"
+            community = detail["community"]
+            output[row["name"]] = (
+                row["size"], row["cohesion"], set(row["members"]),
+                {item["qualified_name"] for item in community["member_details"]},
+            )
+        architecture = run_tool("architecture", environment=environment)
+        assert architecture["status"] == "ok"
+        refs = {row["id"]: row["name"] for row in architecture["communities"]}
+        cross_edges = sorted(
+            (refs[edge["source_community"]], refs[edge["target_community"]],
+             edge["edge_kind"], edge["source"], edge["target"])
+            for edge in architecture["cross_community_edges"]
+        )
+        return output, architecture["summary"], architecture["warnings"], cross_edges
+
+    original_communities = community_snapshot()
+    assert any("build_invoice" in member for row in original_communities[0].values()
+               for member in row[2])
     for args, expected in before.items():
         assert query(repo, *args, "--generation-ref", "refs/heads/main") == expected
 
@@ -536,9 +563,18 @@ def test_shared_cli_interns_equivalent_input_manifests_across_worktrees(tmp_path
         )
     _git(repo, "checkout", "-q", "main")
     subprocess.run(build, env=clean, check=True, capture_output=True, timeout=30)
+    retention = subprocess.check_output(
+        [sys.executable, "-m", "code_review_graph", "prune", "--apply"],
+        env={**env, "CRG_RETENTION_DAYS": "0"}, text=True, timeout=30,
+    )
+    assert "orphan parser facts -0, orphan manifests -0" in retention
+    with sqlite3.connect(database) as db:
+        assert db.execute("SELECT COUNT(*) FROM crg_graph_inputs").fetchone() == (2,)
+        assert db.execute("SELECT COUNT(*) FROM crg_graph_input_bindings").fetchone() == (3,)
     historical_search = run_tool("search", "aerospace")
     assert historical_search == search == run_tool("search", "aerospace", environment=clean)
     assert steps() == main_steps == steps(clean)
+    assert community_snapshot() == original_communities == community_snapshot(clean)
     assert not run_tool("search", "only_on_feature")["results"]
     for args, expected in before.items():
         assert query(repo, *args, "--generation-ref", "refs/heads/main") == expected
@@ -617,8 +653,8 @@ def test_shared_cli_migrate_preserves_native_rows_and_publishes_existing_ref(
         for (table,) in tables:
             db.execute(f"DROP TABLE {table}")
         db.execute("UPDATE _crg_shared SET version=?", (legacy_version,))
-    assert f"{legacy_version} → 3; unresolved checkout records: 0" in run("migrate-shared")
-    assert "3 → 3; unresolved checkout records: 0" in run("migrate-shared")
+    assert f"{legacy_version} to 3; unresolved checkout records: 0" in run("migrate-shared")
+    assert "3 to 3; unresolved checkout records: 0" in run("migrate-shared")
     current = json.loads(run("query", "imports_of", "pkg/service.py", "--repo", str(repo)))
     historical = json.loads(run(
         "query", "imports_of", "pkg/service.py", "--generation-ref", "refs/heads/main",
@@ -709,6 +745,7 @@ main()
             [*cli, "prune", *flags], env=gc_env, text=True, timeout=30,
         )
         assert "orphan generations -1" in report
+        assert "orphan parser facts -2, orphan manifests -1" in report
         assert publication()[1:] == (current[1], expected)
     assert symbols() == {"replacement_symbol"}
     assert list(tmp_path.rglob("*.db")) == [tmp_path / "shared.db"]

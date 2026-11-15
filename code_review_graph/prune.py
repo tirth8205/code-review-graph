@@ -18,7 +18,7 @@ if sys.version_info >= (3, 11):
 else:
     import tomli as tomllib
 
-from . import shared_generations, shared_vectors
+from . import shared_artifact_retention, shared_generations, shared_vectors
 from .constants import env_int
 from .daemon import (
     DaemonConfig,
@@ -155,6 +155,9 @@ def _prune_shared_artifacts(path: Path, *, apply: bool, compact: bool) -> str:
                 generation_count, generation_bytes, generation_budget = shared_generations.prune(
                     conn, days=days, percent=percent, max_bytes=mib * 1024 ** 2, apply=apply,
                 )
+                facts, manifests, artifact_bytes, artifact_budget = shared_artifact_retention.prune(
+                    conn, days=days, percent=percent, max_bytes=mib * 1024 ** 2, apply=apply,
+                )
                 count, reclaimed, budget = (
                     shared_vectors.prune(
                         conn, days=days, percent=percent, max_bytes=mib * 1024 ** 2, apply=apply,
@@ -169,7 +172,9 @@ def _prune_shared_artifacts(path: Path, *, apply: bool, compact: bool) -> str:
         f", vector retention {days} days/{percent}%/{mib} MiB, "
         f"effective budget {budget} bytes, orphan vectors -{count} ({reclaimed} bytes), "
         f"generation budget {generation_budget} bytes, "
-        f"orphan generations -{generation_count} ({generation_bytes} payload bytes)"
+        f"orphan generations -{generation_count} ({generation_bytes} payload bytes), "
+        f"artifact budget {artifact_budget} bytes, "
+        f"orphan parser facts -{facts}, orphan manifests -{manifests} ({artifact_bytes} bytes)"
     )
 
 

@@ -33,6 +33,10 @@ test:
 lint-fork-workflows:
 	mise exec actionlint@1.7.12 -- actionlint .github/workflows/sync-upstream.yml .github/workflows/release-assets.yml
 
+.PHONY: test-communities
+test-communities:
+	uv run --locked --extra dev pytest tests/test_communities.py -q --tb=short
+
 test-release:
 	uv run --locked --extra dev pytest tests/test_release_provenance.py tests/test_documentation.py -q --tb=short
 

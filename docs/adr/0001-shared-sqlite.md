@@ -50,7 +50,8 @@ same ref and checkout binding. Historical search rebuilds its FTS index from
 published nodes and reads the published vector links. Historical flows
 preserve their path through qualified symbols and remap their node IDs to
 the materialized graph. The native graph remains the fast path for its
-current ref; communities still read that native index.
+current ref. Historical community queries restore the published community
+rows and memberships by qualified symbol, including the detector metadata.
 
 Shared builds reuse Python AST evidence by source SHA-256 and extractor
 profile. This evidence describes local function bindings and unreachable
