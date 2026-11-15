@@ -22,6 +22,7 @@ import time
 import unicodedata
 import uuid
 from collections import deque
+from datetime import datetime
 from functools import partial
 from itertools import islice
 from pathlib import Path, PurePosixPath
@@ -3185,7 +3186,7 @@ def full_build(
                 if i % 200 == 0 or i == file_count:
                     logger.info("Progress: %d/%d files parsed", i, file_count)
 
-    store.set_metadata("last_updated", time.strftime("%Y-%m-%dT%H:%M:%S"))
+    store.set_metadata("last_updated", datetime.now().isoformat())
     store.set_metadata("last_build_type", "full")
     store.set_metadata("intentionally_incomplete", "0")
     store.set_metadata(
@@ -3774,7 +3775,7 @@ def incremental_update(
     # the graph matches HEAD, so it keeps the old anchor.
     freshness_advanced = False
     if files_updated or authoritative_git_sync:
-        store.set_metadata("last_updated", time.strftime("%Y-%m-%dT%H:%M:%S"))
+        store.set_metadata("last_updated", datetime.now().isoformat())
         store.set_metadata("last_build_type", "incremental")
         if not remaining_identity:
             store.set_metadata(_CPP_IDENTITY_METADATA_KEY, CPP_IDENTITY_VERSION)

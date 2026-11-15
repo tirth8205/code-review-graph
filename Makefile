@@ -42,7 +42,7 @@ test-notebooks:
 
 .PHONY: test-skills
 test-skills:
-	uv run --locked --extra dev pytest tests/test_skill_template_schema_sync.py tests/test_skills.py -q --tb=short
+	uv run --locked --extra dev pytest tests/test_skill_template_schema_sync.py tests/test_skills.py tests/test_codex_skill_wrapper.py -q --tb=short
 
 .PHONY: test-daemon
 test-daemon:
