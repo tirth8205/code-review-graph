@@ -36,6 +36,15 @@ lint-fork-workflows:
 test-release:
 	uv run --locked --extra dev pytest tests/test_release_provenance.py tests/test_documentation.py -q --tb=short
 
+# Reviewed dead-code corpus. Needs the real checkouts (CRG_CORPUS_ROOT or one
+# CRG_CORPUS_<REPO> per repository); CI runs the synthetic tests instead.
+.PHONY: eval-dead-code eval-dead-code-record
+eval-dead-code:
+	uv run --locked --extra dev python -m tests.dead_code_corpus
+
+eval-dead-code-record:
+	uv run --locked --extra dev python -m tests.dead_code_corpus --record
+
 .PHONY: test-notebooks
 test-notebooks:
 	uv run --locked --extra dev pytest tests/test_notebook.py -q --tb=short

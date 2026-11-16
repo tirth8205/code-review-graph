@@ -3908,6 +3908,11 @@ class CodeParser:
         # files never existed on disk. See ``forget.forget_files``.
         self._excluded_files: set[str] = set()
         self._export_symbol_cache: dict[str, Optional[str]] = {}
+        # File path -> every function/class name defined below file scope.
+        # A closure handed to a library has no call-shaped caller, so value
+        # reference emission needs the names `_collect_file_scope` leaves out
+        # (it owns module exports, where a nested name is not an export).
+        self._nested_definition_names: dict[str, frozenset[str]] = {}
         self._tsconfig_resolver = TsconfigResolver()
         self._workspace_resolver = WorkspaceResolver(
             repo_root=self._repo_root, file_exists=self._file_exists_exact,
@@ -3978,6 +3983,7 @@ class CodeParser:
         self._ruby_load_roots_cache.clear()
         self._python_reexport_cache.clear()
         self._export_symbol_cache.clear()
+        self._nested_definition_names.clear()
         self._dart_pubspec_cache.clear()
         self._rust_project_cache.clear()
         self._tsconfig_resolver = TsconfigResolver()
@@ -8371,18 +8377,28 @@ class CodeParser:
                         resolved.append(edge)
                         continue
                 if candidates:
-                    if is_cpp and len(candidates) > 1:
+                    if len(candidates) > 1:
+                        # A nested class chain makes the same leaf name appear
+                        # in several classes. Prefer the definition in the
+                        # source's own lexical scopes; never pick the first by
+                        # insertion order, which invented a target (#984).
+                        narrowed = self._narrow_by_lexical_scope(
+                            entries, source_scopes.get(edge.source),
+                        )
+                        if narrowed:
+                            candidates = narrowed
+                    if len(candidates) > 1:
                         edge = EdgeInfo(
                             kind=edge.kind,
                             source=edge.source,
                             target=edge.target,
                             file_path=edge.file_path,
                             line=edge.line,
-                            extra=cpp_resolution_extra(
-                                edge.extra,
-                                "ambiguous",
-                                candidates,
-                            ),
+                            extra={
+                                **edge.extra,
+                                "resolution": "ambiguous",
+                                "candidates": candidates[:20],
+                            },
                         )
                         resolved.append(edge)
                         continue
@@ -8396,6 +8412,26 @@ class CodeParser:
                     )
             resolved.append(edge)
         return resolved
+
+    @staticmethod
+    def _narrow_by_lexical_scope(
+        entries: list[tuple[str, Optional[str]]],
+        source_scope: Optional[str],
+    ) -> list[str]:
+        """Candidates declared in the source's own scopes, innermost first.
+
+        Returns an empty list when no scope matches, so the caller keeps the
+        full candidate set and reports ambiguity instead of guessing.
+        """
+        scope = source_scope
+        while scope:
+            matches = [
+                qualified for qualified, parent in entries if parent == scope
+            ]
+            if matches:
+                return matches
+            scope = scope.rsplit(".", 1)[0] if "." in scope else None
+        return [qualified for qualified, parent in entries if parent is None]
 
     def _resolve_julia_call_targets(
         self,
@@ -16810,12 +16846,15 @@ class CodeParser:
         # through its own helper.
         if language == "julia":
             recursive_class = self._julia_scope_join(enclosing_class, name)
-        elif language in ("python", "cpp"):
-            # Python keeps its legacy leaf spelling unless a same-leaf class
-            # actually collides; ``_index_ambiguous_method_scopes`` carries
-            # the full chain for exactly those methods (#999). C++ pins
-            # legacy nested-class keys while its namespace-aware function
-            # scopes stay complete (test_cpp_overload_identity).
+        elif language == "python":
+            # The class node is keyed with the full chain, so its members must
+            # be too. Keeping the legacy leaf spelling keyed a method of
+            # ``Outer.Inner`` as ``file::Inner.method``: the container had no
+            # methods, and rename/inheritance/query could not reach them.
+            recursive_class = f"{class_parent}.{name}" if class_parent else name
+        elif language == "cpp":
+            # C++ pins legacy nested-class keys while its namespace-aware
+            # function scopes stay complete (test_cpp_overload_identity).
             recursive_class = name
         elif class_parent:
             recursive_class = f"{class_parent}.{name}"
@@ -19132,6 +19171,23 @@ class CodeParser:
         else:
             caller = file_path
 
+        # --- Python annotation references (field and parameter types) ---
+        if language == "python" and node_type == "type":
+            for name in self._python_annotation_names(child):
+                self._emit_reference_if_known(
+                    name, language, file_path, caller, edges,
+                    import_map, defined_names,
+                    line=child.start_point[0] + 1,
+                )
+            return
+
+        # --- Python export registry (generated lazy facades) ---
+        if language == "python" and node_type == "call":
+            self._python_export_registry_references(
+                child, file_path, caller, edges,
+            )
+            return
+
         # --- JS/TS/Python: object literal pair values  { key: fnRef } ---
         if node_type in self._PAIR_TYPES:
             self._ref_from_pair(child, source, language, file_path, caller, edges, imap, dnames)
@@ -19186,6 +19242,21 @@ class CodeParser:
             return
         # Must be a known local definition or import to be worth tracking.
         if name not in defined_names and name not in import_map:
+            # A closure or nested class is not a module export, so it never
+            # reaches `defined_names`. It is still a definition this file owns:
+            # hand it to the same-file resolver as a bare target, which binds it
+            # only when exactly one definition carries that leaf name.
+            scoped = self._nested_definition_names.get(file_path, frozenset())
+            if name not in scoped:
+                return
+            edges.append(EdgeInfo(
+                kind="REFERENCES",
+                source=caller,
+                target=name,
+                file_path=file_path,
+                line=line,
+                extra={"value_reference": "file_scope"},
+            ))
             return
 
         target = self._resolve_call_target(
@@ -19287,6 +19358,164 @@ class CodeParser:
                     line=ch.start_point[0] + 1,
                 )
 
+    def _python_annotation_names(self, node) -> list[str]:
+        """Every type name written in a Python annotation.
+
+        A field such as ``path_rules: PathRulesConfig = Field(...)`` or
+        ``Annotated[TestmonCacheSpec, Field(...)]`` uses the model as its type;
+        no call or import edge reaches it, so a model used only this way was
+        reported dead.
+        """
+        names: list[str] = []
+        pending = [node]
+        while pending:
+            current = pending.pop()
+            if current.type == "identifier":
+                names.append(current.text.decode("utf-8", errors="replace"))
+                continue
+            if current.type == "attribute":
+                attribute = current.child_by_field_name("attribute")
+                if attribute is not None:
+                    names.append(attribute.text.decode("utf-8", errors="replace"))
+                continue
+            pending.extend(current.children)
+        return names
+
+    def _python_export_registry_references(
+        self,
+        call_node,
+        file_path: str,
+        caller: str,
+        edges: list[EdgeInfo],
+    ) -> None:
+        """Emit REFERENCES for a generated package export registry.
+
+        A generated ``__init__.py`` publishes its members through a registry
+        call (``defer_lazy_bases(exports=..., deferred_members=...)``): the
+        names are string literals, so no import or call edge reaches the real
+        class, and every lazily exported model looked dead. The registry itself
+        states the facade and its module, which resolves to an exact target
+        instead of a name guess.
+        """
+        function = call_node.child_by_field_name("function")
+        if function is None:
+            return
+        arguments = call_node.child_by_field_name("arguments")
+        if arguments is None:
+            return
+        payload: dict[str, object] = {}
+        module_map: dict[str, str] = {}
+        for child in arguments.children:
+            target = child
+            if child.type == "keyword_argument":
+                key = child.child_by_field_name("name")
+                value = child.child_by_field_name("value")
+                if key is None or value is None:
+                    continue
+                try:
+                    payload[key.text.decode("utf-8", errors="replace")] = ast.literal_eval(
+                        value.text.decode("utf-8", errors="replace")
+                    )
+                except (SyntaxError, ValueError):
+                    continue
+                continue
+            try:
+                literal = ast.literal_eval(
+                    target.text.decode("utf-8", errors="replace")
+                )
+            except (SyntaxError, ValueError):
+                continue
+            if isinstance(literal, dict) and all(
+                isinstance(k, str) and isinstance(v, str) for k, v in literal.items()
+            ):
+                module_map = literal
+        members = payload.get("deferred_members")
+        if not module_map:
+            return
+        line = call_node.start_point[0] + 1
+        for facade, module in module_map.items():
+            origin = self._python_import_origin(module, file_path)
+            if origin is None:
+                continue
+            edges.append(EdgeInfo(
+                kind="REFERENCES",
+                source=caller,
+                target=f"{origin}::{facade}",
+                file_path=file_path,
+                line=line,
+                extra={"export_surface": "registry"},
+            ))
+        if not isinstance(members, dict):
+            return
+        for facade, entries in members.items():
+            if not isinstance(facade, str):
+                continue
+            module = module_map.get(facade)
+            if not isinstance(module, str):
+                continue
+            origin = self._python_import_origin(module, file_path)
+            if origin is None:
+                continue
+            targets = [facade]
+            if isinstance(entries, (list, tuple)):
+                targets.extend(
+                    f"{facade}.{member}" for member in entries if isinstance(member, str)
+                )
+            for target in targets:
+                edges.append(EdgeInfo(
+                    kind="REFERENCES",
+                    source=caller,
+                    target=f"{origin}::{target}",
+                    file_path=file_path,
+                    line=line,
+                    extra={"export_surface": "registry"},
+                ))
+
+    def _python_value_reference_names(self, node) -> list[str]:
+        """Names a Python argument hands to the callee as a value.
+
+        Only forms that *are* the callable are followed: a bare name, a
+        ``self.method`` reference, a parenthesized form, and the two branches of
+        a conditional. Arbitrary expressions are left alone so a name that
+        merely appears inside them is not credited as a reference.
+        """
+        node_type = node.type
+        if node_type == "identifier":
+            return [node.text.decode("utf-8", errors="replace")]
+        if node_type == "attribute":
+            owner = node.child_by_field_name("object")
+            attribute = node.child_by_field_name("attribute")
+            if (
+                owner is not None
+                and attribute is not None
+                and owner.text in (b"self", b"cls")
+            ):
+                return [attribute.text.decode("utf-8", errors="replace")]
+            return []
+        if node_type == "parenthesized_expression":
+            return [
+                name
+                for child in node.children
+                for name in self._python_value_reference_names(child)
+            ]
+        if node_type == "conditional_expression":
+            # This grammar exposes no fields here: children are consequence,
+            # ``if``, condition, ``else``, alternative. The condition is not a
+            # reference; the two branches are.
+            branches = []
+            children = node.children
+            if children:
+                branches.append(children[0])
+            for index, child in enumerate(children):
+                if child.type == "else" and index + 1 < len(children):
+                    branches.append(children[index + 1])
+            return [
+                name
+                for branch in branches
+                for name in self._python_value_reference_names(branch)
+            ]
+        return []
+
     def _ref_from_arguments(
         self,
         args_node,
@@ -19303,7 +19532,27 @@ class CodeParser:
             reference_node = ch
             if ch.type == "keyword_argument" and language == "python":
                 reference_node = ch.child_by_field_name("value")
-            if reference_node is None or reference_node.type != "identifier":
+            if reference_node is None:
+                continue
+            if language == "python":
+                if reference_node.type == "call":
+                    # A callable passed to an inner call (an options object, a
+                    # wrapper) is still a reference in this scope.
+                    inner = reference_node.child_by_field_name("arguments")
+                    if inner is not None:
+                        self._ref_from_arguments(
+                            inner, source, language, file_path, caller, edges,
+                            import_map, defined_names,
+                        )
+                    continue
+                for name in self._python_value_reference_names(reference_node):
+                    self._emit_reference_if_known(
+                        name, language, file_path, caller, edges,
+                        import_map, defined_names,
+                        line=reference_node.start_point[0] + 1,
+                    )
+                continue
+            if reference_node.type != "identifier":
                 continue
             name = reference_node.text.decode("utf-8", errors="replace")
             self._emit_reference_if_known(
@@ -20108,7 +20357,39 @@ class CodeParser:
                 root, source, import_map,
             )
 
+        if file_path:
+            self._nested_definition_names[file_path] = (
+                self._collect_scoped_definition_names(root, language)
+            )
+
         return import_map, defined_names
+
+    def _collect_scoped_definition_names(
+        self,
+        root,
+        language: str,
+    ) -> frozenset[str]:
+        """Every function/class name defined in *root*, file scope included.
+
+        A closure or nested class has no entry in ``defined_names`` because
+        that set owns module exports. Value references need the full inventory
+        to recognise a definition handed to a library, so it is collected once
+        per file and read only by ``_emit_reference_if_known``.
+        """
+        wanted = set(self._function_types.get(language, []))
+        wanted.update(self._class_types.get(language, []))
+        if not wanted:
+            return frozenset()
+        names: set[str] = set()
+        pending = [root]
+        while pending:
+            node = pending.pop()
+            if node.type in wanted:
+                name_node = node.child_by_field_name("name")
+                if name_node is not None:
+                    names.add(name_node.text.decode("utf-8", errors="replace"))
+            pending.extend(node.children)
+        return frozenset(names)
 
     def _collect_julia_scoped_import_names(
         self,
