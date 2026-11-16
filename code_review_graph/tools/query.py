@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 from collections import defaultdict, deque
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
@@ -55,6 +56,7 @@ from ._common import (
     _get_store_for_read,
     _resolve_graph_file_paths,
     _resolve_graph_file_paths_with_unmatched,
+    _select_generation,
     _shown_of,
     _unmatched_file_warning,
     _validate_positive_int,
@@ -1025,6 +1027,7 @@ def query_graph(
     max_results: int = 100,
     resolution: str = RESOLUTION_ALL,
     to: str | None = None,
+    generation_ref: str | None = None,
 ) -> dict[str, Any]:
     """Run a predefined graph query.
 
@@ -1045,6 +1048,8 @@ def query_graph(
             "unresolved" keeps only the bare-name matches.
         to: For path_to, the node, qualified name or file to reach. A route is one
             answer, so max_results and the minimal cap do not cut it.
+
+        generation_ref: A published structural snapshot for this checkout and Git ref.
 
     Returns:
         Matching nodes and their aligned edges, with total and omitted counts.
@@ -1071,7 +1076,9 @@ def query_graph(
     if not_built is not None:
         return not_built
     assert store is not None and root is not None
+    stack = ExitStack()
     try:
+        store = _select_generation(stack, store, ref=generation_ref)
         minimal = detail_level == "minimal"
         if pattern == "path_to" and to:
             return _query_route(store, root, target, to, minimal)
@@ -1799,7 +1806,7 @@ def query_graph(
             response["confidence"] = confidence
         return response
     finally:
-        store.close()
+        stack.close()
 
 
 # ---------------------------------------------------------------------------
@@ -2030,7 +2037,9 @@ def semantic_search_nodes(
     if not_built is not None:
         return not_built
     assert store is not None and root is not None
+    stack = ExitStack()
     try:
+        store = _select_generation(stack, store, projections=True)
         mode_out: list[str] = []
         ranked = hybrid_search(
             store, query, kind=kind, limit=window, context_files=context_files,
@@ -2128,7 +2137,7 @@ def semantic_search_nodes(
         )
         return result
     finally:
-        store.close()
+        stack.close()
 
 
 # ---------------------------------------------------------------------------

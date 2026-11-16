@@ -15,6 +15,7 @@ import json
 import sqlite3
 import threading
 import time
+from contextlib import nullcontext
 
 import pytest
 from watchdog.events import FileModifiedEvent
@@ -48,6 +49,8 @@ class _Trace:
 class InstrumentedStore:
     """Stands in for main()'s GraphStore: counts users, records closes, closes nothing."""
 
+    checkout = None
+
     def __init__(self, trace: _Trace, watcher_threads, db_path) -> None:
         self.db_path = db_path  # the write lock sits beside it
         self._trace = trace
@@ -72,6 +75,12 @@ class InstrumentedStore:
 
     def get_metadata(self, _key: str) -> None:
         return None
+
+    def refresh(self):
+        return nullcontext()
+
+    def invalidate_refresh(self) -> None:
+        pass
 
     def close(self) -> None:
         with self._lock:

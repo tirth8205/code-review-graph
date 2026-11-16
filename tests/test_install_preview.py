@@ -115,6 +115,38 @@ def plans(monkeypatch) -> list[install_plan.Plan]:
     return seen
 
 
+def test_opencode_preview_keeps_version_probe_state_outside_the_profile(
+    sandbox, monkeypatch, capsys,
+):
+    """Even a version command that initializes state leaves the profile untouched."""
+    real_which = skills.shutil.which
+    real_run = subprocess.run
+    version_probe = (
+        "import os; from pathlib import Path; "
+        "data = Path(os.environ.get('XDG_DATA_HOME', Path.home() / '.local/share')); "
+        "log = data / 'opencode/log'; log.mkdir(parents=True, exist_ok=True); "
+        "(log / 'version.log').write_text('started'); print('1.19.5')"
+    )
+
+    def run(command, *args, **kwargs):
+        if command == [sys.executable, "--version"]:
+            command = [sys.executable, "-c", version_probe]
+        return real_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(
+        skills.shutil, "which",
+        lambda name: sys.executable if name == "opencode" else real_which(name),
+    )
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    before = _snapshot(sandbox)
+
+    cli._handle_init(_args(sandbox, "opencode", dry_run=True))
+
+    assert "OpenCode 1.x" in capsys.readouterr().out
+    assert _snapshot(sandbox) == before
+
+
 @pytest.mark.parametrize("key", PLATFORM_KEYS)
 def test_dry_run_writes_nothing_and_shows_each_change(sandbox, key, plans, capsys):
     before = _snapshot(sandbox)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from contextlib import ExitStack
 from pathlib import Path, PurePath
 from typing import Any
 
@@ -33,6 +34,7 @@ from ._common import (
     _error_response,
     _get_store,
     _resolve_graph_file_paths_with_unmatched,
+    _select_generation,
     _shown_of,
     _unmatched_file_warning,
     _validate_positive_int,
@@ -934,7 +936,9 @@ def get_affected_flows_func(
         the response.
     """
     store, root = _get_store(repo_root)
+    stack = ExitStack()
     try:
+        store = _select_generation(stack, store, projections=True)
         if changed_files is None:
             changed_files, base = discover_review_changes(root, base)
 
@@ -988,7 +992,7 @@ def get_affected_flows_func(
     except Exception as exc:
         return {"status": "error", "error": str(exc)}
     finally:
-        store.close()
+        stack.close()
 
 
 # ---------------------------------------------------------------------------

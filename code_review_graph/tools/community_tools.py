@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from contextlib import ExitStack
 from typing import Any
 
 from ..communities import get_architecture_overview, get_communities
@@ -10,7 +11,13 @@ from ..context_history import CallInfo
 from ..context_savings import attach_context_savings
 from ..graph import node_to_dict
 from ..hints import generate_hints, get_session
-from ._common import _bounded, _get_store_for_read, _shown_of, _validate_positive_int
+from ._common import (
+    _bounded,
+    _get_store_for_read,
+    _select_generation,
+    _shown_of,
+    _validate_positive_int,
+)
 
 # ---------------------------------------------------------------------------
 # Tool 13: list_communities  [EXPLORE]
@@ -88,7 +95,9 @@ def list_communities_func(
     if not_built is not None:
         return not_built
     assert store is not None and root is not None
+    stack = ExitStack()
     try:
+        store = _select_generation(stack, store, projections=True, require_communities=True)
         communities, total, truncated = _bounded(
             get_communities(store, sort_by=sort_by, min_size=min_size),
             max_results,
@@ -118,7 +127,7 @@ def list_communities_func(
     except Exception as exc:
         return {"status": "error", "error": str(exc)}
     finally:
-        store.close()
+        stack.close()
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +168,9 @@ def get_community_func(
     if not_built is not None:
         return not_built
     assert store is not None and root is not None
+    stack = ExitStack()
     try:
+        store = _select_generation(stack, store, projections=True, require_communities=True)
         community: dict | None = None
         all_communities = get_communities(store)
 
@@ -207,7 +218,7 @@ def get_community_func(
     except Exception as exc:
         return {"status": "error", "error": str(exc)}
     finally:
-        store.close()
+        stack.close()
 
 
 # ---------------------------------------------------------------------------
@@ -296,7 +307,9 @@ def get_architecture_overview_func(
     if not_built is not None:
         return not_built
     assert store is not None and root is not None
+    stack = ExitStack()
     try:
+        store = _select_generation(stack, store, projections=True, require_communities=True)
         full_overview = get_architecture_overview(store)
         overview = full_overview
         if detail_level == "minimal":
@@ -355,4 +368,4 @@ def get_architecture_overview_func(
     except Exception as exc:
         return {"status": "error", "error": str(exc)}
     finally:
-        store.close()
+        stack.close()

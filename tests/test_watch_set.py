@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+import code_review_graph.watch_set as watch_set_module
 from code_review_graph.daemon import read_watch_health, watch_health_path
 from code_review_graph.graph import GraphStore
 from code_review_graph.incremental import full_build
@@ -80,13 +81,21 @@ def _has_function(data_dir: Path, name: str) -> bool:
 
 
 class TestWatchSet:
-    def test_one_process_watches_every_repo_and_follows_the_manifest(self, tmp_path):
+    def test_one_process_watches_every_repo_and_follows_the_manifest(self, tmp_path, monkeypatch):
         first, first_data = _repo(tmp_path, "first")
         second, second_data = _repo(tmp_path, "second")
         manifest = tmp_path / "watch.json"
         _write_manifest(manifest, [(first, first_data), (second, second_data)])
         stop = threading.Event()
         failures: list[BaseException] = []
+        manifest_checks = []
+        manifest_version = watch_set_module._manifest_version
+
+        def count_check(path):
+            manifest_checks.append(path)
+            return manifest_version(path)
+
+        monkeypatch.setattr(watch_set_module, "_manifest_version", count_check)
 
         def run() -> None:
             try:
@@ -104,6 +113,7 @@ class TestWatchSet:
             (first / "added.py").write_text("def added_later():\n    return 2\n", encoding="utf-8")
             _until(lambda: _has_function(first_data, "added_later"), "the edit in first")
             assert not _has_function(second_data, "added_later")
+            assert manifest_checks == [manifest]
 
             _write_manifest(manifest, [(first, first_data)])
             _until(lambda: not watch_health_path(second).exists(), "second to stop")

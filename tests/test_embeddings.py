@@ -4,9 +4,11 @@ import json
 import os
 import random
 import sqlite3
+import subprocess
 import sys
 import threading
 import time
+from dataclasses import replace
 from email.message import Message
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import MagicMock, patch
@@ -174,6 +176,110 @@ class TestEmbeddingStore:
                     assert vectors.search("symbol") == [(keys[1], 1.0)]
         assert list(tmp_path.glob("*.db")) == [db]
 
+    def test_shared_vector_payloads_reuse_one_common_remote(self, tmp_path, monkeypatch):
+        db = tmp_path / "shared.db"
+        monkeypatch.setenv("CRG_SHARED_DB", str(db))
+        provider = MagicMock()
+        provider.name = "test:direct-peer"
+        provider.embed.side_effect = [[[1.0, 0.0]], [[0.0, 1.0]], [[0.0, -1.0]]]
+        provider.embed_query.return_value = [1.0, 0.0]
+        remotes = (
+            (("origin", "git@github.com:one/example.git"),),
+            (("upstream", "https://github.com/one/example"),
+             ("origin", "https://github.com/two/example")),
+            (("origin", "https://github.com/two/example"),),
+            (("origin", "https://github.com/unrelated/example"),),
+        )
+        with patch("code_review_graph.embeddings.get_provider", return_value=provider):
+            for index, entries in enumerate(remotes):
+                root = tmp_path / f"clone-{index}"
+                subprocess.run(["git", "init", "-q", str(root)], check=True)
+                for remote, url in entries:
+                    subprocess.run(
+                        ["git", "-C", str(root), "remote", "add", remote, url], check=True,
+                    )
+                name = f"module-{index}.py::func_1"
+                node = replace(
+                    self._make_node(1), qualified_name=name,
+                    file_path=str(root / "file.py"),
+                )
+                with GraphStore(db, checkout=root) as graph, EmbeddingStore(
+                    db, graph_store=graph,
+                ) as store:
+                    assert store.embed_nodes([node]) == 1
+                assert provider.embed.call_count == max(1, index)
+                with GraphStore(db, checkout=root, read_only=True) as graph, EmbeddingStore(
+                    db, graph_store=graph,
+                ) as store:
+                    assert store.search("symbol") == [(name, 1.0 if index < 2 else 0.0)]
+
+        with sqlite3.connect(db) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM crg_vector_payloads").fetchone() == (3,)
+
+    def test_shared_legacy_vectors_migrate_without_calls_or_losing_symbols(
+        self, tmp_path, monkeypatch,
+    ):
+        db = tmp_path / "shared.db"
+        monkeypatch.setenv("CRG_SHARED_DB", str(db))
+        provider = MagicMock()
+        provider.name = "test:legacy"
+        provider.embed_query.return_value = [1.0, 0.0]
+        with GraphStore(db, checkout=tmp_path) as graph:
+            graph._conn.execute(
+                "CREATE TABLE embeddings (qualified_name TEXT PRIMARY KEY, vector BLOB, "
+                "text_hash TEXT, provider TEXT)"
+            )
+            graph._conn.executemany("INSERT INTO embeddings VALUES (?, ?, ?, ?)", (
+                (name, _encode_vector([1.0, 0.0]), "legacy-hash", provider.name)
+                for name in ("left.py::f", "right.py::f")
+            ))
+            graph._conn.execute("UPDATE _crg_shared SET version=1")
+        with patch("code_review_graph.embeddings.get_provider", return_value=provider):
+            with GraphStore(db, checkout=tmp_path) as graph, EmbeddingStore(
+                db, graph_store=graph,
+            ) as store:
+                assert set(store.search("f")) == {("left.py::f", 1.0), ("right.py::f", 1.0)}
+            provider.embed.assert_not_called()
+        with sqlite3.connect(db) as conn:
+            assert conn.execute("SELECT version FROM _crg_shared").fetchone() == (3,)
+            assert conn.execute("SELECT COUNT(*) FROM crg_vector_payloads").fetchone() == (1,)
+            assert conn.execute("SELECT COUNT(*) FROM crg_vector_scopes").fetchone() == (0,)
+
+    def test_prune_previews_expired_vectors_and_keeps_active_links(self, tmp_path, monkeypatch):
+        from code_review_graph.prune import prune
+
+        db = tmp_path / "shared.db"
+        monkeypatch.setenv("CRG_SHARED_DB", str(db))
+        monkeypatch.setenv("CRG_RETENTION_DAYS", "7")
+        monkeypatch.setenv("CRG_RETENTION_PERCENT", "100")
+        monkeypatch.setenv("CRG_RETENTION_MAX_MIB", "1")
+        provider = MagicMock()
+        provider.name = "test:prune"
+        provider.embed.return_value = [[1.0, 0.0], [0.0, 1.0]]
+        provider.embed_query.return_value = [1.0, 0.0]
+        deleted, kept = (self._make_node(index) for index in range(2))
+        with patch("code_review_graph.embeddings.get_provider", return_value=provider):
+            with GraphStore(db, checkout=tmp_path) as graph, EmbeddingStore(
+                db, graph_store=graph,
+            ) as store:
+                assert store.embed_nodes([deleted, kept]) == 2
+                store.remove_node(deleted.qualified_name)
+            monkeypatch.setenv("CRG_RETENTION_DAYS", "invalid")
+            with pytest.raises(ValueError, match="CRG_RETENTION_DAYS"):
+                prune(apply=True)
+            monkeypatch.setenv("CRG_RETENTION_DAYS", "7")
+            assert "orphan vectors -0" in prune().summary()
+            with sqlite3.connect(db) as conn:
+                conn.execute("UPDATE crg_vector_payloads SET orphaned_at=0 WHERE link_count=0")
+            assert "orphan vectors -1" in prune().summary()
+            with sqlite3.connect(db) as conn:
+                assert conn.execute("SELECT COUNT(*) FROM crg_vector_payloads").fetchone() == (2,)
+            assert "orphan vectors -1 (8 bytes)" in prune(apply=True, compact=True).summary()
+            with GraphStore(db, checkout=tmp_path, read_only=True) as graph, EmbeddingStore(
+                db, graph_store=graph,
+            ) as store:
+                assert store.search("query") == [(kept.qualified_name, 0.0)]
+
     def test_store_initializes(self, tmp_path):
         db = tmp_path / "embeddings.db"
         with patch("code_review_graph.embeddings.get_provider", return_value=None):
@@ -243,6 +349,28 @@ class TestEmbeddingStore:
             assert [len(call) for call in provider.calls] == [2, 2, 1]
             assert store.count() == 5
             store.close()
+
+    def test_same_document_reuses_vector_for_new_symbols_and_after_reopen(self, tmp_path):
+        db = tmp_path / "embeddings.db"
+        provider = MagicMock(name="provider")
+        provider.name = "test:document"
+        provider.embed.return_value = [[1.0, 0.0]]
+        provider.embed_query.return_value = [1.0, 0.0]
+        original = self._make_node(1)
+        equivalent = replace(original, id=2, file_path="other.py",
+                             qualified_name="other.py::func_1")
+        moved = replace(original, id=3, file_path="moved.py",
+                        qualified_name="moved.py::func_1")
+        with patch("code_review_graph.embeddings.get_provider", return_value=provider):
+            with EmbeddingStore(db) as store:
+                assert store.embed_nodes([original, equivalent]) == 2
+            provider.embed.assert_called_once_with([_node_to_text(original)])
+            with EmbeddingStore(db) as reopened:
+                assert reopened.embed_nodes([moved]) == 1
+                assert set(reopened.search("test")) == {
+                    (node.qualified_name, 1.0) for node in (original, equivalent, moved)
+                }
+            provider.embed.assert_called_once()
 
     def test_embed_nodes_preserves_completed_batches_on_later_failure(self, tmp_path):
         db = tmp_path / "embeddings.db"
@@ -1273,6 +1401,65 @@ def openai_loopback_server():
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def test_shared_hybrid_search_uses_published_branch_vectors(tmp_path, openai_loopback_server):
+    base_url, requests = openai_loopback_server
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    home = tmp_path / "home"
+    env = {
+        **os.environ,
+        "CRG_HOME": str(home),
+        "CRG_SHARED_DB": str(tmp_path / "shared.db"),
+        "CRG_OPENAI_API_KEY": "local-test",
+        "CRG_OPENAI_BASE_URL": base_url,
+        "CRG_OPENAI_MODEL": "text-embedding-3-small",
+        "CRG_RETENTION_DAYS": "0",
+    }
+
+    def git(*args):
+        subprocess.run(
+            ["git", "-C", str(repo), "-c", "user.name=CRG",
+             "-c", "user.email=crg@example.invalid", "-c", "commit.gpgsign=false", *args],
+            check=True, capture_output=True, timeout=15,
+        )
+
+    def run(*args, scoped=True):
+        return subprocess.check_output(
+            [sys.executable, "-m", "code_review_graph", *args,
+             *(("--repo", str(repo)) if scoped else ())],
+            env=env, text=True, timeout=30,
+        )
+
+    source = repo / "app.py"
+    git("init", "-qb", "main")
+    source.write_text("def main_invoice(): return 1\n", encoding="utf-8")
+    git("add", "app.py")
+    git("commit", "-qm", "main")
+    run("build")
+    run("embed", "--provider", "openai", "--model", "text-embedding-3-small")
+    before = json.loads(run("search", "main_invoice"))
+    assert before["search_mode"] == "hybrid"
+    assert before["results"][0]["name"] == "main_invoice"
+
+    git("checkout", "-qb", "feature")
+    source.write_text("def feature_only(): return 2\n", encoding="utf-8")
+    git("add", "app.py")
+    git("commit", "-qm", "feature")
+    run("build")
+    run("embed", "--provider", "openai", "--model", "text-embedding-3-small")
+    with sqlite3.connect(tmp_path / "shared.db") as db:
+        assert db.execute(
+            "SELECT p.link_count FROM crg_vector_payloads p "
+            "JOIN crg_generation_projection_vectors g ON g.payload_id=p.id "
+            "WHERE g.ref='refs/heads/main'",
+        ).fetchall() == [(0,)]
+    run("prune", "--apply", scoped=False)
+    git("checkout", "-q", "main")
+    before_requests = len(requests)
+    assert json.loads(run("search", "main_invoice")) == before
+    assert [request["input"] for request in requests[before_requests:]] == [["main_invoice"]]
 
 
 class TestIsLocalhostUrl:

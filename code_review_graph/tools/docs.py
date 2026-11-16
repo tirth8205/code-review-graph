@@ -87,6 +87,11 @@ def embed_graph(
         store, root = _get_store(str(root), db_path=db_path)
         try:
             with store.refresh():
+                from ..incremental import _git_branch_info
+
+                anchor = _git_branch_info(root) if store.checkout is not None else None
+                if anchor is not None and store.historical_ref_for_checkout() is not None:
+                    return {"status": "error", "error": "Update this checkout before embedding"}
                 try:
                     emb_store = EmbeddingStore(
                         db_path, provider=provider, model=model,
@@ -118,6 +123,10 @@ def embed_graph(
 
                     newly_embedded = embed_all_nodes(store, emb_store)
                     total = emb_store.count()
+                    if anchor is not None:
+                        if _git_branch_info(root) != anchor:
+                            raise RuntimeError("Git reference changed during embedding")
+                        store.publish_generation(*anchor)
                     search_status = (
                         "Semantic search is now active."
                         if total > 0

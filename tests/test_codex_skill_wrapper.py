@@ -111,7 +111,7 @@ def test_path_to_forwards_its_to_argument(tmp_path):
     result = subprocess.run(
         [
             sys.executable, str(WRAPPER), "query", "path_to", "start",
-            "--to", "finish", "--repo", str(repo),
+            "--to", "finish", "--generation-ref", "refs/heads/main", "--repo", str(repo),
         ],
         env={**os.environ, "CRG_BIN": str(fake_cli), "CAPTURE_ARGV": str(captured)},
         capture_output=True,
@@ -120,7 +120,8 @@ def test_path_to_forwards_its_to_argument(tmp_path):
 
     assert result.returncode == 0, result.stderr
     assert json.loads(captured.read_text()) == [
-        "query", "path_to", "start", "--to", "finish", "--repo", str(repo.resolve())
+        "query", "path_to", "start", "--to", "finish",
+        "--generation-ref", "refs/heads/main", "--repo", str(repo.resolve())
     ]
 
 

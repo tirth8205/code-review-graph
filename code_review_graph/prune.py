@@ -7,7 +7,9 @@ on top of ``--apply`` (epic aihub-3t7yh.3.3).
 
 from __future__ import annotations
 
+import sqlite3
 import sys
+from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -16,6 +18,8 @@ if sys.version_info >= (3, 11):
 else:
     import tomli as tomllib
 
+from . import shared_artifact_retention, shared_generations, shared_vectors
+from .constants import env_int
 from .daemon import (
     DaemonConfig,
     WatchRepo,
@@ -23,7 +27,9 @@ from .daemon import (
     default_config_path,
     save_config,
 )
+from .locking import WriteLock
 from .registry import Registry
+from .shared_sqlite import CheckoutConnection, shared_database, verify_shared_file
 
 
 @dataclass
@@ -34,6 +40,7 @@ class PruneReport:
     removed_watch: list[str] = field(default_factory=list)
     orphan_data_dirs: list[str] = field(default_factory=list)
     applied: bool = False
+    vector_retention: str = ""
 
     def summary(self) -> str:
         mode = "applied" if self.applied else "dry-run"
@@ -41,6 +48,7 @@ class PruneReport:
             f"prune ({mode}): registry -{len(self.removed_registry)}, "
             f"watch -{len(self.removed_watch)}, "
             f"orphan data dirs {len(self.orphan_data_dirs)}"
+            f"{self.vector_retention}"
         )
 
 
@@ -120,16 +128,72 @@ def remove_orphan_data_dirs(orphans: list[str]) -> list[str]:
     return removed
 
 
+def _prune_shared_artifacts(path: Path, *, apply: bool, compact: bool) -> str:
+    def limit(name: str, default: int, ceiling: int | None = None) -> int:
+        value = env_int(name, default, strict=True)
+        if value < 0 or (ceiling is not None and value > ceiling):
+            raise ValueError(f"Invalid retention limit {name}={value}")
+        return value
+
+    days = limit("CRG_RETENTION_DAYS", 7)
+    percent = limit("CRG_RETENTION_PERCENT", 10, 100)
+    mib = limit("CRG_RETENTION_MAX_MIB", 512)
+    lock = WriteLock(path)
+    if apply and not lock.acquire():
+        raise RuntimeError(f"Cannot prune {path}: shared graph writer holds the lock")
+    try:
+        uri = path.as_uri() + ("?mode=rw" if apply else "?mode=ro")
+        with closing(sqlite3.connect(
+            uri, uri=True, isolation_level=None, factory=CheckoutConnection,
+        )) as conn:
+            conn.execute("BEGIN IMMEDIATE" if apply else "BEGIN")
+            with conn:
+                verify_shared_file(conn, path, initialize=False)
+                table = conn.execute(
+                    "SELECT 1 FROM sqlite_schema WHERE name='crg_vector_payloads'"
+                ).fetchone()
+                generation_count, generation_bytes, generation_budget = shared_generations.prune(
+                    conn, days=days, percent=percent, max_bytes=mib * 1024 ** 2, apply=apply,
+                )
+                facts, manifests, artifact_bytes, artifact_budget = shared_artifact_retention.prune(
+                    conn, days=days, percent=percent, max_bytes=mib * 1024 ** 2, apply=apply,
+                )
+                count, reclaimed, budget = (
+                    shared_vectors.prune(
+                        conn, days=days, percent=percent, max_bytes=mib * 1024 ** 2, apply=apply,
+                    ) if table else (0, 0, 0)
+                )
+            if compact:
+                conn.execute("VACUUM")
+    finally:
+        if apply:
+            lock.release()
+    return (
+        f", vector retention {days} days/{percent}%/{mib} MiB, "
+        f"effective budget {budget} bytes, orphan vectors -{count} ({reclaimed} bytes), "
+        f"generation budget {generation_budget} bytes, "
+        f"orphan generations -{generation_count} ({generation_bytes} payload bytes), "
+        f"artifact budget {artifact_budget} bytes, "
+        f"orphan parser facts -{facts}, orphan manifests -{manifests} ({artifact_bytes} bytes)"
+    )
+
+
 def prune(
     registry: Registry | None = None,
     *,
     config_path: Path | None = None,
     apply: bool = False,
     data_dirs: bool = False,
+    compact: bool = False,
 ) -> PruneReport:
     """Run one prune pass over registry and watch metadata."""
     registry = registry or Registry()
     report = PruneReport(applied=apply)
+    shared = shared_database()
+    if compact and (not apply or shared is None or not shared.is_file()):
+        raise ValueError("--compact requires --apply and an existing CRG_SHARED_DB")
+    if shared is not None and shared.is_file():
+        report.vector_retention = _prune_shared_artifacts(shared, apply=apply, compact=compact)
     report.removed_registry = [
         str(entry.get("path", ""))
         for entry in registry.list_repos()
