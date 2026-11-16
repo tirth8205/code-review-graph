@@ -7,8 +7,6 @@ look dead when only CALLS edges are counted.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from code_review_graph.graph import GraphStore
 from code_review_graph.incremental import get_db_path
 from code_review_graph.refactor import find_dead_code
