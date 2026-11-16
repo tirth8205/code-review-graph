@@ -98,6 +98,17 @@ REASON_CODES: Final[dict[str, str]] = {
 }
 
 
+#: Pytest finds every hook implementation by name (``pytest_sessionstart``,
+#: ``pytest_runtest_logreport``, ...) in a plugin or ``conftest.py``. A method
+#: with that prefix has no caller in the source and is still live.
+PYTEST_HOOK_PREFIX: Final[str] = "pytest_"
+
+
+def is_pytest_hook(name: str) -> bool:
+    """Return whether *name* is a pytest hook implementation."""
+    return name.startswith(PYTEST_HOOK_PREFIX)
+
+
 def annotation_declares_values(text: str) -> bool:
     """Return whether an annotation is a ``Literal`` (its strings are values)."""
     return text.lstrip().startswith(LITERAL_GENERICS)
