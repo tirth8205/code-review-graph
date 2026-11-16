@@ -46,6 +46,39 @@ PYTHON_HOOK_DECORATORS: Final[tuple[re.Pattern[str], ...]] = (
     re.compile(r"^(?:[\w.]+\.)?(?:abstractmethod|overload)$"),
 )
 
+#: Base classes whose subclasses are constructed by a framework loader or a
+#: declarative wiring step, never by a call site in the graph.
+FRAMEWORK_BASE_CLASSES: Final[frozenset[str]] = frozenset({
+    "Base", "DeclarativeBase", "Model", "BaseModel", "BaseSettings",
+    "db.Model", "TableBase",
+    # AWS CDK constructs -- instantiated by CDK app wiring, not explicit CALLS.
+    "Stack", "NestedStack", "Construct", "Resource",
+    # Ansible plugin bases: the runner loads and instantiates the subclass.
+    "ActionBase", "CallbackBase", "LookupBase", "ConnectionBase",
+    "BecomeBase", "CacheBase", "StrategyBase", "VarsBase", "InventoryBase",
+})
+
+#: Directories whose module-level classes Ansible (or a similar loader) finds by
+#: the class name, not by an import of the consumer.
+PLUGIN_ENTRY_DIRECTORIES: Final[tuple[str, ...]] = ("/plugins/",)
+
+#: Class names a plugin loader instantiates directly. Scoped to
+#: ``PLUGIN_ENTRY_DIRECTORIES`` so the name alone never grants liveness.
+PLUGIN_ENTRY_CLASS_NAMES: Final[frozenset[str]] = frozenset({
+    "ActionModule", "CallbackModule", "FilterModule", "LookupModule",
+    "InventoryModule", "VarsModule", "StrategyModule", "CacheModule",
+    "BecomeModule", "ShellModule", "TerminalModule", "HttpApi", "Connection",
+})
+
+
+def is_plugin_entry_class(name: str, file_path: str) -> bool:
+    """Return whether *name* is a class a loader instantiates in this location."""
+    return name in PLUGIN_ENTRY_CLASS_NAMES and any(
+        directory in f"/{file_path.replace(chr(92), '/')}"
+        for directory in PLUGIN_ENTRY_DIRECTORIES
+    )
+
+
 #: Why a symbol was suppressed or judged. Every verdict carries one, so a
 #: suppression is auditable instead of silent.
 REASON_CODES: Final[dict[str, str]] = {

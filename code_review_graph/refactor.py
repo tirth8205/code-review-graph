@@ -40,12 +40,7 @@ logger = logging.getLogger(__name__)
 # Base class names that indicate a framework-managed class (ORM models,
 # Pydantic schemas, settings).  Classes inheriting from these are invoked
 # via metaclass/framework magic and should not be flagged as dead code.
-_FRAMEWORK_BASE_CLASSES = frozenset({
-    "Base", "DeclarativeBase", "Model", "BaseModel", "BaseSettings",
-    "db.Model", "TableBase",
-    # AWS CDK constructs -- instantiated by CDK app wiring, not explicit CALLS.
-    "Stack", "NestedStack", "Construct", "Resource",
-})
+_FRAMEWORK_BASE_CLASSES = liveness_rules.FRAMEWORK_BASE_CLASSES
 
 # Class name suffixes that indicate CDK/IaC constructs.
 # These are instantiated by framework wiring, not direct CALLS edges.
@@ -2239,10 +2234,20 @@ def find_dead_code(
         if node.kind == "Class":
             if _is_framework_class:
                 continue
+            # A plugin loader instantiates these by name from a plugin folder;
+            # no import or call site ever reaches them.
+            if liveness_rules.is_plugin_entry_class(node.name, node.file_path):
+                continue
             # Fallback: CDK class name suffixes (no INHERITS edge for external bases)
             if any(node.name.endswith(s) for s in _CDK_CLASS_SUFFIXES):
                 continue
         if node.kind == "Function" and _is_framework_class:
+            continue
+        if (
+            node.kind == "Function"
+            and node.parent_name
+            and liveness_rules.is_plugin_entry_class(node.parent_name, node.file_path)
+        ):
             continue
         # Also skip methods whose parent class name matches CDK suffixes
         # (fallback for external base classes without INHERITS edges).
