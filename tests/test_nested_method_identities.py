@@ -6,7 +6,7 @@ import pytest
 
 from code_review_graph.graph import GraphStore
 from code_review_graph.incremental import full_build, incremental_update
-from code_review_graph.parser import CodeParser
+from code_review_graph.parser import CodeParser, NodeInfo
 from code_review_graph.postprocessing import run_post_processing
 
 SOURCES = {
@@ -65,13 +65,14 @@ def test_methods_and_local_calls_remain_in_their_enclosing_scope(tmp_path, langu
 
 
 @pytest.mark.parametrize('language', ['python', 'ruby'])
-def test_unique_leaf_method_identities_keep_their_existing_spelling(language):
+def test_a_method_always_carries_its_full_lexical_scope(language):
     path = Path('m.py' if language == 'python' else 'm.rb')
     source = SOURCES[language].split('class Beta:' if language == 'python' else 'module Beta')[0]
     parser = CodeParser()
     nodes, _ = parser.parse_bytes(path, source.encode())
     methods = [n for n in nodes if n.kind == 'Function']
-    # Ruby methods always carry the full lexical scope, so only Python has a leaf spelling.
+    # The class node is keyed ``Alpha.Same``, so its members must be too; a leaf
+    # spelling left the container with no methods and rename/query blind to them.
     scope = 'Same' if language == 'python' else 'Alpha.Same'
     assert {parser._node_qualified(n) for n in methods} == {
         f'{path}::{scope}.run', f'{path}::{scope}.helper'
@@ -586,18 +587,21 @@ def test_rows_written_with_the_old_identity_are_replaced(tmp_path, monkeypatch, 
     _write_repo(tmp_path)
     m = (tmp_path / 'm.py').as_posix()
     with GraphStore(tmp_path / 'graph.db') as store:
-        # Earlier releases spelled every method with its leaf class only, and
-        # their writer collapsed the resulting same-file collisions (#585).
-        with monkeypatch.context() as legacy:
-            legacy.setattr(
-                CodeParser, '_index_ambiguous_method_scopes',
-                lambda self, root, language, import_map: None, raising=False,
-            )
-            legacy.setattr(
-                GraphStore, '_plan_file_identities',
-                lambda self, file_path, nodes: [self._make_qualified(n) for n in nodes],
-            )
-            full_build(tmp_path, store)
+        # Earlier releases spelled every method with its leaf class only. Write
+        # those rows directly: hijacking the parser would test the hijack, not
+        # the migration.
+        store.store_file_nodes_edges(
+            m,
+            [
+                NodeInfo(
+                    kind='Function', name=name, file_path=m,
+                    line_start=line, line_end=line, language='python',
+                    parent_name='Same',
+                )
+                for name, line in (('run', 3), ('helper', 5))
+            ],
+            [],
+        )
         old = {n.qualified_name for n in store.get_nodes_by_file(m) if n.kind == 'Function'}
         assert old == {f'{m}::Same.run', f'{m}::Same.helper'}
 

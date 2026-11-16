@@ -116,7 +116,7 @@ def test_removing_keep_purges_inferred_output(tmp_path, store):
     assert store.get_all_files() == []
 
 
-def test_gitignore_edit_preserves_existing_explicit_update_semantics(tmp_path, store):
+def test_gitignore_edit_applies_the_new_rule_to_stored_files(tmp_path, store):
     user = write_source(tmp_path / "src" / "user.py")
     incremental_update(tmp_path, store, changed_files=[str(user)])
     handler = _create_watch_handler(tmp_path, store, None)
@@ -124,19 +124,19 @@ def test_gitignore_edit_preserves_existing_explicit_update_semantics(tmp_path, s
     gitignore.write_text("src/\n")
     user.write_text("def changed():\n    return 2\n")
 
-    with (
-        patch(
-            "code_review_graph.incremental._scan_nested_output_dirs",
-            side_effect=AssertionError("ordinary file batch rescanned module tree"),
-        ),
-        patch(
-            "code_review_graph.incremental.collect_all_files",
-            side_effect=AssertionError("ordinary file batch inventoried repository"),
-        ),
+    # A .gitignore edit is now an ignore-policy change: CRG must reconcile the
+    # rules instead of treating it as an ordinary file. Re-including files needs
+    # an inventory; adding a rule must not, so only the inventory stays banned.
+    with patch(
+        "code_review_graph.incremental.collect_all_files",
+        side_effect=AssertionError("ignore edit inventoried the repository"),
     ):
         handler.process([FileModifiedEvent(str(gitignore)), FileModifiedEvent(str(user))])
     handler.raise_if_failed()
-    assert any(node.name == "changed" for node in store.get_nodes_by_file(str(user)))
+    # ``src/`` is ignored now, so the stored file leaves the graph; a rule that
+    # only relaxes exclusions keeps the ordinary batch path (the inventory ban
+    # above must not fire).
+    assert store.get_nodes_by_file(str(user)) == []
 
 
 def test_adding_keep_indexes_existing_output_without_source_event(tmp_path, store):

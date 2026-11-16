@@ -16847,11 +16847,12 @@ class CodeParser:
         if language == "julia":
             recursive_class = self._julia_scope_join(enclosing_class, name)
         elif language == "python":
-            # The class node is keyed with the full chain, so its members must
-            # be too. Keeping the legacy leaf spelling keyed a method of
-            # ``Outer.Inner`` as ``file::Inner.method``: the container had no
-            # methods, and rename/inheritance/query could not reach them.
-            recursive_class = f"{class_parent}.{name}" if class_parent else name
+            # Python keeps its legacy leaf spelling unless a same-leaf class
+            # actually collides; ``_extract_ambiguous_method_scopes`` carries
+            # the full chain for exactly those methods (#999). C++ pins
+            # legacy nested-class keys while its namespace-aware function
+            # scopes stay complete (test_cpp_overload_identity).
+            recursive_class = name
         elif language == "cpp":
             # C++ pins legacy nested-class keys while its namespace-aware
             # function scopes stay complete (test_cpp_overload_identity).

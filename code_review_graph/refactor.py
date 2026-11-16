@@ -2386,12 +2386,23 @@ def find_dead_code(
             if (
                 not has_callers
                 and node.kind in ("Function", "Test")
-                and node.qualified_name.endswith("." + node.name)
+                and node.parent_name
             ):
-                owner = node.qualified_name[: -(len(node.name) + 1)]
-                if "Protocol" in {
-                    base.rpartition(".")[2] for base in class_bases.get(owner, ())
-                }:
+                # Python keys a unique-leaf method with its direct class only,
+                # so the container may be the class node's *suffix*
+                # (``Facade.Protocol`` versus ``Protocol``). Resolve the owner
+                # by exact key first, then by a unique suffix.
+                owners = [f"{node.file_path}::{node.parent_name}"]
+                if owners[0] not in class_bases:
+                    parent = node.parent_name
+                    owners = [
+                        key for key in class_bases
+                        if key.endswith("::" + parent) or key.endswith("." + parent)
+                    ]
+                if any(
+                    "Protocol" in {base.rpartition(".")[2] for base in class_bases.get(owner, ())}
+                    for owner in owners
+                ):
                     has_callers = True
 
             if not has_callers:
