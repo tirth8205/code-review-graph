@@ -54,6 +54,7 @@ from .constants import (
     release_os_memory,
 )
 from .custom_languages import CustomLanguage, load_custom_languages
+from .liveness_rules import annotation_declares_values
 from .npm_alias_resolver import NpmAliasResolver
 from .tsconfig_resolver import TsconfigResolver
 from .workspace_resolver import WorkspaceResolver
@@ -19240,6 +19241,12 @@ class CodeParser:
 
         # --- Python annotation references (field and parameter types) ---
         if language == "python" and node_type == "type":
+            parent = child.parent
+            if parent is not None and parent.type == "type":
+                # A generic argument is wrapped in its own ``type`` node; the
+                # outer annotation already walks it, and visiting it alone would
+                # lose the enclosing ``Literal`` context.
+                return
             for name in self._python_annotation_names(child):
                 self._emit_reference_if_known(
                     name, language, file_path, caller, edges,
@@ -19434,6 +19441,17 @@ class CodeParser:
         reported dead.
         """
         names: list[str] = []
+        # ``Literal["open", "closed"]`` spells values, not types: a string there
+        # must not make a symbol with that name look used. The annotation is
+        # split across nested ``type``/``generic_type`` nodes, so the context is
+        # read from the outermost one.
+        root = node
+        while root.parent is not None and root.parent.type in (
+            "type", "generic_type", "type_parameter", "subscript",
+        ):
+            root = root.parent
+        leading = root.text.decode("utf-8", errors="replace")
+        literal_values = annotation_declares_values(leading)
         pending = [node]
         while pending:
             current = pending.pop()
@@ -19445,7 +19463,7 @@ class CodeParser:
                 if attribute is not None:
                     names.append(attribute.text.decode("utf-8", errors="replace"))
                 continue
-            if current.type == "string":
+            if current.type == "string" and not literal_values:
                 # A forward reference (``-> "Model"``) names the type inside a
                 # string; only a dotted identifier is taken, so prose stays out.
                 content = current.text.decode("utf-8", errors="replace").strip("'\"")
