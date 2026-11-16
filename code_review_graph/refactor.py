@@ -2560,6 +2560,32 @@ def _apply_file_edits(
     return "\n".join(lines), applied, skipped
 
 
+def _restore_originals(
+    files: list[str], planned: dict[str, tuple[str, str, int, bool]],
+) -> list[str]:
+    """Put each file in *files* back to the bytes it had before the rename.
+
+    A file that already holds its original bytes is left alone (a write that
+    failed before touching it). Returns the files that could not be restored.
+    """
+    not_restored: list[str] = []
+    for file_str in files:
+        original, _new, _count, had_bom = planned[file_str]
+        data = (("\ufeff" if had_bom else "") + original).encode("utf-8")
+        file_path = Path(file_str)
+        try:
+            if file_path.read_bytes() == data:
+                continue
+        except OSError:
+            pass
+        try:
+            file_path.write_bytes(data)
+        except OSError as exc:
+            logger.error("apply_refactor: could not restore %s: %s", file_path, exc)
+            not_restored.append(file_str)
+    return not_restored
+
+
 def apply_refactor(
     refactor_id: str,
     repo_root: Path,
@@ -2581,8 +2607,11 @@ def apply_refactor(
             call without ``dry_run``. See: #176
 
     Returns:
-        Status dict with applied count and modified files. When
-        ``dry_run=True`` the dict additionally contains:
+        Status dict with applied count and modified files. If any file
+        cannot be written, the files already written are restored, the
+        status is ``"error"`` (``files_not_restored`` lists any file that
+        could not be put back), and the refactor stays pending for a retry.
+        When ``dry_run=True`` the dict additionally contains:
 
         - ``dry_run``: ``True``
         - ``would_modify``: list of file paths that would be changed
@@ -2715,19 +2744,47 @@ def apply_refactor(
         return result
 
     # --- Real-write path: write the pre-computed new content ---
+    # A rename is all or nothing: if one file cannot be written, the files
+    # already written are put back, so the code is never left half-renamed
+    # (a definition renamed while its importers still use the old name).
     files_modified: set[str] = set()
     edits_applied = 0
+    written: list[str] = []
     for file_str, (_original, new_content, count, had_bom) in planned.items():
         file_path = Path(file_str)
         try:
             # Bytes, not text mode: text mode would turn CRLF into LF.
             prefix = "\ufeff" if had_bom else ""
             file_path.write_bytes((prefix + new_content).encode("utf-8"))
-            edits_applied += count
-            files_modified.add(str(file_path))
-            logger.info("apply_refactor: applied %d edit(s) to %s", count, file_path)
         except OSError as exc:
             logger.error("apply_refactor: could not write %s: %s", file_path, exc)
+            # The failed file is restored too: a write that fails part-way
+            # (a full disk) has already truncated it.
+            not_restored = _restore_originals([*written, file_str], planned)
+            error = (
+                f"Could not write {file_path}: {exc}. Nothing was applied; "
+                f"the {len(written)} file(s) already written were restored."
+            )
+            if not_restored:
+                error = (
+                    f"Could not write {file_path}: {exc}. These files could "
+                    f"not be restored and may hold partial edits: "
+                    f"{', '.join(sorted(not_restored))}."
+                )
+            # The refactor stays pending, so it can be applied once the file
+            # is writable.
+            return {
+                "status": "error",
+                "error": error,
+                "applied": 0,
+                "files_modified": [],
+                "edits_applied": 0,
+                "files_not_restored": sorted(not_restored),
+            }
+        written.append(file_str)
+        edits_applied += count
+        files_modified.add(str(file_path))
+        logger.info("apply_refactor: applied %d edit(s) to %s", count, file_path)
 
     # Remove from pending after successful application.
     with _refactor_lock:

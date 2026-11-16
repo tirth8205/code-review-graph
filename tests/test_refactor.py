@@ -782,6 +782,95 @@ class TestApplyRefactor:
             (tmp_dir / ".git").rmdir()
             tmp_dir.rmdir()
 
+    @staticmethod
+    def _pending_rename(rid: str, files: list[Path]) -> None:
+        with _refactor_lock:
+            _pending_refactors[rid] = {
+                "refactor_id": rid,
+                "type": "rename",
+                "old_name": "old_func",
+                "new_name": "new_func",
+                "edits": [
+                    {
+                        "file": str(path),
+                        "line": 1,
+                        "old": "old_func",
+                        "new": "new_func",
+                        "confidence": "high",
+                    }
+                    for path in files
+                ],
+                "stats": {"high": len(files), "medium": 0, "low": 0},
+                "created_at": time.time(),
+            }
+
+    def test_apply_refactor_write_failure_restores_every_file(self, tmp_path, monkeypatch):
+        """A file that cannot be written must not leave the rename half-applied.
+
+        The files already written are put back byte for byte (CRLF and BOM
+        included), the result says what failed, and the refactor stays
+        pending so it can be applied once the file is writable.
+        """
+        (tmp_path / ".git").mkdir()
+        files = {
+            "a.py": b"def old_func():\r\n    return 1\r\n",
+            "b.py": b"\xef\xbb\xbffrom a import old_func\n",
+            "c.py": b"from a import old_func\n",
+        }
+        paths = []
+        for name, data in files.items():
+            (tmp_path / name).write_bytes(data)
+            paths.append(tmp_path / name)
+        self._pending_rename("writefail", paths)
+
+        real_write_bytes = Path.write_bytes
+
+        def locked_c(self, data):
+            if self.name == "c.py":
+                raise PermissionError(13, "Permission denied", str(self))
+            return real_write_bytes(self, data)
+
+        monkeypatch.setattr(Path, "write_bytes", locked_c)
+        result = apply_refactor("writefail", tmp_path)
+
+        assert result["status"] == "error"
+        assert "c.py" in result["error"]
+        for name, data in files.items():
+            assert (tmp_path / name).read_bytes() == data, name
+        with _refactor_lock:
+            assert "writefail" in _pending_refactors
+
+        monkeypatch.setattr(Path, "write_bytes", real_write_bytes)
+        retry = apply_refactor("writefail", tmp_path)
+        assert retry["status"] == "ok"
+        assert retry["edits_applied"] == 3
+        assert (tmp_path / "a.py").read_bytes() == b"def new_func():\r\n    return 1\r\n"
+        assert (tmp_path / "b.py").read_bytes() == b"\xef\xbb\xbffrom a import new_func\n"
+
+    def test_apply_refactor_restores_a_partially_written_file(self, tmp_path, monkeypatch):
+        """A write that fails part-way (a full disk) is undone as well."""
+        (tmp_path / ".git").mkdir()
+        target = tmp_path / "a.py"
+        original = b"def old_func():\n    return 1\n"
+        target.write_bytes(original)
+        self._pending_rename("partial", [target])
+
+        real_write_bytes = Path.write_bytes
+        calls = []
+
+        def disk_full(self, data):
+            calls.append(self.name)
+            if len(calls) == 1:
+                real_write_bytes(self, data[:5])
+                raise OSError(28, "No space left on device", str(self))
+            return real_write_bytes(self, data)
+
+        monkeypatch.setattr(Path, "write_bytes", disk_full)
+        result = apply_refactor("partial", tmp_path)
+
+        assert result["status"] == "error"
+        assert target.read_bytes() == original
+
     def test_apply_refactor_dry_run_no_edits(self):
         """dry_run with an empty edit list returns an empty diff dict."""
         tmp_dir = Path(tempfile.mkdtemp())
