@@ -860,6 +860,9 @@ repo_root: str | None
 dry_run: bool = False        # Return a diff without writing files
 max_diff_files: int = 25     # Per-file diffs in a dry run (max 150)
 ```
+A rename is applied all or nothing: if a file cannot be written, the files
+already written are restored, the result is an error naming that file, and the
+`refactor_id` stays valid for a retry.
 
 ### Wiki Tools
 
