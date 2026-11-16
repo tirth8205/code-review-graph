@@ -23,6 +23,7 @@ from collections import deque
 from pathlib import Path, PurePosixPath
 from typing import Any, Optional, Union
 
+from . import liveness_rules
 from .constants import (
     CLAIMED_ENDPOINT_KEY,
     INHERITED_ENDPOINT_KEY,
@@ -1952,14 +1953,9 @@ def _csharp_member_scopes(conn: Any) -> dict[str, set[str]]:
     return scopes
 
 
-# Languages whose documents are invoked by an orchestrator, a scheduler or a
-# query engine rather than by a call site. A task, a resource or a statement has
-# no caller in the graph, so "no incoming edge" says nothing about whether it is
-# dead: Ansible playbooks alone produced 740 of algar's reports.
-NON_CODE_SUBJECT_LANGUAGES = frozenset({
-    "ansible", "yaml", "json", "toml", "hcl", "sql", "markdown", "md",
-    "dockerfile", "ini", "xml", "csv",
-})
+# The subject taxonomy lives in one catalog; this alias keeps the old import
+# path working for callers and tests.
+NON_CODE_SUBJECT_LANGUAGES = liveness_rules.NON_CODE_SUBJECT_LANGUAGES
 
 
 def find_dead_code(

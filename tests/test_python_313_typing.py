@@ -52,3 +52,27 @@ def test_python_313_typing_constructs_count_as_uses(tmp_path):
         dead = {row["name"] for row in find_dead_code(store, root=root)}
     assert "Model" not in dead
     assert "Base" not in dead
+
+
+def test_literal_strings_are_values_not_type_uses(tmp_path):
+    root = tmp_path.resolve()
+    (root / ".code-review-graph").mkdir(parents=True, exist_ok=True)
+    (root / "app.py").write_text(
+        '''\
+from typing import Literal
+
+
+class Open:
+    pass
+
+
+class State:
+    mode: Literal["Open"] = "Open"
+''',
+        encoding="utf-8",
+    )
+    result = build_or_update_graph(full_rebuild=True, repo_root=str(root))
+    assert result["status"] == "ok", result
+    with GraphStore(get_db_path(root)) as store:
+        dead = {row["name"] for row in find_dead_code(store, root=root)}
+    assert "Open" in dead
