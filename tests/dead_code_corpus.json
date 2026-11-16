@@ -1,0 +1,66 @@
+{
+  "version": 1,
+  "default_root_env": "CRG_CORPUS_ROOT",
+  "repos": {
+    "flext": {},
+    "ai-hub": {},
+    "algar-oud-mig": {},
+    "datacosmos": {},
+    "cosmos-charts": {},
+    "cosmos-gitops": {},
+    "cosmos-recon": {}
+  },
+  "entries": [
+    {
+      "repo": "flext",
+      "name": "applicable_gate_ids",
+      "kind": "Function",
+      "path": "flext-infra/src/flext_infra/check/gate_registry.py",
+      "verdict": "live",
+      "reason_code": "value_reference",
+      "provenance": "flext-ojd3u: used at check/workspace_check.py:504,858"
+    },
+    {
+      "repo": "flext",
+      "name": "semantic_plan",
+      "kind": "Function",
+      "path": "flext-infra/src/flext_infra/codemod/batch_replacements.py",
+      "verdict": "live",
+      "reason_code": "value_reference",
+      "provenance": "flext-ojd3u: used at codemod/batch_replacements.py:185"
+    },
+    {
+      "repo": "flext",
+      "name": "read_layout",
+      "kind": "Function",
+      "path": "flext-infra/src/flext_infra/codegen/staged_package.py",
+      "verdict": "live",
+      "reason_code": "value_reference",
+      "provenance": "flext-ojd3u: passed as argument at codegen/staged_package.py:664"
+    },
+    {
+      "repo": "flext",
+      "name": "type_reference",
+      "kind": "Function",
+      "path": "flext-infra/src/flext_infra/_utilities/_semantic_cutover/nesting_references.py",
+      "verdict": "live",
+      "reason_code": "value_reference",
+      "provenance": "flext-ojd3u: passed at _semantic_cutover/nesting_references.py:782"
+    },
+    {
+      "repo": "flext",
+      "name": "unwind",
+      "kind": "Function",
+      "path": "flext-infra/src/flext_infra/_utilities/pytest_collection.py",
+      "verdict": "live",
+      "reason_code": "value_reference",
+      "provenance": "flext-ojd3u: read as observer.unwind at _utilities/pytest_collection.py:209"
+    }
+  ],
+  "baseline": {
+    "expected_dead": 0,
+    "false_negatives": 0,
+    "recall": null,
+    "recorded_from": "T0: regression guards for symbols the engine already resolves"
+  }
+}
