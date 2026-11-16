@@ -6,6 +6,29 @@
 
 - Creating a graph database now initializes its schema in one transaction,
   reducing disk synchronization while preserving the same schema version.
+
+### Fixed
+
+- Dead-code reports are truthful on FLEXT's OO/MRO/Pydantic code. Measured on
+  `flext-infra` (700 files): 360 reports before, 26 after; Pydantic model
+  classes 82 before, 0 after.
+- A callable handed to a library is used code: bare closures
+  (`map(published)`), `self.method`, conditional branches and nested-call
+  argument lists.
+- Generated export registries (`install_lazy_exports(..., deferred_members=...)`)
+  resolve to their exact targets instead of hiding every lazily exported model.
+- Pydantic surfaces are live: `@computed_field`, `@cached_property`, validators
+  and serializers; a model used as a field type is counted through its
+  annotation; `@override` is no longer Java-only.
+- A nested class method keeps its full scope chain (`Facade.Inner.method`), the
+  same identity as its container; ambiguous bare targets are reported instead of
+  invented, and diamonds/mixins resolve through the C3 order.
+- Ignore rules follow Git semantics (last match wins, `!` re-includes,
+  slash-free rules match at any depth) and read `.gitignore`,
+  `.git/info/exclude` and `core.excludesFile`; agent/editor trees are never
+  indexed.
+- `make eval-dead-code` gates dead-code precision and recall against a reviewed
+  corpus.
 - Indexing deeply nested HTML no longer looks up the parent from the tree
   root for every opening tag.
 
