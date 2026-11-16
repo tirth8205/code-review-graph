@@ -19445,6 +19445,14 @@ class CodeParser:
                 if attribute is not None:
                     names.append(attribute.text.decode("utf-8", errors="replace"))
                 continue
+            if current.type == "string":
+                # A forward reference (``-> "Model"``) names the type inside a
+                # string; only a dotted identifier is taken, so prose stays out.
+                content = current.text.decode("utf-8", errors="replace").strip("'\"")
+                leaf = content.rsplit(".", 1)[-1].strip()
+                if leaf.isidentifier():
+                    names.append(leaf)
+                continue
             pending.extend(current.children)
         return names
 
