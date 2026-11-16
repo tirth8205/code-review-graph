@@ -157,6 +157,10 @@ class InheritanceIndex:
 
         self._parents: dict[str, tuple[list[str], bool]] = {}
         self._inherited: dict[tuple[str, str], Optional[str]] = {}
+        # C3 linearization per class, and the classes currently being walked so
+        # an inheritance cycle ends the walk instead of recursing forever.
+        self._mro: dict[str, tuple[str, ...]] = {}
+        self._mro_active: set[str] = set()
 
     # -- Lookups ------------------------------------------------------------
 
@@ -240,14 +244,90 @@ class InheritanceIndex:
                 ])
         return None
 
+    def linearization(self, class_name: str) -> tuple[str, ...]:
+        """The C3 method resolution order of *class_name*, itself first.
+
+        Empty when a parent is outside the graph or the hierarchy is
+        inconsistent: precedence cannot be proven then, and the caller keeps the
+        conservative single-ancestor rule instead of guessing.
+        """
+        if class_name in self._mro:
+            return self._mro[class_name]
+        if class_name in self._mro_active:
+            return ()
+        self._mro_active.add(class_name)
+        try:
+            parents, unknown = self._parents_of(class_name)
+            result: tuple[str, ...]
+            if unknown:
+                result = ()
+            elif not parents:
+                result = (class_name,)
+            else:
+                sequences: list[list[str]] = []
+                for parent in parents:
+                    parent_mro = self.linearization(parent)
+                    if not parent_mro:
+                        sequences = []
+                        break
+                    sequences.append(list(parent_mro))
+                merged = self._c3_merge([*sequences, list(parents)]) if sequences else []
+                result = (class_name, *merged) if merged else ()
+        finally:
+            self._mro_active.discard(class_name)
+        self._mro[class_name] = result
+        return result
+
+    @staticmethod
+    def _c3_merge(sequences: list[list[str]]) -> list[str]:
+        """Merge parent linearizations; empty when no consistent order exists."""
+        result: list[str] = []
+        pending = [list(sequence) for sequence in sequences]
+        while pending:
+            pending = [sequence for sequence in pending if sequence]
+            if not pending:
+                break
+            # Consider the head of every sequence, not only the first one: after
+            # taking a common parent, the next valid head usually lives in a
+            # later sequence (a diamond needs C before A).
+            head = next(
+                (
+                    candidate
+                    for candidate in dict.fromkeys(
+                        sequence[0] for sequence in pending if sequence
+                    )
+                    if not any(candidate in sequence[1:] for sequence in pending)
+                ),
+                None,
+            )
+            if head is None:
+                return []
+            result.append(head)
+            pending = [
+                [item for item in sequence if item != head] for sequence in pending
+            ]
+        return result
+
     def inherited_method(self, class_name: str, method: str) -> Optional[str]:
         """The ancestor method a call to *method* on *class_name* runs, if sure.
 
         The class itself is not consulted: callers check ``method_of`` first.
+        A provable C3 order decides between several ancestors; without one the
+        single-ancestor walk keeps the conservative answer.
         """
         key = (class_name, method)
         if key not in self._inherited:
-            self._inherited[key] = self._walk(class_name, method)
+            ancestors = self.linearization(class_name)[1:]
+            resolved: Optional[str] = None
+            if ancestors:
+                for ancestor in ancestors:
+                    found = self._methods.get((ancestor, method))
+                    if found:
+                        resolved = found
+                        break
+            else:
+                resolved = self._walk(class_name, method)
+            self._inherited[key] = resolved
         return self._inherited[key]
 
     # -- Internals ------------------------------------------------------------
