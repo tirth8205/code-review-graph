@@ -1952,6 +1952,16 @@ def _csharp_member_scopes(conn: Any) -> dict[str, set[str]]:
     return scopes
 
 
+# Languages whose documents are invoked by an orchestrator, a scheduler or a
+# query engine rather than by a call site. A task, a resource or a statement has
+# no caller in the graph, so "no incoming edge" says nothing about whether it is
+# dead: Ansible playbooks alone produced 740 of algar's reports.
+NON_CODE_SUBJECT_LANGUAGES = frozenset({
+    "ansible", "yaml", "json", "toml", "hcl", "sql", "markdown", "md",
+    "dockerfile", "ini", "xml", "csv",
+})
+
+
 def find_dead_code(
     store: GraphStore,
     kind: Optional[str] = None,
@@ -2155,6 +2165,12 @@ def find_dead_code(
     dead: list[dict[str, Any]] = []
 
     for node in candidates:
+
+        # A document in a configuration or orchestration language has no call
+        # site to be missing: an Ansible task, an HCL resource or a SQL
+        # statement runs because something outside the graph schedules it.
+        if (node.language or "") in NON_CODE_SUBJECT_LANGUAGES:
+            continue
 
         # Skip test nodes and anything defined in test files.
         if node.is_test or _in_test_file(node.file_path):
