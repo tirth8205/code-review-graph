@@ -17,10 +17,14 @@ from pathlib import Path
 from typing import Any
 
 from .constants import GIT_TIMEOUT as _GIT_TIMEOUT
-from .constants import SECURITY_KEYWORDS as _SECURITY_KEYWORDS
 from .constants import env_float, env_int
 from .errors import ChangeDiscoveryError
-from .flows import _trace_single_flow, detect_entry_points, get_affected_flows
+from .flows import (
+    _trace_single_flow,
+    detect_entry_points,
+    get_affected_flows,
+    is_security_sensitive,
+)
 from .graph import (
     GraphEdge,
     GraphNode,
@@ -1433,9 +1437,7 @@ def _risk_signals_from(
         }
 
     # --- Security sensitivity ---
-    name_lower = node.name.lower()
-    qn_lower = node.qualified_name.lower()
-    sensitive = any(kw in name_lower or kw in qn_lower for kw in _SECURITY_KEYWORDS)
+    sensitive = is_security_sensitive(node, store.get_repo_root())
     signals["security"] = {"score": 0.20 if sensitive else 0.0, "count": int(sensitive)}
 
     # --- Caller count (cap 0.10) ---

@@ -17,8 +17,8 @@ from typing import Iterable, Optional
 
 from .constants import SECURITY_KEYWORDS as _SECURITY_KEYWORDS
 from .graph import FlowAdjacency, GraphNode, GraphStore, _sanitize_name
+from .parser import _repo_relative_path, normalize_file_path
 from .parser import is_test_file as _is_test_file
-from .parser import normalize_file_path
 
 logger = logging.getLogger(__name__)
 
@@ -667,6 +667,26 @@ def trace_flows(
 # ---------------------------------------------------------------------------
 
 
+def is_security_sensitive(node: GraphNode, repo_root: Optional[str]) -> bool:
+    """Whether *node*'s name or in-repo location mentions a security keyword.
+
+    The qualified name begins with the file's absolute path, so matching it
+    whole would read the directories above the checkout too: a repository
+    cloned into ``design-system/`` (``sign``) or ``httpx/`` (``http``) would
+    flag every symbol. Only the path relative to *repo_root* counts, so an
+    ``auth/`` package inside the repository still does. With no known root an
+    absolute path cannot be placed, and only the symbol part is used. A File
+    node's name is its absolute path, so for a File only the relative path
+    counts.
+    """
+    file_part, sep, symbol = node.qualified_name.partition("::")
+    relative = _repo_relative_path(normalize_file_path(file_part), repo_root)
+    scoped = f"{relative}{sep}{symbol}" if relative is not None else symbol
+    name_lower = "" if node.kind == "File" else node.name.lower()
+    scoped_lower = scoped.lower()
+    return any(kw in name_lower or kw in scoped_lower for kw in _SECURITY_KEYWORDS)
+
+
 def compute_criticality(flow: dict, adj: FlowAdjacency) -> float:
     """Score a flow from 0.0 to 1.0 based on multiple weighted factors.
 
@@ -708,14 +728,7 @@ def compute_criticality(flow: dict, adj: FlowAdjacency) -> float:
     external_score = min(external_count / 5.0, 1.0)
 
     # --- Security sensitivity (0.0 - 1.0) ---
-    security_hits = 0
-    for n in nodes:
-        name_lower = n.name.lower()
-        qn_lower = n.qualified_name.lower()
-        for kw in _SECURITY_KEYWORDS:
-            if kw in name_lower or kw in qn_lower:
-                security_hits += 1
-                break  # Count each node at most once.
+    security_hits = sum(1 for n in nodes if is_security_sensitive(n, adj.repo_root))
     security_score = min(security_hits / max(len(nodes), 1), 1.0)
 
     # --- Test coverage gap (0.0 - 1.0) ---

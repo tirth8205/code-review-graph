@@ -491,6 +491,9 @@ class FlowAdjacency:
     has_tested_by: set[str]
     nodes_by_qn: dict[str, "GraphNode"]
     nodes_by_id: dict[int, "GraphNode"]
+    #: The repository root the node paths live under, if known. Scoring reads
+    #: path conventions relative to it, never the directories above it.
+    repo_root: Optional[str] = None
 
 
 @dataclass
@@ -5733,6 +5736,7 @@ class GraphStore:
             has_tested_by=has_tested_by,
             nodes_by_qn=nodes_by_qn,
             nodes_by_id=nodes_by_id,
+            repo_root=self.get_repo_root(),
         )
 
     # --- Internal helpers ---
