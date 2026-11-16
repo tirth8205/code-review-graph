@@ -417,6 +417,14 @@ def _refresh_target_resolution(store: GraphStore) -> None:
 # directories.  See: #91 and PR #92.
 DEFAULT_IGNORE_PATTERNS = [
     "**/.code-review-graph/**",
+    # Agent and editor configuration is vendored glue, never product code.
+    # A plugin copied into `.opencode/plugins` was parsed, registered and then
+    # reported as dead code in the owning repository.
+    "**/.opencode/**",
+    "**/.claude/**",
+    "**/.cursor/**",
+    "**/.kilo/**",
+    "**/.agents/worktrees/**",
     "**/node_modules/**",
     "**/.git/**",
     "**/.svn/**",
