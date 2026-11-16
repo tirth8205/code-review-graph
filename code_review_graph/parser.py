@@ -8453,18 +8453,32 @@ class CodeParser:
                         if narrowed:
                             candidates = narrowed
                     if len(candidates) > 1:
-                        edge = EdgeInfo(
-                            kind=edge.kind,
-                            source=edge.source,
-                            target=edge.target,
-                            file_path=edge.file_path,
-                            line=edge.line,
-                            extra={
-                                **edge.extra,
-                                "resolution": "ambiguous",
-                                "candidates": candidates[:20],
-                            },
-                        )
+                        if is_cpp:
+                            # C++ callers already publish overload candidates
+                            # through their own metadata contract.
+                            edge = EdgeInfo(
+                                kind=edge.kind,
+                                source=edge.source,
+                                target=edge.target,
+                                file_path=edge.file_path,
+                                line=edge.line,
+                                extra=cpp_resolution_extra(
+                                    edge.extra, "ambiguous", candidates,
+                                ),
+                            )
+                        else:
+                            edge = EdgeInfo(
+                                kind=edge.kind,
+                                source=edge.source,
+                                target=edge.target,
+                                file_path=edge.file_path,
+                                line=edge.line,
+                                extra={
+                                    **edge.extra,
+                                    "resolution": "ambiguous",
+                                    "candidates": candidates[:20],
+                                },
+                            )
                         resolved.append(edge)
                         continue
                     edge = EdgeInfo(
@@ -16913,11 +16927,12 @@ class CodeParser:
         if language == "julia":
             recursive_class = self._julia_scope_join(enclosing_class, name)
         elif language == "python":
-            # The class node is keyed with the full chain, so its members must
-            # be too. Keeping the legacy leaf spelling keyed a method of
-            # ``Outer.Inner`` as ``file::Inner.method``: the container had no
-            # methods, and rename/inheritance/query could not reach them.
-            recursive_class = f"{class_parent}.{name}" if class_parent else name
+            # Python keeps its legacy leaf spelling unless a same-leaf class
+            # actually collides; ``_extract_ambiguous_method_scopes`` carries
+            # the full chain for exactly those methods (#999). C++ pins
+            # legacy nested-class keys while its namespace-aware function
+            # scopes stay complete (test_cpp_overload_identity).
+            recursive_class = name
         elif language == "cpp":
             # C++ pins legacy nested-class keys while its namespace-aware
             # function scopes stay complete (test_cpp_overload_identity).
@@ -19523,7 +19538,11 @@ class CodeParser:
             ):
                 module_map = literal
         members = payload.get("deferred_members")
-        if not module_map:
+        if not module_map or not all(
+            re.fullmatch(r"\.?[A-Za-z_][\w.]*", module) for module in module_map.values()
+        ):
+            # Only a real module path names a facade; an arbitrary string map
+            # (``{"/": ...}``) is not an export registry.
             return
         line = call_node.start_point[0] + 1
         for facade, module in module_map.items():
@@ -21226,6 +21245,8 @@ class CodeParser:
         interpreter, not inferred. Probing ``m.py`` first silently bound
         every such import to the wrong file.
         """
+        if not base.name:
+            return ()
         if not has_tail:
             return (base / "__init__.py",)
         return (base / "__init__.py", base.with_suffix(".py"))

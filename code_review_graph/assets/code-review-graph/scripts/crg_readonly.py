@@ -55,10 +55,19 @@ def _resolve_repo(raw: str | None) -> Path:
             raise ValueError(f"Repository directory does not exist: {root}")
         # The CLI looks for the graph in --repo itself, so a subdirectory has to
         # become its repository root or a healthy graph reads as missing.
+        try:
+            import pwd
+
+            home = Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
+        except (ImportError, KeyError):
+            home = Path.home().resolve()
         for parent in (root, *root.parents):
-            if any(
-                (parent / marker).exists() for marker in (".code-review-graph", ".git", ".svn")
-            ):
+            markers = (".code-review-graph", ".git", ".svn")
+            if parent == home and root != home:
+                # The account's home may hold the daemon's catch-all data
+                # directory; only a real VCS root there can own this path.
+                markers = (".git", ".svn")
+            if any((parent / marker).exists() for marker in markers):
                 return parent
         raise ValueError(f"No repository marker found at or above: {root}")
     try:

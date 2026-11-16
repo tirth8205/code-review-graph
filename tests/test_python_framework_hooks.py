@@ -98,3 +98,29 @@ class Catalog(BaseModel):
     with GraphStore(get_db_path(root)) as store:
         dead = {row["name"] for row in find_dead_code(store, root=root)}
     assert "PathRulesConfig" not in dead
+
+
+def test_a_protocol_member_of_a_nested_protocol_is_not_dead(tmp_path):
+    root = tmp_path.resolve()
+    (root / ".code-review-graph").mkdir(parents=True, exist_ok=True)
+    (root / "app.py").write_text('''\
+from typing import Protocol
+
+
+class Facade:
+    class Stream(Protocol):
+        def isatty(self) -> bool:
+            ...
+
+
+class Source:
+    class Reader(Protocol):
+        def scan_file(self, path: str) -> int:
+            ...
+''', encoding="utf-8")
+    result = build_or_update_graph(full_rebuild=True, repo_root=str(root))
+    assert result["status"] == "ok", result
+    with GraphStore(get_db_path(root)) as store:
+        dead = {row["name"] for row in find_dead_code(store, root=root)}
+    assert "isatty" not in dead
+    assert "scan_file" not in dead

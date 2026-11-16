@@ -65,13 +65,14 @@ def test_methods_and_local_calls_remain_in_their_enclosing_scope(tmp_path, langu
 
 
 @pytest.mark.parametrize('language', ['python', 'ruby'])
-def test_unique_leaf_method_identities_keep_their_existing_spelling(language):
+def test_a_method_always_carries_its_full_lexical_scope(language):
     path = Path('m.py' if language == 'python' else 'm.rb')
     source = SOURCES[language].split('class Beta:' if language == 'python' else 'module Beta')[0]
     parser = CodeParser()
     nodes, _ = parser.parse_bytes(path, source.encode())
     methods = [n for n in nodes if n.kind == 'Function']
-    # Ruby methods always carry the full lexical scope, so only Python has a leaf spelling.
+    # The class node is keyed ``Alpha.Same``, so its members must be too; a leaf
+    # spelling left the container with no methods and rename/query blind to them.
     scope = 'Same' if language == 'python' else 'Alpha.Same'
     assert {parser._node_qualified(n) for n in methods} == {
         f'{path}::{scope}.run', f'{path}::{scope}.helper'

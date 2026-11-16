@@ -44,7 +44,6 @@ PYTHON_HOOK_DECORATORS: Final[tuple[re.Pattern[str], ...]] = (
         re.DOTALL,
     ),
     re.compile(r"^(?:[\w.]+\.)?(?:abstractmethod|overload)$"),
-    re.compile(r"^(?:[\w.]+\.)?(?:override|Override|Override)$"),
 )
 
 #: Why a symbol was suppressed or judged. Every verdict carries one, so a

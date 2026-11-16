@@ -242,21 +242,22 @@ def _minimal_overview(overview: dict[str, Any]) -> dict[str, Any]:
         {k: c[k] for k in _MINIMAL_COMMUNITY_FIELDS if k in c}
         for c in overview.get("communities", [])
     ]
-    id_to_name = {c["id"]: c["name"] for c in communities if "id" in c}
 
     edge_pair_counts: Counter[tuple[int, int]] = Counter()
     edge_pair_kinds: dict[tuple[int, int], Counter[str]] = {}
     for e in overview.get("cross_community_edges", []):
         # Use canonical (low, high) ordering so A↔B and B↔A aggregate together.
         a, b = e["source_community"], e["target_community"]
-        pair = (a, b) if a <= b else (b, a)
+        pair = tuple(sorted((a, b), key=str))
         edge_pair_counts[pair] += 1
         edge_pair_kinds.setdefault(pair, Counter())[e["edge_kind"]] += 1
 
     cross_pairs = [
         {
-            "source_community": id_to_name.get(a, f"community-{a}"),
-            "target_community": id_to_name.get(b, f"community-{b}"),
+            # Minimal mode keeps the same field contract as standard mode:
+            # community ids, which ``communities`` resolves to names.
+            "source_community": a,
+            "target_community": b,
             "edge_count": count,
             "top_kinds": [k for k, _ in edge_pair_kinds[(a, b)].most_common(3)],
         }
@@ -320,6 +321,22 @@ def get_architecture_overview_func(
                 _cap_members(c, max_members)
                 for c in overview.get("communities", [])
             ]
+        # One id type and no dangling references: a pruned community must not
+        # leave an edge that the caller cannot resolve to a name.
+        for community in overview.get("communities", []):
+            if "id" in community:
+                community["id"] = str(community["id"])
+        community_ids = {c["id"] for c in overview.get("communities", []) if "id" in c}
+        overview["cross_community_edges"] = [
+            {
+                **edge,
+                "source_community": str(edge.get("source_community")),
+                "target_community": str(edge.get("target_community")),
+            }
+            for edge in overview.get("cross_community_edges", [])
+            if str(edge.get("source_community")) in community_ids
+            and str(edge.get("target_community")) in community_ids
+        ]
         cross, cross_total, truncated = _bounded(
             overview["cross_community_edges"], max_results, _MAX_CROSS_EDGES,
         )
