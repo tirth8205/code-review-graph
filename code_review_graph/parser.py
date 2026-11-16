@@ -8377,18 +8377,28 @@ class CodeParser:
                         resolved.append(edge)
                         continue
                 if candidates:
-                    if is_cpp and len(candidates) > 1:
+                    if len(candidates) > 1:
+                        # A nested class chain makes the same leaf name appear
+                        # in several classes. Prefer the definition in the
+                        # source's own lexical scopes; never pick the first by
+                        # insertion order, which invented a target (#984).
+                        narrowed = self._narrow_by_lexical_scope(
+                            entries, source_scopes.get(edge.source),
+                        )
+                        if narrowed:
+                            candidates = narrowed
+                    if len(candidates) > 1:
                         edge = EdgeInfo(
                             kind=edge.kind,
                             source=edge.source,
                             target=edge.target,
                             file_path=edge.file_path,
                             line=edge.line,
-                            extra=cpp_resolution_extra(
-                                edge.extra,
-                                "ambiguous",
-                                candidates,
-                            ),
+                            extra={
+                                **edge.extra,
+                                "resolution": "ambiguous",
+                                "candidates": candidates[:20],
+                            },
                         )
                         resolved.append(edge)
                         continue
@@ -8402,6 +8412,26 @@ class CodeParser:
                     )
             resolved.append(edge)
         return resolved
+
+    @staticmethod
+    def _narrow_by_lexical_scope(
+        entries: list[tuple[str, Optional[str]]],
+        source_scope: Optional[str],
+    ) -> list[str]:
+        """Candidates declared in the source's own scopes, innermost first.
+
+        Returns an empty list when no scope matches, so the caller keeps the
+        full candidate set and reports ambiguity instead of guessing.
+        """
+        scope = source_scope
+        while scope:
+            matches = [
+                qualified for qualified, parent in entries if parent == scope
+            ]
+            if matches:
+                return matches
+            scope = scope.rsplit(".", 1)[0] if "." in scope else None
+        return [qualified for qualified, parent in entries if parent is None]
 
     def _resolve_julia_call_targets(
         self,
@@ -16816,12 +16846,15 @@ class CodeParser:
         # through its own helper.
         if language == "julia":
             recursive_class = self._julia_scope_join(enclosing_class, name)
-        elif language in ("python", "cpp"):
-            # Python keeps its legacy leaf spelling unless a same-leaf class
-            # actually collides; ``_index_ambiguous_method_scopes`` carries
-            # the full chain for exactly those methods (#999). C++ pins
-            # legacy nested-class keys while its namespace-aware function
-            # scopes stay complete (test_cpp_overload_identity).
+        elif language == "python":
+            # The class node is keyed with the full chain, so its members must
+            # be too. Keeping the legacy leaf spelling keyed a method of
+            # ``Outer.Inner`` as ``file::Inner.method``: the container had no
+            # methods, and rename/inheritance/query could not reach them.
+            recursive_class = f"{class_parent}.{name}" if class_parent else name
+        elif language == "cpp":
+            # C++ pins legacy nested-class keys while its namespace-aware
+            # function scopes stay complete (test_cpp_overload_identity).
             recursive_class = name
         elif class_parent:
             recursive_class = f"{class_parent}.{name}"
