@@ -153,7 +153,28 @@ def evaluate(
     return report
 
 
-def collect_rows(roots: dict[str, Path]) -> tuple[dict[str, list[dict[str, Any]]], list[str]]:
+def resolve_data_dirs(
+    corpus: dict[str, Any], environ: dict[str, str] | None = None,
+) -> dict[str, Path]:
+    """Per-repository graph database overrides, for a dev/installed skew.
+
+    The registry graph may be built by a different analyzer version than the one
+    under test (a released tool and a worktree). ``CRG_CORPUS_DATA_<REPO>``
+    points the gate at the database the current code actually produced.
+    """
+    env = environ if environ is not None else dict(os.environ)
+    found: dict[str, Path] = {}
+    for repo in corpus.get("repos", {}):
+        override = env.get(f"CRG_CORPUS_DATA_{repo.upper().replace('-', '_')}", "")
+        if override:
+            found[repo] = Path(override)
+    return found
+
+
+def collect_rows(
+    roots: dict[str, Path],
+    data_dirs: dict[str, Path] | None = None,
+) -> tuple[dict[str, list[dict[str, Any]]], list[str]]:
     """Run `find_dead_code` over every checkout that is actually present."""
     from code_review_graph.graph import GraphStore
     from code_review_graph.incremental import assert_graph_serves_root, get_db_path
@@ -165,7 +186,8 @@ def collect_rows(roots: dict[str, Path]) -> tuple[dict[str, list[dict[str, Any]]
         if not root.is_dir():
             missing.append(repo)
             continue
-        store = GraphStore(get_db_path(root), checkout=root, read_only=True)
+        db_path = (data_dirs or {}).get(repo) or get_db_path(root)
+        store = GraphStore(db_path, checkout=root, read_only=True)
         try:
             assert_graph_serves_root(root, store)
             rows[repo] = find_dead_code(store, root=root)
@@ -243,7 +265,7 @@ def main(argv: list[str] | None = None) -> int:
     corpus = load_corpus(args.corpus)
     used = {raw["repo"] for raw in corpus["entries"]}
     roots = {repo: path for repo, path in resolve_roots(corpus).items() if repo in used}
-    rows, missing = collect_rows(roots)
+    rows, missing = collect_rows(roots, resolve_data_dirs(corpus))
     report = evaluate(corpus, rows, missing)
     print(format_report(report, corpus.get("baseline", {})))
     if args.record:

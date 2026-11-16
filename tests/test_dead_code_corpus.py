@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from code_review_graph.graph import GraphStore
@@ -15,6 +17,7 @@ from tests.dead_code_corpus import (
     gate,
     load_corpus,
     record,
+    resolve_data_dirs,
 )
 
 
@@ -124,3 +127,11 @@ def test_a_real_graph_reports_an_unreferenced_function(tmp_path):
     report = evaluate(corpus, {"demo": rows}, [])
     assert report.false_negatives == []
     assert report.recall == 1.0
+
+
+def test_a_graph_database_can_be_overridden_per_repository():
+    corpus = {"repos": {"demo": {}, "other": {}}}
+    resolved = resolve_data_dirs(
+        corpus, {"CRG_CORPUS_DATA_DEMO": "/tmp/demo-graph"},
+    )
+    assert resolved == {"demo": Path("/tmp/demo-graph")}
