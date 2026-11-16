@@ -394,13 +394,27 @@ _FRAMEWORK_DECORATOR_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\w+\.(middleware|exception_handler|on_exception)\b", re.IGNORECASE),
     # Generic route decorator (Flask blueprints: @bp.route, @auth_bp.route, etc.)
     re.compile(r"\w+\.route\b", re.IGNORECASE),
+    # Python property protocols: the runtime or a framework invokes these, never
+    # a call site. `computed_field` and `cached_property` are how Pydantic models
+    # expose derived fields, so treating them as ordinary methods reported every
+    # Pydantic field surface as dead code.
+    re.compile(r"^(?:[\w.]+\.)?(?:property|cached_property|computed_field)$"),
+    # Pydantic validators and serializers are called by the model machinery.
+    re.compile(
+        r"^(?:[\w.]+\.)?(?:field_validator|model_validator|field_serializer"
+        r"|model_serializer|validator|root_validator)(?:\s*\(.*)?$",
+        re.DOTALL,
+    ),
+    # Abstract and overload declarations are contracts: an implementation or a
+    # type-checker calls them, never a call site.
+    re.compile(r"^(?:[\w.]+\.)?(?:abstractmethod|overload)$"),
 ]
 
 # An override implements a supertype contract, so its caller is that contract:
 # a supertype-typed reference, a framework, or the runtime for Object.hashCode and
 # friends. The base is often outside the graph, so no hierarchy walk can rescue it.
 # That stops it being dead, but it is no flow root: one with callers is mid-flow.
-_OVERRIDE_DECORATOR = re.compile(r"^(?:java\.lang\.)?Override$")
+_OVERRIDE_DECORATOR = re.compile(r"^(?:[\w.]+\.)?[Oo]verride$")
 
 # Name patterns that indicate conventional entry points.
 _ENTRY_NAME_PATTERNS: list[re.Pattern[str]] = [
