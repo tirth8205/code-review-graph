@@ -510,8 +510,12 @@ def test_setting_aside_the_callers_own_method_does_not_crown_another(tmp_path):
 
 
 def test_python_two_parents_that_both_declare_it_do_not_bind(tmp_path):
-    """C(A, B): Python runs ``Root.m`` through A, not ``B.m``; a walk that
-    stops at the first level would pick B. With two declarations, decline."""
+    """C(A, B): Python runs ``Root.m`` through A, not ``B.m``.
+
+    C3 linearizes C as C, A, Root, B, so the first declaration is Root.m; a walk
+    that stops at the first level would pick B, and declining to answer loses
+    the real consumer of Root.m.
+    """
     store = _build(tmp_path, {
         "tree.py": (
             "class Root:\n    def m(self):\n        return 0\n\n\n"
@@ -525,8 +529,8 @@ def test_python_two_parents_that_both_declare_it_do_not_bind(tmp_path):
     finally:
         store.close()
 
-    assert row["target"] == "m"
-    assert row["tier"] == "UNRESOLVED"
+    assert row["target"].endswith("::Root.m")
+    assert row["tier"] != "UNRESOLVED"
 
 
 def test_python_parent_outside_the_graph_stops_the_walk(tmp_path):

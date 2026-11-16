@@ -1068,11 +1068,24 @@ def _find_explicit_repo_root(start: Path) -> "Path | None":
     current = start.resolve()
     if not current.is_dir():
         return None
+    try:
+        import pwd
+
+        # ``$HOME`` can be rewritten by a harness; the account's real home is
+        # what owns the catch-all daemon graph.
+        home = Path(pwd.getpwuid(__import__("os").getuid()).pw_dir).resolve()
+    except (ImportError, KeyError):
+        home = Path.home().resolve()
     while True:
         if any(
             (current / marker).exists()
             for marker in (".code-review-graph", ".git", ".svn")
         ):
+            if current == home and start.resolve() != home:
+                # A catch-all graph at the user's home (the daemon's data dir)
+                # would otherwise make every directory under it a project and
+                # silently answer reads from the wrong graph.
+                return None
             return current
         if current == current.parent:
             return None
@@ -2949,6 +2962,18 @@ def _dispatch() -> None:
             # Preserve legacy migration without creating graph state for a
             # repository that has never been indexed or an external data dir.
             db_path = get_db_path(repo_root)
+        if not any(
+            (repo_root / marker).exists()
+            for marker in (".git", ".svn", ".code-review-graph")
+        ):
+            # A reader must not resolve graph state for a plain directory: that
+            # silently answers from a shared store and hides a wrong --repo.
+            print(
+                f"--repo is not a project folder: {repo_root}. "
+                "Expected .git, .svn or .code-review-graph.",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
         if not db_path.exists():
             print(
                 f"No graph found at {db_path}. Run `code-review-graph build` first.",
