@@ -1913,6 +1913,30 @@ _TEST_ANNOTATIONS = frozenset({
     "rstest", "rstest::rstest", "proptest",
 })
 
+# C# test-framework attributes that mark a method as a test: xUnit
+# (`[Fact]`, `[Theory]`), MSTest (`[TestMethod]`, `[DataTestMethod]`) and
+# NUnit's parameterised forms. NUnit's and TUnit's plain `[Test]` is already
+# in `_TEST_ANNOTATIONS`. Looked up for C# only, after the namespace and the
+# optional `Attribute` suffix are dropped, so `[Xunit.Fact]` and
+# `[FactAttribute]` match too.
+_CSHARP_TEST_ATTRIBUTES = frozenset({
+    "Fact", "Theory",
+    "TestMethod", "DataTestMethod",
+    "Test", "TestCase", "TestCaseSource",
+})
+
+
+def _csharp_attribute_marks_test(names: "list[str] | tuple[str, ...]") -> bool:
+    """Whether any C# attribute name in *names* is a test-framework marker."""
+    for name in names:
+        short = name.rsplit(".", 1)[-1]
+        if short.endswith("Attribute") and short != "Attribute":
+            short = short[: -len("Attribute")]
+        if short in _CSHARP_TEST_ATTRIBUTES:
+            return True
+    return False
+
+
 # Spring stereotype annotations that mark classes as managed beans
 _SPRING_STEREOTYPE_ANNOTATIONS = frozenset({
     "Component", "Service", "Repository", "Controller", "RestController",
@@ -16931,6 +16955,10 @@ class CodeParser:
             decorators = tuple(deco_list)
 
         is_test = _is_test_function(name, file_path, decorators, repo_root=self._repo_root)
+        # xUnit and MSTest mark tests with attributes that no naming
+        # convention reveals (`[Fact] public void Returns_zero()`).
+        if language == "csharp" and not is_test and _csharp_attribute_marks_test(decorators):
+            is_test = True
         # PowerShell's Test-* verb and DSC Test() methods are production
         # declarations unless the containing file is test code.
         if language == "powershell":

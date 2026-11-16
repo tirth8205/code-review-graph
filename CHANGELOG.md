@@ -35,6 +35,11 @@
 
 ### Fixed
 
+- C# tests marked with xUnit's `[Fact]` or `[Theory]`, MSTest's `[TestMethod]`
+  or `[DataTestMethod]`, or NUnit's `[TestCase]` or `[TestCaseSource]` are now
+  recognised as tests. Only NUnit's and TUnit's `[Test]` was, so in an xUnit or
+  MSTest project `tests_for` found nothing and a change review listed covered
+  code as untested. Rebuild the graph to pick this up.
 - The MCP entry and every hook `install` writes now run the copy of
   code-review-graph that ran `install`. The MCP entry used `uvx` whenever it
   was on PATH, and hooks ran the first copy on PATH, so an older copy could
