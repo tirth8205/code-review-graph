@@ -3908,6 +3908,11 @@ class CodeParser:
         # files never existed on disk. See ``forget.forget_files``.
         self._excluded_files: set[str] = set()
         self._export_symbol_cache: dict[str, Optional[str]] = {}
+        # File path -> every function/class name defined below file scope.
+        # A closure handed to a library has no call-shaped caller, so value
+        # reference emission needs the names `_collect_file_scope` leaves out
+        # (it owns module exports, where a nested name is not an export).
+        self._nested_definition_names: dict[str, frozenset[str]] = {}
         self._tsconfig_resolver = TsconfigResolver()
         self._workspace_resolver = WorkspaceResolver(
             repo_root=self._repo_root, file_exists=self._file_exists_exact,
@@ -3978,6 +3983,7 @@ class CodeParser:
         self._ruby_load_roots_cache.clear()
         self._python_reexport_cache.clear()
         self._export_symbol_cache.clear()
+        self._nested_definition_names.clear()
         self._dart_pubspec_cache.clear()
         self._rust_project_cache.clear()
         self._tsconfig_resolver = TsconfigResolver()
@@ -19186,6 +19192,21 @@ class CodeParser:
             return
         # Must be a known local definition or import to be worth tracking.
         if name not in defined_names and name not in import_map:
+            # A closure or nested class is not a module export, so it never
+            # reaches `defined_names`. It is still a definition this file owns:
+            # hand it to the same-file resolver as a bare target, which binds it
+            # only when exactly one definition carries that leaf name.
+            scoped = self._nested_definition_names.get(file_path, frozenset())
+            if name not in scoped:
+                return
+            edges.append(EdgeInfo(
+                kind="REFERENCES",
+                source=caller,
+                target=name,
+                file_path=file_path,
+                line=line,
+                extra={"value_reference": "file_scope"},
+            ))
             return
 
         target = self._resolve_call_target(
@@ -19287,6 +19308,51 @@ class CodeParser:
                     line=ch.start_point[0] + 1,
                 )
 
+    def _python_value_reference_names(self, node) -> list[str]:
+        """Names a Python argument hands to the callee as a value.
+
+        Only forms that *are* the callable are followed: a bare name, a
+        ``self.method`` reference, a parenthesized form, and the two branches of
+        a conditional. Arbitrary expressions are left alone so a name that
+        merely appears inside them is not credited as a reference.
+        """
+        node_type = node.type
+        if node_type == "identifier":
+            return [node.text.decode("utf-8", errors="replace")]
+        if node_type == "attribute":
+            owner = node.child_by_field_name("object")
+            attribute = node.child_by_field_name("attribute")
+            if (
+                owner is not None
+                and attribute is not None
+                and owner.text in (b"self", b"cls")
+            ):
+                return [attribute.text.decode("utf-8", errors="replace")]
+            return []
+        if node_type == "parenthesized_expression":
+            return [
+                name
+                for child in node.children
+                for name in self._python_value_reference_names(child)
+            ]
+        if node_type == "conditional_expression":
+            # This grammar exposes no fields here: children are consequence,
+            # ``if``, condition, ``else``, alternative. The condition is not a
+            # reference; the two branches are.
+            branches = []
+            children = node.children
+            if children:
+                branches.append(children[0])
+            for index, child in enumerate(children):
+                if child.type == "else" and index + 1 < len(children):
+                    branches.append(children[index + 1])
+            return [
+                name
+                for branch in branches
+                for name in self._python_value_reference_names(branch)
+            ]
+        return []
+
     def _ref_from_arguments(
         self,
         args_node,
@@ -19303,7 +19369,27 @@ class CodeParser:
             reference_node = ch
             if ch.type == "keyword_argument" and language == "python":
                 reference_node = ch.child_by_field_name("value")
-            if reference_node is None or reference_node.type != "identifier":
+            if reference_node is None:
+                continue
+            if language == "python":
+                if reference_node.type == "call":
+                    # A callable passed to an inner call (an options object, a
+                    # wrapper) is still a reference in this scope.
+                    inner = reference_node.child_by_field_name("arguments")
+                    if inner is not None:
+                        self._ref_from_arguments(
+                            inner, source, language, file_path, caller, edges,
+                            import_map, defined_names,
+                        )
+                    continue
+                for name in self._python_value_reference_names(reference_node):
+                    self._emit_reference_if_known(
+                        name, language, file_path, caller, edges,
+                        import_map, defined_names,
+                        line=reference_node.start_point[0] + 1,
+                    )
+                continue
+            if reference_node.type != "identifier":
                 continue
             name = reference_node.text.decode("utf-8", errors="replace")
             self._emit_reference_if_known(
@@ -20108,7 +20194,39 @@ class CodeParser:
                 root, source, import_map,
             )
 
+        if file_path:
+            self._nested_definition_names[file_path] = (
+                self._collect_scoped_definition_names(root, language)
+            )
+
         return import_map, defined_names
+
+    def _collect_scoped_definition_names(
+        self,
+        root,
+        language: str,
+    ) -> frozenset[str]:
+        """Every function/class name defined in *root*, file scope included.
+
+        A closure or nested class has no entry in ``defined_names`` because
+        that set owns module exports. Value references need the full inventory
+        to recognise a definition handed to a library, so it is collected once
+        per file and read only by ``_emit_reference_if_known``.
+        """
+        wanted = set(self._function_types.get(language, []))
+        wanted.update(self._class_types.get(language, []))
+        if not wanted:
+            return frozenset()
+        names: set[str] = set()
+        pending = [root]
+        while pending:
+            node = pending.pop()
+            if node.type in wanted:
+                name_node = node.child_by_field_name("name")
+                if name_node is not None:
+                    names.add(name_node.text.decode("utf-8", errors="replace"))
+            pending.extend(node.children)
+        return frozenset(names)
 
     def _collect_julia_scoped_import_names(
         self,
