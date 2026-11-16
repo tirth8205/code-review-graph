@@ -23,7 +23,7 @@ import unicodedata
 import uuid
 from collections import deque
 from datetime import datetime
-from functools import partial
+from functools import lru_cache, partial
 from itertools import islice
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Callable, Iterable, NamedTuple, Optional
@@ -425,6 +425,13 @@ def _refresh_target_resolution(store: GraphStore) -> None:
 # directories.  See: #91 and PR #92.
 DEFAULT_IGNORE_PATTERNS = [
     "**/.code-review-graph/**",
+    # Agent and editor configuration is vendored glue, never product code: a
+    # governance plugin copied into `.opencode/plugins` was parsed, registered
+    # and then reported as dead code in the owning repository.
+    "**/.opencode/**",
+    "**/.claude/**",
+    "**/.cursor/**",
+    "**/.kilo/**",
     "**/node_modules/**",
     "**/.git/**",
     "**/.svn/**",
@@ -2152,6 +2159,26 @@ def _inventory_candidates(
     return candidates
 
 
+@lru_cache(maxsize=16)
+def _installed_file_set(repo_root: Path) -> frozenset[str]:
+    """Installed files of one checkout, cached until the manifest changes.
+
+    ``_keep_candidate`` runs for every inventory path, so the manifest is read
+    once per (repository, manifest mtime) instead of once per candidate.
+    """
+    try:
+        stamp = (repo_root / INSTALL_MANIFEST).stat().st_mtime_ns
+    except OSError:
+        return frozenset()
+    return _installed_manifest_cached(str(repo_root), stamp)
+
+
+@lru_cache(maxsize=16)
+def _installed_manifest_cached(repo_root: str, _stamp: int) -> frozenset[str]:
+    """Read the manifest for one modification stamp; *stamp* is the cache key."""
+    return install_manifest_paths(Path(repo_root))
+
+
 def _keep_candidate(
     repo_root: Path,
     rel_path: str,
@@ -2159,8 +2186,12 @@ def _keep_candidate(
     parser: CodeParser,
 ) -> bool:
     """Return whether one inventory path is a file the graph should hold."""
-    if _should_ignore(rel_path, ignore_patterns):
-        return False
+    # CRG's own install writes instruction/hook files into agent directories.
+    # The install manifest is the single owner of that surface: a file it names
+    # stays a candidate even when the directory is otherwise ignored.
+    if rel_path not in _installed_file_set(repo_root):
+        if _should_ignore(rel_path, ignore_patterns):
+            return False
     # Skip paths that would exceed OS filename limits (macOS: 255 bytes
     # per component, ~1024 total; Windows: 260 total).
     try:
