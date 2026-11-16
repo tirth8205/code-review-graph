@@ -91,6 +91,33 @@
       "verdict": "live",
       "reason_code": "value_reference",
       "provenance": "T1: method handed as match_filter=self._admit_match"
+    },
+    {
+      "repo": "flext",
+      "name": "TransformStep",
+      "kind": "Class",
+      "path": "flext-infra/src/flext_infra/_models/base.py",
+      "verdict": "live",
+      "reason_code": "export_surface",
+      "provenance": "T4: published through the generated deferred_members registry in flext_infra/_models/__init__.py"
+    },
+    {
+      "repo": "flext",
+      "name": "ConsolidatorReport",
+      "kind": "Class",
+      "path": "flext-infra/src/flext_infra/_models/_codegen/fix.py",
+      "verdict": "live",
+      "reason_code": "export_surface",
+      "provenance": "T4: published through the generated deferred_members registry"
+    },
+    {
+      "repo": "flext",
+      "name": "GitTreeStats",
+      "kind": "Class",
+      "path": "flext-infra/src/flext_infra/_models/_git/worktree_facts.py",
+      "verdict": "live",
+      "reason_code": "export_surface",
+      "provenance": "T4: published through the generated deferred_members registry"
     }
   ],
   "baseline": {

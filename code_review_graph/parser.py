@@ -19138,6 +19138,13 @@ class CodeParser:
         else:
             caller = file_path
 
+        # --- Python export registry (generated lazy facades) ---
+        if language == "python" and node_type == "call":
+            self._python_export_registry_references(
+                child, file_path, caller, edges,
+            )
+            return
+
         # --- JS/TS/Python: object literal pair values  { key: fnRef } ---
         if node_type in self._PAIR_TYPES:
             self._ref_from_pair(child, source, language, file_path, caller, edges, imap, dnames)
@@ -19307,6 +19314,82 @@ class CodeParser:
                     import_map, defined_names,
                     line=ch.start_point[0] + 1,
                 )
+
+    def _python_export_registry_references(
+        self,
+        call_node,
+        file_path: str,
+        caller: str,
+        edges: list[EdgeInfo],
+    ) -> None:
+        """Emit REFERENCES for a generated package export registry.
+
+        A generated ``__init__.py`` publishes its members through a registry
+        call (``defer_lazy_bases(exports=..., deferred_members=...)``): the
+        names are string literals, so no import or call edge reaches the real
+        class, and every lazily exported model looked dead. The registry itself
+        states the facade and its module, which resolves to an exact target
+        instead of a name guess.
+        """
+        function = call_node.child_by_field_name("function")
+        if function is None:
+            return
+        arguments = call_node.child_by_field_name("arguments")
+        if arguments is None:
+            return
+        payload: dict[str, object] = {}
+        module_map: dict[str, str] = {}
+        for child in arguments.children:
+            target = child
+            if child.type == "keyword_argument":
+                key = child.child_by_field_name("name")
+                value = child.child_by_field_name("value")
+                if key is None or value is None:
+                    continue
+                try:
+                    payload[key.text.decode("utf-8", errors="replace")] = ast.literal_eval(
+                        value.text.decode("utf-8", errors="replace")
+                    )
+                except (SyntaxError, ValueError):
+                    continue
+                continue
+            try:
+                literal = ast.literal_eval(
+                    target.text.decode("utf-8", errors="replace")
+                )
+            except (SyntaxError, ValueError):
+                continue
+            if isinstance(literal, dict) and all(
+                isinstance(k, str) and isinstance(v, str) for k, v in literal.items()
+            ):
+                module_map = literal
+        members = payload.get("deferred_members")
+        if not module_map or not isinstance(members, dict):
+            return
+        line = call_node.start_point[0] + 1
+        for facade, entries in members.items():
+            if not isinstance(facade, str):
+                continue
+            module = module_map.get(facade)
+            if not isinstance(module, str):
+                continue
+            origin = self._python_import_origin(module, file_path)
+            if origin is None:
+                continue
+            targets = [facade]
+            if isinstance(entries, (list, tuple)):
+                targets.extend(
+                    f"{facade}.{member}" for member in entries if isinstance(member, str)
+                )
+            for target in targets:
+                edges.append(EdgeInfo(
+                    kind="REFERENCES",
+                    source=caller,
+                    target=f"{origin}::{target}",
+                    file_path=file_path,
+                    line=line,
+                    extra={"export_surface": "registry"},
+                ))
 
     def _python_value_reference_names(self, node) -> list[str]:
         """Names a Python argument hands to the callee as a value.
