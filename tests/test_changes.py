@@ -15,10 +15,11 @@ from code_review_graph.changes import (
     compute_risk_score,
     map_changes_to_nodes,
     parse_git_diff_ranges,
+    risk_signals,
 )
 from code_review_graph.flows import store_flows, trace_flows
 from code_review_graph.graph import GraphStore
-from code_review_graph.parser import EdgeInfo, NodeInfo
+from code_review_graph.parser import EdgeInfo, NodeInfo, normalize_file_path
 
 
 class TestChanges:
@@ -275,6 +276,45 @@ class TestChanges:
         normal_score = compute_risk_score(self.store, normal)
         secure_score = compute_risk_score(self.store, secure)
         assert secure_score > normal_score
+
+    def test_security_keywords_ignore_directories_above_the_checkout(self, tmp_path):
+        """A keyword in the checkout's own path must not flag every symbol.
+
+        ``sign`` is a security keyword, so a repository cloned into
+        ``design-system/`` used to score every node as security-sensitive.
+        """
+        root = tmp_path / "design-system"
+        path = normalize_file_path(root / "app" / "calc.py")
+        self.store.set_metadata("repo_root", str(root))
+        self._add_func("add", path=path)
+        node = self.store.get_node(f"{path}::add")
+        assert node is not None
+
+        assert risk_signals(self.store, node)["security"]["score"] == 0.0
+
+        # A File node is named by its absolute path; that must not leak in.
+        self.store.upsert_node(
+            NodeInfo(
+                kind="File", name=path, file_path=path, line_start=1, line_end=3,
+                language="python",
+            ),
+            file_hash="abc",
+        )
+        self.store.commit()
+        file_node = self.store.get_node(path)
+        assert file_node is not None
+        assert risk_signals(self.store, file_node)["security"]["score"] == 0.0
+
+    def test_security_keywords_still_match_directories_inside_the_repo(self, tmp_path):
+        """A keyword in a directory below the repository root still counts."""
+        root = tmp_path / "shop"
+        path = normalize_file_path(root / "auth" / "views.py")
+        self.store.set_metadata("repo_root", str(root))
+        self._add_func("index", path=path)
+        node = self.store.get_node(f"{path}::index")
+        assert node is not None
+
+        assert risk_signals(self.store, node)["security"]["score"] == pytest.approx(0.20)
 
     def test_risk_score_with_callers(self):
         """Functions with many callers get a caller count bonus."""

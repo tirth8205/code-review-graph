@@ -13,7 +13,7 @@ from code_review_graph.flows import (
     trace_flows,
 )
 from code_review_graph.graph import GraphStore
-from code_review_graph.parser import CodeParser, EdgeInfo, NodeInfo
+from code_review_graph.parser import CodeParser, EdgeInfo, NodeInfo, normalize_file_path
 
 
 class TestFlows:
@@ -437,6 +437,47 @@ class TestFlows:
         assert len(secure_flows) == 1
         # The security flow should have a higher criticality.
         assert secure_flows[0]["criticality"] >= normal_flows[0]["criticality"]
+
+    def test_criticality_ignores_security_keywords_above_the_checkout(self, tmp_path):
+        """The same flow scores the same wherever the repository is cloned.
+
+        ``sign`` is a security keyword; a checkout under ``design-system/``
+        must not add the security term to a flow whose symbols and in-repo
+        paths contain none.
+        """
+
+        def criticality(store: GraphStore, root: Path) -> float:
+            store.set_metadata("repo_root", str(root))
+            path = normalize_file_path(root / "app" / "calc.py")
+            for name in ("start", "process"):
+                store.upsert_node(
+                    NodeInfo(
+                        kind="Function", name=name, file_path=path, line_start=1,
+                        line_end=10, language="python", parent_name=None,
+                        is_test=False, extra={},
+                    ),
+                    file_hash="abc",
+                )
+            store.upsert_edge(
+                EdgeInfo(
+                    kind="CALLS", source=f"{path}::start",
+                    target=f"{path}::process", file_path=path, line=5,
+                )
+            )
+            store.commit()
+            flows = trace_flows(store)
+            assert len(flows) == 1
+            return flows[0]["criticality"]
+
+        plain = criticality(self.store, tmp_path / "plain")
+        other_db = tmp_path / "other.db"
+        other = GraphStore(str(other_db))
+        try:
+            keyword_dir = criticality(other, tmp_path / "design-system")
+        finally:
+            other.close()
+
+        assert keyword_dir == plain
 
     def test_criticality_file_spread_boost(self):
         """Flows spanning more files score higher on file-spread."""
