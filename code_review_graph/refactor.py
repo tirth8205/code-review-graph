@@ -2380,6 +2380,20 @@ def find_dead_code(
                         if has_callers:
                             break
 
+            # A member of a Protocol is a contract, not an implementation: the
+            # runtime never calls the stub body, the consumer or the
+            # implementation does. Reporting it dead would delete the interface.
+            if (
+                not has_callers
+                and node.kind in ("Function", "Test")
+                and node.qualified_name.endswith("." + node.name)
+            ):
+                owner = node.qualified_name[: -(len(node.name) + 1)]
+                if "Protocol" in {
+                    base.rpartition(".")[2] for base in class_bases.get(owner, ())
+                }:
+                    has_callers = True
+
             if not has_callers:
                 if root:
                     try:

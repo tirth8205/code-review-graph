@@ -19138,6 +19138,16 @@ class CodeParser:
         else:
             caller = file_path
 
+        # --- Python annotation references (field and parameter types) ---
+        if language == "python" and node_type == "type":
+            for name in self._python_annotation_names(child):
+                self._emit_reference_if_known(
+                    name, language, file_path, caller, edges,
+                    import_map, defined_names,
+                    line=child.start_point[0] + 1,
+                )
+            return
+
         # --- Python export registry (generated lazy facades) ---
         if language == "python" and node_type == "call":
             self._python_export_registry_references(
@@ -19315,6 +19325,29 @@ class CodeParser:
                     line=ch.start_point[0] + 1,
                 )
 
+    def _python_annotation_names(self, node) -> list[str]:
+        """Every type name written in a Python annotation.
+
+        A field such as ``path_rules: PathRulesConfig = Field(...)`` or
+        ``Annotated[TestmonCacheSpec, Field(...)]`` uses the model as its type;
+        no call or import edge reaches it, so a model used only this way was
+        reported dead.
+        """
+        names: list[str] = []
+        pending = [node]
+        while pending:
+            current = pending.pop()
+            if current.type == "identifier":
+                names.append(current.text.decode("utf-8", errors="replace"))
+                continue
+            if current.type == "attribute":
+                attribute = current.child_by_field_name("attribute")
+                if attribute is not None:
+                    names.append(attribute.text.decode("utf-8", errors="replace"))
+                continue
+            pending.extend(current.children)
+        return names
+
     def _python_export_registry_references(
         self,
         call_node,
@@ -19364,9 +19397,23 @@ class CodeParser:
             ):
                 module_map = literal
         members = payload.get("deferred_members")
-        if not module_map or not isinstance(members, dict):
+        if not module_map:
             return
         line = call_node.start_point[0] + 1
+        for facade, module in module_map.items():
+            origin = self._python_import_origin(module, file_path)
+            if origin is None:
+                continue
+            edges.append(EdgeInfo(
+                kind="REFERENCES",
+                source=caller,
+                target=f"{origin}::{facade}",
+                file_path=file_path,
+                line=line,
+                extra={"export_surface": "registry"},
+            ))
+        if not isinstance(members, dict):
+            return
         for facade, entries in members.items():
             if not isinstance(facade, str):
                 continue

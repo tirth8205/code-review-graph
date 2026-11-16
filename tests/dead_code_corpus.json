@@ -118,6 +118,60 @@
       "verdict": "live",
       "reason_code": "export_surface",
       "provenance": "T4: published through the generated deferred_members registry"
+    },
+    {
+      "repo": "flext",
+      "name": "get_indicator",
+      "kind": "Function",
+      "path": "flext-infra/src/flext_infra/_utilities/_rope/project.py",
+      "verdict": "live",
+      "reason_code": "framework_hook",
+      "provenance": "T3: typing @override of rope ChangeIndicator, called by resourceobserver"
+    },
+    {
+      "repo": "flext",
+      "name": "managed_file_specs",
+      "kind": "Function",
+      "path": "flext-infra/src/flext_infra/_models/_config/artifact.py",
+      "verdict": "live",
+      "reason_code": "framework_hook",
+      "provenance": "T14: @computed_field + @cached_property Pydantic surface"
+    },
+    {
+      "repo": "flext",
+      "name": "artifact_order",
+      "kind": "Function",
+      "path": "flext-infra/src/flext_infra/_models/_config/templates.py",
+      "verdict": "live",
+      "reason_code": "framework_hook",
+      "provenance": "T14: computed Pydantic surface read as an attribute"
+    },
+    {
+      "repo": "flext",
+      "name": "PathRulesConfig",
+      "kind": "Class",
+      "path": "flext-infra/src/flext_infra/_models/deps_tool_config_type_checkers.py",
+      "verdict": "live",
+      "reason_code": "annotation_reference",
+      "provenance": "T14: used as a Pydantic field type"
+    },
+    {
+      "repo": "flext",
+      "name": "TestmonCacheSpec",
+      "kind": "Class",
+      "path": "flext-infra/src/flext_infra/_models/_config/make.py",
+      "verdict": "live",
+      "reason_code": "annotation_reference",
+      "provenance": "T14: used inside Annotated[...] field type"
+    },
+    {
+      "repo": "flext",
+      "name": "ExecutorEnvironmentSpec",
+      "kind": "Class",
+      "path": "flext-infra/src/flext_infra/_models/_config/make.py",
+      "verdict": "live",
+      "reason_code": "annotation_reference",
+      "provenance": "T14: used inside Annotated[...] field type"
     }
   ],
   "baseline": {
