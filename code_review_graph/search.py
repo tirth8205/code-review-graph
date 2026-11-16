@@ -862,7 +862,7 @@ def _embedding_search(
     try:
         emb_store = EmbeddingStore(
             store.db_path, provider=provider, model=model,
-            **({"graph_store": store} if store.checkout is not None else {}),
+            graph_store=store,
         )
         try:
             if not emb_store.available or emb_store.count() == 0:

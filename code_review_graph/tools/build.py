@@ -10,7 +10,7 @@ import sqlite3
 import time
 from contextlib import closing
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from ..build_state import (
     BUILD_COMPLETE,
@@ -41,6 +41,7 @@ from ..incremental import (
     resolve_incremental_base,
 )
 from ..locking import WriteLock, write_lock_path
+from ..postprocessing import populate_signatures
 from ..shared_sqlite import CheckoutConnection, shared_database
 from ._common import _get_store, _resolve_root
 
@@ -65,8 +66,23 @@ def _refresh_profile(
     )
 
 
-def _completed_refresh(request: str, result: dict[str, Any]) -> str:
-    return json.dumps({"request": request, "result": result, "finished": time.time_ns()})
+class _RefreshInputs(NamedTuple):
+    request: str
+    manifest_sha256: str
+    paths: int
+    anchor: tuple[str, str]
+
+
+def _publish_refresh(
+    store: GraphStore, inputs: _RefreshInputs, result: dict[str, Any],
+) -> None:
+    if store.checkout is not None:
+        result["generation_sha256"] = store.publish_generation(*inputs.anchor)
+        store.record_graph_inputs(inputs.manifest_sha256, inputs.paths, *inputs.anchor)
+        result["input_manifest_sha256"] = inputs.manifest_sha256
+    store.set_metadata(REFRESH_REQUEST_KEY, json.dumps({
+        "request": inputs.request, "result": result, "finished": time.time_ns(),
+    }))
 
 
 def refresh_shared_watch(root: Path, store: GraphStore, follow: bool | None, callback) -> None:
@@ -75,7 +91,7 @@ def refresh_shared_watch(root: Path, store: GraphStore, follow: bool | None, cal
     request = _refresh_request(root, None, follow, profile)
     with store.refresh():
         if (completed := store.get_metadata(REFRESH_REQUEST_KEY)) and (
-            json.loads(completed)["request"] == request
+            json.loads(completed)["request"] == request.request
         ):
             return
         store.invalidate_refresh()
@@ -91,13 +107,13 @@ def refresh_shared_watch(root: Path, store: GraphStore, follow: bool | None, cal
             store.set_metadata(BUILD_STATE_KEY, BUILD_COMPLETE)
             if request == _refresh_request(root, None, follow, profile):
                 result.update(status="ok", build_type="incremental", base_resolved=base)
-                store.set_metadata(REFRESH_REQUEST_KEY, _completed_refresh(request, result))
+                _publish_refresh(store, request, result)
 
 
 def _refresh_request(
     root: Path, recurse: bool | None, follow: bool | None, profile: tuple[Any, ...],
-) -> str:
-    """Identify the worktree snapshot and resolved request before waiting."""
+) -> _RefreshInputs:
+    """Identify the worktree snapshot and its portable input manifest."""
     from ..custom_languages import CONFIG_RELATIVE_PATH
 
     paths = set(collect_all_files(root, recurse, follow))
@@ -113,12 +129,21 @@ def _refresh_request(
                 digest.update(block)
         return path, state.st_mtime_ns, state.st_ctime_ns, digest.hexdigest()
 
-    payload = (
-        _git_branch_info(root),
-        profile,
-        [stamp(path) for path in sorted(paths)],
+    stamps = [stamp(path) for path in sorted(paths)]
+    anchor = _git_branch_info(root)
+    payload = (anchor, profile, stamps)
+    # Keep the input key independent of checkout/branch and file timestamps.
+    # The invocation's full/incremental and base options govern cooperation
+    # but are not inputs to the resulting index. Resolver dependencies are
+    # not yet all in this manifest; equality alone never authorizes reuse.
+    manifest = ("crg-graph-inputs-v1", profile[2:],
+                [(path, digest) for path, _, _, digest in stamps])
+    return _RefreshInputs(
+        hashlib.sha256(json.dumps(payload).encode()).hexdigest(),
+        hashlib.sha256(json.dumps(manifest).encode()).hexdigest(),
+        len(stamps),
+        anchor,
     )
-    return hashlib.sha256(json.dumps(payload).encode()).hexdigest()
 
 
 def _previous_refresh(db_path: Path, root: Path) -> str | None:
@@ -429,28 +454,7 @@ def _run_postprocess(
     timing: dict[str, float] = {}
     stage_started = time.perf_counter()
     try:
-        rows = store.get_nodes_without_signature()
-        signature_rows: list[tuple[str, int]] = []
-        for row in rows:
-            node_id, name, kind, params, ret = (
-                row[0],
-                row[1],
-                row[2],
-                row[3],
-                row[4],
-            )
-            if kind in ("Function", "Test"):
-                sig = f"def {name}({params or ''})"
-                if ret:
-                    sig += f" -> {ret}"
-            elif kind == "Class":
-                sig = f"class {name}"
-            else:
-                sig = name
-            signature_rows.append((sig[:512], node_id))
-        # Single transaction via executemany instead of one autocommitted
-        # UPDATE per node (issue #721).
-        store.update_node_signatures(signature_rows)
+        populate_signatures(store)
         build_result["signatures_updated"] = True
     except (sqlite3.OperationalError, TypeError, KeyError) as e:
         logger.warning("Signature computation failed: %s", e)
@@ -677,14 +681,15 @@ def build_or_update_graph(
     store = None
     try:
         before = None
-        request: str | None = None
+        request: _RefreshInputs | None = None
         request_profile: tuple[Any, ...] = ()
-        if (wait_for_lock or db_path == shared_database()) and not (
-            embedding_provider or embedding_model
-        ):
+        explicit_vectors = bool(embedding_provider or embedding_model)
+        if db_path == shared_database() or (wait_for_lock and not explicit_vectors):
             request_profile = _refresh_profile(
                 full_rebuild, base, postprocess, recurse_submodules, enrich, follow_symlinks,
             )
+            if explicit_vectors:
+                request_profile += ((embedding_provider, embedding_model),)
             before = _previous_refresh(db_path.resolve(), root) if waiting else None
             request = _refresh_request(root, recurse_submodules, follow_symlinks, request_profile)
         if not lock.acquire(blocking=wait_for_lock):
@@ -701,10 +706,10 @@ def build_or_update_graph(
             can_join = (waiting and completed != before) or (
                 store.checkout is not None and not full_rebuild
             )
-            if can_join and request is not None and completed:
+            if can_join and not explicit_vectors and request is not None and completed:
                 prior = json.loads(completed)
                 if (
-                    prior["request"] == request
+                    prior["request"] == request.request
                     and request == _refresh_request(
                         root, recurse_submodules, follow_symlinks, request_profile,
                     )
@@ -731,10 +736,7 @@ def build_or_update_graph(
                         root, recurse_submodules, follow_symlinks, request_profile,
                     )
                 ):
-                    store.set_metadata(
-                        REFRESH_REQUEST_KEY,
-                        _completed_refresh(request, result),
-                    )
+                    _publish_refresh(store, request, result)
                 return result
 
             if (
@@ -1103,6 +1105,9 @@ def run_postprocess(
         _prepare_db_path(root, db_path)
         store, _root = _get_store(str(root), db_path=db_path)
         with store.refresh():
+            anchor = _git_branch_info(root) if store.checkout is not None else None
+            if anchor is not None and store.historical_ref_for_checkout() is not None:
+                raise RuntimeError("Update this checkout before post-processing")
             store.invalidate_refresh()
             # Read before anything runs: the stages below rebuild derived data
             # from whatever nodes are stored, and none of them can put back a file
@@ -1128,28 +1133,7 @@ def run_postprocess(
                 )
 
             try:
-                rows = store.get_nodes_without_signature()
-                signature_rows: list[tuple[str, int]] = []
-                for row in rows:
-                    node_id, name, kind, params, ret = (
-                        row[0],
-                        row[1],
-                        row[2],
-                        row[3],
-                        row[4],
-                    )
-                    if kind in ("Function", "Test"):
-                        sig = f"def {name}({params or ''})"
-                        if ret:
-                            sig += f" -> {ret}"
-                    elif kind == "Class":
-                        sig = f"class {name}"
-                    else:
-                        sig = name
-                    signature_rows.append((sig[:512], node_id))
-                # Single transaction via executemany instead of one autocommitted
-                # UPDATE per node (issue #721).
-                store.update_node_signatures(signature_rows)
+                populate_signatures(store)
                 result["signatures_updated"] = True
             except (sqlite3.OperationalError, TypeError, KeyError) as e:
                 logger.warning("Signature computation failed: %s", e)
@@ -1254,8 +1238,12 @@ def run_postprocess(
                 result["summary"] = "Selected post-processing steps complete."
             if warnings:
                 result["warnings"] = warnings
-            if store.checkout is not None and result["status"] == "partial":
-                raise RuntimeError(result["summary"])
+            if anchor is not None:
+                if result["status"] == "partial":
+                    raise RuntimeError(result["summary"])
+                if _git_branch_info(root) != anchor:
+                    raise RuntimeError("Git reference changed during post-processing")
+                store.publish_generation(*anchor)
             return result
     finally:
         try:

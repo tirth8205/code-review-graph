@@ -2,7 +2,7 @@
 
 ``code-review-graph watch --manifest PATH`` runs :func:`incremental.watch` for
 each listed repository on its own thread inside a single process, instead of
-one ``watch`` process per repository.  The manifest is re-read on every tick:
+one ``watch`` process per repository.  Manifest changes wake reconciliation:
 a repository added to it starts watching, a removed one stops, and the others
 keep their observers.  Initial builds run one at a time, so a host with many
 repositories never parses all of them at once.
@@ -28,6 +28,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .constants import env_float
+from .daemon import ConfigWatcher
 from .graph import GraphStore
 from .incremental import _WATCH_STOP_TIMEOUT, _WATCH_TICK_SECONDS, watch
 from .shared_sqlite import shared_database
@@ -126,6 +128,10 @@ def watch_set(
     # inline, so one slow build cannot stall or tear down the others.
     retiring: list[_Watcher] = []
     desired: dict[Path, WatchTarget] = {}
+    changed = threading.Event()
+    observer = ConfigWatcher(
+        manifest, changed.set, poll_interval=env_float("CRG_WATCH_POLL_INTERVAL", 2.0),
+    )
 
     def run(watcher: _Watcher) -> None:
         store: GraphStore | None = None
@@ -213,24 +219,33 @@ def watch_set(
     if threading.current_thread() is threading.main_thread():
         previous_handler = signal.signal(signal.SIGTERM, lambda *_: stopping.set())
     try:
+        observer.start()
         version = _manifest_version(manifest)
         desired = {target.repo: target for target in load_manifest(manifest)}
         reconcile()
         logger.info("Watching %d repositories from one process", len(watchers))
-        while not stopping.wait(_WATCH_TICK_SECONDS):
+        while not stopping.is_set():
+            notified = changed.wait(_WATCH_TICK_SECONDS)
+            if stopping.is_set():
+                break
+            if not observer.is_alive():
+                raise RuntimeError(f"Manifest notification backend stopped: {manifest}")
             for watcher in watchers.values():
                 raise_failure(watcher)
-            current = _manifest_version(manifest)
-            if current != version:
-                version = current
-                desired = {target.repo: target for target in load_manifest(manifest)}
-                logger.info("Manifest reloaded: %d repositories", len(desired))
+            if notified:
+                changed.clear()
+                current = _manifest_version(manifest)
+                if current != version:
+                    version = current
+                    desired = {target.repo: target for target in load_manifest(manifest)}
+                    logger.info("Manifest reloaded: %d repositories", len(desired))
             reconcile()
     except KeyboardInterrupt:
         stopping.set()
     finally:
         active = sys.exc_info()[1]
         try:
+            observer.stop()
             problem = stop_all(report_failures=active is None)
             if problem is not None:
                 if active is None:

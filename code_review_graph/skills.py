@@ -20,6 +20,7 @@ import subprocess
 import sys
 from importlib import resources
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Any, Callable, Iterable, NamedTuple, Sequence
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -4161,13 +4162,24 @@ def _detect_opencode_major_version() -> int | None:
     if executable is None:
         return None
     try:
-        result = subprocess.run(
-            [executable, "--version"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
+        # OpenCode may initialize its log and storage even for --version.
+        # Keep that state out of the profile being previewed or installed.
+        with TemporaryDirectory(prefix="crg-opencode-version-") as state:
+            env = {
+                **os.environ,
+                "XDG_CACHE_HOME": state,
+                "XDG_CONFIG_HOME": state,
+                "XDG_DATA_HOME": state,
+                "XDG_STATE_HOME": state,
+            }
+            result = subprocess.run(
+                [executable, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+                env=env,
+            )
     except (OSError, subprocess.SubprocessError):
         return None
     if result.returncode != 0:

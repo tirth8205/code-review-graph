@@ -394,11 +394,54 @@ shared setting with a per-command `--data-dir`. Launch the VS Code extension
 host with the same setting to read the selected workspace checkout from the
 shared database.
 
+Use `code-review-graph query file_summary path.py --generation-ref refs/heads/main`
+to read the last published structural view of that ref for the selected
+checkout. The MCP `query_graph_tool` accepts the same `generation_ref`. This
+view includes symbols and relations. Search, flows and community commands automatically
+select the current Git ref's published view for this checkout, as does the
+VS Code extension. If the ref has no published projection, build that ref
+first.
+
+To upgrade a shared index from dc.2, point `CRG_SHARED_DB` at a SQLite
+backup copy and run `code-review-graph migrate-shared`. It upgrades schema
+v1/v2 to v3 in one transaction, checks integrity, and leaves the per-checkout
+native rows in place. It does not read source files or call an embedding
+provider. A reported unresolved checkout retains its native data; build
+that checkout to establish the missing provenance. Verify queries on the
+copy before replacing a service index.
+
 The watcher uses the same completion record as CLI and MCP refreshes.
 A checkout, input snapshot and indexing profile must match before a
 completed refresh can be reused. The kernel releases the write lock on
 process death and SQLite rolls back the unfinished refresh. See
 [Shared SQLite ADR](adr/0001-shared-sqlite.md).
+
+Shared embeddings can reuse a vector when the exact input and provider
+profile match and the checkouts share a Git common directory or a fetch
+remote. Each checkout retains its own symbol links and search results.
+
+```bash
+code-review-graph prune
+code-review-graph prune --apply
+code-review-graph prune --apply --compact
+```
+
+The first command previews unbound graph generations, parser facts, input
+manifests, and vectors. A generation stays live while a branch or worktree
+binds it. Live file hashes protect parser facts, and verified input manifests
+follow their checkout and ref. The orphan age for facts and manifests starts
+when an applied maintenance pass first sees them unbound.
+
+The defaults are 7 days, 10% of live payload bytes, and a cap of 512 MiB for
+each reported retention budget. Set `CRG_RETENTION_DAYS`,
+`CRG_RETENTION_PERCENT`, and `CRG_RETENTION_MAX_MIB` to adjust the limits.
+Setting any limit to zero retains no unbound artifacts. Compact explicitly
+to reclaim unused SQLite pages on disk.
+
+Workspace manifest changes use native filesystem notifications by default.
+If those notifications are unavailable, the watcher logs why polling is
+in use and how to restore native coverage. Set `CRG_WATCH_POLL_INTERVAL`
+in seconds to adjust the manifest polling interval.
 
 ## Standalone Daemon CLI (`crg-daemon`)
 

@@ -22,6 +22,7 @@ import threading
 from bisect import bisect_left, bisect_right
 from collections import OrderedDict, deque
 from collections.abc import Iterator
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path, PurePath
@@ -53,6 +54,7 @@ from .constants import (
     release_os_memory,
 )
 from .custom_languages import CustomLanguage, load_custom_languages
+from .liveness_rules import annotation_declares_values
 from .npm_alias_resolver import NpmAliasResolver
 from .tsconfig_resolver import TsconfigResolver
 from .workspace_resolver import WorkspaceResolver
@@ -231,13 +233,9 @@ class _PythonScopeBindingVisitor(ast.NodeVisitor):
         self.names.update(node.names)
 
 def _python_function_scope_bindings(
-    source: bytes,
+    tree: ast.Module,
 ) -> dict[tuple[int, int], tuple[frozenset[str], frozenset[str]]]:
     """Return parameter and local names for each Python function position."""
-    try:
-        tree = ast.parse(source.decode("utf-8"))
-    except (SyntaxError, UnicodeDecodeError, ValueError):
-        return {}
     scopes: dict[
         tuple[int, int], tuple[frozenset[str], frozenset[str]],
     ] = {}
@@ -526,15 +524,10 @@ class _PythonUnreachableCallVisitor(ast.NodeVisitor):
         self._dead = outer_dead
 
 
-@lru_cache(maxsize=128)
 def _python_unreachable_call_positions(
-    source: bytes,
+    tree: ast.Module,
 ) -> frozenset[tuple[int, int]]:
     """Return positions of calls and attribute loads in proven-dead branches."""
-    try:
-        tree = ast.parse(source.decode("utf-8"))
-    except (SyntaxError, UnicodeDecodeError, ValueError):
-        return frozenset()
     type_checking_names, typing_modules = _python_type_checking_aliases(tree)
     visitor = _PythonUnreachableCallVisitor(
         type_checking_names,
@@ -562,19 +555,14 @@ class _PythonUnreachableImportVisitor(_PythonUnreachableCallVisitor):
             self.positions.add((node.lineno, node.col_offset))
 
 
-@lru_cache(maxsize=128)
 def _python_unreachable_import_positions(
-    source: bytes,
+    tree: ast.Module,
 ) -> frozenset[tuple[int, int]]:
     """Return positions of imports that never run, such as under ``if TYPE_CHECKING``.
 
     A bare ``TYPE_CHECKING`` counts whatever it is bound to: type checkers read
     any name spelled so as true, which is what ``TYPE_CHECKING = False`` relies on.
     """
-    try:
-        tree = ast.parse(source.decode("utf-8"))
-    except (SyntaxError, UnicodeDecodeError, ValueError):
-        return frozenset()
     type_checking_names, typing_modules = _python_type_checking_aliases(tree)
     visitor = _PythonUnreachableImportVisitor(
         type_checking_names | {"TYPE_CHECKING"},
@@ -582,6 +570,67 @@ def _python_unreachable_import_positions(
     )
     visitor.visit(tree)
     return frozenset(visitor.positions)
+
+
+class PythonSyntaxFacts(NamedTuple):
+    """Source-only Python evidence, independent of file name and import targets."""
+
+    scopes: dict[tuple[int, int], tuple[frozenset[str], frozenset[str]]]
+    dead_calls: frozenset[tuple[int, int]]
+    dead_imports: frozenset[tuple[int, int]]
+
+    def encode(self) -> str:
+        return json.dumps((
+            [(line, column, sorted(params), sorted(locals_))
+             for (line, column), (params, locals_) in sorted(self.scopes.items())],
+            sorted(self.dead_calls), sorted(self.dead_imports),
+        ), separators=(",", ":"))
+
+    @classmethod
+    def decode(cls, data: str) -> PythonSyntaxFacts:
+        scopes, calls, imports = json.loads(data)
+        return cls(
+            {(line, column): (frozenset(params), frozenset(locals_))
+             for line, column, params, locals_ in scopes},
+            frozenset((line, column) for line, column in calls),
+            frozenset((line, column) for line, column in imports),
+        )
+
+
+def extract_python_syntax_facts(source: bytes) -> PythonSyntaxFacts:
+    """Extract all reusable CPython AST evidence with one parse."""
+    try:
+        tree = ast.parse(source.decode("utf-8"))
+    except (SyntaxError, UnicodeDecodeError, ValueError):
+        return PythonSyntaxFacts({}, frozenset(), frozenset())
+    return PythonSyntaxFacts(
+        _python_function_scope_bindings(tree),
+        _python_unreachable_call_positions(tree),
+        _python_unreachable_import_positions(tree),
+    )
+
+
+_cached_python_syntax_facts = lru_cache(maxsize=128)(extract_python_syntax_facts)
+
+
+@dataclass
+class PreparedPythonFacts:
+    """Portable evidence with a slot for Tree-sitter facts on a cache miss."""
+
+    syntax: PythonSyntaxFacts
+    method_scopes: dict[int, str] | None
+
+
+_python_facts_override: ContextVar[tuple[bytes, PreparedPythonFacts] | None] = ContextVar(
+    "python_syntax_facts", default=None,
+)
+
+
+def _python_syntax_facts(source: bytes) -> PythonSyntaxFacts:
+    prepared = _python_facts_override.get()
+    if prepared is not None and prepared[0] is source:
+        return prepared[1].syntax
+    return _cached_python_syntax_facts(source)
 
 
 # ---------------------------------------------------------------------------
@@ -3995,7 +4044,7 @@ class CodeParser:
             _PYTHON_RETURN_ANNOTATION_CACHE.clear()
         for _cached_fn in (
             _read_cargo_manifest,
-            _python_unreachable_call_positions,
+            _cached_python_syntax_facts,
             _read_go_mod,
             _read_gemspec_require_paths,
             _read_php_composer_psr4,
@@ -4131,6 +4180,16 @@ class CodeParser:
         except (OSError, PermissionError):
             return [], []
         return self.parse_bytes(path, source)
+
+    def parse_with_python_facts(
+        self, path: Path, source: bytes, facts: PreparedPythonFacts,
+    ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
+        """Bind portable facts to these exact bytes while resolving locally."""
+        token = _python_facts_override.set((source, facts))
+        try:
+            return self.parse_bytes(path, source)
+        finally:
+            _python_facts_override.reset(token)
 
     def parse_bytes(self, path: Path, source: bytes) -> tuple[list[NodeInfo], list[EdgeInfo]]:
         """Parse pre-read bytes and return extracted nodes and edges.
@@ -4318,8 +4377,16 @@ class CodeParser:
         import_map, defined_names = self._collect_file_scope(
             tree.root_node, language, source, file_path_str,
         )
-        self._index_ambiguous_method_scopes(tree.root_node, language, import_map)
         if language == "python":
+            prepared = _python_facts_override.get()
+            facts = prepared[1] if prepared is not None and prepared[0] is source else None
+            scopes = facts.method_scopes if facts is not None else None
+            if scopes is None:
+                scopes = self._extract_ambiguous_method_scopes(tree.root_node)
+                if facts is not None:
+                    facts.method_scopes = scopes
+            import_map.update((f"__crg_method_scope__:{offset}", scope)
+                              for offset, scope in scopes.items())
             self._expand_python_star_imports(
                 tree.root_node, file_path_str, import_map,
             )
@@ -5038,22 +5105,20 @@ class CodeParser:
         handlers: list[tuple[str, str, int]] = []
 
         # Iterative: page nesting comes from the input, so it has no safe bound.
-        stack = [tree.root_node]
+        # Carry the parent error state instead of walking back up deep trees.
+        stack = [(tree.root_node, False)]
         while stack:
-            node = stack.pop()
-            if node.type == "script_element":
+            node, in_error = stack.pop()
+            kind = node.type
+            if kind == "script_element":
                 scripts.append(node)
                 continue
-            if node.type == "style_element":
+            if kind == "style_element":
                 continue
             # An element never closed has no ``element`` node: the grammar
             # leaves its opening tag directly under the error.
-            if node.type == "element" or (
-                node.type in ("start_tag", "self_closing_tag")
-                and node.parent is not None
-                and node.parent.type == "ERROR"
-            ):
-                start_tag = node if node.type != "element" else _html_start_tag(node)
+            if kind == "element" or (in_error and kind in ("start_tag", "self_closing_tag")):
+                start_tag = _html_start_tag(node) if kind == "element" else node
                 if start_tag is not None:
                     attributes = _html_attributes(start_tag)
                     line = start_tag.start_point[0] + 1
@@ -5064,7 +5129,7 @@ class CodeParser:
                         node, _html_tag_name(start_tag), attributes, file_path_str,
                         test_file, sections, file_node,
                     )
-            stack.extend(reversed(node.children))
+            stack.extend((child, kind == "ERROR") for child in reversed(node.children))
 
         for section in sections.values():
             all_nodes.append(section)
@@ -9376,8 +9441,9 @@ class CodeParser:
         evidence: dict[tuple[int, str], tuple[str, str]] = {}
         expression_evidence: dict[tuple[int, str], list[tuple[str, str]]] = {}
         property_read_edges: list[EdgeInfo] = []
-        unreachable_positions = _python_unreachable_call_positions(source)
-        function_scopes = _python_function_scope_bindings(source)
+        facts = _python_syntax_facts(source)
+        unreachable_positions = facts.dead_calls
+        function_scopes = facts.scopes
 
         def bind_targets(
             left, value, type_node, env, class_fields, current_class,
@@ -16857,6 +16923,7 @@ class CodeParser:
             # C++ pins legacy nested-class keys while its namespace-aware
             # function scopes stay complete (test_cpp_overload_identity).
             recursive_class = name
+            recursive_class = name
         elif class_parent:
             recursive_class = f"{class_parent}.{name}"
         else:
@@ -16869,18 +16936,13 @@ class CodeParser:
         )
         return True
 
-    def _index_ambiguous_method_scopes(self, root, language: str, import_map: dict) -> None:
+    def _extract_ambiguous_method_scopes(self, root) -> dict[int, str]:
         """Carry full method scopes only where legacy leaf scopes would collide.
 
-        The per-file import map already carries internal resolver metadata.
-        Keeping this index there avoids parser-instance state leaking between
-        files (including recursive parsing). The tree is visited once.
-
-        Python only: a Ruby class already descends with its full lexical scope,
-        so its methods cannot collide on a leaf.
+        Byte offsets are stable for identical source and grammar. Use them
+        instead of process-local Tree-sitter node IDs.
         """
-        if language != "python":
-            return
+        language = "python"
         scopes: dict[str, set[str]] = {}
         methods: list[tuple[int, str, str]] = []
         pending = [(root, "")]
@@ -16892,11 +16954,17 @@ class CodeParser:
                     scope = f"{scope}.{name}" if scope else name
                     scopes.setdefault(name, set()).add(scope)
             if node.type in self._function_types[language] and scope:
-                methods.append((node.id, scope.rsplit(".", 1)[-1], scope))
+                methods.append((node.start_byte, scope.rsplit(".", 1)[-1], scope))
             pending.extend((child, scope) for child in reversed(node.named_children))
-        for node_id, leaf, scope in methods:
-            if len(scopes.get(leaf, ())) > 1:
-                import_map[f"__crg_method_scope__:{node_id}"] = scope
+        return {offset: scope for offset, leaf, scope in methods
+                if len(scopes.get(leaf, ())) > 1}
+
+    def python_method_scope_profile(self) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
+        custom = self._custom_languages.get("python")
+        return (
+            custom.grammar if custom else "python", tuple(self._class_types["python"]),
+            tuple(self._function_types["python"]),
+        )
 
     def _extract_functions(
         self,
@@ -16999,7 +17067,7 @@ class CodeParser:
         parent_name = enclosing_class
         container_scope = enclosing_class
         if language == "python" and import_map is not None:
-            parent_name = import_map.get(f"__crg_method_scope__:{child.id}", parent_name)
+            parent_name = import_map.get(f"__crg_method_scope__:{child.start_byte}", parent_name)
             # A Class node's identity is its direct parent plus its own name,
             # however deep it sits, so CONTAINS must use the same two parts.
             container_scope = (
@@ -17349,7 +17417,7 @@ class CodeParser:
         if (
             language == "python"
             and (child.start_point[0] + 1, child.start_point[1])
-            in _python_unreachable_call_positions(source)
+            in _python_syntax_facts(source).dead_calls
         ):
             return True
 
@@ -19174,6 +19242,12 @@ class CodeParser:
 
         # --- Python annotation references (field and parameter types) ---
         if language == "python" and node_type == "type":
+            parent = child.parent
+            if parent is not None and parent.type == "type":
+                # A generic argument is wrapped in its own ``type`` node; the
+                # outer annotation already walks it, and visiting it alone would
+                # lose the enclosing ``Literal`` context.
+                return
             for name in self._python_annotation_names(child):
                 self._emit_reference_if_known(
                     name, language, file_path, caller, edges,
@@ -19368,6 +19442,17 @@ class CodeParser:
         reported dead.
         """
         names: list[str] = []
+        # ``Literal["open", "closed"]`` spells values, not types: a string there
+        # must not make a symbol with that name look used. The annotation is
+        # split across nested ``type``/``generic_type`` nodes, so the context is
+        # read from the outermost one.
+        root = node
+        while root.parent is not None and root.parent.type in (
+            "type", "generic_type", "type_parameter", "subscript",
+        ):
+            root = root.parent
+        leading = root.text.decode("utf-8", errors="replace")
+        literal_values = annotation_declares_values(leading)
         pending = [node]
         while pending:
             current = pending.pop()
@@ -19378,6 +19463,14 @@ class CodeParser:
                 attribute = current.child_by_field_name("attribute")
                 if attribute is not None:
                     names.append(attribute.text.decode("utf-8", errors="replace"))
+                continue
+            if current.type == "string" and not literal_values:
+                # A forward reference (``-> "Model"``) names the type inside a
+                # string; only a dotted identifier is taken, so prose stays out.
+                content = current.text.decode("utf-8", errors="replace").strip("'\"")
+                leaf = content.rsplit(".", 1)[-1].strip()
+                if leaf.isidentifier():
+                    names.append(leaf)
                 continue
             pending.extend(current.children)
         return names
@@ -24483,7 +24576,7 @@ class CodeParser:
         """``TYPE_CHECKING`` wins: such an import never runs, even in a function."""
         if (
             (node.start_point[0] + 1, node.start_point[1])
-            in _python_unreachable_import_positions(source)
+            in _python_syntax_facts(source).dead_imports
         ):
             return IMPORT_CONTEXT_TYPE_ONLY
         current = node.parent

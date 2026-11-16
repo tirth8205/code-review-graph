@@ -31,7 +31,8 @@ from .shared_sqlite import (
 if TYPE_CHECKING:
     import networkx as nx
 
-    from .parser import EdgeInfo, NodeInfo
+    from .parser import CodeParser, EdgeInfo, NodeInfo
+    from .shared_parser_facts import SharedPythonFacts
 
 from .build_state import REFRESH_REQUEST_KEY
 from .constants import (
@@ -835,8 +836,8 @@ def _describe_open_failure(db_path: Path, exc: Exception) -> str:
     )
 
 
-def _assert_usable_database(conn: sqlite3.Connection, db_path: Path) -> None:
-    """Refuse a SQLite file this build cannot honestly answer from.
+def _assert_usable_database(conn: sqlite3.Connection, db_path: Path) -> bool:
+    """Refuse an unusable file and report whether the schema is empty.
 
     Two cases that both used to be accepted in silence:
 
@@ -877,6 +878,7 @@ def _assert_usable_database(conn: sqlite3.Connection, db_path: Path) -> None:
             "different copy: `code-review-graph doctor` lists each one and "
             "its version."
         )
+    return not tables
 
 
 class CorruptGraphDatabaseError(GraphStoreError):
@@ -1064,9 +1066,12 @@ class GraphStore:
             # FILE keeps the impact-radius working tables reclaimable; the
             # compile-time default is memory on some SQLite builds.
             conn.execute("PRAGMA temp_store=FILE")
-            if self.checkout is None:
-                _assert_usable_database(conn, self.db_path)
-            if self.read_only and not self.has_checkout_schema(conn):
+            has_schema = self.has_checkout_schema(conn)
+            empty_schema = (
+                not has_schema if self.checkout is not None
+                else _assert_usable_database(conn, self.db_path)
+            )
+            if self.read_only and not has_schema:
                 error_type = UnbuiltCheckoutError if self.checkout is not None else GraphStoreError
                 raise error_type(
                     f"No graph found at {self.db_path}. "
@@ -1083,16 +1088,7 @@ class GraphStore:
                 )
             self._conn = conn
             if not self.read_only:
-                self._init_schema()
-                # Ensure schema_version is set, then run pending migrations
-                if get_schema_version(self._conn) < 1:
-                    # Fresh DB — metadata table just created by _init_schema
-                    self._conn.execute(
-                        "INSERT OR IGNORE INTO metadata (key, value) "
-                        "VALUES ('schema_version', '1')"
-                    )
-                    self._conn.commit()
-                run_migrations(self._conn)
+                self._init_schema(empty_schema=empty_schema)
         except (sqlite3.Error, OSError, GraphStoreError) as exc:
             # A corrupt file, a foreign SQLite file, or a data directory this
             # process cannot write to used to escape as a raw traceback from
@@ -1166,6 +1162,14 @@ class GraphStore:
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'nodes'"
         ).fetchone() is not None
 
+    def shared_python_facts(self, parser: CodeParser) -> SharedPythonFacts | None:
+        """Use this writer's transaction for shared source-only Python facts."""
+        if self.checkout is None or self.read_only:
+            return None
+        from .shared_parser_facts import SharedPythonFacts
+
+        return SharedPythonFacts(self._conn, self.checkout.resolve(), parser)
+
     @contextmanager
     def refresh(self) -> Iterator[None]:
         """Publish a complete shared refresh or roll it back on failure."""
@@ -1195,9 +1199,15 @@ class GraphStore:
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.close()
 
-    def _init_schema(self) -> None:
-        self._conn.executescript(_SCHEMA_SQL)
-        self._conn.commit()
+    def _init_schema(self, *, empty_schema: bool) -> None:
+        # Keep a newly created schema and its version in one durable commit,
+        # rather than syncing every DDL statement against empty tables.
+        with self._conn:
+            self._conn.executescript("BEGIN IMMEDIATE;\n" + _SCHEMA_SQL)
+            if empty_schema:
+                run_migrations(self._conn, bootstrap=True)
+        if not empty_schema:
+            run_migrations(self._conn)
 
     def _invalidate_cache(self) -> None:
         """Invalidate the cached NetworkX graph after write operations."""
@@ -1777,7 +1787,7 @@ class GraphStore:
         return changed
 
     @contextmanager
-    def _read_transaction(self) -> Iterator[None]:
+    def read_snapshot(self, *, strict: bool = False) -> Iterator[None]:
         """Hold one snapshot for the duration of a multi-statement read.
 
         The connection runs with ``isolation_level=None``, so without this
@@ -1798,6 +1808,8 @@ class GraphStore:
         try:
             self._conn.execute("BEGIN DEFERRED")
         except sqlite3.OperationalError as exc:  # pragma: no cover - defensive
+            if strict:
+                raise
             logger.debug("Could not open a read transaction: %s", exc)
             yield
             return
@@ -2133,6 +2145,79 @@ class GraphStore:
             line=edge.line,
             extra=edge.extra,
         )
+
+    def publish_generation(self, branch: str, head: str) -> str:
+        """Publish immutable node and edge content inside a shared refresh."""
+        from .shared_generations import git_ref, publish, publish_projections
+
+        if self.checkout is None or not isinstance(self._conn, CheckoutConnection):
+            raise GraphStoreError("Generation publication requires a shared checkout")
+        if not self._conn.refresh_active:
+            raise GraphStoreError("Generation publication requires an active refresh")
+        ref = git_ref(branch, head)
+        digest = publish(
+            self._conn, self.checkout, ref, head, self.get_metadata("last_updated") or "",
+        )
+        publish_projections(self._conn, self.checkout, ref)
+        return digest
+
+    def historical_ref_for_checkout(self) -> str | None:
+        """Return the live Git ref when the native view was built on another ref."""
+        if self.checkout is None:
+            return None
+        from .incremental import _git_branch_info
+        from .shared_generations import git_ref
+
+        requested = git_ref(*_git_branch_info(self.checkout))
+        stored = git_ref(
+            self.get_metadata("git_branch") or "", self.get_metadata("git_head_sha") or "",
+        )
+        return requested if requested != stored else None
+
+    @contextmanager
+    def open_generation(
+        self, ref: str, *, projections: bool = False, require_communities: bool = False,
+    ) -> Iterator[GraphStore]:
+        """Open the published nodes and edges for a ref as a native query store.
+
+        Node IDs are local to this materialization. Optionally rebuild
+        the search index and load the published flow projection.
+        """
+        from .shared_generations import load_projections, read
+
+        if self.checkout is None:
+            raise GraphStoreError("Generation lookup requires a shared checkout")
+        head, built_at, rows = read(self._conn, self.checkout, ref)
+        with GraphStore(":memory:", read_only=False) as snapshot:
+            snapshot.set_metadata("repo_root", str(self.checkout))
+            snapshot.set_metadata("git_head_sha", head)
+            snapshot.set_metadata("last_updated", built_at)
+            snapshot._conn.execute("BEGIN")
+            for kind, row in rows:
+                fields = ", ".join(row)
+                marks = ", ".join("?" for _ in row)
+                snapshot._conn.execute(
+                    f"INSERT INTO {kind} ({fields}, updated_at) VALUES ({marks}, 0)",
+                    tuple(row.values()),
+                )
+            fts = projections and load_projections(
+                self._conn, snapshot._conn, self.checkout, ref,
+                require_communities=require_communities,
+            )
+            snapshot._conn.commit()
+            if fts:
+                from .search import rebuild_fts_index
+
+                rebuild_fts_index(snapshot)
+            yield snapshot
+
+    def record_graph_inputs(self, digest: str, paths: int, branch: str, head: str) -> None:
+        """Bind a verified manifest in the shared refresh transaction."""
+        from .shared_generations import bind_manifest, git_ref
+
+        if self.checkout is None:
+            raise GraphStoreError("A manifest binding requires a shared checkout")
+        bind_manifest(self._conn, self.checkout, git_ref(branch, head), digest, paths)
 
     def invalidate_refresh(self) -> None:
         """Remove a completion before explicitly changing the shared graph."""
@@ -5095,7 +5180,7 @@ class GraphStore:
         breakdowns still sum to the totals when a watcher commits partway
         through (issue: `status` printing numbers that do not add up).
         """
-        with self._read_transaction():
+        with self.read_snapshot():
             return self._get_stats_locked()
 
     def _get_stats_locked(self) -> GraphStats:

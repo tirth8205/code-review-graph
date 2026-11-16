@@ -786,7 +786,7 @@ def _is_new_database(conn: sqlite3.Connection, current: int) -> bool:
     return conn.execute("SELECT 1 FROM nodes LIMIT 1").fetchone() is None
 
 
-def run_migrations(conn: sqlite3.Connection) -> None:
+def run_migrations(conn: sqlite3.Connection, *, bootstrap: bool = False) -> None:
     """Run all pending migrations in order.
 
     Safe to run from several processes at once: each statement tolerates a
@@ -796,6 +796,8 @@ def run_migrations(conn: sqlite3.Connection) -> None:
 
     On a brand-new database the per-migration lines log at DEBUG and one
     INFO line says the graph was created; an upgrade still logs each step.
+    During bootstrap the caller owns one write transaction for the schema
+    and its version marker, so no intermediate migration commits are needed.
     """
     current = get_schema_version(conn)
     if current >= LATEST_VERSION:
@@ -810,7 +812,13 @@ def run_migrations(conn: sqlite3.Connection) -> None:
             if version <= current:
                 continue
             _progress("Running migration v%d", version)
-            _run_one(conn, version)
+            if bootstrap:
+                MIGRATIONS[version](conn)
+            else:
+                _run_one(conn, version)
+
+        if bootstrap:
+            _set_schema_version(conn, LATEST_VERSION)
 
         _progress("Migrations complete, now at schema version %d", LATEST_VERSION)
     finally:

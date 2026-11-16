@@ -23,6 +23,7 @@ from collections import deque
 from pathlib import Path, PurePosixPath
 from typing import Any, Optional, Union
 
+from . import liveness_rules
 from .constants import (
     CLAIMED_ENDPOINT_KEY,
     INHERITED_ENDPOINT_KEY,
@@ -1952,6 +1953,11 @@ def _csharp_member_scopes(conn: Any) -> dict[str, set[str]]:
     return scopes
 
 
+# The subject taxonomy lives in one catalog; this alias keeps the old import
+# path working for callers and tests.
+NON_CODE_SUBJECT_LANGUAGES = liveness_rules.NON_CODE_SUBJECT_LANGUAGES
+
+
 def find_dead_code(
     store: GraphStore,
     kind: Optional[str] = None,
@@ -2155,6 +2161,12 @@ def find_dead_code(
     dead: list[dict[str, Any]] = []
 
     for node in candidates:
+
+        # A document in a configuration or orchestration language has no call
+        # site to be missing: an Ansible task, an HCL resource or a SQL
+        # statement runs because something outside the graph schedules it.
+        if (node.language or "") in NON_CODE_SUBJECT_LANGUAGES:
+            continue
 
         # Skip test nodes and anything defined in test files.
         if node.is_test or _in_test_file(node.file_path):

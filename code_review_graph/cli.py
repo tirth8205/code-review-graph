@@ -193,7 +193,8 @@ _BANNER_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         ("register", "Add a repository to the multi-repo list"),
         ("unregister", "Remove a repository from that list"),
         ("repos", "Show the listed repositories"),
-        ("prune", "Find stale registry entries and orphaned graph directories"),
+        ("migrate-shared", "Upgrade and validate the selected shared SQLite index"),
+        ("prune", "Preview retention and find stale registry entries"),
         ("vstore", "Store and retrieve graph bundles by tree hash"),
         ("eval", "Run the benchmarks"),
     )),
@@ -1177,6 +1178,7 @@ def _run_graph_tool_command(args, repo_root: Path) -> None:
             target=args.target,
             repo_root=root,
             **({"to": args.to} if args.to else {}),
+            **({"generation_ref": args.generation_ref} if args.generation_ref else {}),
         )
     elif args.command == "impact":
         result = tools.get_impact_radius(
@@ -1547,7 +1549,7 @@ def _handle_forget(args, repo_root: Path, db_path: Path, *, legacy: bool = False
     still the old top-level ``.code-review-graph.db``; a real run moves it into
     *db_path* only once it holds the lock, and a dry run reads it where it is.
     """
-    from .incremental import _prepare_db_path, assert_graph_serves_root
+    from .incremental import _git_branch_info, _prepare_db_path, assert_graph_serves_root
 
     lock = None
     if not args.dry_run:
@@ -1578,6 +1580,9 @@ def _handle_forget(args, repo_root: Path, db_path: Path, *, legacy: bool = False
                 else _open_graph_store(db_path, "forget")
             )
         assert_graph_serves_root(repo_root, store)
+        anchor = _git_branch_info(repo_root) if store.checkout is not None else None
+        if anchor is not None and store.historical_ref_for_checkout() is not None:
+            raise CodeReviewGraphError("Update this checkout before forgetting files")
         stored_files = store.get_all_files()
         targets = _match_files_to_forget(stored_files, args.paths, repo_root)
         if not targets:
@@ -1607,6 +1612,10 @@ def _handle_forget(args, repo_root: Path, db_path: Path, *, legacy: bool = False
         with store.refresh():
             store.invalidate_refresh()
             summary = forget_files(store, repo_root, targets)
+            if anchor is not None:
+                if _git_branch_info(repo_root) != anchor:
+                    raise RuntimeError("Git reference changed while forgetting files")
+                store.publish_generation(*anchor)
         reparsed = summary.get("reparsed", [])
         if reparsed:
             print(
@@ -2503,6 +2512,9 @@ def build_parser() -> argparse.ArgumentParser:
     query_cmd.add_argument(
         "--to", default=None, help="For path_to: the node or file to reach",
     )
+    query_cmd.add_argument(
+        "--generation-ref", help="Read a published structural snapshot (e.g. refs/heads/main)",
+    )
     query_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
 
     impact_cmd = sub.add_parser("impact", help="Analyse the blast radius of changes")
@@ -2787,6 +2799,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--store", default=None, help="Store root (default: $CRG_VSTORE/$CRG_HOME/home)"
     )
 
+    sub.add_parser("migrate-shared", help="Upgrade and validate the selected shared SQLite file")
+
     prune_cmd = sub.add_parser(
         "prune",
         help="Remove dead registry/watch entries and report orphaned data dirs",
@@ -2802,6 +2816,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="With --apply, also delete orphaned external data dirs",
     )
     prune_cmd.add_argument("--config", default=None, help="Alternate watch.toml path")
+    prune_cmd.add_argument(
+        "--compact", action="store_true",
+        help="With --apply, compact the selected shared SQLite file",
+    )
 
     vstore_prune = vstore_sub.add_parser(
         "prune", help="Apply LRU/TTL retention to the store (report unless --apply)"
@@ -3311,11 +3329,24 @@ def _dispatch() -> None:
                 )
         return
 
+    if args.command == "migrate-shared":
+        from .shared_sqlite import migrate_selected_database
+
+        before, after, issues = migrate_selected_database()
+        print(f"Shared SQLite schema {before} to {after}; unresolved checkout records: {issues}")
+        return
+
     if args.command == "prune":
         from .prune import prune
 
         config_path = Path(args.config).expanduser() if args.config else None
-        prune_report = prune(config_path=config_path, apply=args.apply, data_dirs=args.data_dirs)
+        try:
+            prune_report = prune(
+                config_path=config_path, apply=args.apply, data_dirs=args.data_dirs,
+                compact=args.compact,
+            )
+        except ValueError as exc:
+            ap.error(str(exc))
         for path in prune_report.removed_registry:
             print(f"registry: {path}")
         for path in prune_report.removed_watch:

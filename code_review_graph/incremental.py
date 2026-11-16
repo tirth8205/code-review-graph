@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import signal
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -21,12 +22,18 @@ import time
 import unicodedata
 import uuid
 from collections import deque
+from datetime import datetime
 from functools import partial
+from itertools import islice
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Callable, Iterable, NamedTuple, Optional
 
 from . import install_plan
-from .build_state import advance_to_postprocess_pending
+from .build_state import (
+    BUILD_COMPLETE,
+    BUILD_STATE_KEY,
+    advance_to_postprocess_pending,
+)
 from .constants import GIT_TIMEOUT as _GIT_TIMEOUT
 from .constants import (
     discovery_timeout,
@@ -42,7 +49,8 @@ from .locking import WriteLock, write_lock_path
 from .shared_sqlite import shared_database
 
 if TYPE_CHECKING:
-    from .parser import CodeParser
+    from .parser import CodeParser, PreparedPythonFacts
+    from .shared_parser_facts import SharedPythonFacts
 
 
 def _get_code_parser_cls():
@@ -2949,30 +2957,108 @@ def find_dependents(
     return DependentList(list(all_dependents))
 
 
+class _SourceObservation(NamedTuple):
+    contents: bytes
+    sha256: str
+
+
+def _observe_source(path: Path) -> _SourceObservation:
+    contents = path.read_bytes()
+    return _SourceObservation(contents, hashlib.sha256(contents).hexdigest())
+
+
+_ParseJob = (
+    tuple[str, str]
+    | tuple[str, str, _SourceObservation | None]
+    | tuple[str, str, _SourceObservation, "PreparedPythonFacts"]
+)
+_ParseResult = tuple[str, list, list, str | None, str]
+
+
+def _parse_jobs(
+    executor: concurrent.futures.Executor,
+    paths: Iterable[str],
+    root: Path,
+    parser: CodeParser,
+    cache: SharedPythonFacts | None,
+    event_path: str | None = None,
+    event_source: _SourceObservation | None = None,
+) -> Iterable[_ParseResult]:
+    def job(path: str) -> _ParseJob:
+        observation = event_source if path == event_path else None
+        if cache is not None and parser.detect_language(root / path, b"") == "python":
+            try:
+                observation = observation or _observe_source(root / path)
+            except OSError:
+                # An unreadable source follows the ordinary worker error path.
+                return (path, str(root))
+            if (facts := cache.get(root / path, *observation)) is not None:
+                return (path, str(root), observation, facts)
+        return (path, str(root), observation)
+
+    if cache is None:
+        yield from executor.map(_parse_single_file, map(job, paths), chunksize=20)
+        return
+    # Executor.map eagerly queues its inputs on supported Python versions.
+    # Bound the amount of source bytes read ahead in the shared store.
+    jobs = map(job, paths)
+    while batch := list(islice(jobs, _MAX_PARSE_WORKERS * 20)):
+        for result, new_scopes in executor.map(_parse_shared_job, batch, chunksize=20):
+            if new_scopes is not None:
+                cache.remember(root / result[0], result[4], new_scopes)
+            yield result
+
+
+def _parse_observation(
+    parser: CodeParser, path: Path, observation: _SourceObservation,
+    cache: SharedPythonFacts | None,
+) -> tuple[list, list]:
+    raw, digest = observation
+    if cache is not None and parser.detect_language(path, raw) == "python":
+        if (facts := cache.get(path, raw, digest)) is not None:
+            missing = facts.method_scopes is None
+            result = parser.parse_with_python_facts(path, raw, facts)
+            if missing and facts.method_scopes is not None:
+                cache.remember(path, digest, facts.method_scopes)
+            return result
+    return parser.parse_bytes(path, raw)
+
+
 def _parse_single_file(
-    args: tuple[str, str],
-) -> tuple[str, list, list, str | None, str]:
+    args: _ParseJob,
+) -> _ParseResult:
     """Parse one file in a process- or thread-pool worker.
 
     Returns ``(rel_path, nodes, edges, error_or_none, file_hash)``.
     Must be a module-level function so ``ProcessPoolExecutor`` can
     serialise it across processes.
     """
-    rel_path, repo_root_str = args
+    rel_path, repo_root_str = args[0], args[1]
     abs_path = Path(repo_root_str) / rel_path
     try:
-        raw = abs_path.read_bytes()
-        fhash = hashlib.sha256(raw).hexdigest()
+        observation = args[2] if len(args) >= 3 else None
+        raw, fhash = observation or _observe_source(abs_path)
         parser = getattr(_PARSE_WORKER_STATE, "parser", None)
         parser_repo_root = getattr(_PARSE_WORKER_STATE, "repo_root", None)
         if parser is None or parser_repo_root != repo_root_str:
             parser = _get_code_parser_cls()(Path(repo_root_str))
             _PARSE_WORKER_STATE.parser = parser
             _PARSE_WORKER_STATE.repo_root = repo_root_str
-        nodes, edges = parser.parse_bytes(abs_path, raw)
+        if len(args) == 4:
+            nodes, edges = parser.parse_with_python_facts(abs_path, raw, args[3])
+        else:
+            nodes, edges = parser.parse_bytes(abs_path, raw)
         return (rel_path, nodes, edges, None, fhash)
     except Exception as e:
         return (rel_path, [], [], str(e), "")
+
+
+def _parse_shared_job(args: _ParseJob) -> tuple[_ParseResult, dict[int, str] | None]:
+    """Return new structural evidence to the SQLite writer process."""
+    facts = args[3] if len(args) == 4 else None
+    missing = facts is not None and facts.method_scopes is None
+    result = _parse_single_file(args)
+    return result, facts.method_scopes if missing and facts is not None and not result[3] else None
 
 
 def _canonical_repo_root(repo_root: Path) -> Path:
@@ -3015,6 +3101,7 @@ def full_build(
     files, followed, followed_dirs = _collect_files(
         repo_root, recurse_submodules, follow_symlinks,
     )
+    facts_cache = store.shared_python_facts(parser) if files and shared_database() else None
     stale_files = _reconcile_stale_files(repo_root, store, files)
     # Recorded before parsing: a record ahead of the graph is harmless, one
     # behind it would let a file outlive the link that brought it in.
@@ -3038,11 +3125,13 @@ def full_build(
             full_path = repo_root / rel_path
             parsed: tuple[list, list, str] | None = None
             try:
-                source = full_path.read_bytes()
-                fhash = hashlib.sha256(source).hexdigest()
-                nodes, edges = parser.parse_bytes(full_path, source)
+                observation = _observe_source(full_path)
+                nodes, edges = _parse_observation(parser, full_path, observation, facts_cache)
+                fhash = observation.sha256
                 _relink_edges(edges, repo_root, followed_dirs)
                 parsed = (nodes, edges, fhash)
+            except (sqlite3.Error, GraphStoreError):
+                raise
             except (OSError, PermissionError) as e:
                 errors.append({"file": rel_path, "error": str(e)})
                 if parser.detect_language(full_path) == "cpp":
@@ -3073,10 +3162,9 @@ def full_build(
         # orphan workers (issues #46, #136, PR #615). Override via
         # CRG_PARSE_EXECUTOR env.
         _prewarm_parser_probes(parser, files)
-        args_list = [(rel_path, str(repo_root)) for rel_path in files]
         with _make_executor(_MAX_PARSE_WORKERS) as executor:
             for i, (rel_path, nodes, edges, error, fhash) in enumerate(
-                executor.map(_parse_single_file, args_list, chunksize=20),
+                _parse_jobs(executor, files, repo_root, parser, facts_cache),
                 1,
             ):
                 if error:
@@ -3098,7 +3186,7 @@ def full_build(
                 if i % 200 == 0 or i == file_count:
                     logger.info("Progress: %d/%d files parsed", i, file_count)
 
-    store.set_metadata("last_updated", time.strftime("%Y-%m-%dT%H:%M:%S"))
+    store.set_metadata("last_updated", datetime.now().isoformat())
     store.set_metadata("last_build_type", "full")
     store.set_metadata("intentionally_incomplete", "0")
     store.set_metadata(
@@ -3140,6 +3228,7 @@ def full_build(
     store.commit()
 
     return {
+        **(facts_cache.report() if facts_cache is not None else {}),
         "files_parsed": len(files),
         "stale_files_removed": len(stale_files),
         "total_nodes": total_nodes,
@@ -3361,6 +3450,19 @@ def incremental_update(
             "freshness_advanced": False,
         }
 
+    # Retain the source from a single-file event through dependency discovery
+    # and parsing. Bulk inventories keep hashes only to bound memory.
+    event_path = changed_files[0] if not reconcile_stale and len(changed_files) == 1 else None
+    event_source: _SourceObservation | None = None
+
+    def observe(rel_path: str) -> _SourceObservation:
+        nonlocal event_source
+        if rel_path == event_path:
+            if event_source is None:
+                event_source = _observe_source(repo_root / rel_path)
+            return event_source
+        return _observe_source(repo_root / rel_path)
+
     # Find dependent files (files that import from changed files)
     dependents_pending = _load_dependents_pending(store)
     dependent_files: set[str] = set(dependents_pending)
@@ -3378,7 +3480,7 @@ def incremental_update(
             try:
                 current_hash = current_hashes.get(normalize_file_path(rel_path))
                 if current_hash is None:
-                    current_hash = hashlib.sha256((repo_root / rel_path).read_bytes()).hexdigest()
+                    current_hash = observe(rel_path).sha256
                     current_hashes[normalize_file_path(rel_path)] = current_hash
                 if existing[0].file_hash == current_hash:
                     continue
@@ -3442,8 +3544,7 @@ def incremental_update(
         fhash = current_hashes.get(normalized_path)
         if fhash is None:
             try:
-                raw = abs_path.read_bytes()
-                fhash = hashlib.sha256(raw).hexdigest()
+                fhash = observe(rel_path).sha256
             except (OSError, PermissionError):
                 fhash = None
         try:
@@ -3519,14 +3620,17 @@ def incremental_update(
 
     use_serial = os.environ.get("CRG_SERIAL_PARSE", "") == "1"
     parsed_files = 0
+    facts_cache = store.shared_python_facts(parser) if to_parse and shared_database() else None
 
     if use_serial or len(to_parse) < 8:
         for rel_path in to_parse:
             abs_path = repo_root / rel_path
             try:
-                source = abs_path.read_bytes()
-                fhash = hashlib.sha256(source).hexdigest()
-                nodes, edges = parser.parse_bytes(abs_path, source)
+                observation = observe(rel_path)
+                nodes, edges = _parse_observation(parser, abs_path, observation, facts_cache)
+                fhash = observation.sha256
+            except (sqlite3.Error, GraphStoreError):
+                raise
             except (OSError, PermissionError) as e:
                 errors.append({"file": rel_path, "error": str(e)})
                 continue
@@ -3547,12 +3651,9 @@ def incremental_update(
     else:
         # See full-build comment above for executor kind rationale.
         _prewarm_parser_probes(parser, to_parse)
-        args_list = [(rel_path, str(repo_root)) for rel_path in to_parse]
         with _make_executor(_MAX_PARSE_WORKERS) as executor:
-            for rel_path, nodes, edges, error, fhash in executor.map(
-                _parse_single_file,
-                args_list,
-                chunksize=20,
+            for rel_path, nodes, edges, error, fhash in _parse_jobs(
+                executor, to_parse, repo_root, parser, facts_cache, event_path, event_source,
             ):
                 if error:
                     logger.warning("Error parsing %s: %s", rel_path, error)
@@ -3674,7 +3775,7 @@ def incremental_update(
     # the graph matches HEAD, so it keeps the old anchor.
     freshness_advanced = False
     if files_updated or authoritative_git_sync:
-        store.set_metadata("last_updated", time.strftime("%Y-%m-%dT%H:%M:%S"))
+        store.set_metadata("last_updated", datetime.now().isoformat())
         store.set_metadata("last_build_type", "incremental")
         if not remaining_identity:
             store.set_metadata(_CPP_IDENTITY_METADATA_KEY, CPP_IDENTITY_VERSION)
@@ -3691,6 +3792,7 @@ def incremental_update(
         store._invalidate_cache()
 
     return {
+        **(facts_cache.report() if facts_cache is not None else {}),
         "files_updated": files_updated,
         "total_nodes": total_nodes,
         "total_edges": total_edges,
@@ -5009,44 +5111,60 @@ def _create_watch_handler(
                 self.last_event_at = time.time()
                 self.events_seen += len(events)
                 try:
-                    if shared_database() is not None:
+                    anchor = _git_branch_info(repo_root) if store.checkout is not None else None
+                    if anchor is not None and anchor != (
+                        store.get_metadata("git_branch") or "",
+                        store.get_metadata("git_head_sha") or "",
+                    ):
                         from .tools.build import refresh_shared_watch
 
                         refresh_shared_watch(repo_root, store, follow, on_files_updated)
-                        # The native watch planner still follows directory and symlink changes.
                         ignore_patterns[:] = _load_ignore_patterns(repo_root)
                         if follow:
                             self._remember_followed()
                         return
-                    patterns_before = ignore_patterns
-                    files_updated, newly_included = self._refresh_ignore_patterns(events)
-                    changed_files = sorted(
-                        newly_included
-                        | {path for event in events for path in self._event_paths(event)}
-                    )
-                    if changed_files:
-                        result = incremental_update(
-                            repo_root,
-                            store,
-                            changed_files=changed_files,
-                            reconcile_stale=False,
-                            follow_symlinks=follow,
+                    # An ordinary file event already gives the work set. Keep
+                    # shared publication atomic without rehashing the checkout.
+                    with store.refresh():
+                        patterns_before = ignore_patterns
+                        files_updated, newly_included = self._refresh_ignore_patterns(events)
+                        changed_files = sorted(
+                            newly_included
+                            | {path for event in events for path in self._event_paths(event)}
                         )
-                        _raise_watch_update_errors(result, "incremental update")
-                        files_updated += result["files_updated"]
-                    if follow:
-                        links_changed, contents_changed = self._touches_followed(events)
-                        links_changed = links_changed or ignore_patterns is not patterns_before
-                        if links_changed or contents_changed:
-                            files_updated += self._reconcile_followed()
-                    if (
-                        files_updated > 0
-                        # A project file change parses nothing but can rebind
-                        # C# calls in unchanged files; the binder marks flows.
-                        or (changed_files and store.get_metadata("csharp_flows_dirty") == "1")
-                    ):
-                        if on_files_updated is not None:
-                            _raise_watch_postprocess_warnings(on_files_updated(store))
+                        if changed_files:
+                            result = incremental_update(
+                                repo_root,
+                                store,
+                                changed_files=changed_files,
+                                reconcile_stale=False,
+                                follow_symlinks=follow,
+                            )
+                            _raise_watch_update_errors(result, "incremental update")
+                            files_updated += result["files_updated"]
+                        if follow:
+                            links_changed, contents_changed = self._touches_followed(events)
+                            links_changed = links_changed or ignore_patterns is not patterns_before
+                            if links_changed or contents_changed:
+                                files_updated += self._reconcile_followed()
+                        if (
+                            files_updated > 0
+                            # A project file change parses nothing but can rebind
+                            # C# calls in unchanged files; the binder marks flows.
+                            or (changed_files and store.get_metadata("csharp_flows_dirty") == "1")
+                        ):
+                            store.invalidate_refresh()
+                            if on_files_updated is not None:
+                                _raise_watch_postprocess_warnings(on_files_updated(store))
+                                if store.checkout is not None:
+                                    store.set_metadata("postprocess_level", "full")
+                                    store.set_metadata(BUILD_STATE_KEY, BUILD_COMPLETE)
+                            if anchor is not None:
+                                if _git_branch_info(repo_root) != anchor:
+                                    raise RuntimeError(
+                                        "Git reference changed during watch publication",
+                                    )
+                                store.publish_generation(*anchor)
                 except BaseException as exc:
                     self.failure = exc
                 finally:

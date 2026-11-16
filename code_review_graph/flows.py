@@ -15,6 +15,7 @@ from collections import deque
 from pathlib import Path
 from typing import Iterable, Optional
 
+from . import liveness_rules
 from .constants import SECURITY_KEYWORDS as _SECURITY_KEYWORDS
 from .graph import FlowAdjacency, GraphNode, GraphStore, _sanitize_name
 from .parser import is_test_file as _is_test_file
@@ -394,21 +395,12 @@ _FRAMEWORK_DECORATOR_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\w+\.(middleware|exception_handler|on_exception)\b", re.IGNORECASE),
     # Generic route decorator (Flask blueprints: @bp.route, @auth_bp.route, etc.)
     re.compile(r"\w+\.route\b", re.IGNORECASE),
-    # Python property protocols: the runtime or a framework invokes these, never
-    # a call site. `computed_field` and `cached_property` are how Pydantic models
-    # expose derived fields, so treating them as ordinary methods reported every
-    # Pydantic field surface as dead code.
-    re.compile(r"^(?:[\w.]+\.)?(?:property|cached_property|computed_field)$"),
-    # Pydantic validators and serializers are called by the model machinery.
-    re.compile(
-        r"^(?:[\w.]+\.)?(?:field_validator|model_validator|field_serializer"
-        r"|model_serializer|validator|root_validator)(?:\s*\(.*)?$",
-        re.DOTALL,
-    ),
-    # Abstract and overload declarations are contracts: an implementation or a
-    # type-checker calls them, never a call site.
-    re.compile(r"^(?:[\w.]+\.)?(?:abstractmethod|overload)$"),
 ]
+
+# The Python runtime/framework hooks (Pydantic surfaces, property, abstract and
+# overload declarations, `@override`) come from the shared catalog so the
+# dead-code engine, the parser and this heuristic cannot drift apart.
+_FRAMEWORK_DECORATOR_PATTERNS.extend(liveness_rules.PYTHON_HOOK_DECORATORS)
 
 # An override implements a supertype contract, so its caller is that contract:
 # a supertype-typed reference, a framework, or the runtime for Object.hashCode and

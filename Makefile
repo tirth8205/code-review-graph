@@ -33,6 +33,10 @@ test:
 lint-fork-workflows:
 	mise exec actionlint@1.7.12 -- actionlint .github/workflows/sync-upstream.yml .github/workflows/release-assets.yml
 
+.PHONY: test-communities
+test-communities:
+	uv run --locked --extra dev pytest tests/test_communities.py -q --tb=short
+
 test-release:
 	uv run --locked --extra dev pytest tests/test_release_provenance.py tests/test_documentation.py -q --tb=short
 
@@ -51,7 +55,7 @@ test-notebooks:
 
 .PHONY: test-skills
 test-skills:
-	uv run --locked --extra dev pytest tests/test_skill_template_schema_sync.py tests/test_skills.py -q --tb=short
+	uv run --locked --extra dev pytest tests/test_skill_template_schema_sync.py tests/test_skills.py tests/test_codex_skill_wrapper.py -q --tb=short
 
 .PHONY: test-daemon
 test-daemon:
@@ -103,7 +107,7 @@ test-review-entrypoints:
 
 .PHONY: test-watcher-lifecycle
 test-watcher-lifecycle:
-	uv run --locked --extra dev pytest tests/test_mcp_watch_store_shutdown.py tests/test_watch_set.py tests/test_windows_path_identity.py tests/test_edit_hook_follows_the_edited_file.py -q --tb=short
+	uv run --locked --extra dev pytest tests/test_config_reload.py tests/test_mcp_watch_store_shutdown.py tests/test_watch_set.py tests/test_windows_path_identity.py tests/test_edit_hook_follows_the_edited_file.py -q --tb=short
 
 .PHONY: test-unmatched-risk
 test-unmatched-risk:
@@ -117,6 +121,10 @@ test-review-analysis:
 test-embedding-notices:
 	uv run --locked --extra dev pytest tests/test_embedding_refresh_skip_notice.py tests/test_yaml_locale_files.py -q --tb=short
 
+.PHONY: test-embeddings
+test-embeddings:
+	uv run --locked --extra dev pytest tests/test_embeddings.py tests/test_embedding_refresh.py -q --tb=short
+
 .PHONY: test-baseline-compat
 test-baseline-compat:
 	uv run --locked --extra dev pytest tests/test_readme_parity.py tests/test_released_shapes.py tests/test_numeric_reports.py tests/test_registered_data_dir_recovery.py -q --tb=short
@@ -127,7 +135,7 @@ test-parser-process-locks:
 
 .PHONY: test-parser-reuse
 test-parser-reuse:
-	uv run --locked --extra dev pytest tests/test_parser.py -q --tb=short
+	uv run --locked --extra dev pytest tests/test_parser.py tests/test_nested_method_identities.py -q --tb=short
 
 .PHONY: test-vscode
 test-vscode:

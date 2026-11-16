@@ -511,10 +511,11 @@ end
 def test_scope_index_is_limited_to_python(language, source):
     """Other languages (C# identity is #964's) are left to their own scheme."""
     parser = CodeParser()
-    tree = parser._get_parser(language).parse(source)
-    import_map = {}
-    parser._index_ambiguous_method_scopes(tree.root_node, language, import_map)
-    assert import_map == {}
+    path = Path("Same.java" if language == "java" else "Same.cs")
+    nodes, _ = parser.parse_bytes(path, source)
+    member = "run" if language == "java" else "Run"
+    methods = {node.parent_name for node in nodes if node.name == member}
+    assert methods == {"Alpha.Same", "Beta.Same"}
 
 
 @pytest.mark.parametrize('name, source, caller, member', [
@@ -587,21 +588,17 @@ def test_rows_written_with_the_old_identity_are_replaced(tmp_path, monkeypatch, 
     _write_repo(tmp_path)
     m = (tmp_path / 'm.py').as_posix()
     with GraphStore(tmp_path / 'graph.db') as store:
-        # Earlier releases spelled every method with its leaf class only. Write
-        # those rows directly: hijacking the parser would test the hijack, not
-        # the migration.
-        store.store_file_nodes_edges(
-            m,
-            [
-                NodeInfo(
-                    kind='Function', name=name, file_path=m,
-                    line_start=line, line_end=line, language='python',
-                    parent_name='Same',
-                )
-                for name, line in (('run', 3), ('helper', 5))
-            ],
-            [],
-        )
+        # Earlier releases spelled every method with its leaf class only, and
+        # their writer collapsed the resulting same-file collisions (#585).
+        with monkeypatch.context() as legacy:
+            legacy.setattr(
+                CodeParser, '_extract_ambiguous_method_scopes', lambda self, root: {},
+            )
+            legacy.setattr(
+                GraphStore, '_plan_file_identities',
+                lambda self, file_path, nodes: [self._make_qualified(n) for n in nodes],
+            )
+            full_build(tmp_path, store)
         old = {n.qualified_name for n in store.get_nodes_by_file(m) if n.kind == 'Function'}
         assert old == {f'{m}::Same.run', f'{m}::Same.helper'}
 
