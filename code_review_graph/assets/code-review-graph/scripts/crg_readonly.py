@@ -62,7 +62,7 @@ def _resolve_repo(raw: str | None) -> Path:
         except (ImportError, KeyError):
             home = Path.home().resolve()
         for parent in (root, *root.parents):
-            markers = (".code-review-graph", ".git", ".svn")
+            markers: tuple[str, ...] = (".code-review-graph", ".git", ".svn")
             if parent == home and root != home:
                 # The account's home may hold the daemon's catch-all data
                 # directory; only a real VCS root there can own this path.

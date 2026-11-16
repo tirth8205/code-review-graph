@@ -1,5 +1,36 @@
 # Changelog
 
+## [2.4.0-dc.4] - 2026-11-16
+
+### Fixed
+
+- Stabilises the integration tip after the dead-code precision work. The full
+  suite is green on 3.10-3.13, minimum declared dependencies and the Windows
+  daemon job, after these repairs:
+  - registry detection accepts only real module paths and path candidates guard
+    an empty base name, so an arbitrary string map no longer crashes the parser;
+  - required read commands refuse a plain `--repo`, and neither the CLI nor the
+    read-only wrapper treats a catch-all graph at the account home as a project
+    boundary;
+  - C++ keeps its overload candidate metadata and other languages report
+    ambiguous bare targets instead of inventing one;
+  - `@Override` stays out of the Python dispatch-hook catalog, keeping flow
+    roots correct while the dedicated override check owns dead code;
+  - C3 is the declared inheritance behaviour (`C(A, B)` resolves through
+    `A` to `Root.m`);
+  - architecture overview emits one id type and no dangling cross-community
+    edge; minimal mode keeps ids like standard mode;
+  - nested method identity keeps its compatible spelling while dead code
+    resolves a Protocol member's owner by exact key and then by unique suffix.
+
+### Changed
+
+- Dead code is measured, not asserted: `make eval-dead-code` gates a reviewed
+  corpus (0 false positives required, recall may not regress). On `flext-infra`
+  (700 files) reports fell from 360 to 26 and the Pydantic model reports from 82
+  to 0, through value references, generated export registries, Pydantic
+  surface hooks and annotation/typing coverage.
+
 ## [2.4.0-dc.3] - 2026-11-15
 
 ### Changed
