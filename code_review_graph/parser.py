@@ -24605,6 +24605,11 @@ class CodeParser:
             if node.type == "object_creation_expression":
                 return self._java_type_name(node)
 
+        # C# ``new T(...)``: the first child is the ``new`` keyword, so the
+        # generic callee reading below finds nothing. The type is the callee.
+        if language == "csharp" and node.type == "object_creation_expression":
+            return _csharp_name(node.child_by_field_name("type")) or None
+
         # Julia macrocall: ``@test expr`` — name is inside
         # ``macro_identifier > identifier``. Prefix with ``@`` to distinguish
         # from ordinary calls.

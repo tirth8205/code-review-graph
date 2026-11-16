@@ -166,6 +166,13 @@
   its analysis; it leaves a notice naming both commits.
 - A call that could mean several functions now stores them in sorted order, so
   the same code gives the same graph whatever order its files are read in.
+- C# `new Order(...)` now shows up as a call from the method that makes it to
+  the `Order` class, including `new App.Models.Order()`, `new Box<int>()` and
+  object initialisers. Before, a C# class that was only ever constructed looked
+  unused: `callers_of` returned nothing, and a test that built the class got no
+  `tests_for` link to it. Types that are not in the repository (such as
+  `List<int>`) stay unresolved, and the target-typed `new()` is still not
+  followed. Rebuild the graph to pick this up.
 
 ## [2.4.0] - 2026-11-10
 
