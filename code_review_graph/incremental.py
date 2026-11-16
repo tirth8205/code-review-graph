@@ -417,14 +417,6 @@ def _refresh_target_resolution(store: GraphStore) -> None:
 # directories.  See: #91 and PR #92.
 DEFAULT_IGNORE_PATTERNS = [
     "**/.code-review-graph/**",
-    # Agent and editor configuration is vendored glue, never product code.
-    # A plugin copied into `.opencode/plugins` was parsed, registered and then
-    # reported as dead code in the owning repository.
-    "**/.opencode/**",
-    "**/.claude/**",
-    "**/.cursor/**",
-    "**/.kilo/**",
-    "**/.agents/worktrees/**",
     "**/node_modules/**",
     "**/.git/**",
     "**/.svn/**",
@@ -818,35 +810,6 @@ def ensure_repo_gitignore_excludes_crg(repo_root: Path) -> str:
     return "created"
 
 
-def _git_ignore_lines(path: Path) -> list[str]:
-    """Read one Git ignore file as ordered rules, comments and blanks dropped."""
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return []
-    return [
-        stripped
-        for stripped in (line.strip() for line in text.splitlines())
-        if stripped and not stripped.startswith("#")
-    ]
-
-
-def _global_git_ignore_lines() -> list[str]:
-    """Rules from Git's configured global excludes file, when it is readable."""
-    try:
-        result = subprocess.run(
-            ["git", "config", "--get", "core.excludesFile"],
-            capture_output=True, text=True, timeout=_GIT_TIMEOUT,
-            stdin=subprocess.DEVNULL,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return []
-    configured = result.stdout.strip() if result.returncode == 0 else ""
-    if not configured:
-        return []
-    return _git_ignore_lines(Path(configured).expanduser())
-
-
 def _load_ignore_patterns(repo_root: Path) -> list[str]:
     """Load ignore patterns from .code-review-graphignore file.
 
@@ -864,12 +827,6 @@ def _load_ignore_patterns(repo_root: Path) -> list[str]:
         pattern for pattern in DEFAULT_IGNORE_PATTERNS
         if pattern != "**/vendor/**" or vendor_dependencies
     ]
-    # The repository's own Git ignore rules come next, so a project does not
-    # have to restate them in CRG's file: root .gitignore, the per-clone
-    # exclude file, then the configured global excludes.
-    patterns.extend(_git_ignore_lines(repo_root / ".gitignore"))
-    patterns.extend(_git_ignore_lines(repo_root / ".git" / "info" / "exclude"))
-    patterns.extend(_global_git_ignore_lines())
     keep: list[str] = []
     ignore_file = repo_root / ".code-review-graphignore"
     if ignore_file.exists():
@@ -878,9 +835,6 @@ def _load_ignore_patterns(repo_root: Path) -> list[str]:
             if line and not line.startswith("#"):
                 if line.startswith("!"):
                     keep.append(line[1:].strip().strip("/"))
-                    # A negation is a rule too: Git's last-match-wins order lets
-                    # it re-include a path an earlier rule excluded.
-                    patterns.append(line.rstrip("/"))
                     continue
                 # Directory names without a slash match at any depth, as in
                 # .gitignore. A leading slash remains an explicit root anchor.
@@ -910,38 +864,29 @@ def _should_ignore(path: str, patterns: list[str]) -> bool:
     """
     normalized = path.replace("\\", "/").lstrip("/")
     parts = PurePosixPath(normalized).parts
-    # Git semantics: the last matching rule decides, and ``!`` re-includes what
-    # an earlier rule ignored. Iterating backwards returns on the first match,
-    # which is the same rule and lets a repository reuse its .gitignore lines.
-    for pattern in reversed(patterns):
-        negated = pattern.startswith("!")
-        candidate_raw = pattern[1:] if negated else pattern
-        anchored = candidate_raw.startswith("/")
-        candidate = candidate_raw[1:] if anchored else candidate_raw
-        matched = False
+    for pattern in patterns:
+        anchored = pattern.startswith("/")
+        candidate = pattern[1:] if anchored else pattern
 
         if candidate.startswith("**/") and candidate.endswith("/**"):
             segment = candidate[3:-3]
-            matched = bool(segment) and segment in parts
-        elif candidate.endswith("/**"):
-            prefix = tuple(part for part in candidate[:-3].split("/") if part)
-            if prefix:
-                if anchored or len(prefix) > 1:
-                    matched = parts[: len(prefix)] == prefix
-                else:
-                    matched = prefix[0] in parts
-        else:
-            # A pattern with no slash matches its name at any depth, exactly as
-            # in .gitignore, so `*.py` and `scratch/` behave the way a project
-            # already expects from its own ignore files.
-            candidate = candidate.rstrip("/")
-            if "/" in candidate:
-                matched = fnmatch.fnmatch(normalized, candidate)
-            else:
-                matched = any(fnmatch.fnmatch(part, candidate) for part in parts)
+            if segment and segment in parts:
+                return True
+            continue
 
-        if matched:
-            return not negated
+        if candidate.endswith("/**"):
+            prefix = tuple(part for part in candidate[:-3].split("/") if part)
+            if not prefix:
+                continue
+            if anchored or len(prefix) > 1:
+                if parts[: len(prefix)] == prefix:
+                    return True
+            elif prefix[0] in parts:
+                return True
+            continue
+
+        if fnmatch.fnmatch(normalized, candidate):
+            return True
     return False
 
 
