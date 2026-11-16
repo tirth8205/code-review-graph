@@ -395,6 +395,24 @@ class TestIgnorePatterns:
         assert _should_ignore(".git/HEAD", patterns)
         assert not _should_ignore("src/main.py", patterns)
 
+    def test_last_matching_rule_decides_and_negation_reincludes(self):
+        assert _should_ignore("src/keep.py", ["*.py", "!keep.py"]) is False
+        assert _should_ignore("src/keep.py", ["!keep.py", "*.py"]) is True
+        assert _should_ignore("src/other.py", ["*.py", "!keep.py"]) is True
+
+    def test_repository_gitignore_and_info_exclude_are_loaded(self, tmp_path):
+        from code_review_graph.incremental import _load_ignore_patterns
+
+        (tmp_path / ".git" / "info").mkdir(parents=True)
+        (tmp_path / ".gitignore").write_text("*.tmp\n!keep.tmp\n# comment\n")
+        (tmp_path / ".git" / "info" / "exclude").write_text("scratch/\n")
+        patterns = _load_ignore_patterns(tmp_path)
+        assert "*.tmp" in patterns
+        assert "!keep.tmp" in patterns
+        assert "scratch/" in patterns
+        assert _should_ignore("build/out.tmp", patterns)
+        assert not _should_ignore("build/keep.tmp", patterns)
+
     def test_default_ignore_excludes_agent_tool_directories(self):
         from code_review_graph.incremental import DEFAULT_IGNORE_PATTERNS
 
