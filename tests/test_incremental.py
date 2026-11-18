@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch  # noqa: F401 – used in tests
 
@@ -1768,6 +1769,178 @@ class TestRacingSaveSnapshotCoherence:
 
 
 class TestParallelParsing:
+    class _TrackedFuture:
+        def __init__(self, value=None, error=None):
+            self.value = value
+            self.error = error
+            self.cancelled = False
+
+        def result(self):
+            if self.error is not None:
+                raise self.error
+            return self.value
+
+        def cancel(self):
+            self.cancelled = True
+            return True
+
+    class _ImmediateExecutor:
+        def __init__(self, results=None, errors=None):
+            self.results = iter(results or [])
+            self.errors = iter(errors or [])
+            self.futures = []
+            self.submitted = []
+
+        def submit(self, function, args):
+            self.submitted.append(args[0])
+            error = next(self.errors, None)
+            future = TestParallelParsing._TrackedFuture(
+                value=next(self.results, (args[0], [], [], None, "")),
+                error=error,
+            )
+            self.futures.append(future)
+            return future
+
+    @pytest.mark.parametrize("operation", ["full", "incremental"])
+    def test_parallel_build_bounds_slow_consumer(self, tmp_path, monkeypatch, operation):
+        (tmp_path / ".git").mkdir()
+        files = [f"mod{i}.py" for i in range(12)]
+        for filename in files:
+            (tmp_path / filename).write_text("value = 1\n")
+
+        class TrackingFuture:
+            def __init__(self, future, executor):
+                self.future = future
+                self.executor = executor
+                self.consumed = False
+
+            def result(self):
+                try:
+                    return self.future.result()
+                finally:
+                    if not self.consumed:
+                        self.consumed = True
+                        self.executor.outstanding -= 1
+
+            def cancel(self):
+                return self.future.cancel()
+
+        class TrackingExecutor:
+            def __init__(self, max_workers):
+                self.pool = incremental_module.concurrent.futures.ThreadPoolExecutor(
+                    max_workers=max_workers,
+                )
+                self.outstanding = 0
+                self.max_outstanding = 0
+                self.submitted_files = []
+
+            def submit(self, function, args):
+                self.outstanding += 1
+                self.max_outstanding = max(self.max_outstanding, self.outstanding)
+                self.submitted_files.append(args[0])
+                return TrackingFuture(self.pool.submit(function, args), self)
+
+            def map(self, function, iterable, chunksize=1):
+                futures = [self.submit(function, args) for args in iterable]
+                return (future.result() for future in futures)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                self.pool.shutdown(wait=True)
+
+        monkeypatch.setattr(incremental_module, "_MAX_PARSE_WORKERS", 2)
+        executors = []
+
+        def make_executor(_max_workers):
+            executor = TrackingExecutor(max_workers=2)
+            executors.append(executor)
+            return executor
+
+        monkeypatch.setattr(incremental_module, "_make_executor", make_executor)
+        monkeypatch.setattr(
+            incremental_module,
+            "_parse_single_file",
+            lambda args: (args[0], [], [], None, "hash"),
+        )
+        if operation == "full":
+            monkeypatch.setattr(
+                incremental_module,
+                "_collect_files",
+                lambda *_args, **_kwargs: (files, [], {}),
+            )
+
+        store = GraphStore(tmp_path / f"{operation}.db")
+        stored_files = []
+        store_file_nodes_edges = store.store_file_nodes_edges
+
+        def slow_store(path, nodes, edges, file_hash):
+            time.sleep(0.01)
+            stored_files.append(Path(path).name)
+            store_file_nodes_edges(path, nodes, edges, file_hash)
+
+        monkeypatch.setattr(store, "store_file_nodes_edges", slow_store)
+        try:
+            if operation == "full":
+                result = full_build(tmp_path, store)
+                expected_order = files
+            else:
+                result = incremental_update(
+                    tmp_path,
+                    store,
+                    changed_files=files,
+                    reconcile_stale=False,
+                )
+                expected_order = executors[0].submitted_files
+        finally:
+            store.close()
+
+        assert result["errors"] == []
+        assert executors[0].max_outstanding <= 4
+        assert executors[0].max_outstanding > 1
+        assert stored_files == expected_order
+
+    def test_bounded_parse_results_cancels_pending_on_close(self):
+        executor = self._ImmediateExecutor()
+        results = incremental_module._bounded_parse_results(
+            executor,
+            [(f"mod{i}.py", "/repo") for i in range(5)],
+            max_outstanding=2,
+        )
+
+        assert next(results)[0] == "mod0.py"
+        assert executor.submitted == ["mod0.py", "mod1.py"]
+        results.close()
+
+        assert executor.futures[1].cancelled
+        assert executor.submitted == ["mod0.py", "mod1.py"]
+
+    def test_bounded_parse_results_preserves_parse_errors(self):
+        error_result = ("mod0.py", [], [], "parse failed", "")
+        executor = self._ImmediateExecutor(results=[error_result])
+
+        results = incremental_module._bounded_parse_results(
+            executor,
+            [("mod0.py", "/repo")],
+            max_outstanding=2,
+        )
+
+        assert list(results) == [error_result]
+
+    def test_bounded_parse_results_propagates_future_errors_and_cancels_pending(self):
+        executor = self._ImmediateExecutor(errors=[RuntimeError("worker failed")])
+        results = incremental_module._bounded_parse_results(
+            executor,
+            [(f"mod{i}.py", "/repo") for i in range(5)],
+            max_outstanding=3,
+        )
+
+        with pytest.raises(RuntimeError, match="worker failed"):
+            next(results)
+
+        assert all(future.cancelled for future in executor.futures[1:])
+
     def test_parse_single_file(self, tmp_path):
         py_file = tmp_path / "single.py"
         py_file.write_text("def foo():\n    pass\n")

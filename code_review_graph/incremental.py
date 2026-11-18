@@ -21,9 +21,10 @@ import time
 import unicodedata
 import uuid
 from collections import deque
+from contextlib import closing
 from functools import partial
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any, Callable, Iterable, NamedTuple, Optional
+from typing import TYPE_CHECKING, Any, Callable, Generator, Iterable, NamedTuple, Optional
 
 from . import install_plan
 from .build_state import advance_to_postprocess_pending
@@ -2975,6 +2976,42 @@ def _parse_single_file(
         return (rel_path, [], [], str(e), "")
 
 
+def _bounded_parse_results(
+    executor: Any,
+    args_list: list[tuple[str, str]],
+    max_outstanding: int,
+) -> Generator[tuple[str, list, list, str | None, str], None, None]:
+    """Yield parsed files in input order with a bounded submission window."""
+    if max_outstanding < 1:
+        raise ValueError("max_outstanding must be at least 1")
+
+    args_iter = iter(args_list)
+    pending: deque[concurrent.futures.Future] = deque()
+
+    def submit_next() -> bool:
+        try:
+            args = next(args_iter)
+        except StopIteration:
+            return False
+        pending.append(executor.submit(_parse_single_file, args))
+        return True
+
+    try:
+        for _ in range(max_outstanding):
+            if not submit_next():
+                break
+
+        while pending:
+            future = pending.popleft()
+            result = future.result()
+            yield result
+            del result
+            submit_next()
+    finally:
+        for future in pending:
+            future.cancel()
+
+
 def _canonical_repo_root(repo_root: Path) -> Path:
     """Return one stable identity for a repository root.
 
@@ -3071,28 +3108,30 @@ def full_build(
         _prewarm_parser_probes(parser, files)
         args_list = [(rel_path, str(repo_root)) for rel_path in files]
         with _make_executor(_MAX_PARSE_WORKERS) as executor:
-            for i, (rel_path, nodes, edges, error, fhash) in enumerate(
-                executor.map(_parse_single_file, args_list, chunksize=20),
-                1,
-            ):
-                if error:
-                    logger.warning("Error parsing %s: %s", rel_path, error)
-                    errors.append({"file": rel_path, "error": error})
-                    if parser.detect_language(repo_root / rel_path) == "cpp":
-                        cpp_errors.add(str(rel_path))
-                    continue
-                full_path = repo_root / rel_path
-                _relink_edges(edges, repo_root, followed_dirs)
-                store.store_file_nodes_edges(
-                    str(full_path),
-                    nodes,
-                    edges,
-                    fhash,
-                )
-                total_nodes += len(nodes)
-                total_edges += len(edges)
-                if i % 200 == 0 or i == file_count:
-                    logger.info("Progress: %d/%d files parsed", i, file_count)
+            with closing(_bounded_parse_results(
+                executor,
+                args_list,
+                max_outstanding=2 * _MAX_PARSE_WORKERS,
+            )) as results:
+                for i, (rel_path, nodes, edges, error, fhash) in enumerate(results, 1):
+                    if error:
+                        logger.warning("Error parsing %s: %s", rel_path, error)
+                        errors.append({"file": rel_path, "error": error})
+                        if parser.detect_language(repo_root / rel_path) == "cpp":
+                            cpp_errors.add(str(rel_path))
+                        continue
+                    full_path = repo_root / rel_path
+                    _relink_edges(edges, repo_root, followed_dirs)
+                    store.store_file_nodes_edges(
+                        str(full_path),
+                        nodes,
+                        edges,
+                        fhash,
+                    )
+                    total_nodes += len(nodes)
+                    total_edges += len(edges)
+                    if i % 200 == 0 or i == file_count:
+                        logger.info("Progress: %d/%d files parsed", i, file_count)
 
     store.set_metadata("last_updated", time.strftime("%Y-%m-%dT%H:%M:%S"))
     store.set_metadata("last_build_type", "full")
@@ -3542,20 +3581,21 @@ def incremental_update(
         _prewarm_parser_probes(parser, to_parse)
         args_list = [(rel_path, str(repo_root)) for rel_path in to_parse]
         with _make_executor(_MAX_PARSE_WORKERS) as executor:
-            for rel_path, nodes, edges, error, fhash in executor.map(
-                _parse_single_file,
+            with closing(_bounded_parse_results(
+                executor,
                 args_list,
-                chunksize=20,
-            ):
-                if error:
-                    logger.warning("Error parsing %s: %s", rel_path, error)
-                    errors.append({"file": rel_path, "error": error})
-                    continue
-                store_parsed(rel_path, nodes, edges, fhash)
-                remaining_identity.discard(rel_path)
-                parsed_files += 1
-                total_nodes += len(nodes)
-                total_edges += len(edges)
+                max_outstanding=2 * _MAX_PARSE_WORKERS,
+            )) as results:
+                for rel_path, nodes, edges, error, fhash in results:
+                    if error:
+                        logger.warning("Error parsing %s: %s", rel_path, error)
+                        errors.append({"file": rel_path, "error": error})
+                        continue
+                    store_parsed(rel_path, nodes, edges, fhash)
+                    remaining_identity.discard(rel_path)
+                    parsed_files += 1
+                    total_nodes += len(nodes)
+                    total_edges += len(edges)
 
     failed_dependents = dependent_files & {error["file"] for error in errors}
     if failed_dependents != dependents_pending:
