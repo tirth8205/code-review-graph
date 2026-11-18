@@ -2163,6 +2163,10 @@ def find_dead_code(
         if (node.language or "") in NON_CODE_SUBJECT_LANGUAGES:
             continue
 
+        # A pytest hook implementation is found by name by the plugin manager.
+        if node.kind in ("Function", "Test") and liveness_rules.is_pytest_hook(node.name):
+            continue
+
         # Skip test nodes and anything defined in test files.
         if node.is_test or _in_test_file(node.file_path):
             continue
