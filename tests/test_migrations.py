@@ -54,6 +54,34 @@ class TestMigrations:
             for node in self.store.search_nodes_by_qualified_tail("Handler.process")
         ] == ["src/app.py::Handler.process"]
 
+    def test_a_graph_stamped_past_v10_without_the_symbol_column_is_repaired(self):
+        """A graph another numbering stamped at v15 reopens with ``nodes.symbol``.
+
+        The version registry skips v10 for such a graph, so before v16 the first
+        write failed with ``table nodes has no column named symbol``.
+        """
+        path = self.tmp.name
+        conn = self.store._conn
+        conn.execute("DROP INDEX IF EXISTS idx_nodes_symbol")
+        conn.execute("ALTER TABLE nodes DROP COLUMN symbol")
+        conn.execute(
+            "INSERT INTO nodes "
+            "(kind, name, qualified_name, file_path, language, updated_at) "
+            "VALUES ('Function', 'process', ?, 'src/app.py', 'python', 0)",
+            ("src/app.py::Handler.process",),
+        )
+        conn.execute("UPDATE metadata SET value = '15' WHERE key = 'schema_version'")
+        self.store.commit()
+        self.store.close()
+
+        self.store = GraphStore(path)
+
+        assert get_schema_version(self.store._conn) == LATEST_VERSION
+        assert [
+            node.qualified_name
+            for node in self.store.search_nodes_by_qualified_tail("Handler.process")
+        ] == ["src/app.py::Handler.process"]
+
     def test_v10_backfills_and_indexes_the_symbol_column(self):
         """v10 must populate ``symbol`` for pre-existing rows and index it, so
         dotted-tail lookups are indexed rather than scanning every node."""
