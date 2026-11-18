@@ -383,6 +383,66 @@ A hook or CI job can tell these apart without reading the message. `75` is
   `CRG_CONTEXT_HISTORY=1` where the MCP server or the CLI runs to turn it on.
   See [USAGE.md](USAGE.md#context-history).
 
+## Shared SQLite
+
+Set `CRG_SHARED_DB` to an absolute SQLite path and use the same value in
+the CLI, MCP server, and watcher service. Build each checkout with
+`code-review-graph build --repo /path/to/checkout`. Existing per-checkout
+databases are left intact; the shared file is populated from source. Use
+`--repo` or the MCP `repo_root` to select the checkout. Do not combine the
+shared setting with a per-command `--data-dir`. Launch the VS Code extension
+host with the same setting to read the selected workspace checkout from the
+shared database.
+
+Use `code-review-graph query file_summary path.py --generation-ref refs/heads/main`
+to read the last published structural view of that ref for the selected
+checkout. The MCP `query_graph_tool` accepts the same `generation_ref`. This
+view includes symbols and relations. Search, flows and community commands automatically
+select the current Git ref's published view for this checkout, as does the
+VS Code extension. If the ref has no published projection, build that ref
+first.
+
+To upgrade a shared index from dc.2, point `CRG_SHARED_DB` at a SQLite
+backup copy and run `code-review-graph migrate-shared`. It upgrades schema
+v1/v2 to v3 in one transaction, checks integrity, and leaves the per-checkout
+native rows in place. It does not read source files or call an embedding
+provider. A reported unresolved checkout retains its native data; build
+that checkout to establish the missing provenance. Verify queries on the
+copy before replacing a service index.
+
+The watcher uses the same completion record as CLI and MCP refreshes.
+A checkout, input snapshot and indexing profile must match before a
+completed refresh can be reused. The kernel releases the write lock on
+process death and SQLite rolls back the unfinished refresh. See
+[Shared SQLite ADR](adr/0001-shared-sqlite.md).
+
+Shared embeddings can reuse a vector when the exact input and provider
+profile match and the checkouts share a Git common directory or a fetch
+remote. Each checkout retains its own symbol links and search results.
+
+```bash
+code-review-graph prune
+code-review-graph prune --apply
+code-review-graph prune --apply --compact
+```
+
+The first command previews unbound graph generations, parser facts, input
+manifests, and vectors. A generation stays live while a branch or worktree
+binds it. Live file hashes protect parser facts, and verified input manifests
+follow their checkout and ref. The orphan age for facts and manifests starts
+when an applied maintenance pass first sees them unbound.
+
+The defaults are 7 days, 10% of live payload bytes, and a cap of 512 MiB for
+each reported retention budget. Set `CRG_RETENTION_DAYS`,
+`CRG_RETENTION_PERCENT`, and `CRG_RETENTION_MAX_MIB` to adjust the limits.
+Setting any limit to zero retains no unbound artifacts. Compact explicitly
+to reclaim unused SQLite pages on disk.
+
+Workspace manifest changes use native filesystem notifications by default.
+If those notifications are unavailable, the watcher logs why polling is
+in use and how to restore native coverage. Set `CRG_WATCH_POLL_INTERVAL`
+in seconds to adjust the manifest polling interval.
+
 ## Standalone Daemon CLI (`crg-daemon`)
 
 `crg-daemon` is installed with `code-review-graph` and mirrors the
@@ -411,16 +471,35 @@ poll_interval = 2            # seconds between config file polls
 [[repos]]
 path = "/home/user/project-a"
 alias = "project-a"
+discover_worktrees = true    # include live linked Git worktrees (default: false)
+activity_ttl_seconds = 600  # opt-in idle expiry for discovered watchers (default: 0)
 
 [[repos]]
 path = "/home/user/project-b"
 alias = "project-b"
 ```
 
-The daemon spawns one `code-review-graph watch` child process per repo with
-`subprocess.Popen`. It polls the config file and starts or stops children as
-repos are added or removed. A health check every 30 seconds restarts dead
-watchers. No tmux or screen is needed.
+The daemon starts one `code-review-graph watch` child per repository. It
+reloads `watch.toml` when the file changes or is replaced atomically and
+starts or stops children as repositories are added or removed. At startup and
+reload, it reuses an existing graph in the registered data directory. A
+health check every 30 seconds restarts dead watchers.
+
+With `discover_worktrees`, startup, configuration reloads, and periodic health checks include
+live linked checkouts found by Git. Explicitly configured checkouts keep their
+own options. Discovered checkouts do not inherit the parent graph directory;
+a process-wide `CRG_DATA_DIR` override is incompatible with this option.
+Worktree membership changes are picked up without editing `watch.toml`.
+An optional `activity_ttl_seconds` retires discovered watchers after inactivity.
+File events and branch or HEAD changes renew activity; health heartbeats do
+not. A branch or HEAD change, or new edits detected in dirty files,
+reactivates an expired checkout. Explicitly
+configured watchers do not expire, and expiry leaves the graph on disk.
+
+Watcher entry points sharing a `CRG_HOME` claim the canonical
+checkout before installing filesystem observers. A competing watcher exits
+with a contention error. This ownership lock is separate from the graph
+write lock, so an active watcher does not prevent manual updates.
 
 ## MCP Tools
 
@@ -451,14 +530,19 @@ postprocess: str = "full"            # "full", "minimal" (signatures + FTS), or 
 recurse_submodules: bool | None      # None falls back to CRG_RECURSE_SUBMODULES
 embedding_provider: str | None       # Refresh an existing embedding index; needs embedding_model
 embedding_model: str | None          # Exact model for embedding_provider
+wait_for_lock: bool = False          # Join a matching in-flight CLI/MCP build or update
 ```
 If some files fail to parse, `status` is `"partial"` and the `summary` names
 them. Their previous graph rows are kept.
 
 One write runs per repository at a time. When another write to the graph is
 running, this tool, `run_postprocess_tool` and `embed_graph_tool`
-return at once with `status: "contended"`, `skipped: true` and the `holder_pid`;
-retry once it ends. An embedding refresh on a graph with no embeddings yet embeds
+return at once with `status: "contended"`, `skipped: true` and the `holder_pid`.
+CLI `--wait` and MCP `wait_for_lock` can reuse a completed, equivalent
+build or update with `refresh_reused: true`. A failed or killed writer
+does not provide an eligible completion. The operating system releases the
+lock when the writer dies; the PID text in the lock file is diagnostic only.
+An embedding refresh on a graph with no embeddings yet embeds
 nothing and sets `embeddings_refresh_skipped: true`; run `embed_graph_tool` once
 first.
 

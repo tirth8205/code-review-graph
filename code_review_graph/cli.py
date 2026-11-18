@@ -193,6 +193,9 @@ _BANNER_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         ("register", "Add a repository to the multi-repo list"),
         ("unregister", "Remove a repository from that list"),
         ("repos", "Show the listed repositories"),
+        ("migrate-shared", "Upgrade and validate the selected shared SQLite index"),
+        ("prune", "Preview retention and find stale registry entries"),
+        ("vstore", "Store and retrieve graph bundles by tree hash"),
         ("eval", "Run the benchmarks"),
     )),
 )
@@ -784,7 +787,7 @@ def _plan_integrations(
         and target in ("all", "claude", "qoder", "codex")
         and _git_hooks_dir(repo_root) is not None
     ):
-        git_hook = install_git_hook(repo_root)
+        git_hook = install_git_hook(repo_root, required=False)
         if git_hook:
             say(f"Installed git pre-commit hook in {shown(git_hook)}")
         for sync_hook in install_git_sync_hooks(repo_root):
@@ -868,18 +871,47 @@ def _print_dry_run(plan: install_plan.Plan, repo_root: Path) -> None:
     print("[dry-run] No files were modified.")
 
 
+def _seed_build_from_vstore(store_root: Path, repo_root: Path, *, quiet: bool) -> bool:
+    """Materialize a vstore bundle for this repo's tree hash; False on miss.
+
+    A miss falls through to a normal build (documented optimization contract);
+    a tampered or incomplete bundle raises (fail loud), never silently rebuilds.
+    """
+    from .incremental import get_data_dir
+    from .vstore import get as vstore_get
+    from .vstore import tree_hash
+
+    digest = tree_hash(repo_root)
+    data_dir = get_data_dir(repo_root)
+    try:
+        receipt = vstore_get(store_root, digest, data_dir)
+    except FileNotFoundError:
+        if not quiet:
+            print(f"No vstore entry for tree {digest[:12]}; building from scratch.")
+        return False
+    if not quiet:
+        print(
+            f"Seeded index from vstore: tree {receipt.tree_hash[:12]} "
+            f"({len(receipt.files)} files, delta-zero) -> {data_dir}"
+        )
+    return True
+
+
 def _handle_data_dir_option(args, repo_root: Path) -> None:
     """Handle --data-dir option by updating registry if specified."""
     if hasattr(args, "data_dir") and args.data_dir:
-        try:
-            from .registry import Registry
-            data_dir_path = Path(args.data_dir).expanduser().resolve()
-            data_dir_path.mkdir(parents=True, exist_ok=True)
-            Registry().set_data_dir(str(repo_root), str(data_dir_path))
-            logging.info(f"Graph database will be stored at: {data_dir_path}")
-        except Exception as exc:
-            logging.error(f"Failed to set data directory: {exc}")
-            sys.exit(1)
+        from .registry import Registry
+        from .shared_sqlite import shared_database
+
+        if shared_database() is not None:
+            raise ValueError("Select either CRG_SHARED_DB or --data-dir")
+
+        # Validate the selected registry before creating a graph-data directory.
+        registry = Registry()
+        data_dir_path = Path(args.data_dir).expanduser().resolve()
+        data_dir_path.mkdir(parents=True, exist_ok=True)
+        registry.set_data_dir(str(repo_root), str(data_dir_path))
+        logging.info(f"Graph database will be stored at: {data_dir_path}")
 
 
 def _add_embedding_refresh_args(command) -> None:
@@ -1036,11 +1068,24 @@ def _find_explicit_repo_root(start: Path) -> "Path | None":
     current = start.resolve()
     if not current.is_dir():
         return None
+    try:
+        import pwd
+
+        # ``$HOME`` can be rewritten by a harness; the account's real home is
+        # what owns the catch-all daemon graph.
+        home = Path(pwd.getpwuid(__import__("os").getuid()).pw_dir).resolve()
+    except (ImportError, KeyError):
+        home = Path.home().resolve()
     while True:
         if any(
             (current / marker).exists()
             for marker in (".code-review-graph", ".git", ".svn")
         ):
+            if current == home and start.resolve() != home:
+                # A catch-all graph at the user's home (the daemon's data dir)
+                # would otherwise make every directory under it a project and
+                # silently answer reads from the wrong graph.
+                return None
             return current
         if current == current.parent:
             return None
@@ -1146,6 +1191,7 @@ def _run_graph_tool_command(args, repo_root: Path) -> None:
             target=args.target,
             repo_root=root,
             **({"to": args.to} if args.to else {}),
+            **({"generation_ref": args.generation_ref} if args.generation_ref else {}),
         )
     elif args.command == "impact":
         result = tools.get_impact_radius(
@@ -1253,9 +1299,15 @@ def _warn_failed_files(result: dict) -> None:
     )
 
 
-def _open_graph_store(db_path: Path, command: str):
+def _open_graph_store(db_path: Path, command: str, *, checkout: Path | None = None):
     """Open a store; CLI builds request recovery inside their write lock."""
+    from .shared_sqlite import shared_database
     from .tools._common import _open_graph_store as open_store
+
+    if db_path == shared_database():
+        from .graph import GraphStore
+
+        return GraphStore(db_path, checkout=checkout, read_only=command != "watch")
 
     return open_store(db_path, command)
 
@@ -1304,6 +1356,12 @@ def _handle_build_update(args, repo_root: Path, embedding_refresh_kwargs) -> Non
 
     _ensure_project_marker(repo_root)
     if args.command == "build":
+        if args.seed_from is not None:
+            from .vstore import default_store_root
+
+            root = default_store_root() if args.seed_from == "auto" else Path(args.seed_from)
+            if _seed_build_from_vstore(root.expanduser().resolve(), repo_root, quiet=args.quiet):
+                return
         pp = (
             "none"
             if getattr(args, "skip_postprocess", False)
@@ -1328,6 +1386,10 @@ def _handle_build_update(args, repo_root: Path, embedding_refresh_kwargs) -> Non
         finally:
             logging.disable(previous_disable)
         _exit_if_contended(result)
+        if result.get("refresh_reused"):
+            if not args.quiet:
+                print(result["summary"])
+            return
         parsed = result.get("files_parsed", 0)
         nodes = result.get("total_nodes", 0)
         edges = result.get("total_edges", 0)
@@ -1383,7 +1445,9 @@ def _handle_build_update(args, repo_root: Path, embedding_refresh_kwargs) -> Non
             sys.exit(1)
         nodes = result.get("total_nodes", 0)
         edges = result.get("total_edges", 0)
-        if not args.quiet:
+        if not args.quiet and result.get("refresh_reused"):
+            print(result["summary"])
+        elif not args.quiet:
             if result.get("build_type") == "full":
                 # No usable incremental base (fresh/legacy graph, or the
                 # last-synced commit was lost to a rewrite/shallow clone),
@@ -1430,7 +1494,7 @@ def _handle_build_update(args, repo_root: Path, embedding_refresh_kwargs) -> Non
                     _exit_if_contended(_write_skipped_response(db_path, brief_lock.holder_pid()))
                 store = None
                 try:
-                    store = _open_graph_store(db_path, "update")
+                    store = _open_graph_store(db_path, "update", checkout=repo_root)
                     assert_graph_serves_root(repo_root, store)
                     impact = analyze_changes(
                         store,
@@ -1498,7 +1562,7 @@ def _handle_forget(args, repo_root: Path, db_path: Path, *, legacy: bool = False
     still the old top-level ``.code-review-graph.db``; a real run moves it into
     *db_path* only once it holds the lock, and a dry run reads it where it is.
     """
-    from .incremental import _prepare_db_path, assert_graph_serves_root
+    from .incremental import _git_branch_info, _prepare_db_path, assert_graph_serves_root
 
     lock = None
     if not args.dry_run:
@@ -1516,13 +1580,22 @@ def _handle_forget(args, repo_root: Path, db_path: Path, *, legacy: bool = False
 
             store = GraphStore(
                 repo_root / ".code-review-graph.db" if legacy else db_path,
-                read_only=True,
+                read_only=True, checkout=repo_root,
             )
         else:
             if legacy:
                 _prepare_db_path(repo_root, db_path)
-            store = _open_graph_store(db_path, args.command)
+            from .graph import GraphStore
+            from .shared_sqlite import shared_database
+
+            store = (
+                GraphStore(db_path, checkout=repo_root) if db_path == shared_database()
+                else _open_graph_store(db_path, "forget")
+            )
         assert_graph_serves_root(repo_root, store)
+        anchor = _git_branch_info(repo_root) if store.checkout is not None else None
+        if anchor is not None and store.historical_ref_for_checkout() is not None:
+            raise CodeReviewGraphError("Update this checkout before forgetting files")
         stored_files = store.get_all_files()
         targets = _match_files_to_forget(stored_files, args.paths, repo_root)
         if not targets:
@@ -1549,7 +1622,13 @@ def _handle_forget(args, repo_root: Path, db_path: Path, *, legacy: bool = False
 
         from .forget import forget_files
 
-        summary = forget_files(store, repo_root, targets)
+        with store.refresh():
+            store.invalidate_refresh()
+            summary = forget_files(store, repo_root, targets)
+            if anchor is not None:
+                if _git_branch_info(repo_root) != anchor:
+                    raise RuntimeError("Git reference changed while forgetting files")
+                store.publish_generation(*anchor)
         reparsed = summary.get("reparsed", [])
         if reparsed:
             print(
@@ -1921,6 +2000,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="External directory to store graph database (useful for network shares)"
     )
+    build_cmd.add_argument(
+        "--seed-from",
+        nargs="?",
+        const="auto",
+        default=None,
+        metavar="STORE",
+        help="Seed the index from a vstore bundle matching this tree hash "
+        "instead of rebuilding (bare flag: default store root)",
+    )
     _add_embedding_refresh_args(build_cmd)
     _add_follow_symlinks_arg(build_cmd)
     build_cmd.add_argument(
@@ -2058,6 +2146,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="External directory to store graph database (useful for network shares)"
     )
+    watch_cmd.add_argument("--manifest", help="JSON manifest of repository graph paths")
     _add_embedding_refresh_args(watch_cmd)
     _add_follow_symlinks_arg(watch_cmd)
 
@@ -2436,6 +2525,9 @@ def build_parser() -> argparse.ArgumentParser:
     query_cmd.add_argument(
         "--to", default=None, help="For path_to: the node or file to reach",
     )
+    query_cmd.add_argument(
+        "--generation-ref", help="Read a published structural snapshot (e.g. refs/heads/main)",
+    )
     query_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
 
     impact_cmd = sub.add_parser("impact", help="Analyse the blast radius of changes")
@@ -2685,6 +2777,79 @@ def build_parser() -> argparse.ArgumentParser:
         "visualize": vis_cmd,
         "detect-changes": detect_cmd,
     })
+    vstore_cmd = sub.add_parser(
+        "vstore",
+        help="Content-addressed index bundle store (keyed by repo tree hash)",
+    )
+    vstore_sub = vstore_cmd.add_subparsers(dest="vstore_command", required=True)
+    vstore_put = vstore_sub.add_parser(
+        "put", help="Store the current index data dir under the repo tree hash"
+    )
+    vstore_put.add_argument("--repo", default=None, help="Repository root (cwd default)")
+    vstore_put.add_argument(
+        "--data-dir",
+        default=None,
+        help="Index data dir (registry data_dir or .code-review-graph default)",
+    )
+    vstore_put.add_argument(
+        "--embedding-model",
+        default=None,
+        help="Embedding model recorded in the receipt",
+    )
+    vstore_put.add_argument(
+        "--store", default=None, help="Store root (default: $CRG_VSTORE/$CRG_HOME/home)"
+    )
+    vstore_get = vstore_sub.add_parser("get", help="Materialize a stored bundle into a data dir")
+    vstore_get.add_argument("tree_hash", help="Tree hash of the bundle")
+    vstore_get.add_argument("--dest", required=True, help="Destination data dir")
+    vstore_get.add_argument(
+        "--store", default=None, help="Store root (default: $CRG_VSTORE/$CRG_HOME/home)"
+    )
+    vstore_list = vstore_sub.add_parser(
+        "list", help="List stored bundles (tree hash, commit, model)"
+    )
+    vstore_list.add_argument(
+        "--store", default=None, help="Store root (default: $CRG_VSTORE/$CRG_HOME/home)"
+    )
+
+    sub.add_parser("migrate-shared", help="Upgrade and validate the selected shared SQLite file")
+
+    prune_cmd = sub.add_parser(
+        "prune",
+        help="Remove dead registry/watch entries and report orphaned data dirs",
+    )
+    prune_cmd.add_argument(
+        "--apply",
+        action="store_true",
+        help="Perform the removals (default: report only)",
+    )
+    prune_cmd.add_argument(
+        "--data-dirs",
+        action="store_true",
+        help="With --apply, also delete orphaned external data dirs",
+    )
+    prune_cmd.add_argument("--config", default=None, help="Alternate watch.toml path")
+    prune_cmd.add_argument(
+        "--compact", action="store_true",
+        help="With --apply, compact the selected shared SQLite file",
+    )
+
+    vstore_prune = vstore_sub.add_parser(
+        "prune", help="Apply LRU/TTL retention to the store (report unless --apply)"
+    )
+    vstore_prune.add_argument(
+        "--store", default=None, help="Store root (default: $CRG_VSTORE/$CRG_HOME/home)"
+    )
+    vstore_prune.add_argument(
+        "--max-entries", type=int, default=None, help="Keep the newest N bundles"
+    )
+    vstore_prune.add_argument(
+        "--ttl-days", type=float, default=None, help="Drop bundles older than N days"
+    )
+    vstore_prune.add_argument(
+        "--apply", action="store_true", help="Perform the removals (default: report)"
+    )
+
     return ap
 
 
@@ -2797,6 +2962,18 @@ def _dispatch() -> None:
             # Preserve legacy migration without creating graph state for a
             # repository that has never been indexed or an external data dir.
             db_path = get_db_path(repo_root)
+        if not any(
+            (repo_root / marker).exists()
+            for marker in (".git", ".svn", ".code-review-graph")
+        ):
+            # A reader must not resolve graph state for a plain directory: that
+            # silently answers from a shared store and hides a wrong --repo.
+            print(
+                f"--repo is not a project folder: {repo_root}. "
+                "Expected .git, .svn or .code-review-graph.",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
         if not db_path.exists():
             print(
                 f"No graph found at {db_path}. Run `code-review-graph build` first.",
@@ -3121,6 +3298,109 @@ def _dispatch() -> None:
             )
         return
 
+    if args.command == "vstore":
+        from .vstore import default_store_root, get, list_entries, put, retain
+
+        store_root = Path(args.store).expanduser().resolve() if args.store else default_store_root()
+        if args.vstore_command == "put":
+            from .registry import Registry
+
+            repo_root = Path(args.repo).resolve() if args.repo else Path.cwd()
+            if args.data_dir:
+                data_dir = Path(args.data_dir).expanduser().resolve()
+            else:
+                registered = Registry().get_data_dir_for_repo(str(repo_root))
+                data_dir = (
+                    Path(registered).expanduser().resolve()
+                    if registered
+                    else repo_root / ".code-review-graph"
+                )
+            receipt = put(
+                store_root,
+                repo_root,
+                data_dir,
+                embedding_model=args.embedding_model,
+            )
+            print(f"stored {receipt.tree_hash} ({len(receipt.files)} files) from {data_dir}")
+        elif args.vstore_command == "get":
+            receipt = get(store_root, args.tree_hash, Path(args.dest).expanduser())
+            print(
+                f"restored {receipt.tree_hash} -> "
+                f"{Path(args.dest).expanduser()} ({len(receipt.files)} files)"
+            )
+        elif args.vstore_command == "prune":
+            removed = retain(
+                store_root,
+                max_entries=args.max_entries,
+                ttl_days=args.ttl_days,
+            )
+            if args.apply:
+                for digest in removed:
+                    print(f"pruned {digest}")
+                print(f"pruned {len(removed)} bundle(s)")
+            else:
+                for digest in removed:
+                    print(f"would prune {digest}")
+                print(f"dry-run: {len(removed)} bundle(s) eligible (use --apply to remove)")
+        else:
+            bundles = list_entries(store_root)
+            if not bundles:
+                print("vstore is empty.")
+            for bundle in bundles:
+                model = f"  model={bundle.embedding_model}" if bundle.embedding_model else ""
+                print(
+                    f"  {bundle.tree_hash}  head={bundle.head[:12]}  "
+                    f"files={len(bundle.files)}{model}"
+                )
+        return
+
+    if args.command == "migrate-shared":
+        from .shared_sqlite import migrate_selected_database
+
+        before, after, issues = migrate_selected_database()
+        print(f"Shared SQLite schema {before} to {after}; unresolved checkout records: {issues}")
+        return
+
+    if args.command == "prune":
+        from .prune import prune
+
+        config_path = Path(args.config).expanduser() if args.config else None
+        try:
+            prune_report = prune(
+                config_path=config_path, apply=args.apply, data_dirs=args.data_dirs,
+                compact=args.compact,
+            )
+        except ValueError as exc:
+            ap.error(str(exc))
+        for path in prune_report.removed_registry:
+            print(f"registry: {path}")
+        for path in prune_report.removed_watch:
+            print(f"watch:    {path}")
+        for path in prune_report.orphan_data_dirs:
+            print(f"data dir: {path}")
+        print(prune_report.summary())
+        return
+
+    if args.command == "watch" and args.manifest is not None:
+        if args.repo is not None or args.data_dir is not None:
+            ap.error("watch --manifest names every repository; drop --repo and --data-dir")
+        from .postprocessing import run_post_processing
+        from .watch_set import watch_set
+
+        try:
+            watch_set(
+                Path(args.manifest).expanduser(),
+                on_files_updated=(
+                    partial(run_post_processing, **embedding_refresh_kwargs)
+                    if embedding_refresh_kwargs
+                    else run_post_processing
+                ),
+            )
+        except RuntimeError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+        return
+
     if args.command == "embed":
         repo_root = Path(args.repo) if args.repo else find_project_root()
         _handle_data_dir_option(args, repo_root)
@@ -3183,6 +3463,11 @@ def _dispatch() -> None:
         "watch",
     })
     explicit_data_dir = bool(getattr(args, "data_dir", None))
+    if explicit_data_dir:
+        from .shared_sqlite import shared_database
+
+        if shared_database() is not None:
+            ap.error("Select either CRG_SHARED_DB or --data-dir")
     read_only_explicit_data_dir = (
         args.command in _read_only_db_cmds and explicit_data_dir
     )
@@ -3229,7 +3514,7 @@ def _dispatch() -> None:
     if args.command == "forget":
         _handle_forget(args, repo_root, db_path, legacy=legacy_pending)
         return
-    store = _open_graph_store(db_path, args.command)
+    store = _open_graph_store(db_path, args.command, checkout=repo_root)
 
     try:
         # A graph.db copied or cached from another checkout answers every
@@ -3265,6 +3550,14 @@ def _dispatch() -> None:
                     print(f"  [{kind}] {name}  ({file_path}:{line})")
 
         elif args.command == "status":
+            from .shared_sqlite import shared_database
+            from .tools._common import _graph_is_built
+
+            if db_path == shared_database() and not _graph_is_built(store):
+                print("No committed graph for this checkout. Run `code-review-graph build` first.",
+                      file=sys.stderr)
+                raise SystemExit(1)
+
             from .build_state import BUILD_IN_PROGRESS, read_build_state
             from .tools.build import build_was_interrupted
 

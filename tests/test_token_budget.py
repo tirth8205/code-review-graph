@@ -34,7 +34,7 @@ Reading the budget table
 ``DEFAULT_BUDGET`` is what the tool costs with only its required arguments
 -- the number an agent actually pays in a normal workflow.
 ``WORST_BUDGET`` is what it costs with every verbosity knob pushed past its
-hard ceiling; it proves the ceiling exists and binds.
+hard ceiling, or with explicit limits on review presentation.
 
 The fixture graph is deliberately small, so these ceilings are not the
 absolute worst case on a large repository. What they pin down is the
@@ -142,13 +142,14 @@ def graph_repo(tmp_path_factory) -> dict[str, Any]:
     db_path = root / ".code-review-graph" / "graph.db"
     # Serial parsing keeps the build deterministic and avoids spawning a
     # ProcessPoolExecutor inside the test session.
-    os.environ["CRG_SERIAL_PARSE"] = "1"
-    with GraphStore(db_path) as store:
+    with pytest.MonkeyPatch.context() as env, GraphStore(db_path) as store:
+        env.setenv("CRG_SERIAL_PARSE", "1")
         full_build(root, store)
 
     # Populate communities and flows so the tools that read them have data.
     asyncio.run(crg_main.run_postprocess_tool(repo_root=str(root)))
-    asyncio.run(crg_main.generate_wiki_tool(repo_root=str(root)))
+    wiki = asyncio.run(crg_main.generate_wiki_tool(repo_root=str(root)))
+    assert wiki["status"] == "ok", wiki
 
     return {
         "root": str(root),
@@ -344,12 +345,12 @@ BUDGETS: dict[str, dict[str, Any]] = {
         "default": {"changed_files": "LEAF"},
         "worst": {
             "changed_files": "ALL", "include_source": True,
-            "max_lines_per_file": HUGE, "max_results": HUGE,
-            "max_files": HUGE,
+            "max_lines_per_file": HUGE, "max_results": 100,
+            "max_files": 25,
         },
         # Larger budgets by design: this is the "give me everything needed to
-        # review" tool, and it inlines source. Bounded by max_results
-        # (100 nodes / 150 edges), an 800-line shared source budget, and
+        # review" tool, and it inlines source. This call requests at most
+        # 100 rows per graph list, with an 800-line shared source budget and
         # max_lines_per_file capped at 500.
         "default_max": 20_000,
         "worst_max": 50_000,
@@ -451,7 +452,7 @@ BUDGETS: dict[str, dict[str, Any]] = {
         "default": {"changed_files": "LEAF"},
         "worst": {
             "changed_files": "ALL", "include_source": True, "max_depth": 5,
-            "max_results": HUGE, "max_flows": HUGE,
+            "max_results": 100, "max_flows": 25,
         },
         "default_max": 12_000,
         "worst_max": 50_000,
@@ -749,7 +750,7 @@ def test_default_args_stay_in_budget(name, repo):
 
 @pytest.mark.parametrize("name", sorted(BUDGETS))
 def test_worst_case_args_stay_in_budget(name, repo):
-    """Maxing every verbosity knob must still hit a hard ceiling."""
+    """Browsing ceilings and explicit review limits bound the response."""
     spec = BUDGETS[name]
     result = _call(name, spec, spec["worst"], repo)
     tokens = count_tokens(result, repo["root"])
@@ -822,15 +823,8 @@ MAX_CEILINGS = {
     "analysis_tools._MAX_GAPS_PER_CATEGORY": (
         analysis_tools._MAX_GAPS_PER_CATEGORY, 50,
     ),
-    "review._MAX_REVIEW_NODES": (review._MAX_REVIEW_NODES, 100),
-    "review._MAX_REVIEW_EDGES": (review._MAX_REVIEW_EDGES, 150),
     "review._MAX_REVIEW_SOURCE_LINES": (review._MAX_REVIEW_SOURCE_LINES, 800),
     "review._MAX_LINES_PER_FILE": (review._MAX_LINES_PER_FILE, 500),
-    "review._MAX_CHANGED_FUNCTIONS": (review._MAX_CHANGED_FUNCTIONS, 100),
-    # Symbols a diff removed, and the users listed for each. Their cost is
-    # measured in tests/test_pure_deletion_review.py, which needs a real git
-    # history that this fixture does not have.
-    "review._MAX_REMOVED_SYMBOLS": (review._MAX_REMOVED_SYMBOLS, 25),
     "changes._MAX_REMOVED_USERS_SHOWN": (changes_mod._MAX_REMOVED_USERS_SHOWN, 3),
     "review._MAX_AFFECTED_FLOWS_STANDARD": (
         review._MAX_AFFECTED_FLOWS_STANDARD, 25,
@@ -909,19 +903,11 @@ def test_hard_ceilings_bind(repo):
     emitted = sum(len(f.get("steps") or []) for f in flows["affected_flows"])
     assert emitted <= review._MAX_AFFECTED_FLOW_STEPS
 
-    changes = asyncio.run(crg_main.detect_changes_tool(
-        repo_root=root, changed_files=all_files, max_results=HUGE,
-    ))
-    assert changes["changed_functions_total"] > review._MAX_CHANGED_FUNCTIONS
-    assert len(changes["changed_functions"]) == review._MAX_CHANGED_FUNCTIONS
-
     context = _invoke(
             crg_main.get_review_context_tool,
         repo_root=root, changed_files=all_files, max_results=HUGE,
         max_files=HUGE, include_source=True, max_lines_per_file=HUGE,
     )["context"]
-    assert len(context["graph"]["impacted_nodes"]) <= review._MAX_REVIEW_NODES
-    assert len(context["graph"]["edges"]) <= review._MAX_REVIEW_EDGES
     emitted_lines = sum(
         len(snippet.splitlines())
         for snippet in context["source_snippets"].values()

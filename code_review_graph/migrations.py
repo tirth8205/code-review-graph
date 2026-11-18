@@ -332,6 +332,9 @@ def _migrate_v5(conn: sqlite3.Connection) -> None:
             _progress("Migration v5: created nodes_fts FTS5 virtual table")
 
 
+RETIRED_TABLES = frozenset({"community_summaries", "flow_snapshots", "risk_index"})
+
+
 def _migrate_v6(conn: sqlite3.Connection) -> None:
     """v6: Add pre-computed summary tables for token-efficient queries."""
     conn.execute("""
@@ -694,6 +697,17 @@ def _migrate_v15(conn: sqlite3.Connection) -> None:
     _progress("Migration v15: dropped unread tables and covered indexes")
 
 
+def _migrate_v16(conn: sqlite3.Connection) -> None:
+    """v16: give a graph stamped past v10 the ``nodes.symbol`` column it lacks.
+
+    A build with a different migration numbering could stamp a graph past v10
+    without ever adding ``nodes.symbol``; the version registry then skipped v10
+    and every write failed on the missing column. v10 decides by the schema
+    itself, so replaying it here repairs such a graph and is a no-op otherwise.
+    """
+    _migrate_v10(conn)
+
+
 # ---------------------------------------------------------------------------
 # Migration registry
 # ---------------------------------------------------------------------------
@@ -713,6 +727,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     13: _migrate_v13,
     14: _migrate_v14,
     15: _migrate_v15,
+    16: _migrate_v16,
 }
 
 LATEST_VERSION = max(MIGRATIONS.keys())
@@ -783,7 +798,7 @@ def _is_new_database(conn: sqlite3.Connection, current: int) -> bool:
     return conn.execute("SELECT 1 FROM nodes LIMIT 1").fetchone() is None
 
 
-def run_migrations(conn: sqlite3.Connection) -> None:
+def run_migrations(conn: sqlite3.Connection, *, bootstrap: bool = False) -> None:
     """Run all pending migrations in order.
 
     Safe to run from several processes at once: each statement tolerates a
@@ -793,6 +808,8 @@ def run_migrations(conn: sqlite3.Connection) -> None:
 
     On a brand-new database the per-migration lines log at DEBUG and one
     INFO line says the graph was created; an upgrade still logs each step.
+    During bootstrap the caller owns one write transaction for the schema
+    and its version marker, so no intermediate migration commits are needed.
     """
     current = get_schema_version(conn)
     if current >= LATEST_VERSION:
@@ -807,7 +824,13 @@ def run_migrations(conn: sqlite3.Connection) -> None:
             if version <= current:
                 continue
             _progress("Running migration v%d", version)
-            _run_one(conn, version)
+            if bootstrap:
+                MIGRATIONS[version](conn)
+            else:
+                _run_one(conn, version)
+
+        if bootstrap:
+            _set_schema_version(conn, LATEST_VERSION)
 
         _progress("Migrations complete, now at schema version %d", LATEST_VERSION)
     finally:

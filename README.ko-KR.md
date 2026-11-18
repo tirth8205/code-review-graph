@@ -664,6 +664,10 @@ pip install "code-review-graph[wiki]"                # ollama client (not used b
 pip install "code-review-graph[all]"                 # All optional dependencies
 ```
 
+### 공유 레지스트리 일관성
+
+동시 프로세스는 같은 잠금을 보유한 상태에서 레지스트리를 다시 읽고 원자적으로 교체합니다. 잘못된 레지스트리는 오류로 처리되며 각 작업 트리는 자체 그래프를 유지합니다.
+
 ### 환경 변수
 
 | 변수 | 내용 | 기본값 |
@@ -680,9 +684,9 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_MAX_IMPACT_NODES` | 영향 분석에 넣는 최대 노드 수 | `500` |
 | `CRG_MAX_IMPACT_DEPTH` | 영향 범위 분석의 탐색 깊이 | `2` |
 | `CRG_MAX_BFS_DEPTH` | 그래프 순회의 최대 깊이 | `15` |
-| `CRG_MAX_CHANGED_FUNCS` | 변경 보고 하나에서 분석하는 변경 함수의 최대 수 | `500` |
+| `CRG_MAX_CHANGED_FUNCS` | 변경 보고 하나에서 분석하는 변경 함수의 최대 수 | - |
 | `CRG_MAX_DELETION_FILES` | diff가 삭제한 함수와 클래스를 알려 주려고 변경 보고 하나에서 이전 버전을 읽는 파일의 최대 수 | `100` |
-| `CRG_MAX_CHANGED_YAML_PATHS` | 변경 보고 하나에서 분석하는 변경 YAML 경로의 최대 수. JSON 경로에도 따로 같은 한도가 적용됨 | `200` |
+| `CRG_MAX_CHANGED_YAML_PATHS` | 변경 보고 하나에서 분석하는 변경 YAML 경로의 최대 수. JSON 경로에도 따로 같은 한도가 적용됨 | - |
 | `CRG_MAX_TRANSITIVE_FRONTIER` | `tests_for`와 `detect-changes`가 테스트를 찾을 때 홉마다 따라가는 피호출자의 최대 수. 이름순으로 앞의 것을 남기므로 같은 그래프는 언제나 같은 답을 줌 | `50` |
 | `CRG_CALLER_TEST_ROUTE_DEPTH` | 테스트가 없는 변경 심벌에 대해 테스트된 호출자를 찾으며 들어오는 `CALLS`를 거슬러 올라갈 홉 수. 커버리지가 아니라 참고 정보로 보고됩니다 | `2` |
 | `CRG_CALLER_TEST_ROUTE_MAX_CALLERS` | 그 테스트된 호출자를 찾는 동안 검사할 최대 호출자 수 | `500` |

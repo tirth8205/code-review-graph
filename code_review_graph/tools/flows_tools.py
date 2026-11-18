@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
 from ..flows import get_flow_by_id, get_flows
 from ..hints import generate_hints, get_session
 from ..incremental import followed_files, path_within_repo
-from ._common import _bounded, _get_store, _shown_of, _validate_positive_int
+from ._common import (
+    _bounded,
+    _get_store_for_read,
+    _select_generation,
+    _shown_of,
+    _validate_positive_int,
+)
 
 # ---------------------------------------------------------------------------
 # Tool 10: list_flows  [EXPLORE]
@@ -53,8 +60,13 @@ def list_flows(
     """
     _validate_positive_int(limit, "limit")
 
-    store, root = _get_store(repo_root)
+    store, root, not_built = _get_store_for_read(repo_root)
+    if not_built is not None:
+        return not_built
+    assert store is not None and root is not None
+    stack = ExitStack()
     try:
+        store = _select_generation(stack, store, projections=True)
         # Count every matching flow, then keep the bounded prefix — the same
         # "count all, return a prefix" contract query.py uses for max_results.
         # The flows table has one row per entry point, so a full read is cheap
@@ -100,7 +112,7 @@ def list_flows(
     except Exception as exc:
         return {"status": "error", "error": str(exc)}
     finally:
-        store.close()
+        stack.close()
 
 
 # ---------------------------------------------------------------------------
@@ -141,8 +153,13 @@ def get_flow(
     _validate_positive_int(max_steps, "max_steps")
     _validate_positive_int(max_source_lines, "max_source_lines")
 
-    store, root = _get_store(repo_root)
+    store, root, not_built = _get_store_for_read(repo_root)
+    if not_built is not None:
+        return not_built
+    assert store is not None and root is not None
+    stack = ExitStack()
     try:
+        store = _select_generation(stack, store, projections=True)
         flow: dict | None = None
 
         if flow_id is not None:
@@ -226,4 +243,4 @@ def get_flow(
     except Exception as exc:
         return {"status": "error", "error": str(exc)}
     finally:
-        store.close()
+        stack.close()

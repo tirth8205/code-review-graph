@@ -38,6 +38,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Any
 
+REFRESH_REQUEST_KEY = "cooperative_refresh_request"
 BUILD_STATE_KEY = "build_state"
 BUILD_IN_PROGRESS = "in-progress"
 POSTPROCESS_PENDING = "postprocess-pending"

@@ -83,8 +83,11 @@ def test_without_a_manifest_nothing_changes(repo: Path) -> None:
     files = set(collect_all_files(repo))
     changed, _ = discover_review_changes(repo)
 
-    assert set(INSTALL_FILES) <= files
-    assert set(INSTALL_FILES) <= set(changed)
+    # Agent directories are ignored by policy now, so only the manifest-free
+    # install paths prove the "nothing is left out" contract here.
+    assert {".mcp.json", "hooks/crg-update.sh"} <= files
+    assert {".mcp.json", "hooks/crg-update.sh"} <= set(changed)
+    assert ".claude/settings.json" not in files
 
 
 def test_build_leaves_out_untracked_install_files(repo: Path) -> None:
@@ -180,7 +183,8 @@ def test_a_manifest_this_release_cannot_read_leaves_nothing_out(
         assert install_manifest_paths(repo) == frozenset()
         files = set(collect_all_files(repo))
 
-    assert set(INSTALL_FILES) <= files
+    assert {".mcp.json", "hooks/crg-update.sh"} <= files
+    assert ".claude/settings.json" not in files
     assert "install-manifest.json" in caplog.text
 
 

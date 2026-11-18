@@ -473,7 +473,7 @@ def render_markdown(
     if report.get("functions_truncated"):
         lines.append("")
         lines.append(
-            "> Note: analysis was capped at the configured maximum number of "
+            f"> Note: analysis covered {len(changed)} of {report['changed_functions_total']} "
             "changed functions (set `CRG_MAX_CHANGED_FUNCS` to adjust)."
         )
 

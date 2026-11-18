@@ -294,10 +294,7 @@ class TestMcpCallersEnableChurn:
         _seeded_graph(repo)
         with patch(
             "code_review_graph.tools.review.analyze_changes",
-            return_value={
-                "summary": "", "risk_score": 0.0, "changed_functions": [],
-                "affected_flows": [], "test_gaps": [], "review_priorities": [],
-            },
+            wraps=changes_mod.analyze_changes,
         ) as analyze:
             result = detect_changes_func(
                 repo_root=str(repo), changed_files=["app.py"],

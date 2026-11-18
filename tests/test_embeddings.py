@@ -4,9 +4,12 @@ import json
 import os
 import random
 import sqlite3
+import subprocess
 import sys
 import threading
 import time
+from dataclasses import replace
+from email.message import Message
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import MagicMock, patch
 
@@ -30,7 +33,7 @@ from code_review_graph.embeddings import (
     clear_model_cache,
     get_provider,
 )
-from code_review_graph.graph import GraphNode
+from code_review_graph.graph import GraphNode, GraphStore
 
 
 class TestVectorEncoding:
@@ -82,11 +85,20 @@ class TestCosineSimilarity:
 class TestNodeToText:
     def _make_node(self, **kwargs):
         defaults = dict(
-            id=1, kind="Function", name="my_func",
-            qualified_name="file.py::my_func", file_path="file.py",
-            line_start=1, line_end=10, language="python",
-            parent_name=None, params=None, return_type=None,
-            is_test=False, file_hash=None, extra={},
+            id=1,
+            kind="Function",
+            name="my_func",
+            qualified_name="file.py::my_func",
+            file_path="file.py",
+            line_start=1,
+            line_end=10,
+            language="python",
+            parent_name=None,
+            params=None,
+            return_type=None,
+            is_test=False,
+            file_hash=None,
+            extra={},
         )
         defaults.update(kwargs)
         return GraphNode(**defaults)
@@ -134,6 +146,139 @@ class TestEmbeddingStore:
             file_hash=None,
             extra={},
         )
+
+    def test_shared_checkout_vector_reads_and_deletes_are_isolated(self, tmp_path, monkeypatch):
+        db = tmp_path / "shared.db"
+        monkeypatch.setenv("CRG_SHARED_DB", str(db))
+        monkeypatch.setenv("CRG_VECTOR_CACHE", "1")
+        provider = MagicMock()
+        provider.name = "test:shared"
+        provider.embed.return_value = [[1.0, 0.0]]
+        provider.embed_query.return_value = [1.0, 0.0]
+        roots = [tmp_path / "left", tmp_path / "right"]
+        keys = [self._make_node(i).qualified_name for i in range(2)]
+        with patch("code_review_graph.embeddings.get_provider", return_value=provider):
+            for i, root in enumerate(roots):
+                root.mkdir()
+                with GraphStore(db, checkout=root) as graph:
+                    with EmbeddingStore(db, graph_store=graph) as vectors:
+                        assert vectors.embed_nodes([self._make_node(i)]) == 1
+            for root, key in zip(roots, keys):
+                with GraphStore(db, checkout=root, read_only=True) as graph:
+                    with EmbeddingStore(db, graph_store=graph) as vectors:
+                        assert vectors.search("symbol") == [(key, 1.0)]
+            with GraphStore(db, checkout=roots[0]) as graph:
+                with EmbeddingStore(db, graph_store=graph) as vectors:
+                    vectors.remove_node(keys[0])
+                    assert vectors.count() == 0
+            with GraphStore(db, checkout=roots[1], read_only=True) as graph:
+                with EmbeddingStore(db, graph_store=graph) as vectors:
+                    assert vectors.search("symbol") == [(keys[1], 1.0)]
+        assert list(tmp_path.glob("*.db")) == [db]
+
+    def test_shared_vector_payloads_reuse_one_common_remote(self, tmp_path, monkeypatch):
+        db = tmp_path / "shared.db"
+        monkeypatch.setenv("CRG_SHARED_DB", str(db))
+        provider = MagicMock()
+        provider.name = "test:direct-peer"
+        provider.embed.side_effect = [[[1.0, 0.0]], [[0.0, 1.0]], [[0.0, -1.0]]]
+        provider.embed_query.return_value = [1.0, 0.0]
+        remotes = (
+            (("origin", "git@github.com:one/example.git"),),
+            (("upstream", "https://github.com/one/example"),
+             ("origin", "https://github.com/two/example")),
+            (("origin", "https://github.com/two/example"),),
+            (("origin", "https://github.com/unrelated/example"),),
+        )
+        with patch("code_review_graph.embeddings.get_provider", return_value=provider):
+            for index, entries in enumerate(remotes):
+                root = tmp_path / f"clone-{index}"
+                subprocess.run(["git", "init", "-q", str(root)], check=True)
+                for remote, url in entries:
+                    subprocess.run(
+                        ["git", "-C", str(root), "remote", "add", remote, url], check=True,
+                    )
+                name = f"module-{index}.py::func_1"
+                node = replace(
+                    self._make_node(1), qualified_name=name,
+                    file_path=str(root / "file.py"),
+                )
+                with GraphStore(db, checkout=root) as graph, EmbeddingStore(
+                    db, graph_store=graph,
+                ) as store:
+                    assert store.embed_nodes([node]) == 1
+                assert provider.embed.call_count == max(1, index)
+                with GraphStore(db, checkout=root, read_only=True) as graph, EmbeddingStore(
+                    db, graph_store=graph,
+                ) as store:
+                    assert store.search("symbol") == [(name, 1.0 if index < 2 else 0.0)]
+
+        with sqlite3.connect(db) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM crg_vector_payloads").fetchone() == (3,)
+
+    def test_shared_legacy_vectors_migrate_without_calls_or_losing_symbols(
+        self, tmp_path, monkeypatch,
+    ):
+        db = tmp_path / "shared.db"
+        monkeypatch.setenv("CRG_SHARED_DB", str(db))
+        provider = MagicMock()
+        provider.name = "test:legacy"
+        provider.embed_query.return_value = [1.0, 0.0]
+        with GraphStore(db, checkout=tmp_path) as graph:
+            graph._conn.execute(
+                "CREATE TABLE embeddings (qualified_name TEXT PRIMARY KEY, vector BLOB, "
+                "text_hash TEXT, provider TEXT)"
+            )
+            graph._conn.executemany("INSERT INTO embeddings VALUES (?, ?, ?, ?)", (
+                (name, _encode_vector([1.0, 0.0]), "legacy-hash", provider.name)
+                for name in ("left.py::f", "right.py::f")
+            ))
+            graph._conn.execute("UPDATE _crg_shared SET version=1")
+        with patch("code_review_graph.embeddings.get_provider", return_value=provider):
+            with GraphStore(db, checkout=tmp_path) as graph, EmbeddingStore(
+                db, graph_store=graph,
+            ) as store:
+                assert set(store.search("f")) == {("left.py::f", 1.0), ("right.py::f", 1.0)}
+            provider.embed.assert_not_called()
+        with sqlite3.connect(db) as conn:
+            assert conn.execute("SELECT version FROM _crg_shared").fetchone() == (3,)
+            assert conn.execute("SELECT COUNT(*) FROM crg_vector_payloads").fetchone() == (1,)
+            assert conn.execute("SELECT COUNT(*) FROM crg_vector_scopes").fetchone() == (0,)
+
+    def test_prune_previews_expired_vectors_and_keeps_active_links(self, tmp_path, monkeypatch):
+        from code_review_graph.prune import prune
+
+        db = tmp_path / "shared.db"
+        monkeypatch.setenv("CRG_SHARED_DB", str(db))
+        monkeypatch.setenv("CRG_RETENTION_DAYS", "7")
+        monkeypatch.setenv("CRG_RETENTION_PERCENT", "100")
+        monkeypatch.setenv("CRG_RETENTION_MAX_MIB", "1")
+        provider = MagicMock()
+        provider.name = "test:prune"
+        provider.embed.return_value = [[1.0, 0.0], [0.0, 1.0]]
+        provider.embed_query.return_value = [1.0, 0.0]
+        deleted, kept = (self._make_node(index) for index in range(2))
+        with patch("code_review_graph.embeddings.get_provider", return_value=provider):
+            with GraphStore(db, checkout=tmp_path) as graph, EmbeddingStore(
+                db, graph_store=graph,
+            ) as store:
+                assert store.embed_nodes([deleted, kept]) == 2
+                store.remove_node(deleted.qualified_name)
+            monkeypatch.setenv("CRG_RETENTION_DAYS", "invalid")
+            with pytest.raises(ValueError, match="CRG_RETENTION_DAYS"):
+                prune(apply=True)
+            monkeypatch.setenv("CRG_RETENTION_DAYS", "7")
+            assert "orphan vectors -0" in prune().summary()
+            with sqlite3.connect(db) as conn:
+                conn.execute("UPDATE crg_vector_payloads SET orphaned_at=0 WHERE link_count=0")
+            assert "orphan vectors -1" in prune().summary()
+            with sqlite3.connect(db) as conn:
+                assert conn.execute("SELECT COUNT(*) FROM crg_vector_payloads").fetchone() == (2,)
+            assert "orphan vectors -1 (8 bytes)" in prune(apply=True, compact=True).summary()
+            with GraphStore(db, checkout=tmp_path, read_only=True) as graph, EmbeddingStore(
+                db, graph_store=graph,
+            ) as store:
+                assert store.search("query") == [(kept.qualified_name, 0.0)]
 
     def test_store_initializes(self, tmp_path):
         db = tmp_path / "embeddings.db"
@@ -204,6 +349,28 @@ class TestEmbeddingStore:
             assert [len(call) for call in provider.calls] == [2, 2, 1]
             assert store.count() == 5
             store.close()
+
+    def test_same_document_reuses_vector_for_new_symbols_and_after_reopen(self, tmp_path):
+        db = tmp_path / "embeddings.db"
+        provider = MagicMock(name="provider")
+        provider.name = "test:document"
+        provider.embed.return_value = [[1.0, 0.0]]
+        provider.embed_query.return_value = [1.0, 0.0]
+        original = self._make_node(1)
+        equivalent = replace(original, id=2, file_path="other.py",
+                             qualified_name="other.py::func_1")
+        moved = replace(original, id=3, file_path="moved.py",
+                        qualified_name="moved.py::func_1")
+        with patch("code_review_graph.embeddings.get_provider", return_value=provider):
+            with EmbeddingStore(db) as store:
+                assert store.embed_nodes([original, equivalent]) == 2
+            provider.embed.assert_called_once_with([_node_to_text(original)])
+            with EmbeddingStore(db) as reopened:
+                assert reopened.embed_nodes([moved]) == 1
+                assert set(reopened.search("test")) == {
+                    (node.qualified_name, 1.0) for node in (original, equivalent, moved)
+                }
+            provider.embed.assert_called_once()
 
     def test_embed_nodes_preserves_completed_batches_on_later_failure(self, tmp_path):
         db = tmp_path / "embeddings.db"
@@ -658,10 +825,14 @@ class TestGetProviderValidation:
                 get_provider("  OPENAI ")
 
     def test_case_normalized_for_minimax(self):
-        with patch.dict(os.environ, {
-            "MINIMAX_API_KEY": "fake",
-            "CRG_ACCEPT_CLOUD_EMBEDDINGS": "1",
-        }, clear=False):
+        with patch.dict(
+            os.environ,
+            {
+                "MINIMAX_API_KEY": "fake",
+                "CRG_ACCEPT_CLOUD_EMBEDDINGS": "1",
+            },
+            clear=False,
+        ):
             with patch(
                 "code_review_graph.embeddings.MiniMaxEmbeddingProvider",
             ) as mock_cls:
@@ -709,7 +880,10 @@ class TestGetProviderValidation:
     @patch("code_review_graph.embeddings.LocalEmbeddingProvider")
     @patch("code_review_graph.embeddings._check_available", return_value=True)
     def test_explicit_blank_stays_local_when_openai_env_configured(
-        self, _mock_available, local_cls, openai_cls,
+        self,
+        _mock_available,
+        local_cls,
+        openai_cls,
     ):
         """Only an omitted provider should use the configured OpenAI default."""
         local_cls.return_value = MagicMock()
@@ -747,7 +921,9 @@ class TestGetProviderModel:
 
     @patch("code_review_graph.embeddings._check_available", return_value=False)
     def test_embedding_store_unavailable_without_local_dependency(
-        self, _mock_available, tmp_path,
+        self,
+        _mock_available,
+        tmp_path,
     ):
         db = tmp_path / "embeddings.db"
         store = EmbeddingStore(db, provider="local")
@@ -791,10 +967,14 @@ class TestCloudProviderWarning:
 
     def test_accept_env_var_suppresses_warning(self, capsys):
         """Setting CRG_ACCEPT_CLOUD_EMBEDDINGS=1 silences the warning."""
-        with patch.dict(os.environ, {
-            "MINIMAX_API_KEY": "fake",
-            "CRG_ACCEPT_CLOUD_EMBEDDINGS": "1",
-        }, clear=False):
+        with patch.dict(
+            os.environ,
+            {
+                "MINIMAX_API_KEY": "fake",
+                "CRG_ACCEPT_CLOUD_EMBEDDINGS": "1",
+            },
+            clear=False,
+        ):
             with patch(
                 "code_review_graph.embeddings.MiniMaxEmbeddingProvider",
             ) as mock_cls:
@@ -846,11 +1026,13 @@ class TestMiniMaxEmbeddingProvider:
     def test_embed_calls_api_with_db_type(self):
         provider = MiniMaxEmbeddingProvider(api_key="test-key")
         mock_vectors = [[0.1] * 1536, [0.2] * 1536]
-        mock_response = json.dumps({
-            "vectors": mock_vectors,
-            "total_tokens": 10,
-            "base_resp": {"status_code": 0, "status_msg": "success"},
-        }).encode("utf-8")
+        mock_response = json.dumps(
+            {
+                "vectors": mock_vectors,
+                "total_tokens": 10,
+                "base_resp": {"status_code": 0, "status_msg": "success"},
+            }
+        ).encode("utf-8")
 
         mock_resp_obj = MagicMock()
         mock_resp_obj.read.return_value = mock_response
@@ -871,11 +1053,13 @@ class TestMiniMaxEmbeddingProvider:
     def test_embed_query_calls_api_with_query_type(self):
         provider = MiniMaxEmbeddingProvider(api_key="test-key")
         mock_vectors = [[0.5] * 1536]
-        mock_response = json.dumps({
-            "vectors": mock_vectors,
-            "total_tokens": 5,
-            "base_resp": {"status_code": 0, "status_msg": "success"},
-        }).encode("utf-8")
+        mock_response = json.dumps(
+            {
+                "vectors": mock_vectors,
+                "total_tokens": 5,
+                "base_resp": {"status_code": 0, "status_msg": "success"},
+            }
+        ).encode("utf-8")
 
         mock_resp_obj = MagicMock()
         mock_resp_obj.read.return_value = mock_response
@@ -893,10 +1077,12 @@ class TestMiniMaxEmbeddingProvider:
 
     def test_embed_api_error_raises(self):
         provider = MiniMaxEmbeddingProvider(api_key="test-key")
-        mock_response = json.dumps({
-            "vectors": [],
-            "base_resp": {"status_code": 1001, "status_msg": "invalid api key"},
-        }).encode("utf-8")
+        mock_response = json.dumps(
+            {
+                "vectors": [],
+                "base_resp": {"status_code": 1001, "status_msg": "invalid api key"},
+            }
+        ).encode("utf-8")
 
         mock_resp_obj = MagicMock()
         mock_resp_obj.read.return_value = mock_response
@@ -912,11 +1098,13 @@ class TestMiniMaxEmbeddingProvider:
         # Cloudflare-fronted gateways with HTTP 403 / error 1010. CRG must
         # send an explicit User-Agent so requests get through.
         provider = MiniMaxEmbeddingProvider(api_key="test-key")
-        mock_response = json.dumps({
-            "vectors": [[0.1] * 1536],
-            "total_tokens": 1,
-            "base_resp": {"status_code": 0, "status_msg": "success"},
-        }).encode("utf-8")
+        mock_response = json.dumps(
+            {
+                "vectors": [[0.1] * 1536],
+                "total_tokens": 1,
+                "base_resp": {"status_code": 0, "status_msg": "success"},
+            }
+        ).encode("utf-8")
 
         mock_resp_obj = MagicMock()
         mock_resp_obj.read.return_value = mock_response
@@ -948,12 +1136,14 @@ class TestGetProviderMiniMax:
 
 
 def _make_voyage_response(vectors: list[list[float]]) -> MagicMock:
-    body = json.dumps({
-        "data": [{"embedding": v, "index": i} for i, v in enumerate(vectors)],
-        "model": "voyage-code-3",
-        "object": "list",
-        "usage": {"total_tokens": 5},
-    }).encode("utf-8")
+    body = json.dumps(
+        {
+            "data": [{"embedding": v, "index": i} for i, v in enumerate(vectors)],
+            "model": "voyage-code-3",
+            "object": "list",
+            "usage": {"total_tokens": 5},
+        }
+    ).encode("utf-8")
     mock = MagicMock()
     mock.read.return_value = body
     mock.__enter__ = MagicMock(return_value=mock)
@@ -973,10 +1163,7 @@ class TestVoyageEmbeddingProvider:
             output_dtype="float",
         )
 
-        assert (
-            provider.name
-            == "voyage:voyage-code-3:dim1024:float@https://api.voyageai.com/v1"
-        )
+        assert provider.name == "voyage:voyage-code-3:dim1024:float@https://api.voyageai.com/v1"
 
     def test_default_dimension_before_call(self):
         provider = VoyageEmbeddingProvider(api_key="k")
@@ -1034,12 +1221,14 @@ class TestVoyageEmbeddingProvider:
 
     def test_response_without_index_field_falls_back_to_server_order(self):
         provider = VoyageEmbeddingProvider(api_key="k")
-        body = json.dumps({
-            "data": [
-                {"embedding": [1.0]},
-                {"embedding": [2.0]},
-            ],
-        }).encode("utf-8")
+        body = json.dumps(
+            {
+                "data": [
+                    {"embedding": [1.0]},
+                    {"embedding": [2.0]},
+                ],
+            }
+        ).encode("utf-8")
         mock = MagicMock()
         mock.read.return_value = body
         mock.__enter__ = MagicMock(return_value=mock)
@@ -1095,9 +1284,7 @@ class TestGetProviderVoyage:
             provider = get_provider("voyage")
 
         assert isinstance(provider, VoyageEmbeddingProvider)
-        assert provider.name == (
-            "voyage:voyage-code-3:dim1024:float@https://api.voyageai.com/v1"
-        )
+        assert provider.name == ("voyage:voyage-code-3:dim1024:float@https://api.voyageai.com/v1")
 
     def test_get_provider_voyage_without_key_raises(self):
         with patch.dict(os.environ, {}, clear=True):
@@ -1119,9 +1306,7 @@ class TestGetProviderVoyage:
 
         assert isinstance(provider, VoyageEmbeddingProvider)
         assert provider._min_interval_sec == 21.0
-        assert provider.name == (
-            "voyage:voyage-code-3:dim512:float@https://voyage.example.test/v1"
-        )
+        assert provider.name == ("voyage:voyage-code-3:dim512:float@https://voyage.example.test/v1")
 
     def test_get_provider_voyage_ignores_local_embedding_model_env(self):
         env = {
@@ -1133,9 +1318,7 @@ class TestGetProviderVoyage:
             provider = get_provider("voyage")
 
         assert isinstance(provider, VoyageEmbeddingProvider)
-        assert provider.name == (
-            "voyage:voyage-code-3:dim1024:float@https://api.voyageai.com/v1"
-        )
+        assert provider.name == ("voyage:voyage-code-3:dim1024:float@https://api.voyageai.com/v1")
 
 
 class TestEmbeddingStoreContextManager:
@@ -1164,12 +1347,14 @@ class TestEmbeddingStoreContextManager:
 
 
 def _make_openai_response(vectors: list[list[float]]) -> MagicMock:
-    body = json.dumps({
-        "data": [{"embedding": v, "index": i} for i, v in enumerate(vectors)],
-        "model": "text-embedding-3-small",
-        "object": "list",
-        "usage": {"prompt_tokens": 5, "total_tokens": 5},
-    }).encode("utf-8")
+    body = json.dumps(
+        {
+            "data": [{"embedding": v, "index": i} for i, v in enumerate(vectors)],
+            "model": "text-embedding-3-small",
+            "object": "list",
+            "usage": {"prompt_tokens": 5, "total_tokens": 5},
+        }
+    ).encode("utf-8")
     mock = MagicMock()
     mock.read.return_value = body
     mock.__enter__ = MagicMock(return_value=mock)
@@ -1218,6 +1403,65 @@ def openai_loopback_server():
         thread.join(timeout=5)
 
 
+def test_shared_hybrid_search_uses_published_branch_vectors(tmp_path, openai_loopback_server):
+    base_url, requests = openai_loopback_server
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    home = tmp_path / "home"
+    env = {
+        **os.environ,
+        "CRG_HOME": str(home),
+        "CRG_SHARED_DB": str(tmp_path / "shared.db"),
+        "CRG_OPENAI_API_KEY": "local-test",
+        "CRG_OPENAI_BASE_URL": base_url,
+        "CRG_OPENAI_MODEL": "text-embedding-3-small",
+        "CRG_RETENTION_DAYS": "0",
+    }
+
+    def git(*args):
+        subprocess.run(
+            ["git", "-C", str(repo), "-c", "user.name=CRG",
+             "-c", "user.email=crg@example.invalid", "-c", "commit.gpgsign=false", *args],
+            check=True, capture_output=True, timeout=15,
+        )
+
+    def run(*args, scoped=True):
+        return subprocess.check_output(
+            [sys.executable, "-m", "code_review_graph", *args,
+             *(("--repo", str(repo)) if scoped else ())],
+            env=env, text=True, timeout=30,
+        )
+
+    source = repo / "app.py"
+    git("init", "-qb", "main")
+    source.write_text("def main_invoice(): return 1\n", encoding="utf-8")
+    git("add", "app.py")
+    git("commit", "-qm", "main")
+    run("build")
+    run("embed", "--provider", "openai", "--model", "text-embedding-3-small")
+    before = json.loads(run("search", "main_invoice"))
+    assert before["search_mode"] == "hybrid"
+    assert before["results"][0]["name"] == "main_invoice"
+
+    git("checkout", "-qb", "feature")
+    source.write_text("def feature_only(): return 2\n", encoding="utf-8")
+    git("add", "app.py")
+    git("commit", "-qm", "feature")
+    run("build")
+    run("embed", "--provider", "openai", "--model", "text-embedding-3-small")
+    with sqlite3.connect(tmp_path / "shared.db") as db:
+        assert db.execute(
+            "SELECT p.link_count FROM crg_vector_payloads p "
+            "JOIN crg_generation_projection_vectors g ON g.payload_id=p.id "
+            "WHERE g.ref='refs/heads/main'",
+        ).fetchall() == [(0,)]
+    run("prune", "--apply", scoped=False)
+    git("checkout", "-q", "main")
+    before_requests = len(requests)
+    assert json.loads(run("search", "main_invoice")) == before
+    assert [request["input"] for request in requests[before_requests:]] == [["main_invoice"]]
+
+
 class TestIsLocalhostUrl:
     """Ensure localhost detection is robust against subdomain tricks."""
 
@@ -1247,19 +1491,25 @@ class TestIsLocalhostUrl:
 class TestOpenAIEmbeddingProvider:
     def test_name_includes_model(self):
         p = OpenAIEmbeddingProvider(
-            api_key="k", base_url="http://localhost:3000/v1", model="text-embedding-3-small",
+            api_key="k",
+            base_url="http://localhost:3000/v1",
+            model="text-embedding-3-small",
         )
         assert p.name == "openai:text-embedding-3-small@http://localhost:3000/v1"
 
     def test_default_dimension_before_call(self):
         p = OpenAIEmbeddingProvider(
-            api_key="k", base_url="http://localhost:3000/v1", model="m",
+            api_key="k",
+            base_url="http://localhost:3000/v1",
+            model="m",
         )
         assert p.dimension == 1536  # fallback until first response
 
     def test_dimension_captured_from_response(self):
         p = OpenAIEmbeddingProvider(
-            api_key="k", base_url="http://localhost:3000/v1", model="m",
+            api_key="k",
+            base_url="http://localhost:3000/v1",
+            model="m",
         )
         with patch(
             "urllib.request.urlopen",
@@ -1301,8 +1551,10 @@ class TestOpenAIEmbeddingProvider:
 
     def test_explicit_dimension_forwarded_in_payload(self):
         p = OpenAIEmbeddingProvider(
-            api_key="k", base_url="http://localhost:3000/v1",
-            model="text-embedding-3-large", dimension=256,
+            api_key="k",
+            base_url="http://localhost:3000/v1",
+            model="text-embedding-3-large",
+            dimension=256,
         )
         with patch(
             "urllib.request.urlopen",
@@ -1313,7 +1565,8 @@ class TestOpenAIEmbeddingProvider:
         assert payload["dimensions"] == 256
 
     def test_loopback_auto_learned_dimension_is_never_resent(
-        self, openai_loopback_server,
+        self,
+        openai_loopback_server,
     ):
         base_url, payloads = openai_loopback_server
         provider = OpenAIEmbeddingProvider(
@@ -1330,7 +1583,8 @@ class TestOpenAIEmbeddingProvider:
         assert all("dimensions" not in payload for payload in payloads)
 
     def test_loopback_explicit_dimension_is_sent_for_custom_model_alias(
-        self, openai_loopback_server,
+        self,
+        openai_loopback_server,
     ):
         base_url, payloads = openai_loopback_server
         provider = OpenAIEmbeddingProvider(
@@ -1341,11 +1595,13 @@ class TestOpenAIEmbeddingProvider:
         )
 
         assert len(provider.embed_query("custom alias")) == 4
-        assert payloads == [{
-            "model": "azure-production-deployment",
-            "input": ["custom alias"],
-            "dimensions": 4,
-        }]
+        assert payloads == [
+            {
+                "model": "azure-production-deployment",
+                "input": ["custom alias"],
+                "dimensions": 4,
+            }
+        ]
 
     def test_auto_learned_dimension_omitted_for_non_v3_models(self):
         # Many OpenAI-compatible providers (SiliconFlow, Cohere, voyage-3,
@@ -1353,7 +1609,8 @@ class TestOpenAIEmbeddingProvider:
         # HTTP 400. The provider auto-learns dimension from the first
         # response and would otherwise forward it on every subsequent call.
         p = OpenAIEmbeddingProvider(
-            api_key="k", base_url="http://localhost:3000/v1",
+            api_key="k",
+            base_url="http://localhost:3000/v1",
             model="BAAI/bge-m3",
         )
         with patch(
@@ -1381,8 +1638,10 @@ class TestOpenAIEmbeddingProvider:
         # compatible gateways can expose dimension-capable models under
         # arbitrary aliases.
         p = OpenAIEmbeddingProvider(
-            api_key="k", base_url="http://localhost:3000/v1",
-            model="BAAI/bge-m3", dimension=1024,
+            api_key="k",
+            base_url="http://localhost:3000/v1",
+            model="BAAI/bge-m3",
+            dimension=1024,
         )
         with patch(
             "urllib.request.urlopen",
@@ -1395,8 +1654,10 @@ class TestOpenAIEmbeddingProvider:
     def test_explicit_dimension_forwarded_for_v3_models(self):
         # Regression guard: v3 models must still honor the pinned dimension.
         p = OpenAIEmbeddingProvider(
-            api_key="k", base_url="http://localhost:3000/v1",
-            model="text-embedding-3-large", dimension=512,
+            api_key="k",
+            base_url="http://localhost:3000/v1",
+            model="text-embedding-3-large",
+            dimension=512,
         )
         with patch(
             "urllib.request.urlopen",
@@ -1408,7 +1669,9 @@ class TestOpenAIEmbeddingProvider:
 
     def test_base_url_trailing_slash_stripped(self):
         p = OpenAIEmbeddingProvider(
-            api_key="k", base_url="http://localhost:3000/v1/", model="m",
+            api_key="k",
+            base_url="http://localhost:3000/v1/",
+            model="m",
         )
         with patch(
             "urllib.request.urlopen",
@@ -1420,11 +1683,15 @@ class TestOpenAIEmbeddingProvider:
 
     def test_embed_api_error_raises(self):
         p = OpenAIEmbeddingProvider(
-            api_key="k", base_url="http://localhost:3000/v1", model="m",
+            api_key="k",
+            base_url="http://localhost:3000/v1",
+            model="m",
         )
-        err_body = json.dumps({
-            "error": {"message": "invalid api key", "type": "invalid_request_error"},
-        }).encode("utf-8")
+        err_body = json.dumps(
+            {
+                "error": {"message": "invalid api key", "type": "invalid_request_error"},
+            }
+        ).encode("utf-8")
         mock = MagicMock()
         mock.read.return_value = err_body
         mock.__enter__ = MagicMock(return_value=mock)
@@ -1435,7 +1702,9 @@ class TestOpenAIEmbeddingProvider:
 
     def test_embed_empty_data_raises(self):
         p = OpenAIEmbeddingProvider(
-            api_key="k", base_url="http://localhost:3000/v1", model="m",
+            api_key="k",
+            base_url="http://localhost:3000/v1",
+            model="m",
         )
         body = json.dumps({"data": []}).encode("utf-8")
         mock = MagicMock()
@@ -1448,7 +1717,9 @@ class TestOpenAIEmbeddingProvider:
 
     def test_batching_splits_into_100_per_request(self):
         p = OpenAIEmbeddingProvider(
-            api_key="k", base_url="http://localhost:3000/v1", model="m",
+            api_key="k",
+            base_url="http://localhost:3000/v1",
+            model="m",
         )
         texts = [f"text-{i}" for i in range(250)]
         call_count = {"n": 0}
@@ -1470,7 +1741,9 @@ class TestOpenAIEmbeddingProvider:
         """new-api gateways (e.g. text-embedding-v4) cap batch at 10 —
         user must be able to lower the batch size to avoid 400 errors."""
         p = OpenAIEmbeddingProvider(
-            api_key="k", base_url="http://localhost:3000/v1", model="m",
+            api_key="k",
+            base_url="http://localhost:3000/v1",
+            model="m",
             batch_size=10,
         )
         texts = [f"t-{i}" for i in range(25)]
@@ -1491,7 +1764,9 @@ class TestOpenAIEmbeddingProvider:
     def test_empty_input_returns_empty(self):
         """embed([]) must short-circuit without hitting the API."""
         p = OpenAIEmbeddingProvider(
-            api_key="k", base_url="http://localhost:3000/v1", model="m",
+            api_key="k",
+            base_url="http://localhost:3000/v1",
+            model="m",
         )
         with patch("urllib.request.urlopen") as mock_urlopen:
             assert p.embed([]) == []
@@ -1503,15 +1778,18 @@ class TestOpenAIEmbeddingProvider:
         store silently reuses vectors from a different backend's vector space.
         (Codex review HIGH finding.)"""
         p1 = OpenAIEmbeddingProvider(
-            api_key="k", base_url="https://api.openai.com/v1",
+            api_key="k",
+            base_url="https://api.openai.com/v1",
             model="text-embedding-3-small",
         )
         p2 = OpenAIEmbeddingProvider(
-            api_key="k", base_url="https://openrouter.ai/api/v1",
+            api_key="k",
+            base_url="https://openrouter.ai/api/v1",
             model="text-embedding-3-small",
         )
         p3 = OpenAIEmbeddingProvider(
-            api_key="k", base_url="http://127.0.0.1:3000/v1",
+            api_key="k",
+            base_url="http://127.0.0.1:3000/v1",
             model="text-embedding-3-small",
         )
         assert p1.name != p2.name != p3.name
@@ -1522,10 +1800,14 @@ class TestOpenAIEmbeddingProvider:
     def test_trailing_slash_does_not_change_identity(self):
         """A trailing slash on base_url must not cause a re-embed."""
         p1 = OpenAIEmbeddingProvider(
-            api_key="k", base_url="http://localhost:3000/v1", model="m",
+            api_key="k",
+            base_url="http://localhost:3000/v1",
+            model="m",
         )
         p2 = OpenAIEmbeddingProvider(
-            api_key="k", base_url="http://localhost:3000/v1/", model="m",
+            api_key="k",
+            base_url="http://localhost:3000/v1/",
+            model="m",
         )
         assert p1.name == p2.name
 
@@ -1534,10 +1816,14 @@ class TestOpenAIEmbeddingProvider:
         different backends and must NOT share cached vectors.
         (Codex round-2 HIGH finding.)"""
         p1 = OpenAIEmbeddingProvider(
-            api_key="k", base_url="https://gw.example.com/openai/v1", model="m",
+            api_key="k",
+            base_url="https://gw.example.com/openai/v1",
+            model="m",
         )
         p2 = OpenAIEmbeddingProvider(
-            api_key="k", base_url="https://gw.example.com/vendor-b/v1", model="m",
+            api_key="k",
+            base_url="https://gw.example.com/vendor-b/v1",
+            model="m",
         )
         assert p1.name != p2.name
         assert p1.name == "openai:m@https://gw.example.com/openai/v1"
@@ -1549,22 +1835,32 @@ class TestOpenAIEmbeddingProvider:
         a pointless re-embed by spelling the port differently.
         (Codex round-2 MED finding.)"""
         p1 = OpenAIEmbeddingProvider(
-            api_key="k", base_url="https://api.openai.com/v1", model="m",
+            api_key="k",
+            base_url="https://api.openai.com/v1",
+            model="m",
         )
         p2 = OpenAIEmbeddingProvider(
-            api_key="k", base_url="https://api.openai.com:443/v1", model="m",
+            api_key="k",
+            base_url="https://api.openai.com:443/v1",
+            model="m",
         )
         p3 = OpenAIEmbeddingProvider(
-            api_key="k", base_url="http://example.com:80/v1", model="m",
+            api_key="k",
+            base_url="http://example.com:80/v1",
+            model="m",
         )
         p4 = OpenAIEmbeddingProvider(
-            api_key="k", base_url="http://example.com/v1", model="m",
+            api_key="k",
+            base_url="http://example.com/v1",
+            model="m",
         )
         assert p1.name == p2.name
         assert p3.name == p4.name
         # Non-default port still affects identity (normal case).
         p5 = OpenAIEmbeddingProvider(
-            api_key="k", base_url="https://api.openai.com:8443/v1", model="m",
+            api_key="k",
+            base_url="https://api.openai.com:8443/v1",
+            model="m",
         )
         assert p5.name != p1.name
 
@@ -1573,10 +1869,14 @@ class TestOpenAIEmbeddingProvider:
         (which gets persisted into the embeddings table). This is an
         at-rest credential-leak defense. (Codex round-2 MED finding.)"""
         p_plain = OpenAIEmbeddingProvider(
-            api_key="k", base_url="https://api.example.com/v1", model="m",
+            api_key="k",
+            base_url="https://api.example.com/v1",
+            model="m",
         )
         p_auth = OpenAIEmbeddingProvider(
-            api_key="k", base_url="https://user:secret@api.example.com/v1", model="m",
+            api_key="k",
+            base_url="https://user:secret@api.example.com/v1",
+            model="m",
         )
         # 1. Same identity — userinfo stripped.
         assert p_plain.name == p_auth.name
@@ -1588,7 +1888,9 @@ class TestOpenAIEmbeddingProvider:
         """IPv6 hostnames must round-trip cleanly, with brackets restored
         when a non-default port is attached."""
         p = OpenAIEmbeddingProvider(
-            api_key="k", base_url="http://[::1]:3000/v1", model="m",
+            api_key="k",
+            base_url="http://[::1]:3000/v1",
+            model="m",
         )
         assert p.name == "openai:m@http://[::1]:3000/v1"
 
@@ -1596,14 +1898,18 @@ class TestOpenAIEmbeddingProvider:
         """Length-only checks let duplicate/missing indices through. We
         require a strict 0..N-1 permutation. (Codex round-2 MED finding.)"""
         p = OpenAIEmbeddingProvider(
-            api_key="k", base_url="http://localhost:3000/v1", model="m",
+            api_key="k",
+            base_url="http://localhost:3000/v1",
+            model="m",
         )
-        bad = json.dumps({
-            "data": [
-                {"embedding": [1.0], "index": 0},
-                {"embedding": [2.0], "index": 0},  # duplicate 0, missing 1
-            ],
-        }).encode("utf-8")
+        bad = json.dumps(
+            {
+                "data": [
+                    {"embedding": [1.0], "index": 0},
+                    {"embedding": [2.0], "index": 0},  # duplicate 0, missing 1
+                ],
+            }
+        ).encode("utf-8")
         mock = MagicMock()
         mock.read.return_value = bad
         mock.__enter__ = MagicMock(return_value=mock)
@@ -1615,14 +1921,18 @@ class TestOpenAIEmbeddingProvider:
     def test_response_with_out_of_range_index_raises(self):
         """Index >= N is invalid even if count matches."""
         p = OpenAIEmbeddingProvider(
-            api_key="k", base_url="http://localhost:3000/v1", model="m",
+            api_key="k",
+            base_url="http://localhost:3000/v1",
+            model="m",
         )
-        bad = json.dumps({
-            "data": [
-                {"embedding": [1.0], "index": 0},
-                {"embedding": [2.0], "index": 5},  # out-of-range
-            ],
-        }).encode("utf-8")
+        bad = json.dumps(
+            {
+                "data": [
+                    {"embedding": [1.0], "index": 0},
+                    {"embedding": [2.0], "index": 5},  # out-of-range
+                ],
+            }
+        ).encode("utf-8")
         mock = MagicMock()
         mock.read.return_value = bad
         mock.__enter__ = MagicMock(return_value=mock)
@@ -1636,14 +1946,18 @@ class TestOpenAIEmbeddingProvider:
         length check is the only safety net available — we must still
         succeed on length match and fail on mismatch."""
         p = OpenAIEmbeddingProvider(
-            api_key="k", base_url="http://localhost:3000/v1", model="m",
+            api_key="k",
+            base_url="http://localhost:3000/v1",
+            model="m",
         )
-        no_idx = json.dumps({
-            "data": [
-                {"embedding": [1.0]},
-                {"embedding": [2.0]},
-            ],
-        }).encode("utf-8")
+        no_idx = json.dumps(
+            {
+                "data": [
+                    {"embedding": [1.0]},
+                    {"embedding": [2.0]},
+                ],
+            }
+        ).encode("utf-8")
         mock = MagicMock()
         mock.read.return_value = no_idx
         mock.__enter__ = MagicMock(return_value=mock)
@@ -1658,10 +1972,14 @@ class TestOpenAIEmbeddingProvider:
         in practice (dev vs prod gateway, pre/post TLS migration). They
         must NOT share cached vectors. (Codex round-3 HIGH finding.)"""
         p_http = OpenAIEmbeddingProvider(
-            api_key="k", base_url="http://gw.example.com/v1", model="m",
+            api_key="k",
+            base_url="http://gw.example.com/v1",
+            model="m",
         )
         p_https = OpenAIEmbeddingProvider(
-            api_key="k", base_url="https://gw.example.com/v1", model="m",
+            api_key="k",
+            base_url="https://gw.example.com/v1",
+            model="m",
         )
         assert p_http.name != p_https.name
         # http default port 80 and https default port 443 are both stripped
@@ -1674,14 +1992,18 @@ class TestOpenAIEmbeddingProvider:
         than silently zip in server order (which would misplace the
         indexed items). (Codex round-3 HIGH finding.)"""
         p = OpenAIEmbeddingProvider(
-            api_key="k", base_url="http://localhost:3000/v1", model="m",
+            api_key="k",
+            base_url="http://localhost:3000/v1",
+            model="m",
         )
-        mixed = json.dumps({
-            "data": [
-                {"embedding": [1.0], "index": 1},  # claims to be for input[1]
-                {"embedding": [2.0]},              # no index
-            ],
-        }).encode("utf-8")
+        mixed = json.dumps(
+            {
+                "data": [
+                    {"embedding": [1.0], "index": 1},  # claims to be for input[1]
+                    {"embedding": [2.0]},  # no index
+                ],
+            }
+        ).encode("utf-8")
         mock = MagicMock()
         mock.read.return_value = mixed
         mock.__enter__ = MagicMock(return_value=mock)
@@ -1695,14 +2017,18 @@ class TestOpenAIEmbeddingProvider:
         Our permutation check requires ints; string index must fall to
         the mixed-case refusal, not silently slip through."""
         p = OpenAIEmbeddingProvider(
-            api_key="k", base_url="http://localhost:3000/v1", model="m",
+            api_key="k",
+            base_url="http://localhost:3000/v1",
+            model="m",
         )
-        bad = json.dumps({
-            "data": [
-                {"embedding": [1.0], "index": "0"},  # string, not int
-                {"embedding": [2.0], "index": "1"},
-            ],
-        }).encode("utf-8")
+        bad = json.dumps(
+            {
+                "data": [
+                    {"embedding": [1.0], "index": "0"},  # string, not int
+                    {"embedding": [2.0], "index": "1"},
+                ],
+            }
+        ).encode("utf-8")
         mock = MagicMock()
         mock.read.return_value = bad
         mock.__enter__ = MagicMock(return_value=mock)
@@ -1716,10 +2042,13 @@ class TestOpenAIEmbeddingProvider:
         when reverse proxies drop idle connections. Must retry.
         (Codex round-2 LOW finding.)"""
         import http.client
+
         monkeypatch.setattr(time, "sleep", lambda s: None)
 
         p = OpenAIEmbeddingProvider(
-            api_key="k", base_url="http://localhost:3000/v1", model="m",
+            api_key="k",
+            base_url="http://localhost:3000/v1",
+            model="m",
         )
         call_count = {"n": 0}
 
@@ -1738,7 +2067,9 @@ class TestOpenAIEmbeddingProvider:
         rather than silently zip misaligned vectors onto the wrong nodes.
         (Codex review MED finding.)"""
         p = OpenAIEmbeddingProvider(
-            api_key="k", base_url="http://localhost:3000/v1", model="m",
+            api_key="k",
+            base_url="http://localhost:3000/v1",
+            model="m",
         )
         with patch(
             "urllib.request.urlopen",
@@ -1752,16 +2083,20 @@ class TestOpenAIEmbeddingProvider:
         the `index` field, so vec[i] always corresponds to input[i].
         (Codex review MED finding.)"""
         p = OpenAIEmbeddingProvider(
-            api_key="k", base_url="http://localhost:3000/v1", model="m",
+            api_key="k",
+            base_url="http://localhost:3000/v1",
+            model="m",
         )
         # Return data in order 2, 0, 1 (i.e. reversed-ish).
-        reordered = json.dumps({
-            "data": [
-                {"embedding": [3.0], "index": 2},
-                {"embedding": [1.0], "index": 0},
-                {"embedding": [2.0], "index": 1},
-            ],
-        }).encode("utf-8")
+        reordered = json.dumps(
+            {
+                "data": [
+                    {"embedding": [3.0], "index": 2},
+                    {"embedding": [1.0], "index": 0},
+                    {"embedding": [2.0], "index": 1},
+                ],
+            }
+        ).encode("utf-8")
         mock = MagicMock()
         mock.read.return_value = reordered
         mock.__enter__ = MagicMock(return_value=mock)
@@ -1776,10 +2111,13 @@ class TestOpenAIEmbeddingProvider:
         (Codex review MED finding — prior substring match missed the fact
         that error bodies may not contain '429'.)"""
         import urllib.error
+
         monkeypatch.setattr(time, "sleep", lambda s: None)  # instant retries
 
         p = OpenAIEmbeddingProvider(
-            api_key="k", base_url="http://localhost:3000/v1", model="m",
+            api_key="k",
+            base_url="http://localhost:3000/v1",
+            model="m",
         )
         call_count = {"n": 0}
         good_response = _make_openai_response([[0.1] * 5])
@@ -1790,7 +2128,9 @@ class TestOpenAIEmbeddingProvider:
             if call_count["n"] == 1:
                 raise urllib.error.HTTPError(
                     url="http://localhost:3000/v1/embeddings",
-                    code=429, msg="Too Many Requests", hdrs=None,
+                    code=429,
+                    msg="Too Many Requests",
+                    hdrs=Message(),
                     fp=io.BytesIO(b'{"error": "rate limited"}'),
                 )
             return good_response
@@ -1805,10 +2145,13 @@ class TestOpenAIEmbeddingProvider:
         previously these surfaced as str(exc) without '429/500/503' so
         retry never fired. (Codex review MED finding.)"""
         import socket
+
         monkeypatch.setattr(time, "sleep", lambda s: None)
 
         p = OpenAIEmbeddingProvider(
-            api_key="k", base_url="http://localhost:3000/v1", model="m",
+            api_key="k",
+            base_url="http://localhost:3000/v1",
+            model="m",
         )
         call_count = {"n": 0}
         good_response = _make_openai_response([[0.1] * 5])
@@ -1827,10 +2170,13 @@ class TestOpenAIEmbeddingProvider:
     def test_retry_on_url_error(self, monkeypatch):
         """URLError (connection refused, DNS failure) must retry."""
         import urllib.error
+
         monkeypatch.setattr(time, "sleep", lambda s: None)
 
         p = OpenAIEmbeddingProvider(
-            api_key="k", base_url="http://localhost:3000/v1", model="m",
+            api_key="k",
+            base_url="http://localhost:3000/v1",
+            model="m",
         )
         call_count = {"n": 0}
 
@@ -1849,10 +2195,13 @@ class TestOpenAIEmbeddingProvider:
         fast rather than waste time on 3 retries."""
         import io
         import urllib.error
+
         monkeypatch.setattr(time, "sleep", lambda s: None)
 
         p = OpenAIEmbeddingProvider(
-            api_key="k", base_url="http://localhost:3000/v1", model="m",
+            api_key="k",
+            base_url="http://localhost:3000/v1",
+            model="m",
         )
         call_count = {"n": 0}
 
@@ -1860,7 +2209,9 @@ class TestOpenAIEmbeddingProvider:
             call_count["n"] += 1
             raise urllib.error.HTTPError(
                 url="http://localhost:3000/v1/embeddings",
-                code=400, msg="Bad Request", hdrs=None,
+                code=400,
+                msg="Bad Request",
+                hdrs=Message(),
                 fp=io.BytesIO(b'{"error": {"message": "invalid model"}}'),
             )
 
@@ -1873,17 +2224,26 @@ class TestOpenAIEmbeddingProvider:
         """If the gateway returns 400 with a JSON error body, the RuntimeError
         must include the real reason, not just 'HTTP Error 400: Bad Request'."""
         import urllib.error
+
         p = OpenAIEmbeddingProvider(
-            api_key="k", base_url="http://localhost:3000/v1", model="m",
+            api_key="k",
+            base_url="http://localhost:3000/v1",
+            model="m",
         )
-        body = json.dumps({
-            "error": {"message": "batch size is invalid, should not exceed 10."},
-        }).encode("utf-8")
+        body = json.dumps(
+            {
+                "error": {"message": "batch size is invalid, should not exceed 10."},
+            }
+        ).encode("utf-8")
         # HTTPError's .read() returns bytes from its fp
         import io
+
         err = urllib.error.HTTPError(
             url="http://localhost:3000/v1/embeddings",
-            code=400, msg="Bad Request", hdrs=None, fp=io.BytesIO(body),
+            code=400,
+            msg="Bad Request",
+            hdrs=Message(),
+            fp=io.BytesIO(body),
         )
         with patch("urllib.request.urlopen", side_effect=err):
             with pytest.raises(RuntimeError, match="batch size is invalid"):

@@ -278,6 +278,3 @@ class TestWiki:
         # Non-ASCII CJK scripts fall back to unnamed
         assert _slugify("パーサー") == "unnamed"
         assert _slugify("解析器") == "unnamed"
-
-
-

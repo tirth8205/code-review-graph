@@ -1119,6 +1119,40 @@ class Plain:
             f"Expected resolved alias import, got targets: {[e.target for e in imports]}"
         )
 
+    def test_reused_syntax_resolves_imports_in_each_checkout(self, tmp_path, monkeypatch):
+        from code_review_graph import parser as parser_module
+
+        load = parser_module._load_tree_sitter_parser
+        syntax_calls = []
+
+        def load_counted(grammar):
+            parser = load(grammar)
+
+            class CountedParser:
+                language = parser.language
+
+                def parse(self, source):
+                    syntax_calls.append(source)
+                    return parser.parse(source)
+
+            return CountedParser()
+
+        monkeypatch.setattr(parser_module, "_load_tree_sitter_parser", load_counted)
+        source = b'import { value } from "./shared"; export const reuseWitness = value;'
+        for name, extension in (("left", "ts"), ("right", "js")):
+            root = tmp_path / name
+            root.mkdir()
+            target = root / f"shared.{extension}"
+            target.write_text("export const value = 1;", encoding="utf-8")
+            importer = root / "reuse.ts"
+            importer.write_bytes(source)
+            nodes, edges = CodeParser(root).parse_file(importer)
+            assert any(node.file_path == importer.as_posix() for node in nodes)
+            assert {edge.target for edge in edges if edge.kind == "IMPORTS_FROM"} == {
+                target.as_posix()
+            }
+        assert syntax_calls == [source]
+
     def test_tsconfig_missing_gracefully_handled(self):
         """Files without a tsconfig should still parse without errors."""
         import os

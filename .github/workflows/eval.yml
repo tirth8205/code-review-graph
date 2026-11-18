@@ -18,10 +18,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
 
@@ -40,7 +40,7 @@ jobs:
 
       - name: Upload result CSVs
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: eval-results-${{ github.run_id }}
           path: evaluate/results/*.csv
@@ -51,7 +51,11 @@ jobs:
         if: always()
         run: |
           python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
-          from code_review_graph.eval.reporter import generate_full_report
+          from code_review_graph.eval.reporter import (
+              generate_full_report,
+              median_token_reduction,
+              median_token_reduction_table,
+          )
 
           print("# Weekly eval (report-only)")
           print()
@@ -60,6 +64,29 @@ jobs:
               "Regressions are reported here and in the CSV artifact but do "
               "not fail CI."
           )
+          print()
+
+          # Headline: median per-question token reduction from this run.
+          print("## Headline: median per-question token reduction")
+          print()
+          stats = median_token_reduction("evaluate/results")
+          if stats["median_percent"] is not None:
+              print(
+                  f"**{stats['median_percent']}%** median reduction over "
+                  f"{stats['n']} questions "
+                  f"(source: `{stats['source']}`). This is the median of "
+                  "per-question `(1 - graph_tokens / baseline_tokens) * 100`."
+              )
+          else:
+              print(
+                  "No usable rows this run (clone or measurement failures) — "
+                  "see the CSV artifact for details."
+              )
+          print()
+          print(median_token_reduction_table("evaluate/results"))
+          print()
+
+          print("## Full report")
           print()
           print(generate_full_report("evaluate/results"))
           PY

@@ -7,6 +7,7 @@
  */
 
 import * as assert from 'assert';
+import { execFileSync } from 'node:child_process';
 import { after, before, describe, it } from 'node:test';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -497,4 +498,89 @@ describe('SqliteReader', () => {
       new SqliteReader('/nonexistent/path/to/database.db');
     });
   });
+});
+
+it('reads isolated checkouts written by the CRG CLI', { skip: !process.env.CRG_TEST_CLI }, () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'crg-shared-consumer-'));
+  const shared = path.join(root, 'shared.db');
+  try {
+    const checkouts = ['left', 'right'].map(name => {
+      const repo = path.join(root, name);
+      fs.mkdirSync(repo);
+      fs.writeFileSync(path.join(repo, 'app.py'), `def ${name}_only(): return 1\n`);
+      execFileSync(process.env.CRG_TEST_CLI!, ['build', '--repo', repo], {
+        env: { ...process.env, CRG_SHARED_DB: shared, CRG_HOME: path.join(root, 'home') },
+        timeout: 30_000,
+      });
+      return repo;
+    });
+    for (const [index, repo] of checkouts.entries()) {
+      const reader = new SqliteReader(shared, repo);
+      try {
+        assert.equal(reader.checkSchemaCompatibility(), undefined);
+        assert.deepEqual(reader.searchNodes('_only').map(node => node.name), [
+          index === 0 ? 'left_only' : 'right_only',
+        ]);
+      } finally {
+        reader.close();
+      }
+    }
+    assert.deepEqual(fs.readdirSync(root).filter(name => name.endsWith('.db')), ['shared.db']);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+it('keeps the same reader on the branch generation after checkout', { skip: !process.env.CRG_TEST_CLI }, () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'crg-generation-consumer-'));
+  const shared = path.join(root, 'shared.db');
+  const repo = path.join(root, 'repo');
+  fs.mkdirSync(repo);
+  const git = (...args: string[]) => execFileSync('git', [
+    '-C', repo, '-c', 'user.name=CRG', '-c', 'user.email=crg@example.invalid',
+    '-c', 'commit.gpgsign=false', ...args,
+  ]);
+  const build = (db?: string) => {
+    const env = { ...process.env, CRG_HOME: path.join(root, 'home') };
+    if (db) Object.assign(env, { CRG_SHARED_DB: db });
+    else delete (env as NodeJS.ProcessEnv).CRG_SHARED_DB;
+    execFileSync(process.env.CRG_TEST_CLI!, ['build', '--repo', repo], { env, timeout: 30_000 });
+  };
+  const fixture = (name: string) => {
+    fs.writeFileSync(path.join(repo, 'app.py'), `def helper(): return 1\ndef ${name}(): return helper()\n`);
+    git('add', 'app.py');
+    git('commit', '-qm', name);
+  };
+  try {
+    git('init', '-qb', 'main');
+    fixture('main_only');
+    build(shared);
+    git('checkout', '-qb', 'feature');
+    fixture('feature_only');
+    build(shared);
+    const reader = new SqliteReader(shared, repo);
+    try {
+      assert.deepEqual(reader.searchNodes('_only').map(node => node.name), ['feature_only']);
+      git('checkout', '-q', 'main');
+      build();
+      const clean = new SqliteReader(path.join(repo, '.code-review-graph', 'graph.db'));
+      try {
+        const nodes = reader.searchNodes('_only');
+        assert.equal(reader.checkSchemaCompatibility(), undefined);
+        assert.equal(reader.isValid(), true);
+        assert.deepEqual(nodes.map(n => n.qualifiedName), clean.searchNodes('_only').map(n => n.qualifiedName));
+        assert.deepEqual(nodes.map(n => n.name), ['main_only']);
+        const edges = (index: SqliteReader) => index.getEdgesBySource(nodes[0].qualifiedName)
+          .map(edge => [edge.kind, edge.sourceQualified, edge.targetQualified, edge.line]).sort();
+        assert.deepEqual(edges(reader), edges(clean));
+        assert.equal(reader.getStats().totalNodes, clean.getStats().totalNodes);
+      } finally {
+        clean.close();
+      }
+    } finally {
+      reader.close();
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

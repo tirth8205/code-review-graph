@@ -65,13 +65,14 @@ def test_methods_and_local_calls_remain_in_their_enclosing_scope(tmp_path, langu
 
 
 @pytest.mark.parametrize('language', ['python', 'ruby'])
-def test_unique_leaf_method_identities_keep_their_existing_spelling(language):
+def test_a_method_always_carries_its_full_lexical_scope(language):
     path = Path('m.py' if language == 'python' else 'm.rb')
     source = SOURCES[language].split('class Beta:' if language == 'python' else 'module Beta')[0]
     parser = CodeParser()
     nodes, _ = parser.parse_bytes(path, source.encode())
     methods = [n for n in nodes if n.kind == 'Function']
-    # Ruby methods always carry the full lexical scope, so only Python has a leaf spelling.
+    # The class node is keyed ``Alpha.Same``, so its members must be too; a leaf
+    # spelling left the container with no methods and rename/query blind to them.
     scope = 'Same' if language == 'python' else 'Alpha.Same'
     assert {parser._node_qualified(n) for n in methods} == {
         f'{path}::{scope}.run', f'{path}::{scope}.helper'
@@ -510,10 +511,11 @@ end
 def test_scope_index_is_limited_to_python(language, source):
     """Other languages (C# identity is #964's) are left to their own scheme."""
     parser = CodeParser()
-    tree = parser._get_parser(language).parse(source)
-    import_map = {}
-    parser._index_ambiguous_method_scopes(tree.root_node, language, import_map)
-    assert import_map == {}
+    path = Path("Same.java" if language == "java" else "Same.cs")
+    nodes, _ = parser.parse_bytes(path, source)
+    member = "run" if language == "java" else "Run"
+    methods = {node.parent_name for node in nodes if node.name == member}
+    assert methods == {"Alpha.Same", "Beta.Same"}
 
 
 @pytest.mark.parametrize('name, source, caller, member', [
@@ -590,8 +592,7 @@ def test_rows_written_with_the_old_identity_are_replaced(tmp_path, monkeypatch, 
         # their writer collapsed the resulting same-file collisions (#585).
         with monkeypatch.context() as legacy:
             legacy.setattr(
-                CodeParser, '_index_ambiguous_method_scopes',
-                lambda self, root, language, import_map: None, raising=False,
+                CodeParser, '_extract_ambiguous_method_scopes', lambda self, root: {},
             )
             legacy.setattr(
                 GraphStore, '_plan_file_identities',

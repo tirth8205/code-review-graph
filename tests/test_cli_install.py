@@ -230,7 +230,8 @@ def test_handle_init_codex_skips_claude_skills(monkeypatch, tmp_path, capsys):
         called["codex_skill"] = True
         return tmp_path / "codex" / "skills" / "code-review-graph"
 
-    def _install_git_hook(repo_root):
+    def _install_git_hook(repo_root, *, required):
+        assert required is False
         called["git_hook"] = True
         return repo_root / ".git" / "hooks" / "pre-commit"
 

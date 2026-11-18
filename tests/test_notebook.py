@@ -37,8 +37,7 @@ class TestNotebookParsing:
 
     def test_parses_class_methods(self):
         methods = [
-            n for n in self.nodes
-            if n.kind == "Function" and n.parent_name == "DataProcessor"
+            n for n in self.nodes if n.kind == "Function" and n.parent_name == "DataProcessor"
         ]
         names = {m.name for m in methods}
         assert "__init__" in names
@@ -51,6 +50,31 @@ class TestNotebookParsing:
         assert funcs["multiply"].extra.get("cell_index") == 2
         # DataProcessor.__init__ is in cell index 3
         assert funcs["__init__"].extra.get("cell_index") == 3
+
+    @pytest.mark.parametrize("first_ending", ["", "\n", "\n\n"])
+    @pytest.mark.parametrize("second_ending", ["", "\n", "\n\n"])
+    def test_cell_indices_follow_concatenated_source(self, first_ending, second_ending):
+        sources = [
+            "def first():\n    return 'olá'" + first_ending,
+            "def second():\n    return first()" + second_ending,
+            "class Third:\n    def method(self):\n        return second()",
+        ]
+        notebook = {
+            "cells": [{"cell_type": "code", "source": source} for source in sources],
+            "metadata": {"kernelspec": {"language": "python"}},
+            "nbformat": 4,
+        }
+        nodes, edges = self.parser.parse_bytes(
+            Path("line_endings.ipynb"), json.dumps(notebook).encode("utf-8")
+        )
+        definitions = {node.name: node for node in nodes if node.kind != "File"}
+        assert definitions["first"].extra["cell_index"] == 0
+        assert definitions["second"].extra["cell_index"] == 1
+        assert definitions["Third"].extra["cell_index"] == 2
+        assert definitions["method"].extra["cell_index"] == 2
+        assert definitions["second"].line_start == sources[0].count("\n") + 2
+        assert definitions["Third"].line_start == sum(s.count("\n") + 1 for s in sources[:2]) + 1
+        assert any(edge.kind == "CALLS" and edge.target.endswith("::first") for edge in edges)
 
     def test_cross_cell_calls(self):
         calls = [e for e in self.edges if e.kind == "CALLS"]
@@ -79,7 +103,8 @@ class TestNotebookParsing:
         }
         source = json.dumps(nb).encode("utf-8")
         nodes, edges = self.parser.parse_bytes(
-            Path("empty.ipynb"), source,
+            Path("empty.ipynb"),
+            source,
         )
         assert len(nodes) == 1
         assert nodes[0].kind == "File"
@@ -88,14 +113,15 @@ class TestNotebookParsing:
     def test_non_python_kernel(self):
         nb = {
             "cells": [
-                {"cell_type": "code", "source": ["println(\"hello\")"], "outputs": []},
+                {"cell_type": "code", "source": ['println("hello")'], "outputs": []},
             ],
             "metadata": {"kernelspec": {"language": "scala"}},
             "nbformat": 4,
         }
         source = json.dumps(nb).encode("utf-8")
         nodes, edges = self.parser.parse_bytes(
-            Path("scala_notebook.ipynb"), source,
+            Path("scala_notebook.ipynb"),
+            source,
         )
         assert nodes == []
         assert edges == []
@@ -103,7 +129,8 @@ class TestNotebookParsing:
     def test_malformed_json(self):
         source = b"not valid json {{"
         nodes, edges = self.parser.parse_bytes(
-            Path("bad.ipynb"), source,
+            Path("bad.ipynb"),
+            source,
         )
         assert nodes == []
         assert edges == []
@@ -119,9 +146,7 @@ class TestSqlTableExtraction:
         assert "catalog.schema.table" in matches
 
     def test_join(self):
-        matches = _SQL_TABLE_RE.findall(
-            "SELECT * FROM a JOIN b ON a.id = b.id"
-        )
+        matches = _SQL_TABLE_RE.findall("SELECT * FROM a JOIN b ON a.id = b.id")
         assert "a" in matches
         assert "b" in matches
 
@@ -134,27 +159,19 @@ class TestSqlTableExtraction:
         assert matches == ["my_db.new_table"]
 
     def test_create_table_if_not_exists(self):
-        matches = _SQL_TABLE_RE.findall(
-            "CREATE TABLE IF NOT EXISTS my_db.new_table (id INT)"
-        )
+        matches = _SQL_TABLE_RE.findall("CREATE TABLE IF NOT EXISTS my_db.new_table (id INT)")
         assert matches == ["my_db.new_table"]
 
     def test_create_or_replace_view(self):
-        matches = _SQL_TABLE_RE.findall(
-            "CREATE OR REPLACE VIEW my_view AS SELECT 1"
-        )
+        matches = _SQL_TABLE_RE.findall("CREATE OR REPLACE VIEW my_view AS SELECT 1")
         assert "my_view" in matches
 
     def test_create_or_replace_view_if_not_exists(self):
-        matches = _SQL_TABLE_RE.findall(
-            "CREATE OR REPLACE VIEW IF NOT EXISTS my_view AS SELECT 1"
-        )
+        matches = _SQL_TABLE_RE.findall("CREATE OR REPLACE VIEW IF NOT EXISTS my_view AS SELECT 1")
         assert matches == ["my_view"]
 
     def test_insert_overwrite(self):
-        matches = _SQL_TABLE_RE.findall(
-            "INSERT OVERWRITE catalog.schema.tbl SELECT * FROM src"
-        )
+        matches = _SQL_TABLE_RE.findall("INSERT OVERWRITE catalog.schema.tbl SELECT * FROM src")
         assert "catalog.schema.tbl" in matches
         assert "src" in matches
 
@@ -253,8 +270,7 @@ class TestDatabricksPyNotebook:
 
     def test_python_imports(self):
         imports = [
-            e for e in self.edges
-            if e.kind == "IMPORTS_FROM" and e.target in ("os", "pathlib")
+            e for e in self.edges if e.kind == "IMPORTS_FROM" and e.target in ("os", "pathlib")
         ]
         targets = {e.target for e in imports}
         assert "os" in targets
@@ -309,11 +325,7 @@ class TestDatabricksPyNotebook:
         """Regression guard for #239 bug 2: ensure the CRLF fix does not
         break the existing LF path (pre-existing behavior)."""
         lf_source = (
-            b"# Databricks notebook source\n"
-            b"# COMMAND ----------\n"
-            b"\n"
-            b"def lf_fn():\n"
-            b"    return 1\n"
+            b"# Databricks notebook source\n# COMMAND ----------\n\ndef lf_fn():\n    return 1\n"
         )
         nodes, edges = self.parser.parse_bytes(Path("nb.py"), lf_source)
         file_nodes = [n for n in nodes if n.kind == "File"]
@@ -326,10 +338,7 @@ class TestDatabricksPyNotebook:
         NOT be detected as a Databricks export.  Protects against the
         naive fix of using ``startswith`` without checking the line end.
         """
-        false_positive = (
-            b"# Databricks notebook source code examples\n"
-            b"def hello(): return 1\n"
-        )
+        false_positive = b"# Databricks notebook source code examples\ndef hello(): return 1\n"
         nodes, edges = self.parser.parse_bytes(Path("doc.py"), false_positive)
         file_nodes = [n for n in nodes if n.kind == "File"]
         assert len(file_nodes) == 1
@@ -367,7 +376,8 @@ class TestRKernelNotebook:
         }
         source = json.dumps(nb).encode("utf-8")
         self.nodes, self.edges = self.parser.parse_bytes(
-            Path("analysis.ipynb"), source,
+            Path("analysis.ipynb"),
+            source,
         )
 
     def test_r_kernel_not_skipped(self):
@@ -376,13 +386,11 @@ class TestRKernelNotebook:
         file_node = [n for n in self.nodes if n.kind == "File"][0]
         assert file_node.language == "r"
 
-    @pytest.mark.xfail(reason="Requires R parser mappings from PR #43")
     def test_r_kernel_detects_functions(self):
         funcs = [n for n in self.nodes if n.kind == "Function"]
         names = {f.name for f in funcs}
         assert "clean_data" in names
 
-    @pytest.mark.xfail(reason="Requires R parser mappings from PR #43")
     def test_r_kernel_detects_imports(self):
         imports = [e for e in self.edges if e.kind == "IMPORTS_FROM"]
         targets = {e.target for e in imports}

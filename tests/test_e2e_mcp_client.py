@@ -26,8 +26,10 @@ import asyncio
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -363,6 +365,592 @@ async def test_mcp_client_full_review_journey(tmp_path: Path) -> None:
             # this is what keeps the test independent of the host machine.
             assert repos["repos"] == [], repos
             assert repos["summary"].startswith("0 registered repository")
+
+
+@pytest.mark.e2e
+def test_shared_postprocess_invalidates_previous_refresh(tmp_path):
+    repo = _make_fixture_repo(tmp_path)
+    env = {**_server_env(tmp_path / "home"), "CRG_SHARED_DB": str(tmp_path / "shared.db")}
+
+    def run(*args):
+        return subprocess.check_output(
+            [sys.executable, "-m", "code_review_graph", *args, "--repo", str(repo)],
+            env=env, text=True, timeout=30,
+        )
+
+    run("build")
+    mixed = subprocess.run(
+        [sys.executable, "-m", "code_review_graph", "status",
+         "--repo", str(repo), "--data-dir", str(tmp_path / "other")],
+        env=env, capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert mixed.returncode == 2
+    assert "Select either CRG_SHARED_DB or --data-dir" in mixed.stderr
+    run("update")
+    assert "Reused the completed refresh" in run("update")
+    run("postprocess")
+    assert "Reused the completed refresh" not in run("update")
+    assert "Reused the completed refresh" in run("update")
+
+
+@pytest.mark.e2e
+def test_shared_cli_reuses_python_facts_but_resolves_imports_locally(tmp_path):
+    env = {**_server_env(tmp_path / "home"), "CRG_SHARED_DB": str(tmp_path / "shared.db")}
+    importer = (
+        "from typing import TYPE_CHECKING\n"
+        "from dependency import value\n"
+        "if TYPE_CHECKING:\n"
+        "    from dependency import Annotation\n"
+        "def invoke(argument):\n"
+        "    return value(argument)\n"
+        "class Outer:\n"
+        "    class Service:\n"
+        "        def run(self): return invoke(1)\n"
+        "class Other:\n"
+        "    class Service:\n"
+        "        def run(self): return invoke(2)\n"
+    )
+
+    def cli(root, *args, **overrides):
+        return subprocess.run(
+            [sys.executable, "-m", "code_review_graph", *args, "--repo", str(root)],
+            env={**env, **overrides}, text=True, capture_output=True, check=True, timeout=60,
+        )
+
+    cases = (
+        ("left", "dependency.py", "git@github.com:example/crg-facts.git", 0, 8),
+        ("right", "dependency/__init__.py", "https://github.com/Example/CRG-Facts", 8, 0),
+        ("unrelated", "dependency.py", "https://github.com/example/other", 0, 8),
+    )
+    for name, dependency, remote, reused, extracted in cases:
+        root = tmp_path / name
+        root.mkdir()
+        _git(root, "init")
+        _git(root, "remote", "add", "source", remote)
+        (root / "consumer.py").write_text(importer, encoding="utf-8")
+        for index in range(6):
+            (root / f"filler{index}.py").write_text(
+                f"def filler_{index}(): return {index}\n", encoding="utf-8",
+            )
+        target = root / dependency
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("def value(argument): return argument\n", encoding="utf-8")
+        _git(root, "add", ".")
+        _git(root, "commit", "-qm", "Fixture")
+        worker_env = {"CRG_SERIAL_PARSE": "1"} if name == "left" else {
+            "CRG_PARSE_EXECUTOR": "process",
+        }
+        built = cli(root, "build", "--skip-postprocess", **worker_env)
+        assert f"Python syntax facts: {reused} reused, {extracted} extracted" in built.stderr
+        assert f"Tree-sitter method scopes: {reused} reused, {extracted} extracted" in built.stderr
+        summary = json.loads(cli(root, "query", "file_summary", "consumer.py").stdout)
+        methods = {row["qualified_name"].split("::", 1)[1] for row in summary["results"]
+                   if row["name"] == "run"}
+        assert methods == {"Outer.Service.run", "Other.Service.run"}
+        imports = json.loads(cli(root, "query", "imports_of", "consumer.py").stdout)
+        targets = {_posix(row["import_target"]) for row in imports["results"]}
+        assert target.as_posix() in targets
+        assert not any(str(tmp_path / peer) in item for peer in ("left", "right", "unrelated")
+                       if peer != name for item in targets)
+
+
+@pytest.mark.e2e
+def test_shared_cli_interns_equivalent_input_manifests_across_worktrees(tmp_path):
+    repo = _make_fixture_repo(tmp_path)
+    source = repo / "pkg" / "service.py"
+    source.write_text(SERVICE_PY.replace(
+        '    return {"total":', '    """Reconcile aerospace invoices."""\n    return {"total":',
+    ) + "\n\ndef invoice_entry(items): return build_invoice(items)\n", encoding="utf-8")
+    _git(repo, "add", "pkg/service.py")
+    _git(repo, "commit", "-qm", "Document the main entry point")
+    sibling = tmp_path / "sibling"
+    _git(repo, "worktree", "add", "-q", "-b", "different-branch", str(sibling))
+    database = tmp_path / "shared.db"
+    env = {**_server_env(tmp_path / "home"), "CRG_SHARED_DB": str(database)}
+    os.utime(sibling / "pkg" / "core.py", (42, 42))
+    for root in (repo, sibling):
+        subprocess.run(
+            [sys.executable, "-m", "code_review_graph", "build", "--repo", str(root)],
+            env=env, check=True, capture_output=True, timeout=30,
+        )
+    with sqlite3.connect(database) as db:
+        assert db.execute("SELECT COUNT(*) FROM crg_graph_inputs").fetchone() == (1,)
+        assert db.execute("SELECT COUNT(DISTINCT generation_id) "
+                          "FROM crg_generation_bindings").fetchone() == (1,)
+
+    def query(root, *args, environment=env, check=True):
+        completed = subprocess.run(
+            [sys.executable, "-m", "code_review_graph", "query", *args, "--repo", str(root)],
+            env=environment, capture_output=True, check=check, text=True, timeout=30,
+        )
+        if not check:
+            return completed
+        result = json.loads(completed.stdout)
+        # Local row IDs are not identities across materializations. Compare
+        # every returned symbol and relation by its qualified identity.
+        for key in ("results", "edges"):
+            for row in result[key]:
+                row.pop("id", None)
+            result[key].sort(key=lambda row: json.dumps(row, sort_keys=True))
+        return result
+
+    checks = (("file_summary", "pkg/service.py"), ("imports_of", "pkg/service.py"),
+              ("callers_of", "compute_total"))
+    before = {args: query(repo, *args) for args in checks}
+
+    def run_tool(*args, environment=env):
+        return json.loads(subprocess.check_output(
+            [sys.executable, "-m", "code_review_graph", *args, "--repo", str(repo)],
+            env=environment, text=True, timeout=30,
+        ))
+
+    search = run_tool("search", "aerospace")
+    assert search["results"] and search["search_mode"] == "fts"
+    assert search["results"][0]["name"] == "build_invoice"
+    flows = run_tool("flows")["flows"]
+    assert flows
+    flow_id = str(flows[0]["id"])
+
+    def steps(environment=env):
+        flow = run_tool("flow", "--id", flow_id, environment=environment)["flow"]
+        return [(step["qualified_name"], step["file"], step["line_start"])
+                for step in flow["steps"]]
+
+    main_steps = steps()
+    assert main_steps
+
+    def community_snapshot(environment=env):
+        listed = run_tool("communities", environment=environment)
+        assert listed["status"] == "ok" and listed["communities"]
+        output = {}
+        for row in listed["communities"]:
+            detail = run_tool("community", "--id", str(row["id"]), "--members",
+                              environment=environment)
+            assert detail["status"] == "ok"
+            community = detail["community"]
+            output[row["name"]] = (
+                row["size"], row["cohesion"], set(row["members"]),
+                {item["qualified_name"] for item in community["member_details"]},
+            )
+        architecture = run_tool("architecture", environment=environment)
+        assert architecture["status"] == "ok"
+        refs = {row["id"]: row["name"] for row in architecture["communities"]}
+        cross_edges = sorted(
+            (refs[edge["source_community"]], refs[edge["target_community"]],
+             edge["edge_kind"], edge["source"], edge["target"])
+            for edge in architecture["cross_community_edges"]
+        )
+        return output, architecture["summary"], architecture["warnings"], cross_edges
+
+    original_communities = community_snapshot()
+    assert any("build_invoice" in member for row in original_communities[0].values()
+               for member in row[2])
+    for args, expected in before.items():
+        assert query(repo, *args, "--generation-ref", "refs/heads/main") == expected
+
+    _git(repo, "checkout", "-qb", "feature")
+    (repo / "pkg" / "service.py").write_text("def only_on_feature(): return 3\n", encoding="utf-8")
+    _git(repo, "add", "pkg/service.py")
+    _git(repo, "commit", "-qm", "Divergent feature")
+    build = [sys.executable, "-m", "code_review_graph", "build", "--repo", str(repo)]
+    subprocess.run(build, env=env, check=True, capture_output=True, timeout=30)
+    clean = _server_env(tmp_path / "clean-home")
+    clean.pop("CRG_SHARED_DB", None)
+    subprocess.run(build, env=clean, check=True, capture_output=True, timeout=30)
+    for args in checks:
+        assert query(repo, *args, "--generation-ref", "refs/heads/feature") == query(
+            repo, *args, environment=clean,
+        )
+    _git(repo, "checkout", "-q", "main")
+    subprocess.run(build, env=clean, check=True, capture_output=True, timeout=30)
+    retention = subprocess.check_output(
+        [sys.executable, "-m", "code_review_graph", "prune", "--apply"],
+        env={**env, "CRG_RETENTION_DAYS": "0"}, text=True, timeout=30,
+    )
+    assert "orphan parser facts -0, orphan manifests -0" in retention
+    with sqlite3.connect(database) as db:
+        assert db.execute("SELECT COUNT(*) FROM crg_graph_inputs").fetchone() == (2,)
+        assert db.execute("SELECT COUNT(*) FROM crg_graph_input_bindings").fetchone() == (3,)
+    historical_search = run_tool("search", "aerospace")
+    assert historical_search == search == run_tool("search", "aerospace", environment=clean)
+    assert steps() == main_steps == steps(clean)
+    assert community_snapshot() == original_communities == community_snapshot(clean)
+    assert not run_tool("search", "only_on_feature")["results"]
+    for args, expected in before.items():
+        assert query(repo, *args, "--generation-ref", "refs/heads/main") == expected
+        assert query(repo, *args) == expected
+    missing = query(sibling, *checks[0], "--generation-ref", "refs/heads/feature", check=False)
+    assert missing.returncode != 0 and "No published graph generation" in missing.stderr
+
+
+@pytest.mark.e2e
+def test_shared_cli_reuses_watcher_reconciliation(tmp_path):
+    repo = _make_fixture_repo(tmp_path)
+    env = {**_server_env(tmp_path / "home"), "CRG_SHARED_DB": str(tmp_path / "shared.db")}
+
+    def cli(*args):
+        return [sys.executable, "-m", "code_review_graph", *args, "--repo", str(repo)]
+
+    subprocess.check_call(cli("build"), env=env, timeout=30)
+    relative = "pkg/view.py"
+    (repo / relative).write_text("def reconciled_by_watch(): return 1\n", encoding="utf-8")
+    log = tmp_path / "watch.log"
+    with log.open("wb") as output, subprocess.Popen(
+        cli("watch"), env={**env, "CRG_WATCH_HEALTH_INTERVAL": "1"},
+        stdout=output, stderr=subprocess.STDOUT,
+    ) as watcher:
+        try:
+            deadline = time.monotonic() + 30
+            while "Watching " not in log.read_text(encoding="utf-8"):
+                assert watcher.poll() is None, log.read_text(encoding="utf-8")
+                assert time.monotonic() < deadline, log.read_text(encoding="utf-8")
+                time.sleep(0.1)
+            assert "Reused the completed refresh" in subprocess.check_output(
+                cli("update"), env=env, text=True, timeout=30,
+            )
+            query = json.loads(subprocess.check_output(
+                cli("query", "file_summary", relative), env=env, text=True, timeout=30,
+            ))
+            assert "reconciled_by_watch" in {row["name"] for row in query["results"]}
+            (repo / relative).write_text("def published_by_event(): return 2\n", encoding="utf-8")
+            while True:
+                generation = json.loads(subprocess.check_output(
+                    cli("query", "file_summary", relative, "--generation-ref", "refs/heads/main"),
+                    env=env, text=True, timeout=30,
+                ))
+                if "published_by_event" in {row["name"] for row in generation["results"]}:
+                    break
+                assert watcher.poll() is None and time.monotonic() < deadline
+                time.sleep(0.1)
+        finally:
+            watcher.terminate()
+            watcher.wait(timeout=15)
+
+
+@pytest.mark.e2e
+@pytest.mark.parametrize("legacy_version", [1, 2])
+def test_shared_cli_migrate_preserves_native_rows_and_publishes_existing_ref(
+    tmp_path, legacy_version,
+):
+    repo = _make_fixture_repo(tmp_path)
+    database = tmp_path / "shared.db"
+    env = {**_server_env(tmp_path / "home"), "CRG_SHARED_DB": str(database)}
+
+    def run(*args):
+        return subprocess.check_output(
+            [sys.executable, "-m", "code_review_graph", *args],
+            env=env, text=True, timeout=30,
+        )
+
+    run("build", "--repo", str(repo))
+    before = json.loads(run("query", "imports_of", "pkg/service.py", "--repo", str(repo)))
+    with sqlite3.connect(database) as db:
+        # Model a dc.2 shared store: retain its native checkout tables.
+        tables = db.execute(
+            "SELECT name FROM sqlite_schema WHERE type='table' "
+            "AND (name GLOB 'crg_generation_*' OR name='crg_graph_generations')",
+        ).fetchall()
+        for (table,) in tables:
+            db.execute(f"DROP TABLE {table}")
+        db.execute("UPDATE _crg_shared SET version=?", (legacy_version,))
+    assert f"{legacy_version} to 3; unresolved checkout records: 0" in run("migrate-shared")
+    assert "3 to 3; unresolved checkout records: 0" in run("migrate-shared")
+    current = json.loads(run("query", "imports_of", "pkg/service.py", "--repo", str(repo)))
+    historical = json.loads(run(
+        "query", "imports_of", "pkg/service.py", "--generation-ref", "refs/heads/main",
+        "--repo", str(repo),
+    ))
+    assert current == before and current["results"] == historical["results"]
+    with sqlite3.connect(database) as db:
+        assert db.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
+        assert not db.execute("PRAGMA foreign_key_check").fetchall()
+
+
+@pytest.mark.e2e
+def test_shared_cli_crash_rolls_back_written_rows(tmp_path):
+    repo = _make_fixture_repo(tmp_path)
+    env = {**_server_env(tmp_path / "home"), "CRG_SERIAL_PARSE": "1",
+           "CRG_SHARED_DB": str(tmp_path / "shared.db")}
+    cli = [sys.executable, "-m", "code_review_graph"]
+
+    def run(*args):
+        return subprocess.check_output(
+            [*cli, *args, "--repo", str(repo)], env=env, text=True, timeout=20,
+        )
+
+    source = repo / "pkg" / "view.py"
+    source.write_text("def previous_symbol(): return 1\n", encoding="utf-8")
+    run("build")
+    source.write_text("def replacement_symbol(): return 2\n", encoding="utf-8")
+
+    def symbols():
+        graph = json.loads(run("query", "file_summary", "pkg/view.py"))
+        return {node["name"] for node in graph["results"] if node["kind"] == "Function"}
+
+    def publication():
+        with sqlite3.connect(env["CRG_SHARED_DB"]) as db:
+            manifests = {row[0] for row in db.execute("SELECT digest FROM crg_graph_inputs")}
+            bindings = db.execute(
+                "SELECT ref, generation_id FROM crg_generation_bindings",
+            ).fetchall()
+            generations = db.execute("SELECT COUNT(*) FROM crg_graph_generations").fetchone()[0]
+            return manifests, bindings, generations
+
+    previous = publication()
+    assert len(previous[0]) == previous[2] == 1
+    entered = tmp_path / "entered"
+    producer = """
+import sys, time
+from pathlib import Path
+from code_review_graph.build_state import REFRESH_REQUEST_KEY
+from code_review_graph.cli import main
+from code_review_graph.graph import GraphStore
+
+marker = Path(sys.argv.pop(1))
+real_write = GraphStore.set_metadata
+def pause(self, key, value):
+    result = real_write(self, key, value)
+    if key == REFRESH_REQUEST_KEY:
+        marker.touch()
+        time.sleep(30)
+    return result
+GraphStore.set_metadata = pause
+main()
+"""
+    with subprocess.Popen(
+        [sys.executable, "-c", producer, str(entered),
+         "update", "--repo", str(repo)], env=env,
+    ) as child:
+        try:
+            deadline = time.monotonic() + 15
+            while not entered.exists() and child.poll() is None and time.monotonic() < deadline:
+                time.sleep(.02)
+            assert entered.exists()
+            assert symbols() == {"previous_symbol"}
+            assert publication() == previous
+        finally:
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=10)
+    assert symbols() == {"previous_symbol"}
+    assert publication() == previous
+    run("update")
+    assert symbols() == {"replacement_symbol"}
+    current = publication()
+    assert len(current[0] - previous[0]) == 1
+    assert current[1] != previous[1] and current[2] == 2
+    gc_env = {**env, "CRG_RETENTION_DAYS": "0"}
+    for flags, expected in (((), 2), (("--apply", "--compact"), 1)):
+        report = subprocess.check_output(
+            [*cli, "prune", *flags], env=gc_env, text=True, timeout=30,
+        )
+        assert "orphan generations -1" in report
+        assert "orphan parser facts -2, orphan manifests -1" in report
+        assert publication()[1:] == (current[1], expected)
+    assert symbols() == {"replacement_symbol"}
+    assert list(tmp_path.rglob("*.db")) == [tmp_path / "shared.db"]
+
+
+@pytest.mark.parametrize("outcome", ["reused", "crash", "different-profile", "new-edit"])
+async def test_cli_and_mcp_complete_a_contended_refresh(tmp_path, outcome):
+    repo = _make_fixture_repo(tmp_path)
+    crg_home = tmp_path / "refresh-home"
+    crg_home.mkdir()
+    env = {**_server_env(crg_home), "CRG_SERIAL_PARSE": "1"}
+    if outcome == "new-edit":
+        env["CRG_SHARED_DB"] = str(tmp_path / "shared.db")
+    # Keep the production parser and writer; pause the CLI process after
+    # it has taken the kernel lock and started parsing.
+    producer = """
+import sys, time
+from pathlib import Path
+from code_review_graph.cli import main
+from code_review_graph.parser import CodeParser
+
+entered, resume = map(Path, sys.argv[1:3])
+del sys.argv[1:3]
+real_parse = CodeParser.parse_bytes
+def pause(self, path, source):
+    result = real_parse(self, path, source)
+    if Path(path).name == "core.py" and not entered.exists():
+        entered.touch()
+        until = time.monotonic() + 60
+        while not resume.exists() and time.monotonic() < until:
+            time.sleep(0.02)
+        if not resume.exists():
+            raise TimeoutError("fixture never resumed the parser")
+    return result
+CodeParser.parse_bytes = pause
+main()
+"""
+    entered, resume = (tmp_path / name for name in ("entered", "resume"))
+    with subprocess.Popen(
+        [sys.executable, "-c", producer, str(entered), str(resume),
+         "build", "--wait", "--skip-postprocess", "--repo", str(repo)],
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    ) as child:
+        try:
+            deadline = time.monotonic() + 60
+            while not entered.exists() and child.poll() is None and time.monotonic() < deadline:
+                await asyncio.sleep(.02)
+            assert entered.exists()
+            if outcome == "new-edit":
+                status = subprocess.run(
+                    [sys.executable, "-m", "code_review_graph", "status", "--json",
+                     "--repo", str(repo)],
+                    env=env, capture_output=True, text=True, timeout=15, check=False,
+                )
+                assert status.returncode == 1 and "No committed graph" in status.stderr
+            params = _server_params(repo, crg_home)
+            params.env = {**env, "TEST_REFRESH_WAITER": str(tmp_path / "waiting")}
+            waiter = """
+import os
+from pathlib import Path
+from code_review_graph.cli import main
+from code_review_graph.tools import build
+
+previous = build._previous_refresh
+def mark(*args):
+    result = previous(*args)
+    Path(os.environ["TEST_REFRESH_WAITER"]).touch()
+    return result
+build._previous_refresh = mark
+main()
+"""
+            params.args = ["-c", waiter, *params.args[2:]]
+            async with stdio_client(params) as (read, write):
+                async with ClientSession(
+                    read, write, read_timeout_seconds=read_timeout(CALL_TIMEOUT),
+                ) as session:
+                    await asyncio.wait_for(session.initialize(), timeout=CALL_TIMEOUT)
+                    join = asyncio.create_task(_call(session, "build_or_update_graph_tool", {
+                        "full_rebuild": True,
+                        "postprocess": "minimal" if outcome == "different-profile" else "none",
+                        "wait_for_lock": True,
+                    }))
+                    deadline = time.monotonic() + 45
+                    while not (tmp_path / "waiting").exists():
+                        assert not join.done() and child.poll() is None
+                        assert time.monotonic() < deadline
+                        await asyncio.sleep(.02)
+                    if outcome == "crash":
+                        child.kill()
+                    else:
+                        if outcome == "new-edit":
+                            (repo / "pkg" / "core.py").write_text(
+                                CORE_PY + "\ndef arrived_during_refresh(): return 1\n",
+                                encoding="utf-8",
+                            )
+                        resume.touch()
+                    result = _payload(await join)
+                    assert result["status"] == "ok", result
+                    if outcome == "reused":
+                        assert result["refresh_reused"] is True, result
+                        assert result["files_parsed"] == 0
+                    else:
+                        assert "refresh_reused" not in result, result
+                        assert result["files_parsed"] > 0
+                    query = _payload(await _call(session, "query_graph_tool", {
+                        "pattern": "file_summary", "target": "pkg/core.py",
+                    }))
+                    names = {node["name"] for node in query["results"]}
+                    assert "compute_total" in names
+                    if outcome == "new-edit":
+                        assert "arrived_during_refresh" in names
+        finally:
+            resume.touch()
+            stdout, stderr = child.communicate(timeout=20)
+        if outcome != "crash":
+            assert child.returncode == 0, stdout + stderr
+        else:
+            assert child.returncode != 0
+
+
+async def test_mcp_shared_sqlite_isolates_sibling_worktrees(tmp_path, monkeypatch):
+    repo = _make_fixture_repo(tmp_path)
+    sibling = tmp_path / "sibling"
+    _git(repo, "worktree", "add", "-q", "-b", "sibling", str(sibling))
+    db = tmp_path / "shared.db"
+    relative_path = "pkg/view.py"
+    for root, name in ((repo, "left_symbol"), (sibling, "right_symbol")):
+        (root / relative_path).write_text(f"def {name}(): return 1\n", encoding="utf-8")
+        _git(root, "add", relative_path)
+
+    monkeypatch.setenv("CRG_SHARED_DB", str(db))
+    crg_home = tmp_path / "crg-home"
+    crg_home.mkdir()
+    async with stdio_client(
+        _server_params(repo, crg_home, multi_worktree=True)
+    ) as (read, write):
+        async with ClientSession(
+            read, write, read_timeout_seconds=read_timeout(CALL_TIMEOUT),
+        ) as session:
+            await asyncio.wait_for(session.initialize(), timeout=CALL_TIMEOUT)
+
+            async def query(root: Path, name: str, excluded: str) -> None:
+                result = _payload(await _call(session, "query_graph_tool", {
+                    "pattern": "file_summary", "target": relative_path, "repo_root": str(root),
+                }))
+                assert result["status"] == "ok", result
+                assert [row["name"] for row in result["results"]
+                        if row["kind"] == "Function"] == [name]
+                assert all(_posix(row["file_path"]) == (root / relative_path).as_posix()
+                           for row in result["results"])
+                ref = "refs/heads/main" if root == repo else "refs/heads/sibling"
+                historical = _payload(await _call(session, "query_graph_tool", {
+                    "pattern": "file_summary", "target": relative_path, "repo_root": str(root),
+                    "generation_ref": ref,
+                }))
+                assert historical["status"] == "ok", historical
+                fields = ("qualified_name", "file_path", "line_start", "line_end")
+                assert {tuple(row[key] for key in fields) for row in historical["results"]} == {
+                    tuple(row[key] for key in fields) for row in result["results"]
+                }
+                search = _payload(await _call(session, "semantic_search_nodes_tool", {
+                    "query": name, "repo_root": str(root),
+                }))
+                assert name in {node["name"] for node in search["results"]}, search
+                other = _payload(await _call(session, "semantic_search_nodes_tool", {
+                    "query": excluded, "repo_root": str(root),
+                }))
+                assert excluded not in {node["name"] for node in other["results"]}, other
+
+            async def refresh(root: Path, *, full: bool) -> dict:
+                result = _payload(await _call(session, "build_or_update_graph_tool", {
+                    "full_rebuild": full, "repo_root": str(root), "wait_for_lock": True,
+                }))
+                assert result["status"] == "ok", result
+                return result
+
+            await asyncio.gather(refresh(repo, full=True), refresh(sibling, full=True))
+            await query(repo, "left_symbol", "right_symbol")
+            await query(sibling, "right_symbol", "left_symbol")
+            assert list(tmp_path.rglob("*.db")) == [db]
+
+            source = sibling / relative_path
+            source.write_text("def right_wip(): return 42\n", encoding="utf-8")
+            await refresh(sibling, full=False)
+            await query(sibling, "right_wip", "right_symbol")
+            await query(repo, "left_symbol", "right_wip")
+            assert list(tmp_path.rglob("*.db")) == [db]
+
+            await asyncio.to_thread(
+                subprocess.check_call,
+                [sys.executable, "-m", "code_review_graph", "forget", relative_path,
+                 "--repo", str(sibling)],
+                env=_server_env(crg_home), timeout=30,
+            )
+            forgotten = _payload(await _call(session, "semantic_search_nodes_tool", {
+                "query": "right_wip", "repo_root": str(sibling),
+            }))
+            assert "right_wip" not in {row["name"] for row in forgotten["results"]}, forgotten
+            history = _payload(await _call(session, "query_graph_tool", {
+                "pattern": "file_summary", "target": relative_path, "repo_root": str(sibling),
+                "generation_ref": "refs/heads/sibling",
+            }))
+            assert not history["results"]
+            await query(repo, "left_symbol", "right_wip")
+            assert list(tmp_path.rglob("*.db")) == [db]
 
 
 async def test_mcp_multi_worktree_routes_parallel_graphs(tmp_path: Path) -> None:

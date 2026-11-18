@@ -17,6 +17,7 @@ from code_review_graph.multi_worktree import (
     MultiWorktreeRouter,
     WorktreeAuthorizer,
     _Child,
+    discover_worktrees,
     run_multi_worktree_server,
 )
 
@@ -49,6 +50,125 @@ def _repository(tmp_path: Path) -> Path:
     _git(repo, "add", "README.md")
     _git(repo, "commit", "-q", "-m", "initial")
     return repo
+
+
+def test_discovery_tracks_moved_and_detached_checkouts(tmp_path: Path) -> None:
+    repo = _repository(tmp_path)
+    linked = tmp_path / "linked space"
+    moved = tmp_path / "moved space"
+    _git(repo, "worktree", "add", "-q", "-b", "review", str(linked))
+    first = {item.root: item for item in discover_worktrees(repo)}
+    assert first[linked.resolve()].branch_ref == "refs/heads/review"
+    assert first[linked.resolve()].head == first[repo.resolve()].head
+
+    _git(linked, "checkout", "--detach")
+    _git(repo, "worktree", "move", str(linked), str(moved))
+    second = {item.root: item for item in discover_worktrees(repo)}
+    assert linked.resolve() not in second
+    assert second[moved.resolve()].branch_ref is None
+    assert second[moved.resolve()].head == first[linked.resolve()].head
+
+
+def test_daemon_reconciles_linked_worktree_membership(tmp_path: Path) -> None:
+    from code_review_graph.daemon import DaemonConfig, WatchDaemon, WatchRepo
+
+    repo = _repository(tmp_path)
+    linked = tmp_path / "linked checkout"
+    configured = WatchRepo(
+        path=str(repo.resolve()), alias="repo", data_dir=str(tmp_path / "external"),
+        discover_worktrees=True,
+    )
+    config = DaemonConfig(repos=[configured])
+    daemon = WatchDaemon(config=config)
+
+    def tick() -> None:
+        with (
+            patch.object(daemon, "_check_health", side_effect=daemon._health_stop.set),
+            patch.object(daemon._health_stop, "wait", return_value=False),
+        ):
+            daemon._health_loop()
+        daemon._health_stop.clear()
+
+    with (
+        patch.object(daemon, "_initial_build"),
+        patch.object(daemon, "_start_watcher") as start,
+        patch.object(daemon, "_save_state"),
+    ):
+        daemon.reconcile(config)
+        _git(repo, "worktree", "add", "-q", "-b", "review", str(linked))
+        tick()
+        discovered = start.call_args.args[0]
+        assert discovered.path == str(linked.resolve())
+        assert discovered.data_dir == ""
+
+        tick()
+        assert start.call_count == 2
+        _git(repo, "worktree", "remove", str(linked))
+        tick()
+        assert daemon._current_repos == {configured.alias: configured}
+
+
+def test_daemon_expires_idle_worktree_and_readmits_new_revision(tmp_path: Path) -> None:
+    from code_review_graph.daemon import DaemonConfig, WatchDaemon, WatchRepo
+
+    repo = _repository(tmp_path)
+    linked = tmp_path / "linked"
+    _git(repo, "worktree", "add", "-q", "-b", "review", str(linked))
+    parent = WatchRepo(path=str(repo), alias="repo", discover_worktrees=True,
+                       activity_ttl_seconds=10)
+    daemon = WatchDaemon(config=DaemonConfig(repos=[parent]))
+    clock = [100.0]
+    health = {"last_event_at": None, "updated_at": 100.0}
+    with (
+        patch("code_review_graph.daemon.time.time", side_effect=lambda: clock[0]),
+        patch("code_review_graph.daemon.read_watch_health", return_value=health),
+        patch.object(daemon, "_initial_build"),
+        patch.object(daemon, "_start_watcher") as start,
+        patch.object(daemon, "_save_state"),
+    ):
+        daemon.reconcile()
+        assert start.call_count == 2
+        clock[0] = 109.0
+        health["last_event_at"] = 108.0
+        daemon.reconcile()
+        clock[0] = health["updated_at"] = 118.0
+        daemon.reconcile()
+        assert len(daemon._current_repos) == 2
+        daemon.reconcile()
+        assert set(daemon._current_repos) == {parent.alias}
+        daemon.reconcile()
+        assert start.call_count == 2
+        _git(linked, "commit", "--allow-empty", "-m", "reactivate")
+        daemon.reconcile()
+        assert start.call_count == 3
+        assert start.call_args.args[0].path == str(linked.resolve())
+        dirty = linked / "README.md"
+        dirty.write_text("first edit\n", encoding="utf-8")
+        clock[0] = 129.0
+        daemon.reconcile()
+        dirty.write_text("edit during retirement\n", encoding="utf-8")
+        daemon.reconcile()
+        assert len(daemon._current_repos) == 2
+        clock[0] = 139.0
+        daemon.reconcile()
+        daemon.reconcile()
+        assert set(daemon._current_repos) == {parent.alias}
+        dirty.write_text("second edit without a commit\n", encoding="utf-8")
+        daemon.reconcile()
+        assert start.call_count == 4
+        assert start.call_args.args[0].path == str(linked.resolve())
+        # A staged-only edit has a clean index-to-worktree comparison.
+        _git(linked, "checkout", "--", "README.md")
+        clock[0] = 150.0
+        daemon.reconcile()
+        daemon.reconcile()
+        assert set(daemon._current_repos) == {parent.alias}
+        dirty.write_text("staged while idle\n", encoding="utf-8")
+        _git(linked, "add", "README.md")
+        _git(linked, "diff", "--exit-code")
+        daemon.reconcile()
+        assert start.call_count == 5
+
 
 
 def test_authorizer_accepts_linked_worktree_and_rejects_other_repo(tmp_path: Path) -> None:

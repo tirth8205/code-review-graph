@@ -70,8 +70,10 @@ def _construct_tagged(loader: _PatchLoader, _suffix: str, node: yaml.Node) -> Ta
         value = loader.construct_scalar(node)
     elif isinstance(node, yaml.SequenceNode):
         value = loader.construct_sequence(node, deep=True)
-    else:
+    elif isinstance(node, yaml.MappingNode):
         value = loader.construct_mapping(node, deep=True)
+    else:
+        raise TypeError(f"Unexpected YAML node type: {type(node).__name__}")
     return Tagged(node.tag, value)
 
 

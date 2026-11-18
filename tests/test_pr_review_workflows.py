@@ -25,7 +25,7 @@ def test_analysis_workflow_is_unprivileged_and_exports_temp_artifact():
     assert "id: review" in workflow
     assert "steps.review.outputs.comment-file" in workflow
     assert "${{ runner.temp }}/crg-report" in workflow
-    assert "actions/upload-artifact@v7" in workflow
+    assert "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" in workflow
     assert "if-no-files-found: error" in workflow
     assert "retention-days: 1" in workflow
 
@@ -58,7 +58,7 @@ def test_privileged_workflow_confines_and_validates_untrusted_artifact():
     assert "size_in_bytes" in workflow
     assert "artifact-ids: ${{ steps.artifact.outputs.artifact-id }}" in workflow
     assert "path: ${{ runner.temp }}/crg-report-download" in workflow
-    assert "actions/download-artifact@v8" in workflow
+    assert "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c" in workflow
     assert "MAX_REPORT_BYTES" in workflow
     assert "MAX_PR_NUMBER_BYTES" in workflow
     assert 'decode("utf-8")' in workflow

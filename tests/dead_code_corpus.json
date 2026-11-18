@@ -1,0 +1,183 @@
+{
+  "version": 1,
+  "default_root_env": "CRG_CORPUS_ROOT",
+  "repos": {
+    "flext": {},
+    "ai-hub": {},
+    "algar-oud-mig": {},
+    "datacosmos": {},
+    "cosmos-charts": {},
+    "cosmos-gitops": {},
+    "cosmos-recon": {}
+  },
+  "entries": [
+    {
+      "repo": "flext",
+      "name": "applicable_gate_ids",
+      "kind": "Function",
+      "path": "flext-infra/src/flext_infra/check/gate_registry.py",
+      "verdict": "live",
+      "reason_code": "value_reference",
+      "provenance": "flext-ojd3u: used at check/workspace_check.py:504,858"
+    },
+    {
+      "repo": "flext",
+      "name": "semantic_plan",
+      "kind": "Function",
+      "path": "flext-infra/src/flext_infra/codemod/batch_replacements.py",
+      "verdict": "live",
+      "reason_code": "value_reference",
+      "provenance": "flext-ojd3u: used at codemod/batch_replacements.py:185"
+    },
+    {
+      "repo": "flext",
+      "name": "read_layout",
+      "kind": "Function",
+      "path": "flext-infra/src/flext_infra/codegen/staged_package.py",
+      "verdict": "live",
+      "reason_code": "value_reference",
+      "provenance": "flext-ojd3u: passed as argument at codegen/staged_package.py:664"
+    },
+    {
+      "repo": "flext",
+      "name": "type_reference",
+      "kind": "Function",
+      "path": "flext-infra/src/flext_infra/_utilities/_semantic_cutover/nesting_references.py",
+      "verdict": "live",
+      "reason_code": "value_reference",
+      "provenance": "flext-ojd3u: passed at _semantic_cutover/nesting_references.py:782"
+    },
+    {
+      "repo": "flext",
+      "name": "unwind",
+      "kind": "Function",
+      "path": "flext-infra/src/flext_infra/_utilities/pytest_collection.py",
+      "verdict": "live",
+      "reason_code": "value_reference",
+      "provenance": "flext-ojd3u: read as observer.unwind at _utilities/pytest_collection.py:209"
+    },
+    {
+      "repo": "flext",
+      "name": "published",
+      "kind": "Function",
+      "path": "flext-infra/src/flext_infra/codegen/conform.py",
+      "verdict": "live",
+      "reason_code": "value_reference",
+      "provenance": "T1: closure handed to publish_codegen_plans(...).map(published)"
+    },
+    {
+      "repo": "flext",
+      "name": "verify",
+      "kind": "Function",
+      "path": "flext-infra/src/flext_infra/refactor/namespace_relocations.py",
+      "verdict": "live",
+      "reason_code": "value_reference",
+      "provenance": "T1: closure in validator=verify if gates is not None else None"
+    },
+    {
+      "repo": "flext",
+      "name": "quoted",
+      "kind": "Function",
+      "path": "flext-infra/src/flext_infra/_utilities/_semantic_cutover/model_aliases.py",
+      "verdict": "live",
+      "reason_code": "value_reference",
+      "provenance": "T1: closure handed to rewrite_quoted_types(...)"
+    },
+    {
+      "repo": "flext",
+      "name": "_admit_match",
+      "kind": "Function",
+      "path": "flext-infra/src/flext_infra/_utilities/_rope/restructure.py",
+      "verdict": "live",
+      "reason_code": "value_reference",
+      "provenance": "T1: method handed as match_filter=self._admit_match"
+    },
+    {
+      "repo": "flext",
+      "name": "TransformStep",
+      "kind": "Class",
+      "path": "flext-infra/src/flext_infra/_models/base.py",
+      "verdict": "live",
+      "reason_code": "export_surface",
+      "provenance": "T4: published through the generated deferred_members registry in flext_infra/_models/__init__.py"
+    },
+    {
+      "repo": "flext",
+      "name": "ConsolidatorReport",
+      "kind": "Class",
+      "path": "flext-infra/src/flext_infra/_models/_codegen/fix.py",
+      "verdict": "live",
+      "reason_code": "export_surface",
+      "provenance": "T4: published through the generated deferred_members registry"
+    },
+    {
+      "repo": "flext",
+      "name": "GitTreeStats",
+      "kind": "Class",
+      "path": "flext-infra/src/flext_infra/_models/_git/worktree_facts.py",
+      "verdict": "live",
+      "reason_code": "export_surface",
+      "provenance": "T4: published through the generated deferred_members registry"
+    },
+    {
+      "repo": "flext",
+      "name": "get_indicator",
+      "kind": "Function",
+      "path": "flext-infra/src/flext_infra/_utilities/_rope/project.py",
+      "verdict": "live",
+      "reason_code": "framework_hook",
+      "provenance": "T3: typing @override of rope ChangeIndicator, called by resourceobserver"
+    },
+    {
+      "repo": "flext",
+      "name": "managed_file_specs",
+      "kind": "Function",
+      "path": "flext-infra/src/flext_infra/_models/_config/artifact.py",
+      "verdict": "live",
+      "reason_code": "framework_hook",
+      "provenance": "T14: @computed_field + @cached_property Pydantic surface"
+    },
+    {
+      "repo": "flext",
+      "name": "artifact_order",
+      "kind": "Function",
+      "path": "flext-infra/src/flext_infra/_models/_config/templates.py",
+      "verdict": "live",
+      "reason_code": "framework_hook",
+      "provenance": "T14: computed Pydantic surface read as an attribute"
+    },
+    {
+      "repo": "flext",
+      "name": "PathRulesConfig",
+      "kind": "Class",
+      "path": "flext-infra/src/flext_infra/_models/deps_tool_config_type_checkers.py",
+      "verdict": "live",
+      "reason_code": "annotation_reference",
+      "provenance": "T14: used as a Pydantic field type"
+    },
+    {
+      "repo": "flext",
+      "name": "TestmonCacheSpec",
+      "kind": "Class",
+      "path": "flext-infra/src/flext_infra/_models/_config/make.py",
+      "verdict": "live",
+      "reason_code": "annotation_reference",
+      "provenance": "T14: used inside Annotated[...] field type"
+    },
+    {
+      "repo": "flext",
+      "name": "ExecutorEnvironmentSpec",
+      "kind": "Class",
+      "path": "flext-infra/src/flext_infra/_models/_config/make.py",
+      "verdict": "live",
+      "reason_code": "annotation_reference",
+      "provenance": "T14: used inside Annotated[...] field type"
+    }
+  ],
+  "baseline": {
+    "expected_dead": 0,
+    "false_negatives": 0,
+    "recall": null,
+    "recorded_from": "T0: regression guards for symbols the engine already resolves"
+  }
+}

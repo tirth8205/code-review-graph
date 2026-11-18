@@ -15,6 +15,7 @@ from collections import deque
 from pathlib import Path
 from typing import Iterable, Optional
 
+from . import liveness_rules
 from .constants import SECURITY_KEYWORDS as _SECURITY_KEYWORDS
 from .graph import FlowAdjacency, GraphNode, GraphStore, _sanitize_name
 from .parser import is_test_file as _is_test_file
@@ -396,11 +397,16 @@ _FRAMEWORK_DECORATOR_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\w+\.route\b", re.IGNORECASE),
 ]
 
+# The Python runtime/framework hooks (Pydantic surfaces, property, abstract and
+# overload declarations, `@override`) come from the shared catalog so the
+# dead-code engine, the parser and this heuristic cannot drift apart.
+_FRAMEWORK_DECORATOR_PATTERNS.extend(liveness_rules.PYTHON_HOOK_DECORATORS)
+
 # An override implements a supertype contract, so its caller is that contract:
 # a supertype-typed reference, a framework, or the runtime for Object.hashCode and
 # friends. The base is often outside the graph, so no hierarchy walk can rescue it.
 # That stops it being dead, but it is no flow root: one with callers is mid-flow.
-_OVERRIDE_DECORATOR = re.compile(r"^(?:java\.lang\.)?Override$")
+_OVERRIDE_DECORATOR = re.compile(r"^(?:[\w.]+\.)?[Oo]verride$")
 
 # Name patterns that indicate conventional entry points.
 _ENTRY_NAME_PATTERNS: list[re.Pattern[str]] = [
@@ -785,6 +791,8 @@ def store_flows(store: GraphStore, flows: list[dict]) -> int:
                 ),
             )
             flow_id = cursor.lastrowid
+            if flow_id is None:
+                raise RuntimeError("Inserted flow did not return a row ID")
             membership_rows.extend(
                 (flow_id, node_id, position)
                 for position, node_id in enumerate(node_ids)
@@ -971,6 +979,8 @@ def incremental_trace_flows(
                     ),
                 )
                 flow_id = cursor.lastrowid
+                if flow_id is None:
+                    raise RuntimeError("Inserted flow did not return a row ID")
                 membership_rows.extend(
                     (flow_id, node_id, position)
                     for position, node_id in enumerate(node_ids)

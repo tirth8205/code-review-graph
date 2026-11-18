@@ -16,7 +16,9 @@ from code_review_graph.tools._common import _resolve_graph_file_paths, _unmatche
 
 @pytest.fixture
 def graph(tmp_path, monkeypatch):
-    store = GraphStore(tmp_path / 'graph.db')
+    monkeypatch.delenv('CRG_DATA_DIR', raising=False)
+    monkeypatch.setenv('CRG_REPO_ROOT', str(tmp_path))
+    store = GraphStore(get_db_path(tmp_path))
     path = (tmp_path / 'src' / 'app.py').as_posix()
     store.upsert_node(NodeInfo('File', path, path, 1, 3, 'python'))
     store.upsert_node(NodeInfo('Function', 'handle', path, 1, 3, 'python'))
@@ -26,11 +28,10 @@ def graph(tmp_path, monkeypatch):
         store.upsert_edge(EdgeInfo('CALLS', f'{caller}::caller{index}',
                                   f'{path}::handle', caller, 2))
     store.commit()
-    monkeypatch.setattr(query, '_get_store', lambda _: (store, tmp_path))
-    monkeypatch.setattr(review, '_get_store', lambda _: (store, tmp_path))
-    monkeypatch.setattr(review, 'resolve_review_base', lambda root, base: base)
-    yield store, tmp_path
-    store.close()
+    try:
+        yield store, tmp_path
+    finally:
+        store.close()
 
 
 @pytest.mark.parametrize('tool', [query.get_impact_radius, review.get_review_context])
@@ -89,23 +90,6 @@ def test_compatibility_wrapper_resolves_duplicate_relative_and_absolute_paths(gr
 
 TOOLS = [query.get_impact_radius, review.get_review_context]
 DETAILS = ['minimal', 'standard']
-
-
-@pytest.fixture
-def reopening_graph(graph, monkeypatch):
-    """The ``graph`` fixture, but each tool call opens its own store.
-
-    The tools close the store they are handed, so a test that calls a tool
-    more than once needs a fresh connection per call.
-    """
-    _store, root = graph
-
-    def open_store(_repo_root):
-        return GraphStore(root / 'graph.db'), root
-
-    monkeypatch.setattr(query, '_get_store', open_store)
-    monkeypatch.setattr(review, '_get_store', open_store)
-    return graph
 
 
 @pytest.mark.parametrize('tool', TOOLS)
@@ -223,7 +207,7 @@ def test_unmatched_paths_respect_explicit_response_bounds(graph, tool):
 
 
 @pytest.mark.parametrize('tool', TOOLS)
-def test_minimal_response_does_not_grow_with_the_number_of_misses(reopening_graph, tool):
+def test_minimal_response_does_not_grow_with_the_number_of_misses(graph, tool):
     """A minimal response must stay bounded however many paths miss.
 
     An auto-detected diff carries every changed docs, lockfile, asset and
@@ -249,7 +233,7 @@ def test_minimal_response_does_not_grow_with_the_number_of_misses(reopening_grap
 
 @pytest.mark.parametrize('tool', TOOLS)
 @pytest.mark.parametrize('detail', DETAILS)
-def test_repeated_calls_give_the_same_answer(reopening_graph, tool, detail):
+def test_repeated_calls_give_the_same_answer(graph, tool, detail):
     request = ['src/app.py', 'missing.py']
     first = tool(changed_files=list(request), detail_level=detail)
     second = tool(changed_files=list(request), detail_level=detail)
@@ -257,7 +241,7 @@ def test_repeated_calls_give_the_same_answer(reopening_graph, tool, detail):
         assert first[key] == second[key]
 
 
-def test_empty_request_keeps_the_no_changes_answer(reopening_graph):
+def test_empty_request_keeps_the_no_changes_answer(graph):
     impact = query.get_impact_radius(changed_files=[])
     assert impact['status'] == 'ok'
     assert impact['summary'] == 'No changed files detected.'
@@ -268,18 +252,11 @@ def test_empty_request_keeps_the_no_changes_answer(reopening_graph):
     assert 'unmatched_files' not in context
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        'pre-existing, not introduced by #1084: get_files_matching() builds an '
-        'unescaped LIKE suffix, so an empty path resolves to every file in the '
-        'graph and the request reads as a low-risk all-clear'
-    ),
-)
 @pytest.mark.parametrize('tool', TOOLS)
-def test_empty_string_path_is_not_an_all_clear(graph, tool):
+def test_empty_string_path_is_unmatched(graph, tool):
     result = tool(changed_files=['src/app.py', ''], detail_level='minimal')
-    assert result['risk'] != 'low'
+    assert result['risk'] == 'high'
+    assert result['unmatched_files'] == ['']
 
 
 # ---------------------------------------------------------------------------

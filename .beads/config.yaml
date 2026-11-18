@@ -6,8 +6,7 @@
 # Issue prefix for this repository (used by bd init)
 # If not set, bd init will auto-detect from directory name
 # Example: issue-prefix: "myproject" creates issues like "myproject-1", "myproject-2", etc.
-# issue-prefix: ""
-
+issue-prefix: "crg"
 # Use no-db mode: JSONL-only, no Dolt database
 # When true, bd will use .beads/issues.jsonl as the source of truth
 # no-db: false
@@ -55,3 +54,18 @@ backup:
 # - linear.api-key
 # - github.org
 # - github.repo
+sync.remote: "git+https://github.com/marlon-costa-dc/code-review-graph"
+repos:
+  primary: "."
+  additional:
+    - "/home/marlonsc/.beads-planning"
+issue_prefix: crg
+dolt.auto-start: false
+dolt:
+  disable-event-flush: true
+export.auto: false
+backup.enabled: false
+gc.endpoint_origin: inherited_city
+gc.endpoint_status: verified
+types.custom: molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step,startup-health-episode
+dolt.mode: server

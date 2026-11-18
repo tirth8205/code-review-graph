@@ -57,8 +57,7 @@ def test_julia_identity_uses_forward_slashes_for_windows_paths():
 
     calls = [e for e in edges if e.kind == "CALLS"]
     assert any(
-        e.source == "/repo/case.jl::Demo.delegate"
-        and e.target == "/repo/case.jl::Demo.greet"
+        e.source == "/repo/case.jl::Demo.delegate" and e.target == "/repo/case.jl::Demo.greet"
         for e in calls
     )
     assert all(e.file_path == "/repo/case.jl" for e in edges)
@@ -119,9 +118,7 @@ def test_php_namespace_backslashes_survive_normalization(tmp_path):
 
     # The unresolved import target must keep its namespace backslashes.
     imports = [e for e in edges if e.kind == "IMPORTS_FROM"]
-    assert any("App\\Domain\\Entity\\Job" == e.target for e in imports), (
-        [e.target for e in imports]
-    )
+    assert any("App\\Domain\\Entity\\Job" == e.target for e in imports), [e.target for e in imports]
     assert all(e.file_path == php.as_posix() for e in edges)
 
 

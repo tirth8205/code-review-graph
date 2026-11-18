@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "project_id": "marlon-costa-dc/code-review-graph",
+  "project_profile": "internal",
+  "source_remote": "git@github.com:marlon-costa-dc/code-review-graph.git",
+  "upstream_project_id": null,
+  "detected_capabilities": []
+}

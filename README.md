@@ -14,6 +14,7 @@
 <p align="center">
   <strong>A local code knowledge graph that gives AI coding tools precise review context over MCP.</strong>
 </p>
+<p align="center">Managed fork: <code>main</code> mirrors upstream; <code>dc-use</code> integrates local changes and publishes <code>-dc.N</code> releases.</p>
 <p align="center">
   <a href="README.md">English</a> |
   <a href="README.zh-CN.md">简体中文</a> |
@@ -667,6 +668,23 @@ pip install "code-review-graph[wiki]"                # ollama client (not used b
 pip install "code-review-graph[all]"                 # All optional dependencies
 ```
 
+### Shared registry consistency
+
+The registry is shared by independent CLI and watch processes. Mutations must
+reload its current contents while holding the same native inter-process lock,
+then publish a complete JSON document atomically. An older `Registry` instance
+must not overwrite entries added by another instance or process. Reads observe
+the current published registry, and an unchanged registration leaves the file
+untouched. Invalid JSON or registry structure is an error; it must never be
+replaced with an empty registry. CLI data-directory registration and graph-data
+resolution propagate that error instead of selecting another directory or
+replacing its traceback. An absent registry or an absent repository entry keeps
+the documented environment/default selection behavior.
+
+This contract also applies when concurrent builds register separate external
+data directories under the same `CRG_HOME`. Each checkout keeps its own graph;
+the shared registry records their locations. It is not a second graph store.
+
 ### Environment Variables
 
 | Variable | Description | Default |
@@ -683,9 +701,9 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_MAX_IMPACT_NODES` | Maximum nodes in impact analysis | `500` |
 | `CRG_MAX_IMPACT_DEPTH` | Search depth for blast-radius analysis | `2` |
 | `CRG_MAX_BFS_DEPTH` | Maximum depth for graph traversal | `15` |
-| `CRG_MAX_CHANGED_FUNCS` | Maximum changed functions analysed in one change report | `500` |
+| `CRG_MAX_CHANGED_FUNCS` | Maximum changed functions analysed in one change report | - |
 | `CRG_MAX_DELETION_FILES` | Maximum files whose old version is read in one change report, to name the functions and classes a diff deleted | `100` |
-| `CRG_MAX_CHANGED_YAML_PATHS` | Maximum changed YAML paths analysed in one change report, and separately the same number of JSON paths | `200` |
+| `CRG_MAX_CHANGED_YAML_PATHS` | Maximum changed paths shown per format (YAML and JSON separately); totals stay complete | - |
 | `CRG_MAX_TRANSITIVE_FRONTIER` | Maximum callees followed per hop when `tests_for` and `detect-changes` look for tests. The first by name are kept, so one graph always gives one answer | `50` |
 | `CRG_CALLER_TEST_ROUTE_DEPTH` | Hops to walk up incoming `CALLS` when looking for a tested caller of an untested changed symbol. Reported as a note, never as coverage | `2` |
 | `CRG_CALLER_TEST_ROUTE_MAX_CALLERS` | Maximum callers examined while looking for that tested caller | `500` |

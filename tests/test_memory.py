@@ -195,4 +195,3 @@ def test_clear_memories_preserves_non_md_files(tmp_path: Path) -> None:
     assert deleted == 1
     assert not (tmp_path / "memory1.md").exists()
     assert config_file.exists()
-

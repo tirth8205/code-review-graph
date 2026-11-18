@@ -42,6 +42,7 @@
       "risk_score": 0.1
     }
   ],
+  "changed_functions_total": 3,
   "affected_flows": [
     {
       "id": 7,

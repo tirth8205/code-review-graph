@@ -103,6 +103,27 @@ def _resolve_bare_endpoints(
         )
 
 
+def populate_signatures(store: GraphStore) -> int:
+    """Compute and store missing node signatures once, returning the count."""
+    rows = store.get_nodes_without_signature()
+    signature_rows: list[tuple[str, int]] = []
+    for row in rows:
+        node_id, name, kind, params, ret = row
+        if kind in ("Function", "Test"):
+            sig = f"def {name}({params or ''})"
+            if ret:
+                sig += f" -> {ret}"
+        elif kind == "Class":
+            sig = f"class {name}"
+        else:
+            sig = name
+        signature_rows.append((sig[:512], node_id))
+    # Single transaction via executemany instead of one autocommitted
+    # UPDATE per node (issue #721).
+    store.update_node_signatures(signature_rows)
+    return len(signature_rows)
+
+
 def _compute_signatures(
     store: GraphStore,
     result: dict[str, Any],
@@ -110,29 +131,7 @@ def _compute_signatures(
 ) -> None:
     """Compute human-readable signatures for nodes that lack one."""
     try:
-        rows = store.get_nodes_without_signature()
-        signature_rows: list[tuple[str, int]] = []
-        for row in rows:
-            node_id, name, kind, params, ret = (
-                row[0],
-                row[1],
-                row[2],
-                row[3],
-                row[4],
-            )
-            if kind in ("Function", "Test"):
-                sig = f"def {name}({params or ''})"
-                if ret:
-                    sig += f" -> {ret}"
-            elif kind == "Class":
-                sig = f"class {name}"
-            else:
-                sig = name
-            signature_rows.append((sig[:512], node_id))
-        # Single transaction via executemany instead of one autocommitted
-        # UPDATE per node (issue #721).
-        store.update_node_signatures(signature_rows)
-        result["signatures_computed"] = len(signature_rows)
+        result["signatures_computed"] = populate_signatures(store)
     except (sqlite3.OperationalError, TypeError, KeyError) as e:
         logger.warning("Signature computation failed: %s", e)
         warnings.append(f"Signature computation failed: {type(e).__name__}: {e}")

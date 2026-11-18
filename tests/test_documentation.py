@@ -158,19 +158,24 @@ def test_release_version_is_current_everywhere_it_is_written_down():
         "pyproject.toml and code_review_graph.__version__ disagree"
     )
 
+    # Fork package builds use a local version suffix. Upstream Action pins
+    # and upstream release history must refer to real upstream releases.
+    upstream_version = __version__.partition("+")[0]
     for name in README_FILES + ("docs/GITHUB_ACTION.md",):
         content = (ROOT / name).read_text(encoding="utf-8")
         pins = set(re.findall(r"tirth8205/code-review-graph@v([0-9][^\s]*)", content))
-        assert pins == {__version__}, (
-            f"{name} pins the Action at {sorted(pins)}; expected v{__version__}"
+        assert pins == {upstream_version}, (
+            f"{name} pins the upstream Action at {sorted(pins)}; expected v{upstream_version}"
         )
 
     expected = {
-        "docs/USAGE.md": f"Applies to code-review-graph {__version__}.",
-        "docs/FEATURES.md": f"## v{__version__} (Current)",
-        "CHANGELOG.md": f"## [{__version__}] - ",
+        "docs/USAGE.md": f"Applies to code-review-graph {upstream_version}.",
+        "docs/FEATURES.md": f"## v{upstream_version} (Current)",
+        "CHANGELOG.md": f"## [{upstream_version}] - ",
         ".github/ISSUE_TEMPLATE/bug_report.yml": f'placeholder: "{__version__}"',
     }
+    if upstream_version != __version__:
+        expected["FORK.md"] = f"`{__version__}`"
     for name, text in expected.items():
         content = (ROOT / name).read_text(encoding="utf-8")
         assert text in content, f"{name} does not say {text!r}"

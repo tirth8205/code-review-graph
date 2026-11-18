@@ -515,9 +515,10 @@ def _holds_commits_since(root: Path, db_path: Path, built: str) -> bool:
     """Whether the graph holds every file changed between ``built`` and HEAD."""
     from .incremental import files_hold_commits
     from .parser import normalize_file_path
+    from .shared_sqlite import connect_for_checkout
 
     def file_hashes() -> dict[str, str]:
-        conn = sqlite3.connect(_read_only_uri(db_path), uri=True, timeout=2)
+        conn = connect_for_checkout(_read_only_uri(db_path), db_path, root, timeout=2)
         try:
             rows = conn.execute(
                 "SELECT file_path, file_hash FROM nodes WHERE kind = ?", ("File",)
@@ -536,6 +537,7 @@ def check_graph(root: Path) -> tuple[dict[str, Any], list[Finding]]:
     from .build_state import BUILD_STATE_KEY, INCOMPLETE_BUILD_STATES
     from .incremental import get_db_path
     from .migrations import LATEST_VERSION, get_schema_version
+    from .shared_sqlite import connect_for_checkout
 
     db_path = get_db_path(root, read_only=True)
     info: dict[str, Any] = {
@@ -548,7 +550,7 @@ def check_graph(root: Path) -> tuple[dict[str, Any], list[Finding]]:
             FAIL, f"No graph at {db_path}.", "Run: code-review-graph build",
         )]
     try:
-        conn = sqlite3.connect(_read_only_uri(db_path), uri=True, timeout=2)
+        conn = connect_for_checkout(_read_only_uri(db_path), db_path, root, timeout=2)
         try:
             schema = get_schema_version(conn)
             metadata = dict(conn.execute(

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "code-review-graph"
-version = "2.4.0"
+version = "2.4.0+dc.4"
 description = "Local-first knowledge graph for token-efficient code review through MCP and CLI"
 readme = {file = "README.md", content-type = "text/markdown"}
 license = "MIT"
@@ -38,7 +38,7 @@ dependencies = [
     # same thread limiter FastMCP dispatches sync tool bodies through, not
     # asyncio's smaller default executor. A direct import gets a direct
     # dependency rather than relying on fastmcp to keep pulling it in.
-    "anyio>=4.8.0,<5",
+    "anyio>=4.14.2,<5",
     "tree-sitter>=0.26.0,<1",
     "tree-sitter-language-pack>=0.13.0,<1",
     # 6.0.2 is the first release with wheels for every supported Python; 6.0
@@ -46,6 +46,7 @@ dependencies = [
     "pyyaml>=6.0.2,<7",
     "networkx>=3.2,<4",
     "watchdog>=4.0.0,<7",
+    "filelock>=3.32.5,<5",
     "tomli>=2.0.0,<3; python_version < '3.11'",
 ]
 
@@ -98,6 +99,7 @@ dev = [
     "pytest-asyncio>=0.23,<2",
     "pytest-cov>=4.0,<8",
     "ruff>=0.3.0,<1",
+    "pyrefly>=1.4,<2",
     "tomli>=2.0; python_version < '3.11'",
 ]
 # Real-browser tests for the generated visualization page
@@ -163,6 +165,7 @@ skips = ["B101", "B404", "B603", "B607", "B608"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 norecursedirs = ["tests/fixtures"]
 # Browser tests are opt-in: they need the "browser-test" extra and a

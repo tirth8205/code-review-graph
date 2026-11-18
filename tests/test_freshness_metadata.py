@@ -173,6 +173,21 @@ def test_skip_postprocess_marks_pending_and_noop_update_repairs_fts(repo):
         ).fetchone()[0] == 1
 
 
+def test_selective_postprocess_does_not_complete_an_incomplete_graph(repo):
+    from code_review_graph.build_state import BUILD_STATE_KEY, POSTPROCESS_PENDING
+    from code_review_graph.tools.build import run_postprocess
+
+    build_or_update_graph(full_rebuild=True, repo_root=str(repo), postprocess="none")
+    result = run_postprocess(flows=False, communities=False, repo_root=str(repo))
+    assert result["status"] == "ok"
+    assert "fts_indexed" in result
+    with GraphStore(get_db_path(repo)) as store:
+        assert store.get_metadata(BUILD_STATE_KEY) == POSTPROCESS_PENDING
+    repaired = build_or_update_graph(repo_root=str(repo))
+    assert repaired["status"] == "ok"
+    assert "flows_detected" in repaired
+
+
 def test_pending_changed_file_update_rebuilds_all_derived_data(repo):
     for i in range(24):
         (repo / f"mod{i}.py").write_text(

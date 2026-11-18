@@ -5,12 +5,21 @@ from __future__ import annotations
 import logging
 import sqlite3
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 from .graph import GraphStore
 from .search import hybrid_search
 
 logger = logging.getLogger(__name__)
+
+
+class QuestionTokenResult(TypedDict):
+    """Numeric benchmark evidence for one question, before JSON reporting."""
+
+    question: str
+    naive_tokens: int
+    graph_tokens: int
+    reduction_ratio: float
 
 # Sample questions for benchmarking
 _SAMPLE_QUESTIONS = [
@@ -31,15 +40,23 @@ def compute_naive_tokens(repo_root: Path) -> int:
     """Count tokens in all parseable source files."""
     total = 0
     exts = (
-        ".py", ".js", ".ts", ".go", ".rs", ".java",
-        ".c", ".cpp", ".rb", ".php", ".swift", ".kt",
+        ".py",
+        ".js",
+        ".ts",
+        ".go",
+        ".rs",
+        ".java",
+        ".c",
+        ".cpp",
+        ".rb",
+        ".php",
+        ".swift",
+        ".kt",
     )
     for ext in exts:
         for f in repo_root.rglob(f"*{ext}"):
             try:
-                total += estimate_tokens(
-                    f.read_text(errors="replace")
-                )
+                total += estimate_tokens(f.read_text(errors="replace"))
             except OSError:
                 continue
     return total
@@ -83,6 +100,7 @@ def run_token_benchmark(
     naive_total = compute_naive_tokens(repo_root)
 
     results = []
+    ratios: list[float] = []
     for q in questions:
         search_results = hybrid_search(store, q, limit=5)
         # Simulate graph context: search results + neighbors
@@ -99,18 +117,19 @@ def run_token_benchmark(
             ratio = naive_total / graph_tokens
         else:
             ratio = 0
-        results.append({
-            "question": q,
-            "naive_tokens": naive_total,
-            "graph_tokens": graph_tokens,
-            "reduction_ratio": round(ratio, 1),
-        })
+        ratios.append(round(ratio, 1))
+        results.append(
+            {
+                "question": q,
+                "naive_tokens": naive_total,
+                "graph_tokens": graph_tokens,
+                "reduction_ratio": ratios[-1],
+            }
+        )
 
     if results:
-        total = sum(
-            r["reduction_ratio"] for r in results  # type: ignore[misc]
-        )
-        avg_ratio = float(total) / len(results)  # type: ignore[arg-type]
+        total = sum(ratios)
+        avg_ratio = total / len(results)
     else:
         avg_ratio = 0.0
 
@@ -119,7 +138,6 @@ def run_token_benchmark(
         "per_question": results,
         "average_reduction_ratio": round(avg_ratio, 1),
         "summary": (
-            f"Graph queries use ~{avg_ratio:.0f}x fewer tokens "
-            f"than reading all source files"
+            f"Graph queries use ~{avg_ratio:.0f}x fewer tokens than reading all source files"
         ),
     }

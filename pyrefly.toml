@@ -1,0 +1,8 @@
+# Pyrefly configuration
+# Suppresses diagnostics for optional third-party packages and runtime-guarded
+# patterns that are intentional in this codebase.
+[errors]
+missing-import = false
+missing-attribute = false
+bad-return = false
+bad-typed-dict-key = false

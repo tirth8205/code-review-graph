@@ -1,13 +1,24 @@
 """Tests for multi-repo registry and connection pool."""
 
 import asyncio
+import json
+import multiprocessing
 import sqlite3
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from code_review_graph.registry import ConnectionPool, Registry, resolve_repo
 from code_review_graph.tools.registry_tools import _echoed, _select_repos
+
+
+def _register_after_barrier(registry_path, repo, ready):
+    """Use independent public registry instances before either process writes."""
+    registry = Registry(path=registry_path)
+    ready.wait(timeout=20)
+    registry.register(str(repo), data_dir=str(repo / "graph-data"))
 
 
 class TestRegistry:
@@ -27,6 +38,7 @@ class TestRegistry:
 
     def teardown_method(self):
         import shutil
+
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
     def test_register_and_list(self):
@@ -40,6 +52,18 @@ class TestRegistry:
         assert str(self.repo1.resolve()) in paths
         assert str(self.repo2.resolve()) in paths
 
+    def test_default_registry_uses_environment_path(self, tmp_path, monkeypatch):
+        """The default registry honors the process isolation boundary."""
+        registry_home = tmp_path / "isolated"
+        registry_path = registry_home / "registry.json"
+        monkeypatch.setenv("CRG_HOME", str(registry_home))
+
+        registry = Registry()
+        registry.register(str(self.repo1), alias="isolated")
+
+        assert registry_path.is_file()
+        assert registry.list_repos() == [{"path": str(self.repo1.resolve()), "alias": "isolated"}]
+
     def test_register_duplicate_path(self):
         """Registering the same path twice updates alias."""
         self.registry.register(str(self.repo1), alias="first")
@@ -52,12 +76,14 @@ class TestRegistry:
     def test_register_invalid_path(self):
         """Registering a non-existent path raises ValueError."""
         import pytest
+
         with pytest.raises(ValueError, match="not a directory"):
             self.registry.register("/nonexistent/path/repo")
 
     def test_register_not_a_repo(self):
         """Registering a dir without .git or .code-review-graph raises ValueError."""
         import pytest
+
         bare_dir = Path(self.tmp_dir) / "bare"
         bare_dir.mkdir()
         with pytest.raises(ValueError, match="does not look like a repository"):
@@ -116,6 +142,107 @@ class TestRegistry:
         assert len(repos) == 1
         assert repos[0]["alias"] == "persistent"
 
+    def test_existing_instances_preserve_each_others_registrations(self):
+        """An instance created earlier must refresh before writing or reading."""
+        second = Registry(path=self.registry_path)
+        self.registry.register(str(self.repo1), alias="first")
+        second.register(str(self.repo2), alias="second")
+
+        expected = {str(self.repo1.resolve()), str(self.repo2.resolve())}
+        assert {row["path"] for row in self.registry.list_repos()} == expected
+        assert {row["path"] for row in second.list_repos()} == expected
+
+    def test_processes_preserve_all_external_data_directories(self):
+        """Concurrent builds must not lose another checkout's registry entry."""
+        context = multiprocessing.get_context("spawn")
+        repositories = (self.repo1, self.repo2)
+        ready = context.Barrier(len(repositories))
+        processes = [
+            context.Process(
+                target=_register_after_barrier,
+                args=(self.registry_path, repo, ready),
+            )
+            for repo in repositories
+        ]
+        started = []
+        try:
+            for process in processes:
+                process.start()
+                started.append(process)
+            for process in started:
+                process.join(timeout=25)
+                assert process.exitcode == 0
+        finally:
+            for process in started:
+                if process.is_alive():
+                    process.terminate()
+                process.join(timeout=5)
+
+        registry = Registry(path=self.registry_path)
+        assert {
+            row["path"]: row["data_dir"] for row in registry.list_repos()
+        } == {
+            str(repo.resolve()): str((repo / "graph-data").resolve())
+            for repo in repositories
+        }
+
+    def test_corrupt_registry_is_not_replaced(self):
+        """A corrupt file must fail before any registration can discard it."""
+        import pytest
+
+        original = b'{"repos": [invalid]}\n'
+        self.registry_path.write_bytes(original)
+        with pytest.raises(json.JSONDecodeError):
+            Registry(path=self.registry_path)
+        assert self.registry_path.read_bytes() == original
+
+    def test_existing_instance_does_not_overwrite_corrupt_registry(self):
+        """Reload errors must escape before an existing instance can write."""
+        original = b'{"repos": [invalid]}\n'
+        self.registry_path.write_bytes(original)
+
+        with pytest.raises(json.JSONDecodeError):
+            self.registry.register(str(self.repo1), alias="must-not-write")
+
+        assert self.registry_path.read_bytes() == original
+
+    def test_unchanged_registration_preserves_file_identity(self):
+        """Repeating the same registration must leave the published file alone."""
+        self.registry.register(str(self.repo1), alias="same")
+        before = self.registry_path.stat()
+        original = self.registry_path.read_bytes()
+
+        self.registry.register(str(self.repo1), alias="same")
+
+        after = self.registry_path.stat()
+        assert self.registry_path.read_bytes() == original
+        assert (after.st_dev, after.st_ino, after.st_mtime_ns) == (
+            before.st_dev, before.st_ino, before.st_mtime_ns
+        )
+
+    @pytest.mark.parametrize("create", [False, True])
+    def test_corrupt_registry_does_not_select_another_graph(
+        self, tmp_path, monkeypatch, create
+    ):
+        """A broken registry must not redirect graph consumers to another path."""
+        from code_review_graph.incremental import get_data_dir
+
+        registry_home = tmp_path / "registry-home"
+        registry_home.mkdir()
+        registry_path = registry_home / "registry.json"
+        original = b'{"repos": [invalid]}\n'
+        registry_path.write_bytes(original)
+        alternative = tmp_path / "alternative"
+        monkeypatch.setenv("CRG_HOME", str(registry_home))
+        monkeypatch.setenv("CRG_DATA_DIR", str(alternative))
+
+        with pytest.raises(json.JSONDecodeError):
+            get_data_dir(self.repo1, create=create)
+
+        assert registry_path.read_bytes() == original
+        assert not alternative.exists()
+        assert not (self.repo1 / ".code-review-graph").exists()
+
     def test_resolve_by_alias(self):
         """resolve_repo resolves alias to path."""
         self.registry.register(str(self.repo1), alias="r1")
@@ -146,6 +273,7 @@ class TestConnectionPool:
     def teardown_method(self):
         self.pool.close_all()
         import shutil
+
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
     def _make_db(self, name: str) -> str:
@@ -239,6 +367,7 @@ class TestCrossRepoSearch:
             assert result["results"] == []
 
         import shutil
+
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
     def test_cross_repo_search_merges_by_local_rank(self, tmp_path):
@@ -265,11 +394,7 @@ class TestCrossRepoSearch:
 
         with (
             patch("code_review_graph.registry.Registry") as mock_registry_cls,
-            patch(
-                "code_review_graph.tools.registry_tools.get_db_path",
-                side_effect=[android_db, ios_db],
-            ),
-            patch("code_review_graph.tools.registry_tools.GraphStore") as mock_store_cls,
+            patch("code_review_graph.tools.registry_tools._get_store_for_read") as read_store,
             patch(
                 "code_review_graph.tools.registry_tools.hybrid_search",
                 side_effect=[android_results, ios_results],
@@ -279,7 +404,7 @@ class TestCrossRepoSearch:
                 {"path": str(android_repo), "alias": "android"},
                 {"path": str(ios_repo), "alias": "ios"},
             ]
-            mock_store_cls.side_effect = [MagicMock(), MagicMock()]
+            read_store.side_effect = [(MagicMock(), None, None)] * 2
 
             result = cross_repo_search_func(query="splash", limit=2)
 
@@ -325,11 +450,7 @@ class TestCrossRepoSearch:
 
         with (
             patch("code_review_graph.registry.Registry") as mock_registry_cls,
-            patch(
-                "code_review_graph.tools.registry_tools.get_db_path",
-                side_effect=[entries[1][1], entries[2][1]],
-            ),
-            patch("code_review_graph.tools.registry_tools.GraphStore") as mock_store_cls,
+            patch("code_review_graph.tools.registry_tools._get_store_for_read") as read_store,
             patch(
                 "code_review_graph.tools.registry_tools.hybrid_search",
                 side_effect=[ios_results, web_results],
@@ -338,7 +459,7 @@ class TestCrossRepoSearch:
             mock_registry_cls.return_value.list_repos.return_value = [
                 entry for entry, _ in entries
             ]
-            mock_store_cls.side_effect = [MagicMock(), MagicMock()]
+            read_store.side_effect = [(MagicMock(), None, None)] * 2
 
             result = cross_repo_search_func(query="splash", repos=["web", "ios"])
 
@@ -356,11 +477,7 @@ class TestCrossRepoSearch:
 
         with (
             patch("code_review_graph.registry.Registry") as mock_registry_cls,
-            patch(
-                "code_review_graph.tools.registry_tools.get_db_path",
-                side_effect=[entries[0][1]],
-            ),
-            patch("code_review_graph.tools.registry_tools.GraphStore") as mock_store_cls,
+            patch("code_review_graph.tools.registry_tools._get_store_for_read") as read_store,
             patch(
                 "code_review_graph.tools.registry_tools.hybrid_search",
                 side_effect=[[{"name": "Splash", "score": 0.03}]],
@@ -369,7 +486,7 @@ class TestCrossRepoSearch:
             mock_registry_cls.return_value.list_repos.return_value = [
                 entry for entry, _ in entries
             ]
-            mock_store_cls.side_effect = [MagicMock()]
+            read_store.side_effect = [(MagicMock(), None, None)] * 1
 
             result = cross_repo_search_func(
                 query="splash", repos=["android", "desktop"]
@@ -413,11 +530,7 @@ class TestCrossRepoSearch:
 
         with (
             patch("code_review_graph.registry.Registry") as mock_registry_cls,
-            patch(
-                "code_review_graph.tools.registry_tools.get_db_path",
-                side_effect=[entries[0][1], entries[1][1]],
-            ),
-            patch("code_review_graph.tools.registry_tools.GraphStore") as mock_store_cls,
+            patch("code_review_graph.tools.registry_tools._get_store_for_read") as read_store,
             patch(
                 "code_review_graph.tools.registry_tools.hybrid_search",
                 side_effect=[android_results, ios_results],
@@ -426,7 +539,7 @@ class TestCrossRepoSearch:
             mock_registry_cls.return_value.list_repos.return_value = [
                 entry for entry, _ in entries
             ]
-            mock_store_cls.side_effect = [MagicMock(), MagicMock()]
+            read_store.side_effect = [(MagicMock(), None, None)] * 2
 
             result = cross_repo_search_func(query="splash", repos=["ios", "android"])
 
@@ -491,11 +604,7 @@ class TestCrossRepoSearchEchoBounds:
 
         with (
             patch("code_review_graph.registry.Registry") as mock_registry_cls,
-            patch(
-                "code_review_graph.tools.registry_tools.get_db_path",
-                side_effect=[db],
-            ),
-            patch("code_review_graph.tools.registry_tools.GraphStore") as mock_store_cls,
+            patch("code_review_graph.tools.registry_tools._get_store_for_read") as read_store,
             patch(
                 "code_review_graph.tools.registry_tools.hybrid_search",
                 side_effect=[[{"name": "Splash", "score": 0.03}]],
@@ -504,7 +613,7 @@ class TestCrossRepoSearchEchoBounds:
             mock_registry_cls.return_value.list_repos.return_value = [
                 {"path": str(repo), "alias": "droid"},
             ]
-            mock_store_cls.side_effect = [MagicMock()]
+            read_store.side_effect = [(MagicMock(), None, None)] * 1
 
             result = cross_repo_search_func(
                 query="splash", repos=["droid", "nope"]
@@ -616,6 +725,7 @@ class TestSetDataDir:
     def teardown_method(self):
         """Clean up temporary directory."""
         import shutil
+
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
     def test_set_data_dir_new_repo(self):
@@ -684,10 +794,7 @@ class TestSetDataDir:
         repo.mkdir()
 
         # Create entry without data_dir (old format)
-        self.registry._repos.append({
-            "path": str(repo.resolve()),
-            "alias": "old-project"
-        })
+        self.registry._repos.append({"path": str(repo.resolve()), "alias": "old-project"})
         self.registry._save()
 
         # Should not crash

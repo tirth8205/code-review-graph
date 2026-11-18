@@ -49,19 +49,22 @@ def _warn_invalid_env(name: str, raw: str, default: object) -> None:
     )
 
 
-def env_int(name: str, default: int) -> int:
+def env_int(name: str, default: int, *, strict: bool = False) -> int:
     """Read *name* as an int, falling back to *default* when it is unusable.
 
     An unset variable is the default silently; a set-but-unparseable one
     (empty string, word, version number) is the default *and* a warning
-    naming the variable, so the operator can find the typo.
+    naming the variable, so the operator can find the typo. Operations
+    that cannot safely apply a default may opt into strict validation.
     """
     raw = os.environ.get(name)
     if raw is None:
         return default
     try:
         return int(raw.strip())
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as exc:
+        if strict:
+            raise ValueError(f"Invalid integer setting {name}={raw!r}") from exc
         _warn_invalid_env(name, raw, default)
         return default
 

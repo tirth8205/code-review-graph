@@ -8,6 +8,9 @@
  * Uses `better-sqlite3` with prepared statements for performance.
  */
 
+import { createHash } from 'node:crypto';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import type BetterSqlite3 from 'better-sqlite3';
 
 type DatabaseType = BetterSqlite3.Database;
@@ -157,18 +160,116 @@ interface MetadataRow {
 const MAX_OPEN_RETRIES = 3;
 const RETRY_BACKOFF_MS = 100;
 
+// Keep the structural payload order aligned with the Python generation format.
+const GENERATION_COLUMNS = {
+  nodes: ['kind', 'name', 'qualified_name', 'file_path', 'line_start', 'line_end',
+    'language', 'parent_name', 'params', 'return_type', 'is_test', 'file_hash',
+    'extra', 'modifiers', 'symbol', 'docstring', 'name_tokens', 'signature'],
+  edges: ['kind', 'source_qualified', 'target_qualified', 'file_path', 'line',
+    'extra', 'confidence', 'confidence_tier', 'target_resolution'],
+} as const;
+
+export function gitHeadFile(root: string): string | undefined {
+  const dotGit = join(root, '.git');
+  const direct = join(dotGit, 'HEAD');
+  if (existsSync(direct)) return direct;
+  if (!existsSync(dotGit)) return undefined;
+  const link = readFileSync(dotGit, 'utf8').trim();
+  if (!link.startsWith('gitdir: ')) throw new Error(`Invalid Git directory link: ${dotGit}`);
+  return join(resolve(root, link.slice(8)), 'HEAD');
+}
+
 export class SqliteReader {
   private db: DatabaseType | null = null;
+  private readonly prefix: string;
+  private readonly checkoutKey?: Buffer;
+  private readonly headFile?: string;
+  private readonly projectedRoot?: string;
+  private selectedGeneration?: number;
+  private selectedBinding?: string;
+  private generationSelected = false;
+
+  private table(name: 'nodes' | 'edges' | 'metadata' | 'embeddings'): string {
+    this.selectCheckoutGeneration();
+    return (this.generationSelected ? 'crg_selected_' : this.prefix) + name;
+  }
+
+  private selectCheckoutGeneration(): void {
+    if (!this.db || !this.headFile || !this.checkoutKey) return;
+    const db = this.db;
+    const head = readFileSync(this.headFile, 'utf8').trim();
+    const ref = head.startsWith('ref: ') ? head.slice(5) : `detached:${head}`;
+    const meta = db.prepare(`SELECT key, value FROM ${this.prefix}metadata
+      WHERE key IN ('git_branch', 'git_head_sha')`).all() as { key: string; value: string }[];
+    const native = Object.fromEntries(meta.map(({ key, value }) => [key, value]));
+    const nativeRef = native.git_branch && native.git_branch !== 'HEAD'
+      ? `refs/heads/${native.git_branch}`
+      : native.git_head_sha ? `detached:${native.git_head_sha}` : 'unborn';
+    if (ref === nativeRef || (nativeRef === 'unborn' && !native.git_head_sha)) {
+      this.generationSelected = false;
+      return;
+    }
+
+    const hasBindings = db.prepare(
+      "SELECT 1 FROM sqlite_schema WHERE name='crg_generation_bindings'",
+    ).get();
+    const binding = hasBindings ? db.prepare(
+      'SELECT generation_id, head, built_at FROM crg_generation_bindings WHERE checkout=? AND ref=?',
+    ).get(this.checkoutKey, ref) as
+      { generation_id: number; head: string; built_at: string } | undefined : undefined;
+    if (!binding) {
+      throw new Error(`No published graph generation for ${ref}; build this checkout`);
+    }
+    const bindingKey = JSON.stringify([ref, binding.head, binding.built_at]);
+    if (binding.generation_id !== this.selectedGeneration || bindingKey !== this.selectedBinding) {
+      db.transaction(() => {
+        for (const [kind, columns] of Object.entries(GENERATION_COLUMNS)) {
+          const name = `crg_selected_${kind}`;
+          db.exec(`CREATE TEMP TABLE IF NOT EXISTS ${name} (id INTEGER PRIMARY KEY, ${columns.join(', ')});
+            DELETE FROM ${name}`);
+          const values = columns.map((_, index) => {
+            const jsonPath = `$[1][${index}]`;
+            return `CASE json_type(data, '${jsonPath}') WHEN 'array'
+              THEN @root || '/' || json_extract(data, '${jsonPath}[0]')
+              ELSE json_extract(data, '${jsonPath}') END`;
+          });
+          db.prepare(`WITH RECURSIVE rows(data, copies) AS (
+            SELECT p.data, m.multiplicity FROM crg_generation_members m
+            JOIN crg_generation_payloads p ON p.id=m.payload_id
+            WHERE m.generation_id=@generation AND json_extract(p.data, '$[0]')=@kind
+            UNION ALL SELECT data, copies-1 FROM rows WHERE copies>1
+          ) INSERT INTO ${name} (${columns.join(', ')}) SELECT ${values.join(', ')} FROM rows`)
+            .run({ root: this.projectedRoot, generation: binding.generation_id, kind });
+        }
+        db.exec(`CREATE TEMP TABLE IF NOT EXISTS crg_selected_metadata (key TEXT PRIMARY KEY, value TEXT);
+          DELETE FROM crg_selected_metadata;
+          CREATE TEMP TABLE IF NOT EXISTS crg_selected_embeddings (qualified_name TEXT);
+          DELETE FROM crg_selected_embeddings`);
+        const insertMeta = db.prepare('INSERT INTO crg_selected_metadata VALUES (?, ?)');
+        insertMeta.run('git_head_sha', binding.head);
+        insertMeta.run('git_branch', ref.startsWith('refs/heads/') ? ref.slice(11) : 'HEAD');
+        insertMeta.run('last_updated', binding.built_at);
+        if (db.prepare("SELECT 1 FROM sqlite_schema WHERE name='crg_generation_projection_vectors'").get()) {
+          db.prepare(`INSERT INTO crg_selected_embeddings
+            SELECT qualified_name FROM crg_generation_projection_vectors WHERE checkout=? AND ref=?`)
+            .run(this.checkoutKey, ref);
+        }
+      })();
+      this.selectedGeneration = binding.generation_id;
+      this.selectedBinding = bindingKey;
+    }
+    this.generationSelected = true;
+  }
 
   /**
    * Create a SqliteReader with retry logic that does not block the event loop.
    * Prefer this over the constructor when calling from async code.
    */
-  static async create(dbPath: string): Promise<SqliteReader> {
+  static async create(dbPath: string, checkout?: string): Promise<SqliteReader> {
     let lastError: unknown;
     for (let attempt = 0; attempt < MAX_OPEN_RETRIES; attempt++) {
       try {
-        return new SqliteReader(dbPath);
+        return new SqliteReader(dbPath, checkout);
       } catch (err) {
         lastError = err;
         if (attempt < MAX_OPEN_RETRIES - 1) {
@@ -181,11 +282,28 @@ export class SqliteReader {
     throw lastError;
   }
 
-  constructor(dbPath: string) {
+  constructor(dbPath: string, checkout?: string) {
+    const root = checkout ? realpathSync.native(checkout) : undefined;
+    const identity = process.platform === 'win32' ? root?.toLowerCase() : root;
+    this.checkoutKey = identity ? createHash('sha256').update(identity).digest() : undefined;
+    this.prefix = this.checkoutKey ? 'crg_' + this.checkoutKey.toString('hex') + '_' : '';
+    this.headFile = root ? gitHeadFile(root) : undefined;
+    this.projectedRoot = root?.replace(/\\/g, '/').replace(/\/$/, '');
     // The Python side sets WAL mode. A read-only open cannot change the
     // journal mode, and trying fails with SQLITE_READONLY.
     this.db = new Database(dbPath, { readonly: true });
     this.db.pragma('busy_timeout = 5000');
+    if (this.prefix) {
+      try {
+        const rows = this.db.prepare('SELECT version FROM _crg_shared').all() as { version: number }[];
+        if (rows.length !== 1 || ![1, 2, 3].includes(rows[0].version)) {
+          throw new Error('Unsupported CRG shared database format');
+        }
+      } catch (error) {
+        this.close();
+        throw error;
+      }
+    }
   }
 
   /**
@@ -196,24 +314,26 @@ export class SqliteReader {
     if (!this.db) { return 'Database is not open'; }
     try {
       // Check that required tables exist
+      this.selectCheckoutGeneration();
       const tables = this.db
-        .prepare("SELECT name FROM sqlite_master WHERE type='table'")
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' "
+          + "UNION ALL SELECT name FROM sqlite_temp_master WHERE type='table'")
         .all() as Array<{ name: string }>;
       const tableNames = new Set(tables.map((t) => t.name));
 
-      if (!tableNames.has('nodes') || !tableNames.has('edges')) {
+      if (!tableNames.has(this.table('nodes')) || !tableNames.has(this.table('edges'))) {
         return 'Database is missing required tables (nodes/edges). Rebuild required.';
       }
 
       // Check for schema_version in metadata if it exists
-      if (tableNames.has('metadata')) {
+      if (tableNames.has(this.table('metadata'))) {
         const row = this.db
-          .prepare("SELECT value FROM metadata WHERE key = 'schema_version'")
+          .prepare(`SELECT value FROM ${this.table('metadata')} WHERE key = 'schema_version'`)
           .get() as { value: string } | undefined;
         if (row) {
           const version = parseInt(row.value, 10);
           // Must match LATEST_VERSION in code_review_graph/migrations.py
-          const SUPPORTED_SCHEMA_VERSION = 15;
+          const SUPPORTED_SCHEMA_VERSION = 16;
           if (!isNaN(version) && version > SUPPORTED_SCHEMA_VERSION) {
             return `Database was created with a newer version (schema v${version}). Update the extension.`;
           }
@@ -240,9 +360,10 @@ export class SqliteReader {
     try {
       const row = this.db
         .prepare(
-          "SELECT name FROM sqlite_master WHERE type='table' AND name='nodes'"
+          "SELECT name FROM sqlite_master WHERE type='table' AND name=? "
+          + "UNION ALL SELECT name FROM sqlite_temp_master WHERE type='table' AND name=?"
         )
-        .get() as { name: string } | undefined;
+        .get(this.table('nodes'), this.table('nodes')) as { name: string } | undefined;
       return row !== undefined;
     } catch {
       return false;
@@ -257,7 +378,7 @@ export class SqliteReader {
   getAllFiles(): string[] {
     const rows = this._db()
       .prepare(
-        "SELECT DISTINCT file_path FROM nodes WHERE kind = 'File' ORDER BY file_path"
+        `SELECT DISTINCT file_path FROM ${this.table('nodes')} WHERE kind = 'File' ORDER BY file_path`
       )
       .all() as FilePathRow[];
     return rows.map((r) => r.file_path);
@@ -267,7 +388,7 @@ export class SqliteReader {
   getNodesByFile(filePath: string): GraphNode[] {
     const rows = this._db()
       .prepare(
-        'SELECT * FROM nodes WHERE file_path = ? ORDER BY line_start'
+        `SELECT * FROM ${this.table('nodes')} WHERE file_path = ? ORDER BY line_start`
       )
       .all(filePath) as NodeRow[];
     return rows.map((r) => this._rowToNode(r));
@@ -276,7 +397,7 @@ export class SqliteReader {
   /** Single node lookup by qualified_name. */
   getNode(qualifiedName: string): GraphNode | undefined {
     const row = this._db()
-      .prepare('SELECT * FROM nodes WHERE qualified_name = ?')
+      .prepare(`SELECT * FROM ${this.table('nodes')} WHERE qualified_name = ?`)
       .get(qualifiedName) as NodeRow | undefined;
     return row ? this._rowToNode(row) : undefined;
   }
@@ -290,7 +411,7 @@ export class SqliteReader {
   getNodeAtCursor(filePath: string, line: number): GraphNode | undefined {
     const row = this._db()
       .prepare(
-        `SELECT * FROM nodes
+        `SELECT * FROM ${this.table('nodes')}
          WHERE file_path = ? AND line_start <= ? AND line_end >= ?
          ORDER BY (line_end - line_start) ASC
          LIMIT 1`
@@ -304,7 +425,7 @@ export class SqliteReader {
     const pattern = `%${query}%`;
     const rows = this._db()
       .prepare(
-        'SELECT * FROM nodes WHERE name LIKE ? OR qualified_name LIKE ? LIMIT ?'
+        `SELECT * FROM ${this.table('nodes')} WHERE name LIKE ? OR qualified_name LIKE ? LIMIT ?`
       )
       .all(pattern, pattern, limit) as NodeRow[];
     return rows.map((r) => this._rowToNode(r));
@@ -317,7 +438,7 @@ export class SqliteReader {
   /** Outgoing edges from a node. */
   getEdgesBySource(qualifiedName: string): GraphEdge[] {
     const rows = this._db()
-      .prepare('SELECT * FROM edges WHERE source_qualified = ?')
+      .prepare(`SELECT * FROM ${this.table('edges')} WHERE source_qualified = ?`)
       .all(qualifiedName) as EdgeRow[];
     return rows.map((r) => this._rowToEdge(r));
   }
@@ -325,7 +446,7 @@ export class SqliteReader {
   /** Incoming edges to a node. */
   getEdgesByTarget(qualifiedName: string): GraphEdge[] {
     const rows = this._db()
-      .prepare('SELECT * FROM edges WHERE target_qualified = ?')
+      .prepare(`SELECT * FROM ${this.table('edges')} WHERE target_qualified = ?`)
       .all(qualifiedName) as EdgeRow[];
     return rows.map((r) => this._rowToEdge(r));
   }
@@ -342,7 +463,7 @@ export class SqliteReader {
     const placeholders = qns.map(() => '?').join(',');
     const rows = this._db()
       .prepare(
-        `SELECT * FROM edges
+        `SELECT * FROM ${this.table('edges')}
          WHERE source_qualified IN (${placeholders})
            AND target_qualified IN (${placeholders})`
       )
@@ -359,36 +480,36 @@ export class SqliteReader {
     const db = this._db();
 
     const totalNodes = (
-      db.prepare('SELECT COUNT(*) AS cnt FROM nodes').get() as CountRow
+      db.prepare(`SELECT COUNT(*) AS cnt FROM ${this.table('nodes')}`).get() as CountRow
     ).cnt;
 
     const totalEdges = (
-      db.prepare('SELECT COUNT(*) AS cnt FROM edges').get() as CountRow
+      db.prepare(`SELECT COUNT(*) AS cnt FROM ${this.table('edges')}`).get() as CountRow
     ).cnt;
 
     const nodesByKind: Record<string, number> = {};
     const nkRows = db
-      .prepare('SELECT kind, COUNT(*) AS cnt FROM nodes GROUP BY kind')
+      .prepare(`SELECT kind, COUNT(*) AS cnt FROM ${this.table('nodes')} GROUP BY kind`)
       .all() as KindCountRow[];
     for (const r of nkRows) { nodesByKind[r.kind] = r.cnt; }
 
     const edgesByKind: Record<string, number> = {};
     const ekRows = db
-      .prepare('SELECT kind, COUNT(*) AS cnt FROM edges GROUP BY kind')
+      .prepare(`SELECT kind, COUNT(*) AS cnt FROM ${this.table('edges')} GROUP BY kind`)
       .all() as KindCountRow[];
     for (const r of ekRows) { edgesByKind[r.kind] = r.cnt; }
 
     const languages = (
       db
         .prepare(
-          "SELECT DISTINCT language FROM nodes WHERE language IS NOT NULL AND language != ''"
+          `SELECT DISTINCT language FROM ${this.table('nodes')} WHERE language IS NOT NULL AND language != ''`
         )
         .all() as LanguageRow[]
     ).map((r) => r.language);
 
     const filesCount = (
       db
-        .prepare("SELECT COUNT(*) AS cnt FROM nodes WHERE kind = 'File'")
+        .prepare(`SELECT COUNT(*) AS cnt FROM ${this.table('nodes')} WHERE kind = 'File'`)
         .get() as CountRow
     ).cnt;
 
@@ -398,7 +519,7 @@ export class SqliteReader {
     let embeddingsCount = 0;
     try {
       embeddingsCount = (
-        db.prepare('SELECT COUNT(*) AS cnt FROM embeddings').get() as CountRow
+        db.prepare(`SELECT COUNT(*) AS cnt FROM ${this.table('embeddings')}`).get() as CountRow
       ).cnt;
     } catch {
       // embeddings table does not exist -- that is fine
@@ -419,7 +540,7 @@ export class SqliteReader {
   /** Read a single key from the metadata table. */
   getMetadata(key: string): string | undefined {
     const row = this._db()
-      .prepare('SELECT value FROM metadata WHERE key = ?')
+      .prepare(`SELECT value FROM ${this.table('metadata')} WHERE key = ?`)
       .get(key) as MetadataRow | undefined;
     return row?.value;
   }
@@ -536,7 +657,7 @@ export class SqliteReader {
     const where = conditions.join(' AND ');
     const rows = this._db()
       .prepare(
-        `SELECT * FROM nodes WHERE ${where} ` + // nosec
+        `SELECT * FROM ${this.table('nodes')} WHERE ${where} ` + // nosec
         'ORDER BY (line_end - line_start + 1) DESC LIMIT ?',
       )
       .all(...params) as NodeRow[];

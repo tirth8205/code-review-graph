@@ -1,0 +1,41 @@
+name: Sync upstream main
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream-main
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    if: github.event.repository.fork && github.event.repository.default_branch == 'dc-use'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - name: Fast-forward main to the canonical upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          source=$(gh api "repos/$GITHUB_REPOSITORY" --jq '.source.full_name')
+          test -n "$source"
+          git fetch --no-tags "${GITHUB_SERVER_URL}/${source}.git" refs/heads/main
+          target=$(git rev-parse FETCH_HEAD)
+          current=$(git ls-remote origin refs/heads/main | cut -f1)
+          if [ -n "$current" ]; then
+            git fetch --no-tags origin refs/heads/main
+            if ! git merge-base --is-ancestor "$(git rev-parse FETCH_HEAD)" "$target"; then
+              echo "::error::Fork main has diverged. Preserve its commits on a separate branch and reconcile main with the maintainer."
+              exit 1
+            fi
+          fi
+          git push origin "$target:refs/heads/main"
+          test "$(git ls-remote origin refs/heads/main | cut -f1)" = "$target"

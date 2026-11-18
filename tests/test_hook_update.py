@@ -43,7 +43,7 @@ def test_update_uses_payload_repo_and_ignores_invalid_payload(monkeypatch, tmp_p
     monkeypatch.setattr(
         hook_update,
         "_update_repo",
-        lambda root: calls.append(root),
+        lambda root, *, existing_only: calls.append(root),
     )
     monkeypatch.chdir(repo_a)
     monkeypatch.setattr(hook_update.sys, "stdin", io.StringIO(json.dumps({"cwd": str(nested)})))
@@ -169,7 +169,7 @@ def test_update_calls_real_builder_with_payload_repo(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(hook_update.sys, "stdin", io.StringIO(json.dumps({"cwd": str(nested)})))
     hook_update.run_update_hook()
-    assert calls == [{"full_rebuild": False, "repo_root": str(repo), "postprocess": "minimal"}]
+    assert calls == [{"full_rebuild": True, "repo_root": str(repo), "postprocess": "minimal"}]
     assert build.build_or_update_graph is not original
 
 

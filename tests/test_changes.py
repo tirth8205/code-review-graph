@@ -638,7 +638,7 @@ class TestChanges:
         ("get_impact_radius", "query"),
     ])
     def test_every_review_tool_reports_a_discovery_failure(
-        self, func_name, module,
+        self, func_name, module, tmp_path,
     ):
         """None of the four may render "could not look" as the all-clear.
 
@@ -650,24 +650,22 @@ class TestChanges:
         import importlib
 
         from code_review_graph.errors import ChangeDiscoveryError
+        from code_review_graph.incremental import get_db_path
 
         tools_module = importlib.import_module(
             f"code_review_graph.tools.{module}"
         )
         func = getattr(tools_module, func_name)
 
-        with (
-            patch(f"code_review_graph.tools.{module}._get_store") as mock_get_store,
-            patch(
-                f"code_review_graph.tools.{module}.discover_review_changes",
-                side_effect=ChangeDiscoveryError(
-                    "could not determine the changes: git timed out after 5s."
-                ),
+        with GraphStore(get_db_path(tmp_path)) as store:
+            store.set_metadata("last_build_type", "full")
+        with patch.object(
+            tools_module, "discover_review_changes",
+            side_effect=ChangeDiscoveryError(
+                "could not determine the changes: git timed out after 5s."
             ),
-            patch.object(self.store, "close"),
         ):
-            mock_get_store.return_value = (self.store, Path("/fake/repo"))
-            result = func(repo_root="/fake/repo")
+            result = func(repo_root=str(tmp_path))
 
         assert result["status"] == "error", func_name
         assert "could not determine the changes" in result["error"]

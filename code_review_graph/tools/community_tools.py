@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from contextlib import ExitStack
 from typing import Any
 
 from ..communities import get_architecture_overview, get_communities
@@ -10,7 +11,13 @@ from ..context_history import CallInfo
 from ..context_savings import attach_context_savings
 from ..graph import node_to_dict
 from ..hints import generate_hints, get_session
-from ._common import _bounded, _get_store, _shown_of, _validate_positive_int
+from ._common import (
+    _bounded,
+    _get_store_for_read,
+    _select_generation,
+    _shown_of,
+    _validate_positive_int,
+)
 
 # ---------------------------------------------------------------------------
 # Tool 13: list_communities  [EXPLORE]
@@ -84,8 +91,13 @@ def list_communities_func(
     _validate_positive_int(max_results, "max_results")
     _validate_positive_int(max_members, "max_members")
 
-    store, root = _get_store(repo_root)
+    store, root, not_built = _get_store_for_read(repo_root)
+    if not_built is not None:
+        return not_built
+    assert store is not None and root is not None
+    stack = ExitStack()
     try:
+        store = _select_generation(stack, store, projections=True, require_communities=True)
         communities, total, truncated = _bounded(
             get_communities(store, sort_by=sort_by, min_size=min_size),
             max_results,
@@ -115,7 +127,7 @@ def list_communities_func(
     except Exception as exc:
         return {"status": "error", "error": str(exc)}
     finally:
-        store.close()
+        stack.close()
 
 
 # ---------------------------------------------------------------------------
@@ -152,8 +164,13 @@ def get_community_func(
     """
     _validate_positive_int(max_members, "max_members")
 
-    store, root = _get_store(repo_root)
+    store, root, not_built = _get_store_for_read(repo_root)
+    if not_built is not None:
+        return not_built
+    assert store is not None and root is not None
+    stack = ExitStack()
     try:
+        store = _select_generation(stack, store, projections=True, require_communities=True)
         community: dict | None = None
         all_communities = get_communities(store)
 
@@ -201,7 +218,7 @@ def get_community_func(
     except Exception as exc:
         return {"status": "error", "error": str(exc)}
     finally:
-        store.close()
+        stack.close()
 
 
 # ---------------------------------------------------------------------------
@@ -225,21 +242,22 @@ def _minimal_overview(overview: dict[str, Any]) -> dict[str, Any]:
         {k: c[k] for k in _MINIMAL_COMMUNITY_FIELDS if k in c}
         for c in overview.get("communities", [])
     ]
-    id_to_name = {c["id"]: c["name"] for c in communities if "id" in c}
 
     edge_pair_counts: Counter[tuple[int, int]] = Counter()
     edge_pair_kinds: dict[tuple[int, int], Counter[str]] = {}
     for e in overview.get("cross_community_edges", []):
         # Use canonical (low, high) ordering so A↔B and B↔A aggregate together.
         a, b = e["source_community"], e["target_community"]
-        pair = (a, b) if a <= b else (b, a)
+        pair = tuple(sorted((a, b), key=str))
         edge_pair_counts[pair] += 1
         edge_pair_kinds.setdefault(pair, Counter())[e["edge_kind"]] += 1
 
     cross_pairs = [
         {
-            "source_community": id_to_name.get(a, f"community-{a}"),
-            "target_community": id_to_name.get(b, f"community-{b}"),
+            # Minimal mode keeps the same field contract as standard mode:
+            # community ids, which ``communities`` resolves to names.
+            "source_community": a,
+            "target_community": b,
             "edge_count": count,
             "top_kinds": [k for k, _ in edge_pair_kinds[(a, b)].most_common(3)],
         }
@@ -286,8 +304,13 @@ def get_architecture_overview_func(
     _validate_positive_int(max_results, "max_results")
     _validate_positive_int(max_members, "max_members")
 
-    store, root = _get_store(repo_root)
+    store, root, not_built = _get_store_for_read(repo_root)
+    if not_built is not None:
+        return not_built
+    assert store is not None and root is not None
+    stack = ExitStack()
     try:
+        store = _select_generation(stack, store, projections=True, require_communities=True)
         full_overview = get_architecture_overview(store)
         overview = full_overview
         if detail_level == "minimal":
@@ -298,6 +321,22 @@ def get_architecture_overview_func(
                 _cap_members(c, max_members)
                 for c in overview.get("communities", [])
             ]
+        # One id type and no dangling references: a pruned community must not
+        # leave an edge that the caller cannot resolve to a name.
+        for community in overview.get("communities", []):
+            if "id" in community:
+                community["id"] = str(community["id"])
+        community_ids = {c["id"] for c in overview.get("communities", []) if "id" in c}
+        overview["cross_community_edges"] = [
+            {
+                **edge,
+                "source_community": str(edge.get("source_community")),
+                "target_community": str(edge.get("target_community")),
+            }
+            for edge in overview.get("cross_community_edges", [])
+            if str(edge.get("source_community")) in community_ids
+            and str(edge.get("target_community")) in community_ids
+        ]
         cross, cross_total, truncated = _bounded(
             overview["cross_community_edges"], max_results, _MAX_CROSS_EDGES,
         )
@@ -346,4 +385,4 @@ def get_architecture_overview_func(
     except Exception as exc:
         return {"status": "error", "error": str(exc)}
     finally:
-        store.close()
+        stack.close()

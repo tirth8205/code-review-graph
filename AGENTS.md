@@ -1,22 +1,139 @@
+<!-- AIHUB-INVIOLABLE-LAW-PRELUDE v1 -->
+# AIHUB Inviolable Law — Strict Prelude
+
+1. Truth: never claim done/green/resolved without command, exit code, decisive output.
+2. Root cause: exterminate bypass, fallback, shim, suppression, stub, hardcode, catch-based normalization, retry, compatibility, partial execution, keyring, or old+new coexistence.
+3. Tracker boundary: without repository `.beads/`, invoke neither `bd` nor `gc` and create no substitute. Otherwise use only the selected, available canonical tracker. If explicitly suspended, preserve authorized Git/PR/CI evidence and never declare DONE.
+4. Research first: inspect code, docs, canonical sources before acting; never invent APIs, flags, facts, or behavior.
+5. Owner first: use the project's declared facades/primitives; do not reimplement them locally.
+6. Gate persistence: a failure stops only that invocation. Correct its owner,
+   republish, and rerun until green; never switch phase or repository because a
+   check, review, approval, or merge is pending. Escalate only after every
+   authorized technical action is exhausted and the remaining condition is
+   genuinely external or requires new authority.
+7. Landing: native gates, commit, fast-forward push, bead evidence.
+8. Divergence: FF push rejected → integrate by cooperation: `git merge --no-ff` the integration base into your lane, resolve conflicts, revalidate, land. Never rebase or force-push an authorized change or integration branch; adopt all current worktree state and fix it forward.
+9. Escalation: impossible rule → exact error. Rule conflict → present both with numbers. Unclear → one targeted question. Never guess.
+10. Precedence: NEWEST > OLDEST. USER REQUEST > BEADS > ADRs > SKILLs > DOCS > default. Adjust lower/older to higher/newer. Doubt → ASK USER FIRST.
+11. Workspaces: follow `rules/coordination/gascity.md`. Every manual task uses a dedicated Git worktree, branch, and physical `.venv`, never the primary checkout. Gas City suspension keeps orchestration inactive. Worktrees and staging stay on the destination filesystem, never `/tmp`; no borrowed environment, backup, or archive. Retire worktrees after verified integration.
+12. Phase closure: keep the phase active through check repair, review resolution,
+    independent approval, merge into the configured integration branch, and
+    post-merge proof. Only then, with its Bead closed with evidence, is it DONE.
+    When the operator states that no independent reviewer exists and authorizes
+    an administrative merge, that authorization replaces the approval row alone;
+    every other row stays mandatory and closure records the approval as
+    operator-authorized, never as satisfied.
+13. Root Make only: diagnostics, validation, generation, tests, Waza,
+    publication, and deployment run only through selector-free verbs in the
+    repository root Makefile; bare verbs perform their declared operation. Test
+    verbs: `rules/workflow/canonical-commands.md`.
+14. Red means red: a warning, skip, empty output, missing tool, missing report,
+    zero collection, caught exception, retry, or normalized failure is RED. The
+    only acceptable zero-execution test result is a typed `make test` cache hit
+    with an integrity-checked database and complete deselection
+    accounting; it is never reported as tests passed. The first exception and
+    raw traceback escape unchanged.
+<!-- /AIHUB-INVIOLABLE-LAW-PRELUDE -->
+
+# AGENTS.md — code-review-graph
+
+> Packaged governance `agents-governance` `0.6.3` owns the capability indexes: 71 agents, 112 rules, 141 skills. Consume them through `GovernanceBundle`; do not copy their bodies here.
+
+<!-- AIHUB-AGENTS-SCOPE-LOCAL-BEGIN -->
 # Agent Instructions
 
-Project context (architecture, commands, conventions, tests) is in `CLAUDE.md`. This file holds the rules for every coding agent working in this repository.
+This project uses **bd** (beads) for issue tracking. Run `bd prime` for full workflow context.
+
+## Quick Reference
+
+```bash
+bd ready              # Find available work
+bd show <id>          # View issue details
+bd update <id> --claim  # Claim work atomically
+bd close <id>         # Complete work
+bd dolt push          # Push beads data to remote
+```
 
 ## Non-Interactive Shell Commands
 
-`cp`, `mv` and `rm` may be aliased with `-i` on some systems, which leaves an agent waiting for a y/n answer that never comes. Always pass the non-interactive flag:
+**ALWAYS use non-interactive flags** with file operations to avoid hanging on confirmation prompts.
 
+Shell commands like `cp`, `mv`, and `rm` may be aliased to include `-i` (interactive) mode on some systems, causing the agent to hang indefinitely waiting for y/n input.
+
+**Use these forms instead:**
 ```bash
-cp -f source dest
-mv -f source dest
-rm -f file
-rm -rf directory
-cp -rf source dest
+# Force overwrite without prompting
+cp -f source dest           # NOT: cp source dest
+mv -f source dest           # NOT: mv source dest
+rm -f file                  # NOT: rm file
+
+# For recursive operations
+rm -rf directory            # NOT: rm -r directory
+cp -rf source dest          # NOT: cp -r source dest
 ```
 
-Other commands that may prompt: `scp` and `ssh` (`-o BatchMode=yes`), `apt-get` (`-y`), `brew` (`HOMEBREW_NO_AUTO_UPDATE=1`).
+**Other commands that may prompt:**
+- `scp` - use `-o BatchMode=yes` for non-interactive
+- `ssh` - use `-o BatchMode=yes` to fail instead of prompting
+- `apt-get` - use `-y` flag
+- `brew` - use `HOMEBREW_NO_AUTO_UPDATE=1` env var
 
-<!-- code-review-graph MCP tools -->
+<!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:970c3bf2 -->
+## Beads Issue Tracker
+
+This project uses **bd (beads)** for issue tracking. Run `bd prime` to see full workflow context and commands.
+
+### Quick Reference
+
+```bash
+bd ready              # Find available work
+bd show <id>          # View issue details
+bd update <id> --claim  # Claim work
+bd close <id>         # Complete work
+```
+
+### Rules
+
+- Use `bd` for ALL task tracking — do NOT use TodoWrite, TaskCreate, or markdown TODO lists
+- Run `bd prime` for detailed command reference and session close protocol
+- Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
+
+**Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for details and anti-patterns.
+
+## Agent Context Profiles
+
+The managed Beads block is task-tracking guidance, not permission to override repository, user, or orchestrator instructions.
+
+- **Conservative (default)**: Use `bd` for task tracking. Do not run git commits, git pushes, or Dolt remote sync unless explicitly asked. At handoff, report changed files, validation, and suggested next commands.
+- **Minimal**: Keep tool instruction files as pointers to `bd prime`; use the same conservative git policy unless active instructions say otherwise.
+- **Team-maintainer**: Only when the repository explicitly opts in, agents may close beads, run quality gates, commit, and push as part of session close. A current "do not commit" or "do not push" instruction still wins.
+
+## Session Completion
+
+This protocol applies when ending a Beads implementation workflow. It is subordinate to explicit user, repository, and orchestrator instructions.
+
+1. **File issues for remaining work** - Create beads for anything that needs follow-up
+2. **Run quality gates** (if code changed) - Tests, linters, builds
+3. **Update issue status** - Close finished work, update in-progress items
+4. **Handle git/sync by active profile**:
+   ```bash
+   # Conservative/minimal/default: report status and proposed commands; wait for approval.
+   git status
+
+   # Team-maintainer opt-in only, unless current instructions forbid it:
+   git pull --rebase
+   bd dolt push
+   git push
+   git status
+   ```
+5. **Hand off** - Summarize changes, validation, issue status, and any blocked sync/commit/push step
+
+**Critical rules:**
+- Explicit user or orchestrator instructions override this Beads block.
+- Do not commit or push without clear authority from the active profile or the current user request.
+- If a required sync or push is blocked, stop and report the exact command and error.
+<!-- END BEADS INTEGRATION -->
+
 ## MCP Tools: code-review-graph
 
 **This project has a knowledge graph. Start with the code-review-graph
@@ -25,7 +142,7 @@ gives you structural context (callers, dependents, test coverage) that file sear
 
 ### When to use graph tools FIRST
 
-- **Exploring code**: `semantic_search_nodes_tool(include_source=True, expand_neighbors=True)`
+- **Exploring code**: `semantic_search_nodes_tool` or `query_graph_tool` instead of Grep
 - **Understanding impact**: `get_impact_radius_tool` instead of manually tracing imports
 - **Code review**: `detect_changes_tool` + `get_review_context_tool` instead of reading entire files
 - **Finding relationships**: `query_graph_tool` with callers_of/callees_of/imports_of/tests_for
@@ -33,12 +150,12 @@ gives you structural context (callers, dependents, test coverage) that file sear
 
 ### Verify in the source
 
-- Answer from `include_source=True, expand_neighbors=True`; read a file only if truncated.
-- Do not change code from graph output alone: for any non-trivial change,
-  read the implementation and the relevant tests before concluding.
+- Narrow scope with the graph, then read the source. Do not change code from graph output alone.
+- For any non-trivial change, read the implementation and the relevant tests before concluding.
 - Verify the exact source when touching behavior, database logic, migrations, retries, fallbacks,
   recovery, or compatibility code.
-- When the graph and the source disagree, the source wins. The graph may be stale.
+- When the graph and the source disagree, the source wins. The graph may be stale or may not
+  model that relationship.
 - An empty graph result can mean "not indexed" or "not statically visible", not "does not exist".
 
 ### Key Tools
@@ -60,4 +177,210 @@ gives you structural context (callers, dependents, test coverage) that file sear
 2. Use `detect_changes_tool` for code review.
 3. Use `get_affected_flows_tool` to understand impact.
 4. Use `query_graph_tool` pattern="tests_for" to check coverage.
-<!-- /code-review-graph MCP tools -->
+
+<!-- BEGIN BEADS CODEX SETUP: generated by bd setup codex -->
+## Beads Issue Tracker
+
+Use Beads (`bd`) for durable task tracking in repositories that include it. Use the `beads` skill at `.agents/skills/beads/SKILL.md` (project install) or `~/.agents/skills/beads/SKILL.md` (global install) for Beads workflow guidance, then use the `bd` CLI for issue operations.
+
+### Quick Reference
+
+```bash
+bd ready                # Find available work
+bd show <id>            # View issue details
+bd update <id> --claim  # Claim work
+bd close <id>           # Complete work
+bd prime                # Refresh Beads context
+```
+
+### Rules
+
+- Use `bd` for all task tracking; do not create markdown TODO lists.
+- Run `bd prime` when Beads context is missing or stale. Codex 0.129.0+ can load Beads context automatically through native hooks; use `/hooks` to inspect or toggle them.
+- Keep persistent project memory in Beads via `bd remember`; do not create ad hoc memory files.
+
+**Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for details and anti-patterns.
+<!-- END BEADS CODEX SETUP -->
+
+<!-- migrated from CLAUDE.md -->
+# CLAUDE.md - Project Context for Claude Code
+
+## Project Overview
+
+**code-review-graph** is a persistent, incrementally updated, local-first knowledge graph for token-efficient code review through MCP and the CLI. It parses codebases using Tree-sitter and targeted fallbacks, builds a structural graph in SQLite, and exposes compact context to AI coding tools including Claude Code, Codex, Cursor, Windsurf, Zed, Continue, OpenCode, Gemini CLI, Qwen, Kiro, Qoder, and GitHub Copilot.
+
+## Graph Tool Usage (Token-Efficient)
+When using code-review-graph MCP tools, follow these rules:
+1. First call: `get_minimal_context(task="<description>")` — costs ~100 tokens, gives you the full picture.
+2. All subsequent calls: use `detail_level="minimal"` unless you need more.
+3. Prefer `query_graph_tool` with a specific target over broad `list_*` calls.
+4. The `next_tool_suggestions` field in every response tells you the optimal next step.
+5. Target: ≤5 tool calls per task, ≤800 total tokens of graph context.
+
+## Architecture
+
+- **Core Package**: `code_review_graph/` (Python 3.10+)
+  - `parser.py` — Tree-sitter multi-language AST parser plus targeted fallbacks for broad source-language and notebook support
+  - `custom_languages.py` — Config-driven custom language support (`.code-review-graph/languages.toml`, see docs/CUSTOM_LANGUAGES.md)
+  - `graph.py` — SQLite-backed graph store (nodes, edges, weighted-score impact analysis)
+  - `tools/` — 30 MCP tool implementations split by domain
+  - `main.py` — FastMCP server entry point, registers 30 tools + 5 prompts
+  - `incremental.py` — Git-based change detection, file watching
+  - `embeddings.py` — Optional vector embeddings (local sentence-transformers, OpenAI-compatible endpoints, Google Gemini, MiniMax, Voyage AI)
+  - `visualization.py` — D3.js interactive HTML graph generator
+  - `cli.py` — CLI entry point (install/init, build, update, postprocess, embed, watch, status, doctor, visualize, serve/mcp, wiki, detect-changes, register, unregister, repos, eval, daemon)
+  - `doctor.py` — Health checklist (`doctor` command): graph presence, freshness vs git HEAD, MCP config, server boot smoke, hooks, embeddings; surfaces the latest Token Savings number
+  - `flows.py` — Execution flow detection and criticality scoring
+  - `communities.py` — Community detection (Leiden algorithm or file-based grouping) and architecture overview
+  - `search.py` — FTS5 hybrid search (keyword + vector)
+  - `changes.py` — Risk-scored change impact analysis (detect-changes)
+  - `refactor.py` — Rename preview, dead code detection, refactoring suggestions
+  - `hints.py` — Review hint generation
+  - `prompts.py` — 5 MCP prompt templates (review_changes, architecture_map, debug_issue, onboard_developer, pre_merge_check)
+  - `wiki.py` — Markdown wiki generation from community structure
+  - `skills.py` — Multi-platform install/config generation and shipped skill metadata
+  - `registry.py` — Multi-repo registry helpers
+  - `migrations.py` — Database schema migrations (v1-v9)
+  - `tsconfig_resolver.py` — TypeScript path alias resolution
+
+- **VS Code Extension**: `code-review-graph-vscode/` (TypeScript)
+  - Separate subproject with its own `package.json`, `tsconfig.json`
+  - Reads from `.code-review-graph/graph.db` via SQLite
+
+- **Database**: `.code-review-graph/graph.db` (SQLite, WAL mode)
+
+## Key Commands
+
+```bash
+# Development
+uv run pytest tests/ --tb=short -q          # Run tests
+uv run ruff check code_review_graph/        # Lint
+uv run mypy code_review_graph/ --ignore-missing-imports --no-strict-optional
+
+# Build & test
+uv run code-review-graph build              # Full graph build
+uv run code-review-graph update             # Incremental update
+uv run code-review-graph status             # Show stats
+uv run code-review-graph doctor             # Health checklist (verify the install)
+uv run code-review-graph serve              # Start MCP server
+uv run code-review-graph wiki               # Generate markdown wiki
+uv run code-review-graph detect-changes     # Risk-scored change analysis
+uv run code-review-graph register <path>    # Register repo in multi-repo registry
+uv run code-review-graph repos              # List registered repos
+uv run code-review-graph eval               # Run evaluation benchmarks
+```
+
+## Code Conventions
+
+- **Line length**: 100 chars (ruff)
+- **Python target**: 3.10+
+- **SQL**: Always use parameterized queries (`?` placeholders), never f-string values
+- **Error handling**: Catch specific exceptions, log with `logger.warning/error`
+- **Thread safety**: `threading.Lock` for shared caches, `check_same_thread=False` for SQLite
+- **Node names**: Always sanitize via `_sanitize_name()` before returning to MCP clients
+- **File reads**: Read bytes once, hash, then parse (TOCTOU-safe pattern)
+
+## Security Invariants
+
+- No `eval()`, `exec()`, `pickle`, or `yaml.unsafe_load()`
+- No `shell=True` in subprocess calls
+- `_validate_repo_root()` prevents path traversal via repo_root parameter
+- `_sanitize_name()` strips control characters, caps at 256 chars (prompt injection defense)
+- `escH()` in visualization escapes HTML entities including quotes and backticks
+- SRI hash on D3.js CDN script tag
+- API keys only from environment variables, never hardcoded
+
+## Test Structure
+
+- `tests/test_parser.py` — Parser correctness, cross-file resolution
+- `tests/test_graph.py` — Graph CRUD, stats, impact radius
+- `tests/test_tools.py` — MCP tool integration tests
+- `tests/test_visualization.py` — Export, HTML generation, C++ resolution
+- `tests/test_incremental.py` — Build, update, migration, git ops
+- `tests/test_multilang.py` — Broad language parsing tests, including SFCs, notebooks, SQL, Perl XS, and modern systems/web languages
+- `tests/test_custom_languages.py` — Config-driven custom languages (languages.toml loader + end-to-end Erlang parse)
+- `tests/test_embeddings.py` — Vector encode/decode, similarity, store
+- `tests/test_flows.py` — Execution flow detection and criticality
+- `tests/test_communities.py` — Community detection, architecture overview
+- `tests/test_changes.py` — Risk-scored change analysis
+- `tests/test_refactor.py` — Rename preview, dead code, suggestions
+- `tests/test_search.py` — FTS5 hybrid search
+- `tests/test_hints.py` — Review hint generation
+- `tests/test_prompts.py` — MCP prompt template tests
+- `tests/test_wiki.py` — Wiki generation
+- `tests/test_context_savings.py` — Estimated context-savings metadata
+- `tests/test_doctor.py` — `doctor` health checklist (unbuilt flags, built healthy, exit codes)
+- `tests/test_skills.py` — Install/config generation and shipped skill metadata
+- `tests/test_registry.py` — Multi-repo registry
+- `tests/test_migrations.py` — Database migrations
+- `tests/test_eval.py` — Evaluation framework
+- `tests/test_tsconfig_resolver.py` — TypeScript path resolution
+- `tests/test_repo_root_identity.py` — One graph identity per repository root spelling
+- `tests/test_integration_v2.py` — v2 pipeline integration test
+- `tests/test_action_render.py` — GitHub Action PR comment renderer (`scripts/render_pr_comment.py`)
+- `tests/fixtures/` — Sample files for each supported language
+
+## CI Pipeline
+
+- **lint**: ruff on Python 3.10
+- **type-check**: mypy
+- **security**: bandit scan
+- **test**: pytest matrix (3.10, 3.11, 3.12, 3.13) with 65% coverage minimum
+
+
+<!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:970c3bf2 -->
+## Beads Issue Tracker
+
+This project uses **bd (beads)** for issue tracking. Run `bd prime` to see full workflow context and commands.
+
+### Quick Reference
+
+```bash
+bd ready              # Find available work
+bd show <id>          # View issue details
+bd update <id> --claim  # Claim work
+bd close <id>         # Complete work
+```
+
+### Rules
+
+- Use `bd` for ALL task tracking — do NOT use TodoWrite, TaskCreate, or markdown TODO lists
+- Run `bd prime` for detailed command reference and session close protocol
+- Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
+
+**Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for details and anti-patterns.
+
+## Agent Context Profiles
+
+The managed Beads block is task-tracking guidance, not permission to override repository, user, or orchestrator instructions.
+
+- **Conservative (default)**: Use `bd` for task tracking. Do not run git commits, git pushes, or Dolt remote sync unless explicitly asked. At handoff, report changed files, validation, and suggested next commands.
+- **Minimal**: Keep tool instruction files as pointers to `bd prime`; use the same conservative git policy unless active instructions say otherwise.
+- **Team-maintainer**: Only when the repository explicitly opts in, agents may close beads, run quality gates, commit, and push as part of session close. A current "do not commit" or "do not push" instruction still wins.
+
+## Session Completion
+
+This protocol applies when ending a Beads implementation workflow. It is subordinate to explicit user, repository, and orchestrator instructions.
+
+1. **File issues for remaining work** - Create beads for anything that needs follow-up
+2. **Run quality gates** (if code changed) - Tests, linters, builds
+3. **Update issue status** - Close finished work, update in-progress items
+4. **Handle git/sync by active profile**:
+   ```bash
+   # Conservative/minimal/default: report status and proposed commands; wait for approval.
+   git status
+
+   # Team-maintainer opt-in only, unless current instructions forbid it:
+   git pull --rebase
+   bd dolt push
+   git push
+   git status
+   ```
+5. **Hand off** - Summarize changes, validation, issue status, and any blocked sync/commit/push step
+
+**Critical rules:**
+- Explicit user or orchestrator instructions override this Beads block.
+- Do not commit or push without clear authority from the active profile or the current user request.
+- If a required sync or push is blocked, stop and report the exact command and error.
+<!-- END BEADS INTEGRATION -->
+<!-- AIHUB-AGENTS-SCOPE-LOCAL-END -->

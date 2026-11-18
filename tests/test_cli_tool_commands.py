@@ -8,7 +8,6 @@ from unittest.mock import patch
 
 import pytest
 
-import code_review_graph.tools  # noqa: F401 - exposes lazy patch targets
 from code_review_graph import cli
 from code_review_graph.graph import GraphStore
 from code_review_graph.parser import NodeInfo
@@ -99,7 +98,12 @@ _LEGACY_GRAPH_COMMANDS = [
     ],
 )
 def test_tool_command_forwards_typed_arguments_as_json(
-    arguments, tool_name, expected, tmp_path, monkeypatch, capsys,
+    arguments,
+    tool_name,
+    expected,
+    tmp_path,
+    monkeypatch,
+    capsys,
 ):
     repo = tmp_path / "repo"
     nested = repo / "src" / "nested"
