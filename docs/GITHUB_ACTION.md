@@ -177,11 +177,11 @@ someone else's.
 The action caches the `.code-review-graph/` directory (the SQLite graph
 database) with `actions/cache`:
 
-- **Key**: `code-review-graph-schema15-<runner.os>-<hashFiles(lockfiles)>`.
+- **Key**: `code-review-graph-schema16-<runner.os>-<hashFiles(lockfiles)>`.
   The lockfile hash covers `uv.lock`, `poetry.lock`, `requirements*.txt`,
   `Pipfile.lock`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`,
   `go.sum`, `Cargo.lock`, `Gemfile.lock` and `composer.lock`.
-- **Schema segment**: `schema15` tracks the database schema version
+- **Schema segment**: `schema16` tracks the database schema version
   (`LATEST_VERSION` in `code_review_graph/migrations.py`). It is bumped when
   the schema changes so a stale cache is not restored across incompatible
   versions.

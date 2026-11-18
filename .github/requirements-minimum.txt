@@ -1,8 +1,8 @@
 # Exact direct-dependency floors declared by pyproject.toml. CI installs this
 # set with the package and dev tools on every supported Python to prove that the
 # declared lower bounds work, instead of hoping older releases still do.
-mcp==1.30.0
-fastmcp==3.4.10
+mcp==1.29.0
+fastmcp==3.2.4
 anyio==4.14.2
 tree-sitter==0.26.0
 tree-sitter-language-pack==0.13.0
