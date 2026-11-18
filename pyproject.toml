@@ -168,6 +168,11 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 norecursedirs = ["tests/fixtures"]
+# Delete each passing test's tmp_path, and the whole basetemp after a green run;
+# keep only the latest failing run. The default kept three full runs (~800 MB
+# each), which filled /dev/shm-backed TMPDIRs and the swap behind them.
+tmp_path_retention_policy = "failed"
+tmp_path_retention_count = 1
 # Browser tests are opt-in: they need the "browser-test" extra and a
 # Chromium build (`python -m playwright install chromium`). CI runs them in
 # the separate "viz-browser" job; the coverage job excludes them.
