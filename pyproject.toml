@@ -46,7 +46,7 @@ dependencies = [
     "pyyaml>=6.0.2,<7",
     "networkx>=3.2,<4",
     "watchdog>=4.0.0,<7",
-    "filelock>=3.32.5,<4",
+    "filelock>=3.32.5,<5",
     "tomli>=2.0.0,<3; python_version < '3.11'",
 ]
 
