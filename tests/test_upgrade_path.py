@@ -71,7 +71,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # discovered so the corpus is reproducible; ``test_release_list_tracks_the_
 # newest_tag`` fails if a newer release is tagged and this list is not updated,
 # which is the only way this check can quietly go stale.
-RELEASES = ("2.3.9", "2.3.8", "2.3.7")
+RELEASES = ("2.4.0", "2.3.9", "2.3.8", "2.3.7")
 
 OPT_IN_ENV = "CRG_UPGRADE_TEST"
 

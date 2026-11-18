@@ -697,6 +697,17 @@ def _migrate_v15(conn: sqlite3.Connection) -> None:
     _progress("Migration v15: dropped unread tables and covered indexes")
 
 
+def _migrate_v16(conn: sqlite3.Connection) -> None:
+    """v16: give a graph stamped past v10 the ``nodes.symbol`` column it lacks.
+
+    A build with a different migration numbering could stamp a graph past v10
+    without ever adding ``nodes.symbol``; the version registry then skipped v10
+    and every write failed on the missing column. v10 decides by the schema
+    itself, so replaying it here repairs such a graph and is a no-op otherwise.
+    """
+    _migrate_v10(conn)
+
+
 # ---------------------------------------------------------------------------
 # Migration registry
 # ---------------------------------------------------------------------------
@@ -716,6 +727,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     13: _migrate_v13,
     14: _migrate_v14,
     15: _migrate_v15,
+    16: _migrate_v16,
 }
 
 LATEST_VERSION = max(MIGRATIONS.keys())
