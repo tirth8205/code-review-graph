@@ -11,6 +11,8 @@ from __future__ import annotations
 import importlib
 import os
 import pkgutil
+import shutil
+import tempfile
 from pathlib import Path
 from tempfile import mkdtemp
 
@@ -26,6 +28,23 @@ for _module in ("incremental", "postprocessing"):
     importlib.import_module(f"code_review_graph.{_module}")
 for _info in pkgutil.iter_modules(code_review_graph.tools.__path__):
     importlib.import_module(f"code_review_graph.tools.{_info.name}")
+
+
+@pytest.fixture(scope="session", autouse=True)
+def contained_tempdir(tmp_path_factory):
+    """Hold every raw ``tempfile`` directory the suite makes, and delete them.
+
+    Many tests call ``tempfile.mkdtemp()`` and never remove the result, and
+    subprocesses inherit ``TMPDIR``. Without this, each run left hundreds of
+    MB in the caller's temp folder; with ``TMPDIR`` on ``/dev/shm`` that was
+    RAM, and repeated runs filled memory and swap.
+    """
+    root = tmp_path_factory.mktemp("tempfile")
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(tempfile, "tempdir", str(root))
+        patch.setenv("TMPDIR", str(root))
+        yield root
+    shutil.rmtree(root, ignore_errors=True)
 
 
 @pytest.fixture(scope="session")
@@ -75,6 +94,9 @@ def isolated_crg_home(crg_home_parent, monkeypatch):
     # A developer who records their own context history (#813) must not
     # have the suite append lines to every scratch repository it builds.
     monkeypatch.delenv("CRG_CONTEXT_HISTORY", raising=False)
+    # Every non-interactive bash a test spawns sources ``BASH_ENV``; a
+    # developer's hook there (direnv, for one) writes to the script's stderr.
+    monkeypatch.delenv("BASH_ENV", raising=False)
     # The installers write user-level configs under the home directory
     # (``~/.codex``, ``~/.continue``, ``~/.qwen`` and more). Point the home
     # at a temp directory, so a test that forgets to patch ``Path.home()``
