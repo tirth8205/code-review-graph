@@ -234,13 +234,26 @@ class _PythonScopeBindingVisitor(ast.NodeVisitor):
     def visit_Global(self, node: ast.Global) -> None:  # noqa: N802
         self.names.update(node.names)
 
+@lru_cache(maxsize=4)
+def _python_module_ast(source: bytes) -> Optional[ast.Module]:
+    """The ``ast`` tree of one Python file, or ``None`` if it does not parse.
+
+    Several passes over a Python file need the stdlib tree as well as the
+    tree-sitter one; they share this parse instead of each running their own.
+    None of them modifies the tree.
+    """
+    try:
+        return ast.parse(source.decode("utf-8"))
+    except (SyntaxError, UnicodeDecodeError, ValueError):
+        return None
+
+
 def _python_function_scope_bindings(
     source: bytes,
 ) -> dict[tuple[int, int], tuple[frozenset[str], frozenset[str]]]:
     """Return parameter and local names for each Python function position."""
-    try:
-        tree = ast.parse(source.decode("utf-8"))
-    except (SyntaxError, UnicodeDecodeError, ValueError):
+    tree = _python_module_ast(source)
+    if tree is None:
         return {}
     scopes: dict[
         tuple[int, int], tuple[frozenset[str], frozenset[str]],
@@ -535,9 +548,8 @@ def _python_unreachable_call_positions(
     source: bytes,
 ) -> frozenset[tuple[int, int]]:
     """Return positions of calls and attribute loads in proven-dead branches."""
-    try:
-        tree = ast.parse(source.decode("utf-8"))
-    except (SyntaxError, UnicodeDecodeError, ValueError):
+    tree = _python_module_ast(source)
+    if tree is None:
         return frozenset()
     type_checking_names, typing_modules = _python_type_checking_aliases(tree)
     visitor = _PythonUnreachableCallVisitor(
@@ -575,9 +587,8 @@ def _python_unreachable_import_positions(
     A bare ``TYPE_CHECKING`` counts whatever it is bound to: type checkers read
     any name spelled so as true, which is what ``TYPE_CHECKING = False`` relies on.
     """
-    try:
-        tree = ast.parse(source.decode("utf-8"))
-    except (SyntaxError, UnicodeDecodeError, ValueError):
+    tree = _python_module_ast(source)
+    if tree is None:
         return frozenset()
     type_checking_names, typing_modules = _python_type_checking_aliases(tree)
     visitor = _PythonUnreachableImportVisitor(
@@ -3971,6 +3982,7 @@ class CodeParser:
         for _cached_fn in (
             _read_cargo_manifest,
             _python_unreachable_call_positions,
+            _python_module_ast,
             _read_go_mod,
             _read_gemspec_require_paths,
             _read_php_composer_psr4,

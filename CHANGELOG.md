@@ -42,6 +42,9 @@
   `detail_level="minimal"` drops source, so a search with
   `include_source=True` and `get_review_context_tool` stay at standard. Run
   `install` again for the new text.
+- Parsing a Python file runs Python's own `ast` parser once instead of three
+  times, so a build or update of a Python repository parses about 7% faster
+  (408 files: 9.3 s to 8.7 s). The graph is unchanged.
 
 ### Fixed
 
