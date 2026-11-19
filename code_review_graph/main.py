@@ -94,6 +94,7 @@ _LAZY_TOOL_NAMES = frozenset({
     "list_repos_func",
     "query_graph",
     "refactor_func",
+    "relative_to_cwd",
     "run_postprocess",
     "semantic_search_nodes",
     "traverse_graph_func",
@@ -254,6 +255,7 @@ async def _offload(
     provenance: bool = True,
     bounded: bool = True,
     timeout_hint: str = _TIMEOUT_HINT,
+    cwd: str | None = None,
 ) -> dict:
     """Run one blocking tool body off the event loop, optionally bounded.
 
@@ -304,6 +306,8 @@ async def _offload(
             keep review calls responsive. Letting that knob quietly abort
             their builds would make the documented remedy a new bug.
         timeout_hint: Advice appended to the timeout message.
+        cwd: The caller's working directory. Inside the repository, paths in
+            the result are made repo-relative (``relative_to_cwd``).
     """
     def run_fn() -> Any:
         # Resolve lazy attributes inside the worker: on a cold call the import
@@ -314,9 +318,12 @@ async def _offload(
         for name in getattr(getattr(work, "__code__", None), "co_names", ()):
             if name in _LAZY_TOOL_NAMES and name not in globals():
                 _resolve_attr(name)
+        result = work()
         if provenance:
-            return _resolve_attr("with_provenance")(work(), root)
-        return work()
+            result = _resolve_attr("with_provenance")(result, root)
+        if cwd:
+            result = _resolve_attr("relative_to_cwd")(result, root, cwd)
+        return result
 
     tool_timeout = env_int("CRG_TOOL_TIMEOUT", 0)
     if not bounded or tool_timeout <= 0:
@@ -389,6 +396,7 @@ async def build_or_update_graph_tool(
     recurse_submodules: Optional[bool] = None,
     embedding_provider: Optional[str] = None,
     embedding_model: Optional[str] = None,
+    cwd: Optional[str] = None,
 ) -> dict:
     """Build or incrementally update the code knowledge graph.
 
@@ -420,6 +428,8 @@ async def build_or_update_graph_tool(
             the result sets embeddings_refresh_skipped; run embed_graph_tool first.
         embedding_model: Exact model for an explicit post-build embedding
             refresh. Must be supplied with embedding_provider. Default: disabled.
+        cwd: Your working directory. When it is inside the repository, paths in
+            the result are repo-relative; otherwise they stay absolute.
     """
     # The blocking full_build / incremental_update work runs on a worker
     # thread via _offload so the stdio event loop stays responsive. Without
@@ -440,6 +450,7 @@ async def build_or_update_graph_tool(
         # Writes graph.db for as long as the repository takes. A timeout
         # cannot stop the worker, only stop waiting for it. See _offload.
         bounded=False,
+        cwd=cwd,
     )
 
 
@@ -451,6 +462,7 @@ async def run_postprocess_tool(
     repo_root: Optional[str] = None,
     embedding_provider: Optional[str] = None,
     embedding_model: Optional[str] = None,
+    cwd: Optional[str] = None,
 ) -> dict:
     """Run post-processing on existing graph (flows, communities, FTS index).
 
@@ -474,6 +486,8 @@ async def run_postprocess_tool(
             the result sets embeddings_refresh_skipped; run embed_graph_tool first.
         embedding_model: Exact model for an explicit embedding refresh.
             Must be supplied with embedding_provider. Default: disabled.
+        cwd: Your working directory. When it is inside the repository, paths in
+            the result are repo-relative; otherwise they stay absolute.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -487,6 +501,7 @@ async def run_postprocess_tool(
         # Writes graph.db for as long as the repository takes. A timeout
         # cannot stop the worker, only stop waiting for it. See _offload.
         bounded=False,
+        cwd=cwd,
     )
 
 
@@ -496,6 +511,7 @@ async def get_minimal_context_tool(
     changed_files: Optional[list[str]] = None,
     repo_root: Optional[str] = None,
     base: str = "HEAD~1",
+    cwd: Optional[str] = None,
 ) -> dict:
     """Get ultra-compact context for any task (~100 tokens). Always call this first.
 
@@ -510,6 +526,8 @@ async def get_minimal_context_tool(
         changed_files: Explicit list of changed files. Auto-detected if omitted.
         repo_root: Repository root path. Auto-detected if omitted.
         base: Git ref for diff comparison. Default: HEAD~1.
+        cwd: Your working directory. When it is inside the repository, paths in
+            the result are repo-relative; otherwise they stay absolute.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -519,6 +537,7 @@ async def get_minimal_context_tool(
             repo_root=root, base=base,
         ),
         root,
+        cwd=cwd,
     )
 
 
@@ -532,6 +551,7 @@ async def get_impact_radius_tool(
     detail_level: str = "standard",
     resolution: str = "all",
     max_files: int = 25,
+    cwd: Optional[str] = None,
 ) -> dict:
     """Analyze the blast radius of changed files in the codebase.
 
@@ -558,6 +578,8 @@ async def get_impact_radius_tool(
         max_files: File display limit in compact mode (default 25, maximum 200).
             Does not reduce the graph traversal budget set by max_results.
         resolution: "all" (default) or "direct" to traverse only calls bound to an indexed node.
+        cwd: Your working directory. When it is inside the repository, paths in
+            the result are repo-relative; otherwise they stay absolute.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -569,6 +591,7 @@ async def get_impact_radius_tool(
             resolution=resolution, max_files=max_files,
         ),
         root,
+        cwd=cwd,
     )
 
 
@@ -581,6 +604,7 @@ async def query_graph_tool(
     max_results: int = 100,
     resolution: str = "all",
     to: Optional[str] = None,
+    cwd: Optional[str] = None,
 ) -> dict:
     """Run a predefined graph query to explore code relationships.
 
@@ -627,6 +651,8 @@ async def query_graph_tool(
         resolution: "all" (default), "direct" for only calls bound to an indexed
             node, or "unresolved" for only the bare-name matches.
         to: For path_to, the node name, qualified name, or file path to reach.
+        cwd: Your working directory. When it is inside the repository, paths in
+            the result are repo-relative; otherwise they stay absolute.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -637,6 +663,7 @@ async def query_graph_tool(
             resolution=resolution, to=to,
         ),
         root,
+        cwd=cwd,
     )
 
 
@@ -651,6 +678,7 @@ async def get_review_context_tool(
     detail_level: str = "standard",
     max_results: int = 100,
     max_files: int = 25,
+    cwd: Optional[str] = None,
 ) -> dict:
     """Generate a focused, token-efficient review context for code changes.
 
@@ -670,6 +698,8 @@ async def get_review_context_tool(
             Default: 50. Each list reports its untruncated ``*_total``.
         max_files: Maximum files listed and given source snippets.
             Default: 25. Snippets share an 800-line budget.
+        cwd: Your working directory. When it is inside the repository, paths in
+            the result are repo-relative; otherwise they stay absolute.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -681,6 +711,7 @@ async def get_review_context_tool(
             max_results=max_results, max_files=max_files,
         ),
         root,
+        cwd=cwd,
     )
 
 
@@ -696,6 +727,7 @@ async def semantic_search_nodes_tool(
     include_source: bool = False,
     expand_neighbors: bool = False,
     max_source_lines: int = 60,
+    cwd: Optional[str] = None,
 ) -> dict:
     """Search for code entities by name, keyword, or semantic similarity.
 
@@ -729,6 +761,8 @@ async def semantic_search_nodes_tool(
                           answers "how does X work". Default: False.
         max_source_lines: With include_source, the most lines per snippet
                           (1-60). Default: 60.
+        cwd: Your working directory. When it is inside the repository, paths in
+            the result are repo-relative; otherwise they stay absolute.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -740,6 +774,7 @@ async def semantic_search_nodes_tool(
             max_source_lines=max_source_lines,
         ),
         root,
+        cwd=cwd,
     )
 
 
@@ -748,6 +783,7 @@ async def embed_graph_tool(
     repo_root: Optional[str] = None,
     model: Optional[str] = None,
     provider: Optional[str] = None,
+    cwd: Optional[str] = None,
 ) -> dict:
     """Compute vector embeddings for all graph nodes to enable semantic search.
 
@@ -765,6 +801,8 @@ async def embed_graph_tool(
                   "voyage". "openai" accepts any OpenAI-compatible endpoint
                   and needs CRG_OPENAI_BASE_URL + CRG_OPENAI_API_KEY;
                   "voyage" needs VOYAGE_API_KEY.
+        cwd: Your working directory. When it is inside the repository, paths in
+            the result are repo-relative; otherwise they stay absolute.
     """
     # The blocking sentence-transformers / Gemini / HTTP inference runs on a
     # worker thread via _offload so the stdio event loop stays responsive.
@@ -779,12 +817,14 @@ async def embed_graph_tool(
         ),
         root,
         bounded=False,  # writes embeddings; minutes is normal. See _offload.
+        cwd=cwd,
     )
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
 async def list_graph_stats_tool(
     repo_root: Optional[str] = None,
+    cwd: Optional[str] = None,
 ) -> dict:
     """Get aggregate statistics about the code knowledge graph.
 
@@ -793,12 +833,15 @@ async def list_graph_stats_tool(
 
     Args:
         repo_root: Repository root path. Auto-detected if omitted.
+        cwd: Your working directory. When it is inside the repository, paths in
+            the result are repo-relative; otherwise they stay absolute.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
         "list_graph_stats_tool",
         lambda: list_graph_stats(repo_root=root),
         root,
+        cwd=cwd,
     )
 
 
@@ -838,6 +881,7 @@ async def find_large_functions_tool(
     limit: int = 50,
     repo_root: Optional[str] = None,
     detail_level: str = "standard",
+    cwd: Optional[str] = None,
 ) -> dict:
     """Find functions, classes, or files exceeding a line-count threshold.
 
@@ -854,6 +898,8 @@ async def find_large_functions_tool(
         repo_root: Repository root path. Auto-detected if omitted.
         detail_level: "standard" for full rows, "minimal" for fewer, smaller rows.
             Default: standard.
+        cwd: Your working directory. When it is inside the repository, paths in
+            the result are repo-relative; otherwise they stay absolute.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -863,6 +909,7 @@ async def find_large_functions_tool(
             limit=limit, repo_root=root, detail_level=detail_level,
         ),
         root,
+        cwd=cwd,
     )
 
 
@@ -873,6 +920,7 @@ async def list_flows_tool(
     kind: Optional[str] = None,
     detail_level: str = "standard",
     repo_root: Optional[str] = None,
+    cwd: Optional[str] = None,
 ) -> dict:
     """List execution flows in the codebase, sorted by criticality.
 
@@ -887,6 +935,8 @@ async def list_flows_tool(
         detail_level: "standard" (default) returns full flow data; "minimal"
                       returns only name, criticality, and node_count per flow.
         repo_root: Repository root path. Auto-detected if omitted.
+        cwd: Your working directory. When it is inside the repository, paths in
+            the result are repo-relative; otherwise they stay absolute.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -896,6 +946,7 @@ async def list_flows_tool(
             detail_level=detail_level,
         ),
         root,
+        cwd=cwd,
     )
 
 
@@ -907,6 +958,7 @@ async def get_flow_tool(
     repo_root: Optional[str] = None,
     max_steps: int = 50,
     max_source_lines: int = 400,
+    cwd: Optional[str] = None,
 ) -> dict:
     """Get detailed information about a single execution flow.
 
@@ -924,6 +976,8 @@ async def get_flow_tool(
             full count. Default: 50.
         max_source_lines: Total source lines across all steps when
             include_source is set. Default: 400.
+        cwd: Your working directory. When it is inside the repository, paths in
+            the result are repo-relative; otherwise they stay absolute.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -934,6 +988,7 @@ async def get_flow_tool(
             max_steps=max_steps, max_source_lines=max_source_lines,
         ),
         root,
+        cwd=cwd,
     )
 
 
@@ -944,6 +999,7 @@ async def get_affected_flows_tool(
     repo_root: Optional[str] = None,
     detail_level: str = "standard",
     max_flows: int = 50,
+    cwd: Optional[str] = None,
 ) -> dict:
     """Find execution flows affected by changed files.
 
@@ -961,6 +1017,8 @@ async def get_affected_flows_tool(
             Default: 50. Pass 0 for no caller limit. Standard mode
             additionally caps visible flows at 25 and minimal mode at 500,
             because a standard flow costs ~980 tokens against ~18 minimal.
+        cwd: Your working directory. When it is inside the repository, paths in
+            the result are repo-relative; otherwise they stay absolute.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -970,6 +1028,7 @@ async def get_affected_flows_tool(
             detail_level=detail_level, max_flows=max_flows,
         ),
         root,
+        cwd=cwd,
     )
 
 
@@ -981,6 +1040,7 @@ async def list_communities_tool(
     repo_root: Optional[str] = None,
     max_results: int = 50,
     max_members: int = 10,
+    cwd: Optional[str] = None,
 ) -> dict:
     """List detected code communities in the codebase.
 
@@ -1000,6 +1060,8 @@ async def list_communities_tool(
         max_members: Maximum member names listed per community in standard
             mode. Each community's size still reports its true member
             count. Default: 10.
+        cwd: Your working directory. When it is inside the repository, paths in
+            the result are repo-relative; otherwise they stay absolute.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -1010,6 +1072,7 @@ async def list_communities_tool(
             max_members=max_members,
         ),
         root,
+        cwd=cwd,
     )
 
 
@@ -1020,6 +1083,7 @@ async def get_community_tool(
     include_members: bool = False,
     repo_root: Optional[str] = None,
     max_members: int = 25,
+    cwd: Optional[str] = None,
 ) -> dict:
     """Get detailed information about a single code community.
 
@@ -1037,6 +1101,8 @@ async def get_community_tool(
         max_members: Maximum member entries to include; the community's
             size still reports its true member count and
             members_truncated marks the cut. Default: 25.
+        cwd: Your working directory. When it is inside the repository, paths in
+            the result are repo-relative; otherwise they stay absolute.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -1047,6 +1113,7 @@ async def get_community_tool(
             max_members=max_members,
         ),
         root,
+        cwd=cwd,
     )
 
 
@@ -1056,6 +1123,7 @@ async def get_architecture_overview_tool(
     detail_level: str = "minimal",
     max_results: int = 100,
     max_members: int = 10,
+    cwd: Optional[str] = None,
 ) -> dict:
     """Generate an architecture overview based on community structure.
 
@@ -1073,6 +1141,8 @@ async def get_architecture_overview_tool(
             cross_community_edges_total reports the full count. Default: 100.
         max_members: Maximum member names per community in standard mode.
             Default: 10.
+        cwd: Your working directory. When it is inside the repository, paths in
+            the result are repo-relative; otherwise they stay absolute.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -1084,6 +1154,7 @@ async def get_architecture_overview_tool(
             max_members=max_members,
         ),
         root,
+        cwd=cwd,
     )
 
 
@@ -1097,6 +1168,7 @@ async def detect_changes_tool(
     detail_level: str = "standard",
     max_results: int = 25,
     max_flows: int = 20,
+    cwd: Optional[str] = None,
 ) -> dict:
     """Detect changes and produce risk-scored, priority-ordered review guidance.
 
@@ -1120,6 +1192,8 @@ async def detect_changes_tool(
         max_flows: Maximum affected flows to embed. Embedded flows carry
             per-flow metadata only — use get_affected_flows_tool for step
             detail. Default: 20.
+        cwd: Your working directory. When it is inside the repository, paths in
+            the result are repo-relative; otherwise they stay absolute.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -1132,6 +1206,7 @@ async def detect_changes_tool(
         ),
         root,
         timeout_hint=_DETECT_CHANGES_TIMEOUT_HINT,
+        cwd=cwd,
     )
 
 
@@ -1145,6 +1220,7 @@ async def refactor_tool(
     repo_root: Optional[str] = None,
     max_results: int = 50,
     detail_level: str = "standard",
+    cwd: Optional[str] = None,
 ) -> dict:
     """Graph-powered refactoring operations.
 
@@ -1172,6 +1248,8 @@ async def refactor_tool(
             Default: 50.
         detail_level: "standard" for full records, "minimal" for
             identifying fields only. Default: standard.
+        cwd: Your working directory. When it is inside the repository, paths in
+            the result are repo-relative; otherwise they stay absolute.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -1182,6 +1260,7 @@ async def refactor_tool(
             max_results=max_results, detail_level=detail_level,
         ),
         root,
+        cwd=cwd,
     )
 
 
@@ -1191,6 +1270,7 @@ async def apply_refactor_tool(
     repo_root: Optional[str] = None,
     dry_run: bool = False,
     max_diff_files: int = 25,
+    cwd: Optional[str] = None,
 ) -> dict:
     """Apply a previously previewed refactoring to source files.
 
@@ -1211,6 +1291,8 @@ async def apply_refactor_tool(
             committing changes to disk. See: #176
         max_diff_files: Maximum per-file diffs to include in a dry run.
             would_modify still lists every file. Default: 25.
+        cwd: Your working directory. When it is inside the repository, paths in
+            the result are repo-relative; otherwise they stay absolute.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -1224,6 +1306,7 @@ async def apply_refactor_tool(
         # anyway leaves the caller a modified tree and a retry that cannot
         # work: the refactor id is consumed. See _offload.
         bounded=False,
+        cwd=cwd,
     )
 
 
@@ -1231,6 +1314,7 @@ async def apply_refactor_tool(
 async def generate_wiki_tool(
     repo_root: Optional[str] = None,
     force: bool = False,
+    cwd: Optional[str] = None,
 ) -> dict:
     """Generate a markdown wiki from the code community structure.
 
@@ -1241,6 +1325,8 @@ async def generate_wiki_tool(
     Args:
         repo_root: Repository root path. Auto-detected if omitted.
         force: If True, regenerate all pages even if content unchanged. Default: False.
+        cwd: Your working directory. When it is inside the repository, paths in
+            the result are repo-relative; otherwise they stay absolute.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -1250,6 +1336,7 @@ async def generate_wiki_tool(
         ),
         root,
         bounded=False,  # writes the wiki tree; minutes is normal. See _offload.
+        cwd=cwd,
     )
 
 
@@ -1258,6 +1345,7 @@ async def get_wiki_page_tool(
     community_name: str,
     repo_root: Optional[str] = None,
     max_chars: int = 20000,
+    cwd: Optional[str] = None,
 ) -> dict:
     """Retrieve a specific wiki page by community name.
 
@@ -1269,6 +1357,8 @@ async def get_wiki_page_tool(
         repo_root: Repository root path. Auto-detected if omitted.
         max_chars: Maximum characters of page content to return;
             total_chars reports the real length. Default: 20000.
+        cwd: Your working directory. When it is inside the repository, paths in
+            the result are repo-relative; otherwise they stay absolute.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -1278,6 +1368,7 @@ async def get_wiki_page_tool(
             max_chars=max_chars,
         ),
         root,
+        cwd=cwd,
     )
 
 
@@ -1286,6 +1377,7 @@ async def get_hub_nodes_tool(
     top_n: int = 10,
     repo_root: Optional[str] = None,
     detail_level: str = "standard",
+    cwd: Optional[str] = None,
 ) -> dict:
     """Find the most connected nodes in the codebase (architectural hotspots).
 
@@ -1297,6 +1389,8 @@ async def get_hub_nodes_tool(
         repo_root: Repository root path. Auto-detected if omitted.
         detail_level: "standard" for full node data, "minimal" for name,
             kind, and total_degree only. Default: standard.
+        cwd: Your working directory. When it is inside the repository, paths in
+            the result are repo-relative; otherwise they stay absolute.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -1305,6 +1399,7 @@ async def get_hub_nodes_tool(
             repo_root=root, top_n=top_n, detail_level=detail_level,
         ),
         root,
+        cwd=cwd,
     )
 
 
@@ -1313,6 +1408,7 @@ async def get_bridge_nodes_tool(
     top_n: int = 10,
     repo_root: Optional[str] = None,
     detail_level: str = "standard",
+    cwd: Optional[str] = None,
 ) -> dict:
     """Find architectural chokepoints via betweenness centrality.
 
@@ -1325,6 +1421,8 @@ async def get_bridge_nodes_tool(
         repo_root: Repository root path. Auto-detected if omitted.
         detail_level: "standard" for full node data, "minimal" for name,
             kind, and betweenness only. Default: standard.
+        cwd: Your working directory. When it is inside the repository, paths in
+            the result are repo-relative; otherwise they stay absolute.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -1333,6 +1431,7 @@ async def get_bridge_nodes_tool(
             repo_root=root, top_n=top_n, detail_level=detail_level,
         ),
         root,
+        cwd=cwd,
     )
 
 
@@ -1341,6 +1440,7 @@ async def get_knowledge_gaps_tool(
     repo_root: Optional[str] = None,
     max_per_category: int = 15,
     detail_level: str = "standard",
+    cwd: Optional[str] = None,
 ) -> dict:
     """Identify structural weaknesses in the codebase graph.
 
@@ -1355,6 +1455,8 @@ async def get_knowledge_gaps_tool(
             total_gaps still report the untruncated counts. Default: 15.
         detail_level: "standard" for full gap records, "minimal" to drop
             file paths. Default: standard.
+        cwd: Your working directory. When it is inside the repository, paths in
+            the result are repo-relative; otherwise they stay absolute.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -1364,6 +1466,7 @@ async def get_knowledge_gaps_tool(
             detail_level=detail_level,
         ),
         root,
+        cwd=cwd,
     )
 
 
@@ -1372,6 +1475,7 @@ async def get_surprising_connections_tool(
     top_n: int = 15,
     repo_root: Optional[str] = None,
     detail_level: str = "standard",
+    cwd: Optional[str] = None,
 ) -> dict:
     """Find unexpected architectural coupling via composite surprise scoring.
 
@@ -1384,6 +1488,8 @@ async def get_surprising_connections_tool(
         repo_root: Repository root path. Auto-detected if omitted.
         detail_level: "standard" for full edge records, "minimal" for
             source, target, kind, and score only. Default: standard.
+        cwd: Your working directory. When it is inside the repository, paths in
+            the result are repo-relative; otherwise they stay absolute.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -1392,12 +1498,14 @@ async def get_surprising_connections_tool(
             repo_root=root, top_n=top_n, detail_level=detail_level,
         ),
         root,
+        cwd=cwd,
     )
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
 async def get_suggested_questions_tool(
     repo_root: Optional[str] = None,
+    cwd: Optional[str] = None,
 ) -> dict:
     """Auto-generate review questions from graph analysis.
 
@@ -1407,6 +1515,8 @@ async def get_suggested_questions_tool(
 
     Args:
         repo_root: Repository root path. Auto-detected if omitted.
+        cwd: Your working directory. When it is inside the repository, paths in
+            the result are repo-relative; otherwise they stay absolute.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -1415,6 +1525,7 @@ async def get_suggested_questions_tool(
             repo_root=root,
         ),
         root,
+        cwd=cwd,
     )
 
 
@@ -1425,6 +1536,7 @@ async def traverse_graph_tool(
     depth: int = 3,
     token_budget: int = 2000,
     repo_root: Optional[str] = None,
+    cwd: Optional[str] = None,
 ) -> dict:
     """BFS/DFS traversal from best-matching node with token budget.
 
@@ -1440,6 +1552,8 @@ async def traverse_graph_tool(
         token_budget: Approximate token limit for results, at most 10000.
             The walk stops when it runs out. Default: 2000.
         repo_root: Repository root path. Auto-detected if omitted.
+        cwd: Your working directory. When it is inside the repository, paths in
+            the result are repo-relative; otherwise they stay absolute.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -1450,6 +1564,7 @@ async def traverse_graph_tool(
             repo_root=root or "",
         ),
         root,
+        cwd=cwd,
     )
 
 
@@ -1472,6 +1587,7 @@ async def cross_repo_search_tool(
     limit: int = 20,
     max_results: int = 50,
     repos: Optional[list[str]] = None,
+    cwd: Optional[str] = None,
 ) -> dict:
     """Search for code entities across registered repositories.
 
@@ -1493,6 +1609,8 @@ async def cross_repo_search_tool(
             and case-sensitive, and paths are not accepted. Names matching no
             registry entry come back in ``unknown``; a name matching several
             entries selects all of them and is listed in ``ambiguous``.
+        cwd: Your working directory. When it is inside the repository, paths in
+            the result are repo-relative; otherwise they stay absolute.
     """
     return await _offload(
         "cross_repo_search_tool",
@@ -1502,6 +1620,7 @@ async def cross_repo_search_tool(
         ),
         None,
         provenance=False,
+        cwd=cwd,
     )
 
 

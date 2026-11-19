@@ -3,7 +3,7 @@
 The graph is one SQLite database, `.code-review-graph/graph.db`, opened in WAL mode.
 The base tables and indexes come from `_SCHEMA_SQL` in `code_review_graph/graph.py`.
 Everything else is added by the versioned migrations in `code_review_graph/migrations.py`.
-The current schema version is 15, the highest key in `MIGRATIONS`. A database
+The current schema version is 16, the highest key in `MIGRATIONS`. A database
 below that is migrated on open, in order, by every migration above its own
 version.
 
@@ -416,3 +416,4 @@ Each migration runs in its own transaction and updates `schema_version` on succe
 | 13 | `nodes.docstring`, `nodes.name_tokens`, both back-filled; `nodes_fts` and `nodes_fts_state` widened to carry them |
 | 14 | No schema change: `file_hash` cleared on Ruby `File` nodes so the next update re-parses them under the new namespaced class identities |
 | 15 | Dropped `community_summaries`, `flow_snapshots` and `risk_index` with `idx_risk_index_score`, as nothing read them; dropped `idx_nodes_qualified`, `idx_edges_source` and `idx_edges_target`, as other indexes cover them. The file keeps its size until `VACUUM`; later writes reuse the freed pages |
+| 16 | No schema change: paths inside the repository are stored relative to it (`./pkg/b.py`, `./pkg/b.py::run`, the root itself as `.`), and the store adds the root back on read, so a copied graph serves its new checkout. A raw value that already starts with `./`, `../` or `.` is stored with a leading `!`. Metadata `path_mode` is `relative` afterwards. An existing graph is converted on its first writable open, by copy and swap in the same file; other openers are told to try again meanwhile. Rolling back needs a rebuild |

@@ -47,6 +47,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from ...relpaths import PathCodec
+
 logger = logging.getLogger(__name__)
 
 #: The seven edit kinds, in report order. ``trailing_comment`` is the easy
@@ -674,6 +676,9 @@ class _Targets:
 
 
 def _relative(tree: Path, stored: str) -> str:
+    # The graph is read raw, so a relative graph's ``./m.py`` arrives as
+    # stored; give it the tree back before relpath resolves it against the cwd.
+    stored = PathCodec(str(tree)).restore(stored)
     try:
         return os.path.relpath(stored, str(tree)).replace(os.sep, "/")
     except ValueError:

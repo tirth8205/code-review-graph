@@ -498,3 +498,84 @@ describe('SqliteReader', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Repo-relative storage (schema v16)
+// ---------------------------------------------------------------------------
+
+describe('SqliteReader on a relative graph', () => {
+  let repo: string;
+  let reader: SqliteReader;
+
+  before(() => {
+    repo = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'crg-rel-')));
+    fs.mkdirSync(path.join(repo, '.code-review-graph'));
+    const dbPath = path.join(repo, '.code-review-graph', 'graph.db');
+    const db = new Database(dbPath);
+    db.exec(SCHEMA_SQL);
+    const node = db.prepare(
+      `INSERT INTO nodes (kind, name, qualified_name, file_path, line_start, line_end,
+         language, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'python', ?)`
+    );
+    node.run('File', './app.py', './app.py', './app.py', 1, 9, NOW);
+    node.run('Function', 'run', './app.py::run', './app.py', 2, 4, NOW);
+    node.run('File', '/elsewhere/lib.py', '/elsewhere/lib.py', '/elsewhere/lib.py', 1, 3, NOW);
+    const edge = db.prepare(
+      `INSERT INTO edges (kind, source_qualified, target_qualified, file_path, line, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    );
+    edge.run('CALLS', './app.py::run', 'helper', './app.py', 3, NOW);
+    edge.run('IMPORTS_FROM', './app.py', '!./missing', './app.py', 1, NOW);
+    edge.run('IMPORTS_FROM', './app.py', '/elsewhere/lib.py', './app.py', 1, NOW);
+    db.prepare('INSERT INTO metadata (key, value) VALUES (?, ?)').run('path_mode', 'relative');
+    // A stale recorded root from another checkout must not win.
+    db.prepare('INSERT INTO metadata (key, value) VALUES (?, ?)').run('repo_root', '/old/checkout');
+    db.close();
+    reader = new SqliteReader(dbPath);
+  });
+
+  after(() => {
+    reader.close();
+    fs.rmSync(repo, { recursive: true, force: true });
+  });
+
+  it('answers with paths under the checkout that holds the database', () => {
+    const file = `${repo}/app.py`;
+    assert.deepStrictEqual(reader.getAllFiles(), ['/elsewhere/lib.py', file]);
+    const nodes = reader.getNodesByFile(file);
+    assert.deepStrictEqual(
+      nodes.map((n) => n.qualifiedName).sort(), [file, `${file}::run`],
+    );
+    assert.ok(nodes.every((n) => n.filePath === file));
+    assert.strictEqual(reader.getNode(`${file}::run`)?.lineStart, 2);
+    assert.strictEqual(reader.getNodeAtCursor(file, 3)?.name, 'run');
+  });
+
+  it('leaves bare names, outside paths and escaped values as written', () => {
+    const file = `${repo}/app.py`;
+    const targets = reader.getEdgesBySource(file).map((e) => e.targetQualified).sort();
+    assert.deepStrictEqual(targets, ['./missing', '/elsewhere/lib.py']);
+    assert.strictEqual(reader.getEdgesByTarget('./missing').length, 1);
+    assert.deepStrictEqual(
+      reader.getEdgesBySource(`${file}::run`).map((e) => e.targetQualified), ['helper'],
+    );
+    assert.strictEqual(reader.getNodesByFile('/elsewhere/lib.py').length, 1);
+  });
+
+  it('finds edges and sizes by absolute names', () => {
+    const file = `${repo}/app.py`;
+    const among = reader.getEdgesAmong(new Set([file, '/elsewhere/lib.py']));
+    assert.strictEqual(among.length, 1);
+    assert.strictEqual(among[0].filePath, file);
+    const sized = reader.getNodesBySize(1, 'File', repo);
+    assert.deepStrictEqual(sized.map((n) => n.filePath), [file]);
+    const impact = reader.getImpactRadius([file], 1);
+    assert.ok(impact.impactedFiles.includes('/elsewhere/lib.py'));
+  });
+
+  it('accepts schema v16', () => {
+    const db = new Database(':memory:');
+    db.close();
+    assert.strictEqual(reader.checkSchemaCompatibility(), undefined);
+  });
+});

@@ -29,6 +29,7 @@ from urllib.parse import urlparse
 from . import __version__ as _crg_version
 from .constants import release_os_memory
 from .graph import GraphNode, GraphStore, node_to_dict
+from .relpaths import TranslatingConnection, bind_relative_root
 
 logger = logging.getLogger(__name__)
 
@@ -1210,9 +1211,11 @@ class EmbeddingStore:
         self.db_path = Path(db_path)
         self._conn = sqlite3.connect(
             str(self.db_path), timeout=30, check_same_thread=False,
-            isolation_level=None,
+            isolation_level=None, factory=TranslatingConnection,
         )
         self._conn.row_factory = sqlite3.Row
+        # Keys follow the graph's path mode, so they match the nodes they embed.
+        bind_relative_root(self._conn, self.db_path)
         self._conn.execute("PRAGMA cache_size=-2000")
         self._conn.executescript(_EMBEDDINGS_SCHEMA)
         # The file this connection holds open. If graph.db is later replaced,

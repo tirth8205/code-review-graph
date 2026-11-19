@@ -328,7 +328,7 @@ A hook or CI job can tell these apart without reading the message. `75` is
   Warning: no source files found under <root>. Is this the project root?
   ```
 
-  A new graph logs one line, `Created graph database (schema v15).`, not
+  A new graph logs one line, `Created graph database (schema v16).`, not
   every migration step. Upgrading an older graph logs each step, and one
   coming from below schema 15 then logs one line asking for one `build`.
 - `visualize` without a seed exports the whole repository, and falls back to
@@ -428,6 +428,12 @@ Every `repo_root` parameter is optional and auto-detected from the current
 directory when omitted. The one exception is `serve --http --multi-repo`, where
 every call must pass the absolute path of a registered repository (see Server
 below).
+
+Every tool except `get_docs_section_tool` and `list_repos_tool` also takes an
+optional `cwd`, the caller's working directory. When it is the repository root
+or below it, paths in the result are repo-relative (`pkg/a.py`, and the root
+itself as `.`). Without `cwd`, or with a `cwd` outside the repository, paths stay
+absolute.
 
 Every tool carries `readOnlyHint: true` except the five that write:
 `build_or_update_graph_tool`, `run_postprocess_tool`, `embed_graph_tool`,

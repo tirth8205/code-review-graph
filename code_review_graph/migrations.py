@@ -694,6 +694,17 @@ def _migrate_v15(conn: sqlite3.Connection) -> None:
     _progress("Migration v15: dropped unread tables and covered indexes")
 
 
+def _migrate_v16(conn: sqlite3.Connection) -> None:
+    """v16: graphs may store repo-relative paths (metadata ``path_mode``).
+
+    No table changes here. The version moves so a release that only knows
+    absolute paths refuses a relative graph instead of misreading it. The row
+    rewrite needs the repository root, which a bare connection does not know,
+    so ``GraphStore`` runs it after the migrations (see relpath_migration.py).
+    """
+    _progress("Migration v16: repo-relative paths are converted on open")
+
+
 # ---------------------------------------------------------------------------
 # Migration registry
 # ---------------------------------------------------------------------------
@@ -713,6 +724,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     13: _migrate_v13,
     14: _migrate_v14,
     15: _migrate_v15,
+    16: _migrate_v16,
 }
 
 LATEST_VERSION = max(MIGRATIONS.keys())

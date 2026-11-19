@@ -9,6 +9,8 @@
  */
 
 import type BetterSqlite3 from 'better-sqlite3';
+import * as fs from 'fs';
+import * as path from 'path';
 
 type DatabaseType = BetterSqlite3.Database;
 
@@ -151,6 +153,78 @@ interface MetadataRow {
 }
 
 // ---------------------------------------------------------------------------
+// Repo-relative paths (schema v16)
+// ---------------------------------------------------------------------------
+
+// Mirrors code_review_graph/relpaths.py. A graph with metadata
+// path_mode = 'relative' stores in-repo paths as './<path>' (the root itself
+// as '.'), keeps outside paths absolute, and stores a raw value that would
+// read as relative with a leading '!'. The reader works in absolute paths.
+const PATH_MODE_RELATIVE = 'relative';
+const ROOT_TOKEN = '.';
+const REL_PREFIX = './';
+const ESCAPE = '!';
+
+function looksRelative(value: string): boolean {
+  const body = value.replace(/^!+/, '');
+  return body === ROOT_TOKEN || body.startsWith(REL_PREFIX) || body.startsWith('../');
+}
+
+function sameDirectory(a: string, b: string): boolean {
+  try {
+    return fs.realpathSync(a) === fs.realpathSync(b);
+  } catch {
+    return false;
+  }
+}
+
+export class PathCodec {
+  readonly root: string;
+  private readonly roots: string[];
+
+  constructor(root: string) {
+    this.root = root.replace(/\\/g, '/').replace(/\/+$/, '') || '/';
+    const variants = new Set([this.root]);
+    try {
+      variants.add(fs.realpathSync(this.root).replace(/\\/g, '/'));
+    } catch {
+      // A missing root keeps the spelling it was given.
+    }
+    // macOS: /var and /tmp are links into /private.
+    for (const value of [...variants]) {
+      if (value.startsWith('/private/')) { variants.add(value.slice('/private'.length)); }
+    }
+    this.roots = [...variants].sort((a, b) => b.length - a.length);
+  }
+
+  /** '<root>/x' -> './x' and '<root>' -> '.'; anything else is returned as is. */
+  stripRoot(value: string): string {
+    for (const root of this.roots) {
+      if (value.startsWith(root + '/')) { return REL_PREFIX + value.slice(root.length + 1); }
+    }
+    return this.roots.includes(value) ? ROOT_TOKEN : value;
+  }
+
+  /** The stored form of a path or qualified name. */
+  strip(value: string): string {
+    const stripped = this.stripRoot(value);
+    if (stripped === value && looksRelative(value)) { return ESCAPE + value; }
+    return stripped;
+  }
+
+  /** The value a caller sees for a stored path or qualified name. */
+  restore(value: string): string;
+  restore(value: string | null): string | null;
+  restore(value: string | null): string | null {
+    if (!value) { return value; }
+    if (value === ROOT_TOKEN) { return this.root; }
+    if (value.startsWith(REL_PREFIX)) { return this.root + value.slice(1); }
+    if (value.startsWith(ESCAPE) && looksRelative(value)) { return value.slice(1); }
+    return value;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // SqliteReader
 // ---------------------------------------------------------------------------
 
@@ -159,6 +233,7 @@ const RETRY_BACKOFF_MS = 100;
 
 export class SqliteReader {
   private db: DatabaseType | null = null;
+  private codec: PathCodec | null = null;
 
   /**
    * Create a SqliteReader with retry logic that does not block the event loop.
@@ -186,6 +261,42 @@ export class SqliteReader {
     // journal mode, and trying fails with SQLITE_READONLY.
     this.db = new Database(dbPath, { readonly: true });
     this.db.pragma('busy_timeout = 5000');
+    this.codec = this._relativeCodec(dbPath);
+  }
+
+  /** The codec for a relative graph, or null when paths are stored absolute. */
+  private _relativeCodec(dbPath: string): PathCodec | null {
+    const meta = (key: string): string | undefined => {
+      try {
+        return this.getMetadata(key);
+      } catch {
+        return undefined; // no metadata table
+      }
+    };
+    if (meta('path_mode') !== PATH_MODE_RELATIVE) { return null; }
+    // Same rule as the Python side: the checkout around .code-review-graph,
+    // else the recorded repo_root; the written spelling wins when both name
+    // the same directory.
+    const parent = path.dirname(path.resolve(dbPath));
+    let root = path.basename(parent) === '.code-review-graph'
+      ? path.dirname(parent)
+      : meta('repo_root');
+    if (!root) { return null; }
+    const recorded = meta('relpath_root');
+    if (recorded && recorded !== root && sameDirectory(recorded, root)) { root = recorded; }
+    return new PathCodec(root);
+  }
+
+  /** Stored form of a path or qualified name parameter. */
+  private _in(value: string): string {
+    return this.codec ? this.codec.strip(value) : value;
+  }
+
+  /** Caller-facing form of a stored path or qualified name. */
+  private _out(value: string): string;
+  private _out(value: string | null): string | null;
+  private _out(value: string | null): string | null {
+    return this.codec ? this.codec.restore(value) : value;
   }
 
   /**
@@ -213,7 +324,7 @@ export class SqliteReader {
         if (row) {
           const version = parseInt(row.value, 10);
           // Must match LATEST_VERSION in code_review_graph/migrations.py
-          const SUPPORTED_SCHEMA_VERSION = 15;
+          const SUPPORTED_SCHEMA_VERSION = 16;
           if (!isNaN(version) && version > SUPPORTED_SCHEMA_VERSION) {
             return `Database was created with a newer version (schema v${version}). Update the extension.`;
           }
@@ -260,7 +371,9 @@ export class SqliteReader {
         "SELECT DISTINCT file_path FROM nodes WHERE kind = 'File' ORDER BY file_path"
       )
       .all() as FilePathRow[];
-    return rows.map((r) => r.file_path);
+    const files = rows.map((r) => this._out(r.file_path));
+    // Stored './' paths sort apart from absolute ones; order by what callers see.
+    return this.codec ? files.sort() : files;
   }
 
   /** All nodes in a file, ordered by line_start. */
@@ -269,7 +382,7 @@ export class SqliteReader {
       .prepare(
         'SELECT * FROM nodes WHERE file_path = ? ORDER BY line_start'
       )
-      .all(filePath) as NodeRow[];
+      .all(this._in(filePath)) as NodeRow[];
     return rows.map((r) => this._rowToNode(r));
   }
 
@@ -277,7 +390,7 @@ export class SqliteReader {
   getNode(qualifiedName: string): GraphNode | undefined {
     const row = this._db()
       .prepare('SELECT * FROM nodes WHERE qualified_name = ?')
-      .get(qualifiedName) as NodeRow | undefined;
+      .get(this._in(qualifiedName)) as NodeRow | undefined;
     return row ? this._rowToNode(row) : undefined;
   }
 
@@ -295,13 +408,15 @@ export class SqliteReader {
          ORDER BY (line_end - line_start) ASC
          LIMIT 1`
       )
-      .get(filePath, line, line) as NodeRow | undefined;
+      .get(this._in(filePath), line, line) as NodeRow | undefined;
     return row ? this._rowToNode(row) : undefined;
   }
 
   /** LIKE search on name and qualified_name. */
   searchNodes(query: string, limit: number = 20): GraphNode[] {
-    const pattern = `%${query}%`;
+    // File nodes are named by path, stored relative under the root.
+    const stored = this.codec ? this.codec.stripRoot(query) : query;
+    const pattern = `%${stored}%`;
     const rows = this._db()
       .prepare(
         'SELECT * FROM nodes WHERE name LIKE ? OR qualified_name LIKE ? LIMIT ?'
@@ -318,7 +433,7 @@ export class SqliteReader {
   getEdgesBySource(qualifiedName: string): GraphEdge[] {
     const rows = this._db()
       .prepare('SELECT * FROM edges WHERE source_qualified = ?')
-      .all(qualifiedName) as EdgeRow[];
+      .all(this._in(qualifiedName)) as EdgeRow[];
     return rows.map((r) => this._rowToEdge(r));
   }
 
@@ -326,7 +441,7 @@ export class SqliteReader {
   getEdgesByTarget(qualifiedName: string): GraphEdge[] {
     const rows = this._db()
       .prepare('SELECT * FROM edges WHERE target_qualified = ?')
-      .all(qualifiedName) as EdgeRow[];
+      .all(this._in(qualifiedName)) as EdgeRow[];
     return rows.map((r) => this._rowToEdge(r));
   }
 
@@ -338,7 +453,7 @@ export class SqliteReader {
    */
   getEdgesAmong(qualifiedNames: Set<string>): GraphEdge[] {
     if (qualifiedNames.size === 0) { return []; }
-    const qns = [...qualifiedNames];
+    const qns = [...qualifiedNames].map((qn) => this._in(qn));
     const placeholders = qns.map(() => '?').join(',');
     const rows = this._db()
       .prepare(
@@ -529,7 +644,14 @@ export class SqliteReader {
     }
     if (filePathPattern) {
       conditions.push('file_path LIKE ?');
-      params.push(`%${filePathPattern}%`);
+      // A pattern that names a path under the root matches its stored form.
+      // The stored './' form always starts the value.
+      const stored = this.codec ? this.codec.stripRoot(filePathPattern) : filePathPattern;
+      if (stored !== filePathPattern) {
+        params.push(stored === ROOT_TOKEN ? './%' : `${stored}%`);
+      } else {
+        params.push(`%${filePathPattern}%`);
+      }
     }
 
     params.push(limit);
@@ -567,16 +689,16 @@ export class SqliteReader {
     return {
       id: row.id,
       kind: row.kind as NodeKind,
-      name: row.name,
-      qualifiedName: row.qualified_name,
-      filePath: row.file_path,
+      name: this._out(row.name),
+      qualifiedName: this._out(row.qualified_name),
+      filePath: this._out(row.file_path),
       lineStart: row.line_start,
       lineEnd: row.line_end,
       language: row.language ?? null,
-      parentName: row.parent_name ?? null,
-      params: row.params ?? null,
-      returnType: row.return_type ?? null,
-      modifiers: row.modifiers ?? null,
+      parentName: this._out(row.parent_name ?? null),
+      params: this._out(row.params ?? null),
+      returnType: this._out(row.return_type ?? null),
+      modifiers: this._out(row.modifiers ?? null),
       isTest: row.is_test === 1,
       fileHash: row.file_hash ?? null,
     };
@@ -587,9 +709,9 @@ export class SqliteReader {
     return {
       id: row.id,
       kind: row.kind as EdgeKind,
-      sourceQualified: row.source_qualified,
-      targetQualified: row.target_qualified,
-      filePath: row.file_path,
+      sourceQualified: this._out(row.source_qualified),
+      targetQualified: this._out(row.target_qualified),
+      filePath: this._out(row.file_path),
       line: row.line ?? 0,
     };
   }

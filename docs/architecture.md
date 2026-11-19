@@ -62,7 +62,7 @@ All modules live in `code_review_graph/`.
 | `parser.py` | Tree-sitter multi-language parser plus targeted fallbacks; emits nodes and edges per file |
 | `custom_languages.py` | Config-driven languages from `.code-review-graph/languages.toml` |
 | `graph.py` | `GraphStore`: SQLite storage, queries, impact radius |
-| `migrations.py` | Versioned schema migrations, currently v15 (see `schema.md`) |
+| `migrations.py` | Versioned schema migrations, currently v16 (see `schema.md`) |
 | `incremental.py` | File collection and ignore rules, git/SVN change detection, full and incremental builds, post-build resolvers |
 | `locking.py`, `build_state.py` | The per-repository write lock, and how much of a build finished |
 | `postprocessing.py` | `run_post_processing()`: endpoint resolution, signatures, FTS sync, flows, communities, opt-in embedding refresh |

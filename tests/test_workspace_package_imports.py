@@ -8,7 +8,6 @@ impact radius then stopped at every package boundary.
 
 from __future__ import annotations
 
-import contextlib
 import json
 from pathlib import Path
 
@@ -123,8 +122,6 @@ def test_javascript_importers_resolve_too(tmp_path):
 
 
 def test_full_build_survives_a_crafted_member_manifest(tmp_path):
-    import sqlite3
-
     from code_review_graph.incremental import full_build
 
     importer, entry = _workspace(tmp_path)
@@ -135,7 +132,9 @@ def test_full_build_survives_a_crafted_member_manifest(tmp_path):
     with GraphStore(db_path) as store:
         full_build(tmp_path, store)
 
-    with contextlib.closing(sqlite3.connect(db_path)) as conn:
+    # Through the store: rows hold repo-relative paths, the API absolute ones.
+    with GraphStore(db_path) as store:
+        conn = store._conn
         files = {Path(row[0]).resolve() for row in conn.execute(
             "SELECT file_path FROM nodes WHERE kind = 'File'"
         )}

@@ -415,3 +415,31 @@ def test_a_file_added_by_an_update_gets_a_community(tmp_path):
         conn.close()
     assert total == 2
     assert unassigned == 0
+
+
+def test_edits_stay_inside_the_copied_tree(tmp_path):
+    """The benchmark edits its own copy, never the process's working directory.
+
+    A relative graph stores ``./m.py``; reading that raw and taking
+    ``os.path.relpath`` of it resolved against the cwd, so ``add_file`` wrote
+    ``crg_fidelity_probe.py`` into whatever directory pytest ran from.
+    """
+    import os
+
+    tree = _mock_repo(tmp_path / "repo")
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    from code_review_graph.graph import GraphStore
+
+    store = GraphStore(tmp_path / "outer.db")
+    before = os.getcwd()
+    os.chdir(cwd)
+    try:
+        rows = fidelity.run(tree, store, {"name": "mock"})
+    finally:
+        os.chdir(before)
+        store.close()
+    assert list(cwd.iterdir()) == []
+    for row in rows:
+        for part in row["target"].split(" -> "):
+            assert not part.startswith(("/", "..")), row

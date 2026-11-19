@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import re
 import sqlite3
 import subprocess
 from datetime import datetime
@@ -12,6 +14,7 @@ from typing import Any
 from ..graph import GraphStore, _sanitize_name
 from ..incremental import find_project_root, get_db_path
 from ..parser import normalize_file_path
+from ..relpaths import absolute_root, root_variants
 
 _PROVENANCE_READ_TIMEOUT_SECONDS = 0.05
 _PROVENANCE_GIT_TIMEOUT_SECONDS = 1.0
@@ -130,6 +133,58 @@ def with_provenance(result: Any, repo_root: str | None = None) -> Any:
     if provenance:
         result["_graph"] = provenance
     return result
+
+
+def _inside(path: str, root: str) -> bool:
+    return path == root or path.startswith(root.rstrip("/") + "/")
+
+
+def relative_to_cwd(result: Any, repo_root: str | None, cwd: str | None) -> Any:
+    """*result* with repository paths made repo-relative, when *cwd* is inside it.
+
+    The caller passes its working directory as ``cwd``. When that directory is
+    the repository root or below it, every ``<root>/...`` path in the result
+    (values, dict keys, and paths inside text) loses the root prefix and the
+    root itself becomes ``.``. Otherwise, or without ``cwd``, the result is
+    returned unchanged, with absolute paths.
+    """
+    if not cwd or not os.path.isabs(cwd):
+        return result
+    try:
+        root = absolute_root(str(_resolve_root(repo_root)))
+    except (ValueError, OSError) as exc:
+        logger.debug("cwd: no repository root to relativize against: %s", exc)
+        return result
+    spellings = root_variants(root)
+    try:
+        real_cwd = os.path.realpath(cwd)
+        real_root = os.path.realpath(root)
+    except OSError:
+        return result
+    if not _inside(real_cwd, real_root):
+        return result
+    # Longest spelling first; the lookbehind keeps ``/a/repo/`` from matching
+    # inside ``/b/a/repo/``.
+    pattern = re.compile(
+        r"(?<![\w.\-/])(?:" + "|".join(re.escape(v.rstrip("/")) for v in spellings) + r")/"
+    )
+    exact = set(spellings)
+
+    def convert(value: Any) -> Any:
+        if isinstance(value, str):
+            if value in exact:
+                return "."
+            return pattern.sub("", value) if "/" in value else value
+        if isinstance(value, dict):
+            return {convert(k): convert(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [convert(v) for v in value]
+        if isinstance(value, tuple):
+            return tuple(convert(v) for v in value)
+        return value
+
+    return convert(result)
+
 
 # Common JS/TS builtin method names filtered from callers_of results.
 # "Who calls .map()?" returns hundreds of hits and is never useful.
@@ -314,9 +369,12 @@ def _resolve_graph_file_paths_with_unmatched(
             candidates.append(normalize_file_path(root / path))
 
         for candidate in candidates:
-            if store.get_nodes_by_file(candidate):
+            found = store.get_nodes_by_file(candidate)
+            if found:
                 matched = True
-                add(candidate)
+                # The stored spelling: a relative candidate matches a
+                # relative graph too, and must not be added a second time.
+                add(found[0].file_path)
 
         suffixes = []
         for candidate in candidates:

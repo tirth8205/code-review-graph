@@ -62,6 +62,18 @@ from .migrations import (
     run_migrations,
     target_resolution_expr,
 )
+from .relpath_migration import GraphMigratingError, convert_to_relative, migration_holder
+from .relpaths import (
+    MOVED_FROM_KEY,
+    PATH_MODE_KEY,
+    PATH_MODE_RELATIVE,
+    ROOT_SPELLING_KEY,
+    PathCodec,
+    TranslatingConnection,
+    absolute_root,
+    names_another_directory,
+    preferred_root,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1028,6 +1040,7 @@ class GraphStore:
                     timeout=30,
                     check_same_thread=False,
                     isolation_level=None,
+                    factory=TranslatingConnection,
                 )
             else:
                 # Inside the try on purpose: an unwritable data directory
@@ -1037,6 +1050,7 @@ class GraphStore:
                 conn = sqlite3.connect(
                     str(self.db_path), timeout=30, check_same_thread=False,
                     isolation_level=None,  # Disable implicit transactions (#135)
+                    factory=TranslatingConnection,
                 )
             conn.row_factory = sqlite3.Row
             if not self.read_only:
@@ -1065,6 +1079,12 @@ class GraphStore:
                     "Run `code-review-graph update` first."
                 )
             self._conn = conn
+            holder = migration_holder(conn)
+            if holder is not None:
+                raise GraphMigratingError(holder)
+            is_new_graph = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'nodes'"
+            ).fetchone() is None
             if not self.read_only:
                 self._init_schema()
                 # Ensure schema_version is set, then run pending migrations
@@ -1127,6 +1147,7 @@ class GraphStore:
             )
         except (sqlite3.NotSupportedError, TypeError):  # pragma: no cover
             self._conn.create_function("crg_parent_dir", 1, _parent_dir)
+        self._open_path_mode(is_new_graph)
         self._nxg_cache: nx.DiGraph | None = None
         self._bare_endpoint_context_cache: tuple[
             dict[str, list[tuple[str, str]]],
@@ -2111,6 +2132,100 @@ class GraphStore:
         row = self._conn.execute("SELECT value FROM metadata WHERE key=?", (key,)).fetchone()
         return row["value"] if row else None
 
+    def _default_root(self) -> Optional[str]:
+        parent = self.db_path.parent
+        if parent.name == ".code-review-graph":
+            return str(parent.parent)
+        return self.get_metadata("repo_root") or None
+
+    def _open_path_mode(self, is_new_graph: bool) -> None:
+        """Bind repo-relative storage for this connection (see relpaths.py).
+
+        A new graph starts relative. An existing absolute one is converted
+        once, here, when this opener can write and knows the root.
+        """
+        mode = self.get_metadata(PATH_MODE_KEY)
+        root = self._default_root()
+        converted = False
+        if mode is None and root and not self.read_only:
+            if is_new_graph or not self.has_nodes():
+                self.set_metadata(PATH_MODE_KEY, PATH_MODE_RELATIVE)
+                mode = PATH_MODE_RELATIVE
+            else:
+                converted = self._convert_to_relative(root)
+                mode = self.get_metadata(PATH_MODE_KEY)
+        if mode == PATH_MODE_RELATIVE and root:
+            self._bind_root(root)
+        if converted:
+            from .search import rebuild_fts_index
+
+            rebuild_fts_index(self)
+
+    def _convert_to_relative(self, root: str) -> bool:
+        try:
+            convert_to_relative(self._conn, root)
+        except GraphMigratingError:
+            raise
+        except sqlite3.Error as exc:
+            if is_lock_error(exc):
+                raise
+            # The absolute graph is still the live one; it keeps working.
+            logger.error("Could not convert %s to relative paths: %s", self.db_path, exc)
+            return False
+        return True
+
+    def _bind_root(self, root: str) -> None:
+        conn = self._conn
+        assert isinstance(conn, TranslatingConnection)
+        root = preferred_root(root, self.get_metadata(ROOT_SPELLING_KEY))
+        conn.bind_root(root)
+        if not self.read_only and self.get_metadata(ROOT_SPELLING_KEY) != root:
+            self._record_root_spelling(root)
+        self._nxg_cache = None
+        self._bare_endpoint_context_cache = None
+
+    def _record_root_spelling(self, root: str) -> None:
+        # Only a preference for later openers, so a busy graph is not an error.
+        try:
+            recorded = self.get_metadata(ROOT_SPELLING_KEY)
+            if names_another_directory(recorded, root) and not self.get_metadata(
+                MOVED_FROM_KEY,
+            ):
+                # A graph copied from another checkout: remember where from, so
+                # the next update rebuilds (see MOVED_FROM_KEY).
+                assert recorded is not None
+                self.set_metadata(MOVED_FROM_KEY, recorded)
+            self.set_metadata(ROOT_SPELLING_KEY, root)
+        except sqlite3.OperationalError as exc:
+            logger.debug("Could not record the root spelling %s: %s", root, exc)
+
+    @property
+    def path_root(self) -> Optional[str]:
+        """The root relative paths are stored against, or ``None`` (absolute mode)."""
+        codec = getattr(self._conn, "codec", None)
+        return codec.root if codec is not None else None
+
+    def bind_repo_root(self, repo_root: str | Path) -> None:
+        """Anchor relative storage to the checkout a build or update runs on.
+
+        A graph opened from a data directory learns its root here. An empty
+        graph that has no path mode yet becomes relative; a relative one is
+        re-anchored, which is what lets a copied graph serve another checkout.
+        """
+        if self.read_only:
+            return
+        root = Path(repo_root).as_posix()
+        mode = self.get_metadata(PATH_MODE_KEY)
+        if mode is None and not self.has_nodes():
+            self.set_metadata(PATH_MODE_KEY, PATH_MODE_RELATIVE)
+            mode = PATH_MODE_RELATIVE
+        if mode != PATH_MODE_RELATIVE:
+            return
+        if self.path_root != absolute_root(root):
+            # A build names its spelling outright, as absolute storage did.
+            self._record_root_spelling(absolute_root(root))
+            self._bind_root(root)
+
     def get_repo_root(self) -> Optional[str]:
         """Absolute root of the repository this graph describes, if known.
 
@@ -2123,6 +2238,8 @@ class GraphStore:
         must degrade explicitly rather than assume the whole path is inside
         the repository.
         """
+        if self.path_root:
+            return self.path_root
         recorded = self.get_metadata("repo_root")
         if recorded:
             return recorded
@@ -2263,12 +2380,16 @@ class GraphStore:
         ``CLAIMED_ENDPOINT_KEY``, so a symbol a diff deleted is still found by
         the calls written against it.
         """
+        # Compared here, not in SQL: ``extra`` keeps absolute paths, and a
+        # parameter would be stored-form (repo-relative). See relpaths.py.
         rows = self._conn.execute(
-            "SELECT * FROM edges WHERE extra LIKE ? "
-            "AND json_valid(extra) AND json_extract(extra, ?) = ? ORDER BY id",
-            (f'%"{CLAIMED_ENDPOINT_KEY}"%', f"$.{CLAIMED_ENDPOINT_KEY}", qualified_name),
+            "SELECT * FROM edges WHERE extra LIKE ? AND json_valid(extra) ORDER BY id",
+            (f'%"{CLAIMED_ENDPOINT_KEY}"%',),
         ).fetchall()
-        return [self._row_to_edge(row) for row in rows]
+        return [
+            self._row_to_edge(row) for row in rows
+            if _load_edge_extra(row["extra"]).get(CLAIMED_ENDPOINT_KEY) == qualified_name
+        ]
 
     def search_edges_by_target_name(
         self, name: str, kind: str = "CALLS", language: str | None = None,
@@ -4280,7 +4401,9 @@ class GraphStore:
             "SELECT file_path FROM edges "
             "ORDER BY file_path"
         ).fetchall()
-        return [r["file_path"] for r in rows]
+        # Sorted again after restoring: stored ``./`` paths order apart from
+        # absolute ones.
+        return sorted(r["file_path"] for r in rows)
 
     def get_file_hashes(self) -> dict[str, str]:
         """Return indexed file paths mapped to the hash last stored for each file."""
@@ -5102,6 +5225,7 @@ class GraphStore:
         max_lines: int | None,
         kind: str | None,
         file_path_pattern: str | None,
+        codec: Optional[PathCodec] = None,
     ) -> tuple[str, list]:
         """Build the WHERE clause and parameters for a line-count range."""
         conditions = [
@@ -5119,8 +5243,16 @@ class GraphStore:
             conditions.append("kind = ?")
             params.append(kind)
         if file_path_pattern:
-            conditions.append("file_path LIKE ?")
-            params.append(f"%{file_path_pattern}%")
+            stored = codec.strip_root(file_path_pattern) if codec else file_path_pattern
+            if stored != file_path_pattern:
+                # A pattern under the root matches the stored ``./`` form,
+                # which always starts the value. The ``.`` is joined in SQL: a
+                # parameter starting ``./`` would be escaped on the way in.
+                conditions.append("file_path LIKE ('.' || ?)")
+                params.append(f"{stored[1:]}%" if stored != "." else "/%")
+            else:
+                conditions.append("file_path LIKE ?")
+                params.append(f"%{file_path_pattern}%")
         return " AND ".join(conditions), params
 
     def count_nodes_by_size(
@@ -5133,6 +5265,7 @@ class GraphStore:
         """Count what :meth:`get_nodes_by_size` would return without a limit."""
         where, params = self._nodes_by_size_filter(
             min_lines, max_lines, kind, file_path_pattern,
+            getattr(self._conn, "codec", None),
         )
         row = self._conn.execute(
             f"SELECT COUNT(*) FROM nodes WHERE {where}",  # nosec B608
@@ -5162,6 +5295,7 @@ class GraphStore:
         """
         where, params = self._nodes_by_size_filter(
             min_lines, max_lines, kind, file_path_pattern,
+            getattr(self._conn, "codec", None),
         )
         params.append(limit)
         rows = self._conn.execute(
@@ -5280,6 +5414,10 @@ class GraphStore:
         wildcards.
         """
         normalized = normalize_file_path(pattern)
+        if getattr(self._conn, "codec", None) is not None:
+            # The LIKE value itself is not translated (it starts with ``%``),
+            # so match the stored ``./`` form: ``<root>/a.py`` is ``./a.py``.
+            normalized = self._conn.codec.strip_root(normalized)
         escaped = (
             normalized.replace("\\", "\\\\")
             .replace("%", "\\%")

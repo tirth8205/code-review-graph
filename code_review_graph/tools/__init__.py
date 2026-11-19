@@ -49,6 +49,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "_BUILTIN_CALL_NAMES": ("._common", "_BUILTIN_CALL_NAMES"),
     "_get_store": ("._common", "_get_store"),
     "_validate_repo_root": ("._common", "_validate_repo_root"),
+    "relative_to_cwd": ("._common", "relative_to_cwd"),
     "with_provenance": ("._common", "with_provenance"),
     # analysis_tools
     "get_bridge_nodes_func": (".analysis_tools", "get_bridge_nodes_func"),
@@ -97,6 +98,7 @@ __all__ = [
     "_BUILTIN_CALL_NAMES",
     "_get_store",
     "_validate_repo_root",
+    "relative_to_cwd",
     "with_provenance",
     # build
     "build_or_update_graph",

@@ -515,10 +515,15 @@ def _holds_commits_since(root: Path, db_path: Path, built: str) -> bool:
     """Whether the graph holds every file changed between ``built`` and HEAD."""
     from .incremental import files_hold_commits
     from .parser import normalize_file_path
+    from .relpaths import TranslatingConnection, bind_relative_root
 
     def file_hashes() -> dict[str, str]:
-        conn = sqlite3.connect(_read_only_uri(db_path), uri=True, timeout=2)
+        conn = sqlite3.connect(
+            _read_only_uri(db_path), uri=True, timeout=2, factory=TranslatingConnection,
+        )
         try:
+            # A relative graph's paths get the root back, as the lookups expect.
+            bind_relative_root(conn, db_path)
             rows = conn.execute(
                 "SELECT file_path, file_hash FROM nodes WHERE kind = ?", ("File",)
             ).fetchall()

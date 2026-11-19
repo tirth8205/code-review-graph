@@ -18,7 +18,7 @@ code-review-graph doctor: /path/to/project
   ok    On PATH: /path/to/project/.venv/bin/code-review-graph 2.4.0. Your shell runs this one, and so does a hook that names no copy.
   fail  MCP entry in .mcp.json (Claude Code, CodeBuddy Code) runs 2.3.9, not 2.4.0 (the copy uv tool install put in place).
         Fix: Upgrade the copy the MCP entry runs: uv tool upgrade code-review-graph. Then restart your AI tool.
-  ok    Graph: schema v15, 4 files, 8 nodes, built at HEAD (24e03a5).
+  ok    Graph: schema v16, 4 files, 8 nodes, built at HEAD (24e03a5).
   ok    Hooks: git pre-commit, post-checkout, post-merge, post-rewrite; Claude Code PostToolUse, SessionStart.
 
 1 problem found.
@@ -577,7 +577,7 @@ and exits 1, instead of raising a SQLite traceback:
 ```
 Error: the graph database at <path> is unreadable (file is not a database). Run `code-review-graph build` to rebuild it from scratch.
 Error: <path> is a SQLite database but not a code-review-graph graph (it holds invoices). Point --data-dir somewhere else, or delete the file and run `code-review-graph build`.
-Error: the graph database at <path> was written by a newer code-review-graph (schema v99; this build understands v15). This is code-review-graph <version> at <dir>. Upgrade this copy, or delete the file and run `code-review-graph build`. Your MCP entry and hooks may run a different copy: `code-review-graph doctor` lists each one and its version.
+Error: the graph database at <path> was written by a newer code-review-graph (schema v99; this build understands v16). This is code-review-graph <version> at <dir>. Upgrade this copy, or delete the file and run `code-review-graph build`. Your MCP entry and hooks may run a different copy: `code-review-graph doctor` lists each one and its version.
 Error: the graph at <path> was built for a different repository root: none of its 12 file(s), such as /other/repo/lib.py, are under /this/repo. Run `code-review-graph build` here, or point --repo at the root it was built for.
 ```
 

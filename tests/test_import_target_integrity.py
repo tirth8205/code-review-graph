@@ -43,6 +43,7 @@ import pytest
 from code_review_graph.graph import GraphStore
 from code_review_graph.incremental import _run_python_resolver, full_build
 from tests.import_audit import (
+    audit,
     audit_imports,
     exists_case_exact,
     looks_like_a_path,
@@ -214,6 +215,24 @@ def test_no_import_target_escapes_the_repository_root(built_repo):
         f"escaping imports produced no edge at all: "
         f"{escape_lines - seen_escape_lines}"
     )
+
+
+def test_the_audit_command_reads_a_relative_graph(built_repo):
+    """The command line opens graph.db on its own; it must decode stored paths.
+
+    A relative-path graph stores ``./app/x.py``. Read raw, every relative
+    import looked missing because the audit compares absolute paths.
+    """
+    repo, db_path = built_repo
+    conn = audit._connect(db_path)
+    try:
+        stats = audit_imports(conn, repo / "app", repo.resolve())
+    finally:
+        conn.close()
+
+    assert stats["relative_total"] >= 12
+    assert stats["relative_missing"] == 0
+    assert stats["relative_wrong"] == 0, stats["wrong_examples"]
 
 
 def test_every_relative_import_resolves_to_the_right_file(built_repo):

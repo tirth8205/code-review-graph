@@ -39,6 +39,7 @@ from .csharp_resolver import restore_csharp_references
 from .errors import ChangeDiscoveryError, GraphRootMismatchError, GraphStoreError
 from .graph import GraphStore
 from .locking import WriteLock, write_lock_path
+from .relpaths import MOVED_FROM_KEY
 
 if TYPE_CHECKING:
     from .parser import CodeParser
@@ -3007,6 +3008,7 @@ def full_build(
             ``CRG_FOLLOW_SYMLINKS`` env var. Default: off.
     """
     repo_root = _canonical_repo_root(repo_root)
+    store.bind_repo_root(repo_root)
     parser = _get_code_parser_cls()(repo_root)
     files, followed, followed_dirs = _collect_files(
         repo_root, recurse_submodules, follow_symlinks,
@@ -3096,6 +3098,8 @@ def full_build(
 
     store.set_metadata("last_updated", time.strftime("%Y-%m-%dT%H:%M:%S"))
     store.set_metadata("last_build_type", "full")
+    if store.get_metadata(MOVED_FROM_KEY):
+        store.set_metadata(MOVED_FROM_KEY, "")
     store.set_metadata("intentionally_incomplete", "0")
     store.set_metadata(
         VERIFIED_FILE_COUNT_KEY, "0" if errors else str(len(store.get_all_files()))
@@ -3200,8 +3204,14 @@ def incremental_update(
     """
     repo_root = _canonical_repo_root(repo_root)
     follow = follow_symlinks_enabled(follow_symlinks)
+    if store.path_root is None:
+        # Nothing bound yet, so nothing foreign to compare: bind, then check.
+        store.bind_repo_root(repo_root)
     if reconcile_stale:
+        # Before re-anchoring: bound to *repo_root*, a foreign graph's paths
+        # would read as this checkout's and pass the check.
         _assert_graph_matches_root(repo_root, store)
+    store.bind_repo_root(repo_root)
     parser = _get_code_parser_cls()(repo_root)
     ignore_patterns = _load_ignore_patterns(repo_root)
     vcs = detect_vcs(repo_root)
@@ -3212,15 +3222,24 @@ def incremental_update(
         and base == stored_git_sha
     )
 
+    moved_from = store.get_metadata(MOVED_FROM_KEY)
     identity_pending = _load_cpp_identity_pending(store)
-    if (
+    cpp_rebuild = not moved_from and (
         identity_pending is None
         and store.get_metadata(_CPP_IDENTITY_METADATA_KEY) != CPP_IDENTITY_VERSION
         and store.has_nodes_for_language("cpp")
-    ):
-        logger.info(
-            "C++ identity format changed; rebuilding the graph before incremental update",
-        )
+    )
+    if moved_from or cpp_rebuild:
+        if moved_from:
+            # Copied from another checkout: ``extra`` JSON still names its root,
+            # so an incremental pass would keep edges resolved against that tree.
+            logger.info(
+                "The graph was built in %s; rebuilding it for %s", moved_from, repo_root,
+            )
+        else:
+            logger.info(
+                "C++ identity format changed; rebuilding the graph before incremental update",
+            )
         rebuilt = full_build(repo_root, store, enrich=enrich, follow_symlinks=follow)
         return {
             "files_updated": rebuilt["files_parsed"],

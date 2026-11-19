@@ -11,6 +11,7 @@ Pass detail_level="minimal" unless it is not enough. Minimal drops source, so le
 Prefer a targeted query_graph_tool call over a broad listing tool.
 To see how code works, semantic_search_nodes_tool(query="...", include_source=True, expand_neighbors=True) returns each hit's source and the top hits' direct callers and callees; open a file only when a snippet is marked source_truncated. Leave detail_level at standard for this call; minimal drops the source.
 Budget: about five tool calls per task. Source snippets stand in for file reads.
+Pass cwd="<your working directory>" to get repo-relative paths (pkg/a.py, the root as .) when it is inside the repository; without cwd, or outside it, paths are absolute. Every tool except get_docs_section_tool and list_repos_tool takes it.
 context_savings, when present, is an estimate, not an exact token count.
 Set CRG_CONTEXT_HISTORY=1 (off by default) to log each estimate to context-history.jsonl next to graph.db, holding token counts, tool names, a timestamp, a detail level and file and depth counts, never file names, paths or source text; read it with code-review-graph context-history [--by day|tool] [--days N] [--json].
 </section>

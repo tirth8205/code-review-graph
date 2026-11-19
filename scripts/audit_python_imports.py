@@ -766,8 +766,18 @@ def audit_call_attribution(
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    """Open *db_path* read-only, with paths decoded the way GraphStore reads them.
+
+    A relative-path graph stores ``./pkg/b.py``; the audit compares and prints
+    absolute paths, so the connection restores the root on the way out.
+    """
+    from code_review_graph.relpaths import TranslatingConnection, bind_relative_root
+
+    conn = sqlite3.connect(
+        f"file:{db_path}?mode=ro", uri=True, factory=TranslatingConnection,
+    )
     conn.row_factory = sqlite3.Row
+    bind_relative_root(conn, db_path)
     return conn
 
 
