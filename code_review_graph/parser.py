@@ -19150,6 +19150,22 @@ class CodeParser:
             self._ref_from_array(child, source, language, file_path, caller, edges, imap, dnames)
             return
 
+        # --- JSX attribute values  <button onClick={handler} /> ---
+        if (
+            node_type == "jsx_expression"
+            and language in ("javascript", "typescript", "tsx")
+            and child.parent is not None
+            and child.parent.type == "jsx_attribute"
+        ):
+            inner = [c for c in child.children if c.type not in ("{", "}", "comment")]
+            if len(inner) == 1 and inner[0].type == "identifier":
+                self._emit_reference_if_known(
+                    inner[0].text.decode("utf-8", errors="replace"),
+                    language, file_path, caller, edges, imap, dnames,
+                    line=inner[0].start_point[0] + 1,
+                )
+            return
+
         # --- Callback arguments (identifier args inside call_expression) ---
         if node_type in self._ARGUMENTS_TYPES:
             self._ref_from_arguments(
