@@ -3501,3 +3501,300 @@ class TestParserCacheAndUnreachableVisitorDirect:
         visitor._visit_function(fn_node)
         visitor._visit_statements(tree.body, dead=False)
         assert (4, 4) in visitor.positions
+
+
+class TestJsInlineArrowCallbacks:
+    """Inline JS/TS/TSX arrow callbacks must not become standalone Function nodes (#1236)."""
+
+    def setup_method(self):
+        self.parser = CodeParser()
+
+    def test_tsx_inline_map_callback_not_indexed_or_dead_code(self):
+        """Exact reproduction from issue #1236."""
+        from code_review_graph.refactor import find_dead_code
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir).resolve()
+            src_dir = root / "src"
+            src_dir.mkdir()
+            app_file = src_dir / "App.tsx"
+            app_file.write_text(
+                "export function App({ items }: { items: string[] }) {\n"
+                "  return <ul>{items.map(r => <li key={r}>{r}</li>)}</ul>\n"
+                "}\n",
+                encoding="utf-8",
+            )
+
+            nodes, _ = self.parser.parse_file(app_file)
+            fn_names = [n.name for n in nodes if n.kind == "Function"]
+            assert fn_names == ["App"]
+
+            with GraphStore(root / "graph.db") as store:
+                built = full_build(root, store)
+                assert built["errors"] == []
+                dead = find_dead_code(store, root=root)
+
+            dead_names = {d["name"] for d in dead}
+            assert "r" not in dead_names
+
+    @pytest.mark.parametrize("ext", [".js", ".jsx", ".ts", ".tsx"])
+    def test_inline_arrow_callback_variants_create_no_function_nodes(self, ext):
+        """Single-param, multi-param, destructured, zero-param and identifier-body callbacks."""
+        src = (
+            "export function run(items, fallback, flag) {\n"
+            "  const a = items.map(r => r);\n"
+            "  const b = items.map((x, idx) => x + idx);\n"
+            "  const c = items.map(({ id }) => id);\n"
+            "  const d = items.map(() => fallback);\n"
+            "  const e = Promise.resolve().then(async () => fallback);\n"
+            "  const f = flag ? (v => v) : (w => w);\n"
+            "  const g = [k => k];\n"
+            "  const h = items.map(function(n) { return n; });\n"
+            "  return () => fallback;\n"
+            "}\n"
+        ).encode("utf-8")
+
+        nodes, _ = self.parser.parse_bytes(Path(f"/test/callbacks{ext}"), src)
+        fn_names = [n.name for n in nodes if n.kind == "Function"]
+        assert fn_names == ["run"]
+
+    def test_calls_inside_inline_arrow_callbacks_stay_on_enclosing_function(self):
+        """Skipping anonymous callbacks must attribute inner CALLS to the enclosing function
+        so callees like ``formatItem`` are not falsely flagged as dead code."""
+        from code_review_graph.refactor import find_dead_code
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir).resolve()
+            app_file = root / "App.tsx"
+            app_file.write_text(
+                "function isValid(x: string) {\n"
+                "  return x.length > 0;\n"
+                "}\n"
+                "function formatItem(r: string) {\n"
+                "  return r.trim();\n"
+                "}\n"
+                "function handleClick(e: unknown) {\n"
+                "  return e;\n"
+                "}\n"
+                "export function App({ items }: { items: string[] }) {\n"
+                "  const valid = items.filter(x => isValid(x)).map(r => formatItem(r));\n"
+                "  return <button onClick={e => handleClick(e)}>{valid.join(',')}</button>;\n"
+                "}\n",
+                encoding="utf-8",
+            )
+
+            nodes, edges = self.parser.parse_file(app_file)
+            fn_names = {n.name for n in nodes if n.kind == "Function"}
+            assert fn_names == {"isValid", "formatItem", "handleClick", "App"}
+
+            app_qn = f"{app_file.as_posix()}::App"
+            app_calls = {e.target for e in edges if e.kind == "CALLS" and e.source == app_qn}
+            assert f"{app_file.as_posix()}::isValid" in app_calls
+            assert f"{app_file.as_posix()}::formatItem" in app_calls
+            assert f"{app_file.as_posix()}::handleClick" in app_calls
+
+            with GraphStore(root / "graph.db") as store:
+                built = full_build(root, store)
+                assert built["errors"] == []
+                dead = {d["name"] for d in find_dead_code(store, root=root)}
+
+            assert not (dead & {"x", "r", "e", "isValid", "formatItem", "handleClick"})
+
+    def test_deeply_nested_callbacks_and_curried_arrow_preserve_caller(self):
+        """Nested callbacks and curried arrows attribute calls to the named outer function."""
+        path = Path("/test/nested.ts")
+        src = (
+            "function leaf(a: number, b: number) { return a + b; }\n"
+            "export const make = a => b => leaf(a, b);\n"
+            "export function walk(groups: number[][]) {\n"
+            "  return groups.map(g => g.map(item => leaf(item, 1)));\n"
+            "}\n"
+        ).encode("utf-8")
+
+        nodes, edges = self.parser.parse_bytes(path, src)
+        fn_names = {n.name for n in nodes if n.kind == "Function"}
+        assert fn_names == {"leaf", "make", "walk"}
+
+        leaf_callers = {
+            e.source for e in edges if e.kind == "CALLS" and e.target.endswith("leaf")
+        }
+        assert f"{path.as_posix()}::make" in leaf_callers
+        assert f"{path.as_posix()}::walk" in leaf_callers
+
+    def test_typed_receiver_resolution_preserved_inside_inline_arrow_callback(self):
+        """Removing arrow_function from _FUNCTION_TYPES must keep TS parameter typing."""
+        path = Path("/test/typed_cb.ts")
+        src = (
+            "class Service {\n"
+            "  run(): void {}\n"
+            "}\n"
+            "export function dispatch(items: Service[]) {\n"
+            "  items.forEach((svc: Service) => svc.run());\n"
+            "}\n"
+            "export const runOne = (svc: Service) => svc.run();\n"
+        ).encode("utf-8")
+
+        nodes, edges = self.parser.parse_bytes(path, src)
+        fn_names = {n.name for n in nodes if n.kind == "Function"}
+        assert fn_names == {"run", "dispatch", "runOne"}
+
+        run_qn = f"{path.as_posix()}::Service.run"
+        call_pairs = {(e.source, e.target) for e in edges if e.kind == "CALLS"}
+        assert (f"{path.as_posix()}::dispatch", run_qn) in call_pairs
+        assert (f"{path.as_posix()}::runOne", run_qn) in call_pairs
+
+    def test_named_arrow_functions_and_class_fields_still_indexed(self):
+        """Variable bindings, TS/JS class fields, member assignments and object methods."""
+        ts_path = Path("/test/named.tsx")
+        ts_src = (
+            "const foo = (r: string) => r;\n"
+            "let bar = r => r;\n"
+            "export const MyComp = ({ items }: { items: string[] }) => (\n"
+            "  <ul>{items.map(r => <li key={r}>{r}</li>)}</ul>\n"
+            ");\n"
+            "class Widget {\n"
+            "  handleClick = (e: Event) => e;\n"
+            "  simple = r => r;\n"
+            "}\n"
+            "export const api = {\n"
+            "  shorthand(x: number) { return x; },\n"
+            "  inlineCb: r => r,\n"
+            "};\n"
+            "export default r => r;\n"
+        ).encode("utf-8")
+
+        ts_nodes, _ = self.parser.parse_bytes(ts_path, ts_src)
+        ts_fns = {(n.name, n.parent_name) for n in ts_nodes if n.kind == "Function"}
+        assert ts_fns == {
+            ("foo", None),
+            ("bar", None),
+            ("MyComp", None),
+            ("handleClick", "Widget"),
+            ("simple", "Widget"),
+            ("shorthand", None),
+        }
+
+        js_path = Path("/test/named.js")
+        js_src = (
+            "class Button {\n"
+            "  handleClick = (e) => e;\n"
+            "  single = r => r;\n"
+            "}\n"
+            "router.dispatch = r => r;\n"
+            "exports.helper = (x) => x;\n"
+        ).encode("utf-8")
+
+        js_nodes, _ = self.parser.parse_bytes(js_path, js_src)
+        js_fns = {(n.name, n.parent_name) for n in js_nodes if n.kind == "Function"}
+        assert js_fns == {
+            ("handleClick", "Button"),
+            ("single", "Button"),
+            ("router.dispatch", None),
+            ("exports.helper", None),
+        }
+
+    @pytest.mark.parametrize("ext", [".js", ".ts"])
+    def test_class_field_decorators_static_and_non_function_fields(self, ext):
+        """Decorated JS/TS class-field arrows keep outer decorator CALLS and liveness,
+        while undecorated, static, and non-function fields behave consistently."""
+        from code_review_graph.refactor import find_dead_code
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir).resolve()
+            src_file = root / f"fields{ext}"
+            src_file.write_text(
+                "function register(x) { return x; }\n"
+                "function token() { return 1; }\n"
+                "function help(x) { return x; }\n"
+                "function initCount() { return 0; }\n"
+                "class Box {\n"
+                "  @register(token()) fn = r => help(r);\n"
+                "  plain = r => help(r);\n"
+                "  static st = r => help(r);\n"
+                "  count = initCount();\n"
+                "}\n",
+                encoding="utf-8",
+            )
+
+            nodes, edges = self.parser.parse_file(src_file)
+            fns = {(n.name, n.parent_name) for n in nodes if n.kind == "Function"}
+            assert fns == {
+                ("register", None),
+                ("token", None),
+                ("help", None),
+                ("initCount", None),
+                ("fn", "Box"),
+                ("plain", "Box"),
+                ("st", "Box"),
+            }
+
+            fp = src_file.as_posix()
+            call_pairs = {(e.source, e.target) for e in edges if e.kind == "CALLS"}
+            # Decorator and non-function field calls stay in outer scope, not Box.fn.
+            assert (fp, f"{fp}::register") in call_pairs
+            assert (fp, f"{fp}::token") in call_pairs
+            assert (fp, f"{fp}::initCount") in call_pairs
+            assert (f"{fp}::Box.fn", f"{fp}::register") not in call_pairs
+            assert (f"{fp}::Box.fn", f"{fp}::token") not in call_pairs
+            # Field function bodies attribute their calls to the field functions.
+            assert (f"{fp}::Box.fn", f"{fp}::help") in call_pairs
+            assert (f"{fp}::Box.plain", f"{fp}::help") in call_pairs
+            assert (f"{fp}::Box.st", f"{fp}::help") in call_pairs
+
+            with GraphStore(root / "graph.db") as store:
+                built = full_build(root, store)
+                assert built["errors"] == []
+                dead = {d["name"] for d in find_dead_code(store, root=root)}
+
+            assert not (dead & {"register", "token", "help", "initCount", "r"})
+
+    @pytest.mark.parametrize("ext", [".ts", ".tsx"])
+    def test_function_expression_closure_keeps_enclosing_parameter_type(self, ext):
+        """A function_expression inside a method must keep the enclosing parameter type
+        when a class field shares the same name."""
+        path = Path(f"/test/closure{ext}")
+        src = (
+            "class A { run() {} }\n"
+            "class B { run() {} }\n"
+            "class Box {\n"
+            "  svc: A;\n"
+            "  method(svc: B) {\n"
+            "    return [1].map(function () { return svc.run(); });\n"
+            "  }\n"
+            "}\n"
+        ).encode("utf-8")
+
+        _, edges = self.parser.parse_bytes(path, src)
+        calls = [e for e in edges if e.kind == "CALLS" and e.extra.get("receiver") == "svc"]
+        assert len(calls) == 1
+        assert calls[0].target == f"{path.as_posix()}::B.run"
+        assert calls[0].extra.get("receiver_type") == "B"
+
+    def test_typed_arrow_callback_parameter_stays_scoped_to_callback(self):
+        """A typed parameter in an inline arrow callback shadows the outer binding
+        without leaking past the callback."""
+        path = Path("/test/scoped_cb.ts")
+        src = (
+            "class A { run() {} }\n"
+            "class B { run() {} }\n"
+            "export function work(svc: A, items: B[]) {\n"
+            "  svc.run();\n"
+            "  items.forEach((svc: B) => {\n"
+            "    svc.run();\n"
+            "  });\n"
+            "  svc.run();\n"
+            "}\n"
+        ).encode("utf-8")
+
+        _, edges = self.parser.parse_bytes(path, src)
+        calls = sorted(
+            (e.line, e.target, e.extra.get("receiver_type"))
+            for e in edges
+            if e.kind == "CALLS" and e.extra.get("receiver") == "svc"
+        )
+        fp = path.as_posix()
+        assert calls == [
+            (4, f"{fp}::A.run", "A"),
+            (6, f"{fp}::B.run", "B"),
+            (8, f"{fp}::A.run", "A"),
+        ]
