@@ -1548,25 +1548,29 @@ _TS_TYPE_DECLARATIONS = frozenset({
 
 _FUNCTION_TYPES: dict[str, list[str]] = {
     "python": ["function_definition"],
+    # JS/TS/TSX: omit ``arrow_function`` here — arrow functions are anonymous
+    # expressions whose direct ``identifier`` child is a single unparenthesised
+    # parameter (``r => ...``) or an expression body (``() => value``), not a
+    # function name. Named arrow bindings (``const f = () => {}``, class
+    # fields, member assignments) are handled by ``_extract_js_var_functions``,
+    # ``_extract_js_field_function`` and ``_extract_js_member_functions``;
+    # inline callbacks remain part of their enclosing function (#1236).
     "javascript": [
         "function_declaration",
         "generator_function_declaration",
         "method_definition",
-        "arrow_function",
     ],
     "typescript": [
         "function_declaration",
         "generator_function_declaration",
         "method_definition",
         "abstract_method_signature",
-        "arrow_function",
     ],
     "tsx": [
         "function_declaration",
         "generator_function_declaration",
         "method_definition",
         "abstract_method_signature",
-        "arrow_function",
     ],
     "go": ["function_declaration", "method_declaration"],
     "rust": ["function_item", "function_signature_item"],
@@ -8536,6 +8540,8 @@ class CodeParser:
         function_types = set(self._function_types.get(language, []))
         if language == "csharp":
             function_types.add("local_function_statement")
+        elif language in ("javascript", "typescript", "tsx"):
+            function_types.add("arrow_function")
         call_types = set(self._call_types.get(language, []))
         block_types = {
             "java": {"block"},
@@ -8760,12 +8766,14 @@ class CodeParser:
             "csharp": {"parameter"},
         }.get(language, set())
 
+        stop_types = set(self._function_types.get(language, []))
+        if language in ("javascript", "typescript", "tsx"):
+            stop_types.add("arrow_function")
+
         def visit(node, depth: int = 0) -> None:
             if depth > self._MAX_AST_DEPTH:
                 return
-            if node is not function_node and node.type in self._function_types.get(
-                language, []
-            ):
+            if node is not function_node and node.type in stop_types:
                 return
             if node.type in parameter_types:
                 bindings.update(self._typed_bindings_from_node(node, language))
@@ -12512,7 +12520,7 @@ class CodeParser:
             # --- JS/TS class field arrow functions (handler = () => {}) ---
             if (
                 language in ("javascript", "typescript", "tsx")
-                and node_type == "public_field_definition"
+                and node_type in ("public_field_definition", "field_definition")
                 and self._extract_js_field_function(
                     child, source, language, file_path, nodes, edges,
                     enclosing_class, enclosing_func,
@@ -15111,11 +15119,14 @@ class CodeParser:
         """Handle class field arrow functions: handler = (e) => { ... }"""
         prop_name = None
         func_node = None
+        rest: list = []
         for sub in child.children:
             if sub.type == "property_identifier" and prop_name is None:
                 prop_name = sub.text.decode("utf-8", errors="replace")
-            elif sub.type in self._JS_FUNC_VALUE_TYPES:
+            elif sub.type in self._JS_FUNC_VALUE_TYPES and func_node is None:
                 func_node = sub
+            elif sub.is_named:
+                rest.append(sub)
 
         if not prop_name or not func_node:
             return False
@@ -15156,6 +15167,18 @@ class CodeParser:
             defined_names=defined_names,
             _depth=_depth + 1,
         )
+        # Walk non-function siblings (decorators, TS type annotations) in the
+        # outer scope so decorator calls and type references are not dropped
+        # or misattributed to the field function itself.
+        if rest:
+            self._extract_from_tree(
+                _NodeGroup(rest), source, language, file_path, nodes, edges,
+                enclosing_class=enclosing_class,
+                enclosing_func=enclosing_func,
+                import_map=import_map,
+                defined_names=defined_names,
+                _depth=_depth + 1,
+            )
         return True
 
     def _extract_js_member_functions(
@@ -23276,6 +23299,16 @@ class CodeParser:
                     for sub in reversed(name_child.children):
                         if sub.type == "constant":
                             return sub.text.decode("utf-8", errors="replace")
+
+        # JS/TS arrow functions are anonymous expressions; their direct
+        # ``identifier`` children are a single unparenthesised parameter
+        # (``r => ...``) or an expression body (``() => value``), never a
+        # function name.
+        if (
+            language in ("javascript", "typescript", "tsx")
+            and node.type == "arrow_function"
+        ):
+            return None
 
         # Most built-in languages use a 'name' child.
         # field_identifier covers C++ class member function names inside

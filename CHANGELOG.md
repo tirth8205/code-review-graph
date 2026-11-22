@@ -35,6 +35,11 @@
 
 ### Fixed
 
+- Inline JavaScript, TypeScript and TSX arrow callbacks (such as
+  `items.map(r => ...)` or `onClick={e => ...}`) are no longer indexed as
+  standalone `Function` nodes named after their parameter or body identifier or
+  reported as dead code; calls inside them stay attributed to their enclosing
+  function.
 - The MCP entry and every hook `install` writes now run the copy of
   code-review-graph that ran `install`. The MCP entry used `uvx` whenever it
   was on PATH, and hooks ran the first copy on PATH, so an older copy could
