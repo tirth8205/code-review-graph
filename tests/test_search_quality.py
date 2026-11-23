@@ -361,6 +361,37 @@ class TestSearchBehaviour:
             graph_store.close()
             Path(tmp.name).unlink(missing_ok=True)
 
+    def test_test_heavy_fts_window_still_has_source_candidates(self, tmp_path):
+        with GraphStore(tmp_path / "graph.db") as store:
+            source = "src/long_component_path/session.py"
+            store.store_file_nodes_edges(
+                source,
+                [NodeInfo(
+                    kind="Function", name="auth", file_path=source,
+                    line_start=1, line_end=3, language="python",
+                )],
+                [],
+            )
+            for index in range(12):
+                path = f"tests/auth/auth_{index}.py"
+                store.store_file_nodes_edges(
+                    path,
+                    [NodeInfo(
+                        kind="Test", name="auth", file_path=path,
+                        line_start=1, line_end=3, language="python", is_test=True,
+                    )],
+                    [],
+                )
+            rebuild_fts_index(store)
+
+            mode: list[str] = []
+            results = hybrid_search(store, "auth", limit=3, _out_mode=mode)
+            assert mode == ["fts"]
+            assert results[0]["file_path"] == source
+            assert any(result["kind"] == "Test" for result in results)
+            assert hybrid_search(store, "auth test", limit=3)[0]["kind"] == "Test"
+            assert hybrid_search(store, "auth", kind="Test", limit=1)[0]["kind"] == "Test"
+
     def test_operator_words_do_not_raise_or_act_as_operators(self, store):
         for query in ("OR", "NOT", "NEAR", "token NEAR store"):
             hybrid_search(store, query, limit=10)

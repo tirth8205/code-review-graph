@@ -65,6 +65,7 @@ _NAME_EXACT_COVERAGE_BOOST = 2.0
 # two-line stub in tests/ could outrank the implementation. Rank test symbols
 # below production ones unless the caller is actually asking about tests.
 _TEST_RANK_PENALTY = 0.4
+_TEST_NODE_SQL = "(COALESCE(nodes.is_test, 0) != 0 OR nodes.kind = 'Test')"
 _TEST_INTENT_WORDS = frozenset({
     "test", "tests", "tested", "testing", "spec", "specs", "fixture",
     "fixtures", "mock", "mocks", "stub", "stubs", "coverage",
@@ -749,6 +750,7 @@ def _fts_search(
     limit: int = 50,
     kind: str | None = None,
     skip_json: bool = False,
+    skip_tests: bool = False,
 ) -> list[tuple[int, float]]:
     """Run an FTS5 BM25 search against the nodes_fts table.
 
@@ -759,6 +761,7 @@ def _fts_search(
     *kind*, ``_UNSEARCHED_KIND`` rows are left out there for the same reason.
     With *skip_json*, JSON rows are left out, so an expression that matches
     only JSON falls through as it did before JSON was indexed.
+    With *skip_tests*, nodes marked as tests are left out.
 
     Returns list of ``(node_id, bm25_score)`` tuples. The BM25 score is
     negated so higher = better (FTS5 returns negative BM25).
@@ -790,6 +793,8 @@ def _fts_search(
         filters = (_UNSEARCHED_KIND,)
     if skip_json:
         conditions.append("nodes.language IS NOT 'json'")
+    if skip_tests:
+        conditions.append(f"NOT {_TEST_NODE_SQL}")
     if len(conditions) > 1:
         # CROSS JOIN keeps the full-text index as the outer loop.
         sql = (  # nosec B608
@@ -954,37 +959,48 @@ def _has_json_intent(query: str, kind: Optional[str]) -> bool:
     )
 
 
-def _fts_search_past_json(
+def _fts_search_past_demoted_rows(
     conn: sqlite3.Connection,
     query: str,
     results: list[tuple[int, float]],
     limit: int,
     kind: Optional[str] = None,
+    *,
+    skip_json: bool,
+    skip_tests: bool,
 ) -> list[tuple[int, float]]:
-    """Add the best other matches when JSON rows take places in a full window.
+    """Preserve candidates for reranking when demoted rows fill a result window.
 
-    On next-i18next, six ``translation.json`` files filled the window for
-    "translation" and pushed ``appWithTranslation`` out of the results. The
-    other rows are fetched on their own, up to *limit* of them, and merged in
-    by score, so no number of JSON rows ahead of the code can hide it.
+    The rank penalties only apply after the initial FTS limit, so tests or
+    JSON keys can keep a relevant implementation out of the candidate set.
+    Fetch up to *limit* ordinary rows if the initial window contains any
+    demoted rows, and merge them by BM25 without losing the original hits.
     """
-    if len(results) < limit:
+    if len(results) < limit or not (skip_json or skip_tests):
         return results
     ids = [node_id for node_id, _ in results]
-    json_rows = 0
+    demoted = []
+    if skip_json:
+        demoted.append("nodes.language = 'json'")
+    if skip_tests:
+        demoted.append(_TEST_NODE_SQL)
+    demoted_sql = " OR ".join(demoted)
     for start in range(0, len(ids), 450):
         batch = ids[start:start + 450]
         placeholders = ",".join("?" for _ in batch)
-        json_rows += conn.execute(
-            "SELECT count(*) FROM nodes WHERE language = 'json' "  # nosec B608
-            f"AND id IN ({placeholders})",
+        if conn.execute(
+            f"SELECT 1 FROM nodes WHERE ({demoted_sql}) "  # nosec B608
+            f"AND id IN ({placeholders}) LIMIT 1",
             batch,
-        ).fetchone()[0]
-    if not json_rows:
+        ).fetchone():
+            break
+    else:
         return results
     seen = set(ids)
     others = [
-        row for row in _fts_search(conn, query, limit=limit, kind=kind, skip_json=True)
+        row for row in _fts_search(
+            conn, query, limit=limit, kind=kind, skip_json=skip_json, skip_tests=skip_tests,
+        )
         if row[0] not in seen
     ]
     if not others:
@@ -1054,10 +1070,16 @@ def hybrid_search(
         store, query, limit=fetch_limit, model=model, provider=provider, kind=kind,
     )
 
-    # JSON rows rank below code (``_JSON_RANK_PENALTY``), so they must not use
-    # up the window that code would otherwise fill, whatever the kind filter.
-    if fts_results and not _has_json_intent(query, kind):
-        fts_results = _fts_search_past_json(conn, query, fts_results, fetch_limit, kind)
+    query_words = identifier_words(query)
+    # A kind or a word like "spec" or "fixture" can explicitly ask for tests.
+    test_intent = kind == "Test" or bool(
+        {word.lower() for word in query_words} & _TEST_INTENT_WORDS
+    )
+    json_intent = _has_json_intent(query, kind)
+    fts_results = _fts_search_past_demoted_rows(
+        conn, query, fts_results, fetch_limit, kind,
+        skip_json=not json_intent, skip_tests=not test_intent,
+    )
 
     # ------ Phase 2: Merge via RRF or fallback ------
     if fts_results or emb_results:
@@ -1091,15 +1113,6 @@ def hybrid_search(
     context_set = (
         {normalize_file_path(p) for p in context_files} if context_files else set()
     )
-
-    query_words = identifier_words(query)
-
-    # Asking for kind="Test", or using a word like "spec" or "fixture", means
-    # test code is what was wanted; do not push it down in that case.
-    test_intent = kind == "Test" or bool(
-        {w.lower() for w in query_words} & _TEST_INTENT_WORDS
-    )
-    json_intent = _has_json_intent(query, kind)
 
     # Batch-fetch all candidate nodes in one query
     candidate_ids = [node_id for node_id, _ in merged]
@@ -1159,7 +1172,7 @@ def hybrid_search(
 
         if not test_intent:
             row_keys = row.keys()
-            is_test = bool(row["is_test"]) if "is_test" in row_keys else False
+            is_test = node_kind == "Test" or ("is_test" in row_keys and bool(row["is_test"]))
             if not is_test and file_path:
                 # The graph stores absolute paths, so without the root only
                 # file names count and tests/helpers.py reads as production.
