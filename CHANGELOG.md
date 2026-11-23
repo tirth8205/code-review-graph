@@ -4,6 +4,10 @@
 
 ### Added
 
+- `serve --multi-repo` works over stdio, so an editor opened at a folder of
+  repositories can serve their registered graphs without picking the workspace
+  folder by default (#311).
+
 - `install` keeps a record of the files it writes inside the repository, in
   `.code-review-graph/install-manifest.json`, even when `--data-dir` or
   `CRG_DATA_DIR` keeps the graph somewhere else. Each install adds to it and

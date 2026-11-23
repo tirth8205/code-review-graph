@@ -134,7 +134,7 @@ logger = logging.getLogger(__name__)
 # Set once by ``main()`` before the server starts and only read after that, so
 # concurrent HTTP requests can share them. Nothing per request is kept here.
 _default_repo_root: str | None = None
-#: ``serve --http --multi-repo``: every call must name a registered repo.
+#: ``serve --multi-repo``: every repo-scoped call must name a registered repo.
 _multi_repo: bool = False
 
 
@@ -147,7 +147,7 @@ def _resolve_repo_root(repo_root: Optional[str]) -> Optional[str]:
        (captured in ``_default_repo_root``).
     3. None — the underlying impl will fall back to the server's cwd.
 
-    With ``serve --http --multi-repo`` there is no fallback at all: see
+    With ``serve --multi-repo`` there is no fallback at all: see
     ``_registered_repo_root``.
 
     All MCP tools that accept ``repo_root`` should use this helper so
@@ -162,7 +162,7 @@ def _resolve_repo_root(repo_root: Optional[str]) -> Optional[str]:
 def _registered_repo_root(repo_root: Optional[str]) -> str:
     """Return the registered repository a ``--multi-repo`` call names.
 
-    One HTTP server shared by several repositories must never guess which one
+    A server shared by several repositories must never guess which one
     a call means. Falling back to ``--repo`` or the server's working directory
     answered a call from a repository the client never named (#607), so a
     missing, relative or unregistered ``repo_root`` is refused with a message
@@ -366,11 +366,10 @@ SERVER_INSTRUCTIONS = (
     "keys - use Grep; the graph does not index text."
 )
 
-# Added to the instructions under ``serve --http --multi-repo``, so a client
-# learns before its first call that every call must name a repository.
+# Added under ``serve --multi-repo`` so clients know how to route calls.
 MULTI_REPO_INSTRUCTIONS = (
     "\nThis server serves several repositories: pass repo_root, the absolute "
-    "path of a registered repository, on every call. list_repos_tool lists them."
+    "path of a registered repository, on calls that take repo_root. list_repos_tool lists them."
 )
 
 mcp = FastMCP(
@@ -1651,14 +1650,12 @@ def main(
         transport: ``"stdio"`` (default) or ``"streamable-http"`` for local HTTP.
         host: Bind address when using HTTP (required for HTTP; set by CLI).
         port: Port when using HTTP (required for HTTP; set by CLI).
-        multi_repo: Serve every registered repository over HTTP. Each call
-            must then name one in ``repo_root``; there is no default (#607).
+        multi_repo: Serve the registered repositories over stdio or HTTP.
+            Repo-scoped calls must name one in ``repo_root``; there is no default.
     """
     global _default_repo_root, _multi_repo
     root: Path | None = None
     if multi_repo:
-        if transport != "streamable-http":
-            raise ValueError("multi_repo needs the HTTP transport (serve --http)")
         if repo_root:
             raise ValueError(
                 "multi_repo serves the repositories in the registry and takes no repo_root"

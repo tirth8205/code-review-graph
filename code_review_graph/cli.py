@@ -2585,7 +2585,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--multi-repo",
         action="store_true",
         help=(
-            "With --http, serve every registered repository from one server; "
+            "Serve every registered repository from one server; "
             "each tool call must name one in repo_root"
         ),
     )
@@ -2832,8 +2832,6 @@ def _dispatch() -> None:
         multi_repo = getattr(args, "multi_repo", False)
         if multi_repo:
             serve_parser = _SUBCOMMANDS["serve"]
-            if not args.http:
-                serve_parser.error("--multi-repo requires --http")
             if multi_worktree:
                 serve_parser.error("--multi-repo cannot be combined with --multi-worktree")
             if args.repo:
@@ -2889,6 +2887,8 @@ def _dispatch() -> None:
                     tools=args.tools,
                     multi_repo=multi_repo,
                 )
+            elif multi_repo:
+                serve_main(tools=args.tools, multi_repo=True)
             else:
                 serve_main(repo_root=args.repo, auto_watch=auto_watch, tools=args.tools)
         else:

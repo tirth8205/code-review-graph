@@ -236,11 +236,10 @@ code-review-graph unregister api                    # remove by path or alias
 ```
 
 Once registered, `list_repos_tool` and `cross_repo_search_tool` work across
-all of them. One HTTP server can also answer for all of them:
-`code-review-graph serve --http --multi-repo` serves every registered repository
-and loads the embedding model once. Each tool call must then pass `repo_root`,
-the absolute path of a registered repository; a call without one, or naming a
-repository that is not registered, is refused. To keep several graphs current, the daemon watches registered
+all of them. `code-review-graph serve --multi-repo` serves them over stdio and
+loads the embedding model once. Add `--http` for a Streamable HTTP client.
+Calls that take `repo_root` require the absolute path of a registered
+repository. To keep several graphs current, the daemon watches registered
 repositories as child processes:
 
 ```bash
@@ -257,5 +256,8 @@ graph for, inside that repo. The edit hook that `install` writes for Claude
 Code, Qoder and CodeBuddy then updates the graph of the repo that holds each
 edited file, even when the session started in the outer folder. It never
 builds a graph for a repo that has none, unless the session started in that
-repo. MCP tool calls still act on the server's default repo unless they pass
-`repo_root`.
+repo. In a stdio MCP configuration launched from the workspace folder, use
+`serve --multi-repo` without `--repo` and register only the checkouts and
+worktrees you want to serve. Pass the desired checkout's absolute path in
+`repo_root` on repository-specific calls. The workspace folder is never
+selected automatically.
