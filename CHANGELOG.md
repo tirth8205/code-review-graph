@@ -35,6 +35,9 @@
 
 ### Fixed
 
+- Search keeps production matches available for ranking when tests fill its
+  initial full-text results. Test-focused searches still rank tests normally (#419).
+
 - The MCP entry and every hook `install` writes now run the copy of
   code-review-graph that ran `install`. The MCP entry used `uvx` whenever it
   was on PATH, and hooks ran the first copy on PATH, so an older copy could
