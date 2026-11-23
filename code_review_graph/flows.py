@@ -23,6 +23,7 @@ from .parser import normalize_file_path
 logger = logging.getLogger(__name__)
 
 _SQL_BATCH = 450
+_LANGUAGES_WITH_TEST_ONLY_ROOTS = frozenset({"ruby", "java", "javascript", "typescript", "tsx"})
 
 
 def _escape_like_literal(value: str) -> str:
@@ -516,12 +517,12 @@ def detect_entry_points(
     # Scan all nodes for entry-point candidates.
     candidate_nodes = store.get_nodes_by_kind(["Function", "Test"])
 
-    # Ruby and Java test calls did not bind to the methods they call until
-    # recently, so a method used only by its tests was an entry point. Keep it
-    # one: being well tested must not hide a method from flow analysis.
+    # A resolved test caller should not hide a production entry point. Ruby
+    # and Java test methods and JS/TS test callbacks can be the only indexed
+    # callers of a feature that is invoked by a framework at runtime.
     called_outside_tests = (
         store.get_call_targets_outside_tests()
-        if any(node.language in ("ruby", "java") for node in candidate_nodes)
+        if any(node.language in _LANGUAGES_WITH_TEST_ONLY_ROOTS for node in candidate_nodes)
         else set()
     )
 
@@ -544,7 +545,7 @@ def detect_entry_points(
         # True root: no one calls this function.
         called = (
             called_outside_tests
-            if node.language in ("ruby", "java")
+            if node.language in _LANGUAGES_WITH_TEST_ONLY_ROOTS
             else called_qnames
         )
         is_entry = (
