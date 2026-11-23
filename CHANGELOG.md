@@ -35,6 +35,9 @@
 
 ### Fixed
 
+- JavaScript and TypeScript flows stay visible when a test is the only indexed
+  caller of their entry point, including React component calls from TSX tests.
+
 - The MCP entry and every hook `install` writes now run the copy of
   code-review-graph that ran `install`. The MCP entry used `uvx` whenever it
   was on PATH, and hooks ran the first copy on PATH, so an older copy could

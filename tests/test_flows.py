@@ -937,6 +937,46 @@ class TestFlows:
         matched_any = expand_changed_file_paths(self.store, ["util.py"])
         assert abs_root in matched_any or abs_nested in matched_any
 
+def test_tsx_test_caller_keeps_component_flow(tmp_path):
+    parser = CodeParser(repo_root=tmp_path)
+    component = tmp_path / "Checkout.tsx"
+    test = tmp_path / "checkout.test.tsx"
+    component.write_text(
+        "function CheckoutForm() { return <form />; }\n"
+        "export function CheckoutPage() { return <CheckoutForm />; }\n",
+        encoding="utf-8",
+    )
+    test.write_text(
+        "import { CheckoutPage } from './Checkout';\n"
+        "test('renders checkout', () => render(<CheckoutPage />));\n",
+        encoding="utf-8",
+    )
+    entry = f"{component.as_posix()}::CheckoutPage"
+    with GraphStore(tmp_path / "graph.db") as store:
+        for path in (component, test):
+            nodes, edges = parser.parse_file(path)
+            store.store_file_nodes_edges(path.as_posix(), nodes, edges)
+        assert entry in store.get_all_call_targets(include_file_sources=False)
+        assert entry not in store.get_call_targets_outside_tests()
+
+        flows = trace_flows(store)
+        assert {flow["name"] for flow in flows} == {"CheckoutPage"}
+        assert flows[0]["node_count"] == 2
+        store_flows(store, flows)
+        affected = get_affected_flows(store, [component.as_posix()])
+        assert [flow["name"] for flow in affected["affected_flows"]] == ["CheckoutPage"]
+
+        app = tmp_path / "App.tsx"
+        app.write_text(
+            "import { CheckoutPage } from './Checkout';\n"
+            "export function App() { return <CheckoutPage />; }\n",
+            encoding="utf-8",
+        )
+        nodes, edges = parser.parse_file(app)
+        store.store_file_nodes_edges(app.as_posix(), nodes, edges)
+        assert {flow["name"] for flow in trace_flows(store)} == {"App"}
+
+
 def test_postprocess_incremental_flows_accept_repo_relative_changed_files(tmp_path):
     """Repo-relative changed_files must reach the flow pass as absolute paths.
 

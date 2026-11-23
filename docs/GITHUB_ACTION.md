@@ -124,6 +124,13 @@ action maps the score to levels:
   [REPRODUCING.md](REPRODUCING.md) for the calibration method).
 - A `Powered by code-review-graph` footer.
 
+For React and other JavaScript or TypeScript projects, the flow list follows
+resolved call edges from entry points. For example, a routed component that
+renders another indexed component can start a flow, even if a test is its only
+indexed caller. A route, mutation or event handler wired up only through
+runtime configuration may have no resolved call path. In that case, an empty
+flow list can coexist with file or symbol dependencies in `details: impact`.
+
 ### Graph context (opt-in)
 
 The `details` input adds more of what the graph knows, under one folded
