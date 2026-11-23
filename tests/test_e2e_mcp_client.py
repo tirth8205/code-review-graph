@@ -172,6 +172,7 @@ def _server_params(
     crg_home: Path,
     *,
     multi_worktree: bool = False,
+    multi_repo: bool = False,
 ) -> Any:
     """Stdio launch parameters, as an MCP client config file would supply them.
 
@@ -180,7 +181,8 @@ def _server_params(
     starting a server. stdio is the default transport (``--http`` opts out), so
     there is no ``--stdio`` flag to pass.
     """
-    args = ["-m", "code_review_graph", "serve", "--repo", str(repo)]
+    args = ["-m", "code_review_graph", "serve"]
+    args += ["--multi-repo"] if multi_repo else ["--repo", str(repo)]
     if multi_worktree:
         args.append("--multi-worktree")
     return StdioServerParameters(
@@ -451,6 +453,45 @@ async def test_mcp_multi_worktree_routes_parallel_graphs(tmp_path: Path) -> None
                 )
 
 
+async def test_mcp_multi_repo_requires_a_registered_root_from_workspace(tmp_path: Path) -> None:
+    from code_review_graph.registry import Registry
+
+    workspace = tmp_path / "workspace"
+    _git(tmp_path, "init", "-q", str(workspace))
+    roots = [_make_fixture_repo(workspace / name) for name in ("first", "second")]
+    crg_home = tmp_path / "crg-home"
+    registry = Registry(crg_home / "registry.json")
+    for root in roots:
+        registry.register(str(root))
+
+    async with stdio_client(
+        _server_params(workspace, crg_home, multi_repo=True),
+    ) as (read, write):
+        async with ClientSession(
+            read,
+            write,
+            read_timeout_seconds=read_timeout(CALL_TIMEOUT),
+        ) as session:
+            await asyncio.wait_for(session.initialize(), timeout=CALL_TIMEOUT)
+            for arguments, error in (
+                ({}, "repo_root is required"),
+                ({"repo_root": str(workspace)}, "not a registered repository"),
+            ):
+                result = await _call(session, "build_or_update_graph_tool", arguments)
+                assert wire(result, "isError")
+                assert error in " ".join(_text_blocks(result))
+
+            for root in roots:
+                result = await _call(
+                    session, "build_or_update_graph_tool", {"repo_root": str(root)},
+                )
+                assert _payload(result)["status"] == "ok"
+                assert (root / ".code-review-graph" / "graph.db").is_file()
+
+    assert not (workspace / ".code-review-graph").exists()
+
+
+@pytest.mark.asyncio
 async def test_mcp_client_rejects_repo_root_outside_a_project(tmp_path: Path) -> None:
     """A repo_root that is not a project root is refused, not silently served."""
     repo = _make_fixture_repo(tmp_path)

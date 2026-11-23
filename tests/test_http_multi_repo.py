@@ -9,7 +9,7 @@ unregistered ``repo_root`` is refused with a clear message instead.
 The first tests pin the routing rule in-process. The last ones start a real
 ``serve --http --multi-repo`` server and drive it with the ``mcp`` client over
 Streamable HTTP, building and querying two repositories at the same time.
-stdio and plain ``serve --http`` keep their old fallback.
+Plain ``serve`` and ``serve --http`` keep their old fallback.
 """
 
 from __future__ import annotations
@@ -212,7 +212,6 @@ class TestServeMainOptions:
     @pytest.mark.parametrize(
         "kwargs, message",
         [
-            pytest.param({"transport": "stdio"}, "--http", id="stdio"),
             pytest.param(
                 {"transport": "streamable-http", "host": "127.0.0.1", "port": 5555,
                  "repo_root": "/srv/a"},
@@ -265,7 +264,7 @@ class TestServeCommand:
     @pytest.mark.parametrize(
         "extra, message",
         [
-            pytest.param([], "--multi-repo requires --http", id="no-http"),
+            pytest.param(["--repo", "x"], "registry", id="stdio-repo"),
             pytest.param(["--http", "--repo", "x"], "registry", id="repo"),
             pytest.param(
                 ["--http", "--auto-watch"], "combined with --auto-watch", id="auto-watch",

@@ -213,7 +213,7 @@ Writes one markdown page per detected community, plus an index, to `.code-review
 ```bash
 code-review-graph register /path/to/other/repo --alias mylib
 ```
-Then use `cross_repo_search_tool` to search every registered repository, or pass `repos=["mylib"]` to search a subset. `code-review-graph serve --http --multi-repo` runs one HTTP server for every registered repository; each tool call must then name one in `repo_root`.
+Then use `cross_repo_search_tool` to search every registered repository, or pass `repos=["mylib"]` to search a subset. `code-review-graph serve --multi-repo` serves registered repositories over stdio. Add `--http` to use Streamable HTTP. Each tool with a `repo_root` parameter requires a registered repository's absolute path.
 
 `code-review-graph repos` lists each repository's registered `data_dir`, marking
 missing directories with `[MISSING]`. If a registered directory disappears and
