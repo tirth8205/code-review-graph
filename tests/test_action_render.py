@@ -45,6 +45,15 @@ def test_risk_level_mapping():
     assert render.risk_level(0.0) == "low"
 
 
+def test_php_gap_note_uses_report_evidence_even_when_rows_are_omitted(report):
+    note = "PHP test gaps are estimates"
+    assert note not in render.render_markdown(report)
+    report["test_gaps_php_uncertain"] = True
+    report["test_gaps_total"] = 2
+    report["test_gaps"] = []
+    assert note in render.render_markdown(report)
+
+
 # ---------------------------------------------------------------------------
 # md_escape
 # ---------------------------------------------------------------------------

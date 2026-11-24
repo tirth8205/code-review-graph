@@ -433,6 +433,7 @@ def test_guesses_are_not_coverage_and_the_gap_report_says_so(
     assert "execute" in {gap["name"] for gap in result["test_gaps"]}
     assert "PHP" in result["summary"]
     assert "guess" in result["summary"]
+    assert result["test_gaps_php_uncertain"] is True
 
 
 @pytest.mark.parametrize(("language", "expected"), [("php", 1), ("python", 0)])
