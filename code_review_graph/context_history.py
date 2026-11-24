@@ -133,20 +133,22 @@ def record_call(call: CallInfo, *, baseline: int, returned: int, saved: int) -> 
 
 @contextlib.contextmanager
 def _locked(lock_path: Path) -> Iterator[None]:
-    """Hold an exclusive ``flock`` on *lock_path* for the block.
+    """Hold an exclusive lock on *lock_path* for the block.
 
     Each call opens its own descriptor, so threads in one process wait for
-    each other as well as other processes. Windows has no ``flock``; there
-    the block runs unguarded, as the graph write lock does.
+    each other as well as other processes. Windows locks the first byte of
+    the lock file, including when the file is empty.
     """
-    if sys.platform == "win32":  # pragma: no cover - POSIX in CI
-        yield
-        return
-    import fcntl
-
-    fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600)
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        if sys.platform == "win32":
+            import msvcrt
+
+            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_EX)
         yield
     finally:
         # Closing the descriptor drops the lock.

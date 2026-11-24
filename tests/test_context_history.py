@@ -209,7 +209,6 @@ class TestBoundedSize:
     def test_the_default_limit_is_small(self):
         assert ch.MAX_BYTES <= 2 * 1024 * 1024
 
-    @pytest.mark.skipif(sys.platform == "win32", reason="the guard uses flock")
     def test_two_writers_rolling_over_at_once_keep_the_old_log(self, tmp_path, monkeypatch):
         # Both writers see a full log. Without one lock around the size check,
         # the roll-over and the append, the second renames the first one's
@@ -233,6 +232,7 @@ class TestBoundedSize:
         _attach(tmp_path)
         other.join(timeout=5)
 
+        assert not other.is_alive()
         assert (tmp_path / (LOG_NAME + ".1")).read_text(encoding="utf-8") == full
         assert len(_log_lines(tmp_path)) == 2
 
