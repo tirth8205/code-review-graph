@@ -1735,9 +1735,11 @@ def analyze_changes(
     # withheld from the payload.
     test_gaps: list[dict[str, Any]] = []
     indirect_gaps: list[dict[str, Any]] = []
+    has_php_test_gap = False
     for node in gap_candidates:
         if node.qualified_name in directly_tested:
             continue
+        has_php_test_gap |= node.language == "php"
         entry: dict[str, Any] = {
             "name": _sanitize_name(node.name),
             "qualified_name": _sanitize_name(node.qualified_name),
@@ -1824,10 +1826,7 @@ def analyze_changes(
             "  - Reached only through a caller: "
             f"{', '.join(_gap_names(indirect_gaps))}"
         )
-    if any(
-        node.language == "php" and node.qualified_name not in directly_tested
-        for node in gap_candidates
-    ):
+    if has_php_test_gap:
         # A Laravel test reaches code through the container or an HTTP call,
         # and the graph traces neither, so a PHP gap is a guess (#850, #851).
         summary_parts.append(
@@ -1888,6 +1887,7 @@ def analyze_changes(
         "test_gaps_total": len(test_gaps),
         "test_gaps_uncovered": uncovered_count,
         "test_gaps_indirect": indirect_count,
+        "test_gaps_php_uncertain": has_php_test_gap,
         # Symbols the diff deleted outright, each with what still uses it.
         # They are not in ``changed_functions``: nothing of them is left to
         # score, and the code around the hole did not change.

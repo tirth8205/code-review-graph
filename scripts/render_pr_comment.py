@@ -459,6 +459,13 @@ def render_markdown(
             )
         )
 
+    if gaps_total and report.get("test_gaps_php_uncertain") is True:
+        lines.extend([
+            "",
+            "> PHP test gaps are estimates. Calls through Laravel's service "
+            "container or HTTP routes can hide coverage.",
+        ])
+
     savings = report.get("context_savings") or {}
     saved_tokens = savings.get("saved_tokens")
     saved_percent = savings.get("saved_percent")
