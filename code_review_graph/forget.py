@@ -129,7 +129,7 @@ def forget_files(
     #    forgotten files are hidden from import resolution so a still-on-disk
     #    file is not silently re-resolved (forget removes it from the graph,
     #    not from the working tree).
-    from .incremental import _load_followed_dirs, _relink_edges
+    from .incremental import _load_followed_dirs, _relink_edges, _run_helm_resolver
 
     parser = CodeParser(repo_root)
     parser.exclude_files(forgotten)
@@ -175,6 +175,8 @@ def forget_files(
     #    store_communities clear their tables first, so flows and communities
     #    are fully recomputed; signatures and FTS are rebuilt; and any edge
     #    left bare by the re-parse is re-resolved.
+    if any(path.lower().endswith((".yaml", ".yml")) for path in forgotten | set(reparsed)):
+        _run_helm_resolver(store)
     run_post_processing(store)
 
     # 6. Drop embedding vectors that now reference a deleted node.

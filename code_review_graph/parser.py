@@ -45,6 +45,7 @@ from .constants import (
     release_os_memory,
 )
 from .custom_languages import CustomLanguage, load_custom_languages
+from .helm import VALUES_LINE_KEY, template_values_line
 from .npm_alias_resolver import NpmAliasResolver
 
 try:
@@ -4117,6 +4118,22 @@ class CodeParser:
         actually parsed (issue #746).
         """
         nodes, edges = self._extract_bytes(path, source)
+        if (
+            path.suffix.lower() in (".yaml", ".yml")
+            and "templates" in path.parent.parts
+            and len(source) <= self._MAX_GENERIC_YAML_BYTES
+            and b".Values" in source
+            and (values_line := template_values_line(source)) is not None
+        ):
+            # Unrendered Go actions often make the YAML invalid. Keep the
+            # source file so the chart resolver can attach its dependency.
+            if not nodes:
+                file_path = normalize_file_path(path)
+                nodes.append(NodeInfo(
+                    kind="File", name=file_path, file_path=file_path, line_start=1,
+                    line_end=source.count(b"\n") + 1, language="yaml",
+                ))
+            nodes[0].extra[VALUES_LINE_KEY] = values_line
         # Every node from a test file is test code, whatever its kind: the
         # test classes, the fixtures and the private helpers as much as the
         # test functions.  Marking them here rather than at each of the ~40

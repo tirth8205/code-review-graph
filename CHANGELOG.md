@@ -4,6 +4,9 @@
 
 ### Added
 
+- Helm YAML templates that access .Values are linked to their chart's default
+  values.yaml file for import queries and impact analysis.
+
 - `install` keeps a record of the files it writes inside the repository, in
   `.code-review-graph/install-manifest.json`, even when `--data-dir` or
   `CRG_DATA_DIR` keeps the graph somewhere else. Each install adds to it and
