@@ -79,6 +79,42 @@ def _store(root: Path) -> GraphStore:
     return GraphStore(root / ".code-review-graph" / "graph.db")
 
 
+@pytest.mark.parametrize("namespace", ["MediatR", "Mediator", "Local"])
+def test_mediator_dispatch_limit_survives_graph_queries(tmp_path, namespace):
+    from code_review_graph.incremental import full_build
+    from code_review_graph.postprocessing import run_post_processing
+    from code_review_graph.tools.community_tools import get_architecture_overview_func
+    from code_review_graph.tools.flows_tools import list_flows
+
+    source = tmp_path / "App.cs"
+    source.write_text(
+        f"using {namespace};\n"
+        "namespace App;\n"
+        "public record Request();\n"
+        "public class Handler { public void Handle(Request request) {} }\n"
+        "public class Controller {\n"
+        "    private readonly IMediator mediator;\n"
+        "    public void Run() { mediator.Send(new Request()); }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    past = time.time() - 60
+    os.utime(source, (past, past))
+    (tmp_path / ".code-review-graph").mkdir()
+    with _store(tmp_path) as store:
+        full_build(tmp_path, store)
+        run_post_processing(store)
+
+    root = str(tmp_path)
+    query = query_graph("callers_of", "Handle", repo_root=root)
+    assert query["result_count"] == 0
+    known = namespace != "Local"
+    assert ("mediator dispatch" in query["confidence"]) == known
+    for report in (list_flows(repo_root=root), get_architecture_overview_func(repo_root=root)):
+        assert report["status"] == "ok"
+        assert any("mediator dispatch" in note for note in report.get("warnings", [])) == known
+
+
 # ---------------------------------------------------------------------------
 # The dangerous zero: a target the graph never saw
 # ---------------------------------------------------------------------------

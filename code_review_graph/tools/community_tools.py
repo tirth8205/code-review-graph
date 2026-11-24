@@ -283,6 +283,8 @@ def get_architecture_overview_func(
         Architecture overview with communities, cross-community edges,
         warnings, and a ``truncated`` flag.
     """
+    from ..uncertainty import MEDIATOR_DISPATCH_WARNING
+
     _validate_positive_int(max_results, "max_results")
     _validate_positive_int(max_members, "max_members")
 
@@ -304,9 +306,10 @@ def get_architecture_overview_func(
         overview["cross_community_edges"] = cross
         # One warning per highly-coupled community pair grows quadratically
         # with the community count, so it needs the same bound.
-        warnings, warn_total, warn_cut = _bounded(
-            overview["warnings"], max_results, _MAX_CROSS_EDGES,
-        )
+        all_warnings = overview["warnings"]
+        if store.has_unresolved_csharp_mediator_calls():
+            all_warnings = [MEDIATOR_DISPATCH_WARNING, *all_warnings]
+        warnings, warn_total, warn_cut = _bounded(all_warnings, max_results, _MAX_CROSS_EDGES)
         overview["warnings"] = warnings
         truncated = truncated or warn_cut
         n_communities = len(overview["communities"])

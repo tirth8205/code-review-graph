@@ -8,6 +8,7 @@ from typing import Any
 from ..flows import get_flow_by_id, get_flows
 from ..hints import generate_hints, get_session
 from ..incremental import followed_files, path_within_repo
+from ..uncertainty import MEDIATOR_DISPATCH_WARNING
 from ._common import _bounded, _get_store, _shown_of, _validate_positive_int
 
 # ---------------------------------------------------------------------------
@@ -93,6 +94,8 @@ def list_flows(
             "total": total,
             "truncated": truncated,
         }
+        if store.has_unresolved_csharp_mediator_calls():
+            result["warnings"] = [MEDIATOR_DISPATCH_WARNING]
         result["_hints"] = generate_hints(
             "list_flows_tool", result, get_session()
         )

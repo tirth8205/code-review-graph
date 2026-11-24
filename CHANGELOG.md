@@ -35,6 +35,9 @@
 
 ### Fixed
 
+- C# caller queries, flows and architecture reports flag missing handler
+  links when the graph sees MediatR or Mediator dispatch.
+
 - The MCP entry and every hook `install` writes now run the copy of
   code-review-graph that ran `install`. The MCP entry used `uvx` whenever it
   was on PATH, and hooks ran the first copy on PATH, so an older copy could
