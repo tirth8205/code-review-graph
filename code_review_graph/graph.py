@@ -2205,6 +2205,21 @@ class GraphStore:
     def get_edges_by_target(self, qualified_name: str) -> list[GraphEdge]:
         return list(self.iter_edges_by_target(qualified_name))
 
+    def has_unresolved_csharp_mediator_calls(self) -> bool:
+        """Find a typed Send/Publish call in a file importing a .NET mediator."""
+        return self._conn.execute(
+            "SELECT 1 FROM edges AS call "
+            "JOIN nodes AS file ON file.qualified_name = call.file_path "
+            "WHERE call.kind = 'CALLS' AND file.language = 'csharp' "
+            "AND call.target_qualified IN "
+            "('IMediator::Send', 'IMediator::Publish', 'ISender::Send', 'IPublisher::Publish') "
+            "AND EXISTS (SELECT 1 FROM edges AS imported "
+            "WHERE imported.kind = 'IMPORTS_FROM' "
+            "AND imported.source_qualified = call.file_path "
+            "AND imported.target_qualified IN ('MediatR', 'Mediator')) "
+            "LIMIT 1"
+        ).fetchone() is not None
+
     def get_direct_dependent_files(self, file_path: str) -> set[str]:
         """Files that import *file_path* or point an edge at a node in it.
 

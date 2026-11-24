@@ -50,6 +50,11 @@ MAX_CONFIDENCE_CHARS = 140
 # argument, so one table can serve every caller.
 IMPACT_PATTERN = "impact_radius"
 
+MEDIATOR_DISPATCH_WARNING = (
+    "C# mediator dispatch through Send or Publish is not traced, so "
+    "handler calls can be missing from the graph."
+)
+
 _UPDATE_HINT = "run `code-review-graph update`"
 
 _WHITESPACE = re.compile(r"\s+")
@@ -486,7 +491,14 @@ def empty_query_confidence(
         if stale:
             return _bounded(stale)
 
-        gap = gap_note(getattr(node, "language", None), pattern)
+        language = getattr(node, "language", None)
+        if (
+            language == "csharp"
+            and pattern in {"callers_of", "callees_of", "tests_for"}
+            and store.has_unresolved_csharp_mediator_calls()
+        ):
+            return _bounded(MEDIATOR_DISPATCH_WARNING)
+        gap = gap_note(language, pattern)
         if gap:
             return _bounded(gap)
 
