@@ -261,6 +261,7 @@ jobs:
           tests/test_daemon.py
           tests/test_changes.py
           tests/test_communities.py
+            tests/test_context_history.py
           tests/test_flows.py
           tests/test_graph.py
           tests/test_incremental.py
