@@ -7312,6 +7312,54 @@ class CodeParser:
             i += 1
         return " ".join(text[sig_start:].split())
 
+    @staticmethod
+    def _sql_dollar_statement_ends(root: Any, source: bytes) -> dict[tuple[int, int], int]:
+        """Find statement spans for CREATE ... AS dollar-quoted bodies.
+
+        The SQL grammar exposes the tokens even when CREATE PROCEDURE is
+        recovered as an ERROR. Ignore the body up to the same delimiter:
+        semicolons and CREATE tokens inside it do not end the outer statement.
+        """
+        ends: dict[tuple[int, int], int] = {}
+        stack = [root]
+        start: tuple[int, int] | None = None
+        body_line = 0
+        body_end = 0
+        as_end = 0
+        while stack:
+            node = stack.pop()
+            if node.end_byte <= body_end:
+                continue
+            if node.child_count:
+                stack.extend(reversed(node.children))
+                continue
+            if node.is_missing or node.start_byte < body_end:
+                continue
+            if node.type in ("keyword_create", ";"):
+                if start is not None and body_line:
+                    ends[start] = node.end_point.row + 1 if node.type == ";" else body_line
+                start = (
+                    (node.start_point.row, node.start_point.column)
+                    if node.type == "keyword_create" else None
+                )
+                body_line = as_end = 0
+            elif node.type == "keyword_as":
+                as_end = node.end_byte
+            elif (
+                node.type == "dollar_quote" and start is not None and as_end
+                and not source[as_end:node.start_byte].strip()
+            ):
+                delimiter = source[node.start_byte:node.end_byte]
+                close = source.find(delimiter, node.end_byte)
+                if close != -1:
+                    body_end = close + len(delimiter)
+                    body_line = node.end_point.row + 1 + source.count(
+                        b"\n", node.end_byte, body_end,
+                    )
+        if start is not None and body_line:
+            ends[start] = body_line
+        return ends
+
     def _parse_sql(
         self, path: Path, source: bytes,
     ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
@@ -7387,11 +7435,14 @@ class CodeParser:
 
         # --- tree-sitter pass ---
         parser = self._get_parser("sql")
+        dollar_statement_ends: dict[tuple[int, int], int] = {}
         if parser:
             tree = parser.parse(source)
             self._walk_sql_tree(
                 tree.root_node, source, file_path_str, nodes, edges,
             )
+            if b"$" in source and self._SQL_PROC_RE.search(text):
+                dollar_statement_ends = self._sql_dollar_statement_ends(tree.root_node, source)
 
         # Whether the PL/SQL-specific passes below (body-span computation
         # and CALLS extraction) should run at all. Plain ANSI/T-SQL/MySQL
@@ -7424,17 +7475,19 @@ class CodeParser:
         }
 
         # --- regex fallback for CREATE PROCEDURE ---
-        # Body-span computation and CALLS extraction only run for confirmed
-        # Oracle PL/SQL; a plain ANSI/T-SQL/MySQL procedure still gets a
-        # Function node (as before this file supported PL/SQL at all), just
-        # without a computed body span.
+        # Use dollar-quoted statement spans when the grammar exposes them.
+        # Other body spans and CALLS extraction still require Oracle evidence.
         for m in self._SQL_PROC_RE.finditer(clean_text):
             raw_name = m.group(1)
             name = raw_name.split(".")[-1]  # strip schema prefix
             line = clean_text[: m.start()].count("\n") + 1
             qualified = f"{file_path_str}::{name}"
-            line_end = line
-            if is_plsql:
+            line_start = clean_text.rfind("\n", 0, m.start()) + 1
+            column = len(clean_text[line_start:m.start()].encode("utf-8"))
+            dollar_end = dollar_statement_ends.get((line - 1, column))
+            line_end = dollar_end if dollar_end is not None else line
+            body_end = None
+            if dollar_end is None and is_plsql:
                 body_end = self._plsql_block_end(clean_text, m.end(), name)
                 line_end = clean_text[:body_end].count("\n") + 1
             nodes.append(NodeInfo(
@@ -7453,7 +7506,7 @@ class CodeParser:
                 file_path=file_path_str,
                 line=line,
             ))
-            if is_plsql:
+            if body_end is not None:
                 self._extract_plsql_calls(
                     clean_text, m.end(), body_end, qualified, file_path_str, edges,
                 )

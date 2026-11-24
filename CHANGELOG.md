@@ -35,6 +35,9 @@
 
 ### Fixed
 
+- Dollar-quoted PostgreSQL procedures include their body lines in the
+  graph, so edits inside the body can be attributed to the procedure.
+
 - The MCP entry and every hook `install` writes now run the copy of
   code-review-graph that ran `install`. The MCP entry used `uvx` whenever it
   was on PATH, and hooks ran the first copy on PATH, so an older copy could
