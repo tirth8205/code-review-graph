@@ -314,6 +314,12 @@ Languages not covered can be added through a `.code-review-graph/languages.toml`
 
 ## What Gets Indexed
 
+YAML templates under a Helm chart's `templates/` directory that access
+`.Values` or `$.Values` gain a file-level dependency on their chart's
+`values.yaml`. Use `importers_of` or impact analysis to find the templates
+affected by an edit to those defaults. Rebuild an existing graph to index
+templates it has already parsed.
+
 Terraform provider aliases have distinct names (`provider.aws.west`), while the default
 provider retains `provider.aws`. Resource/data `provider` selections and module `providers`
 map values link to provider nodes; ordinary resource expressions retain resource references.

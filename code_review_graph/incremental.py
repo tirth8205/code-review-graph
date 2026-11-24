@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import signal
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -348,6 +349,16 @@ def _run_scoped_resolver(store: GraphStore, repo_root: Path) -> Optional[dict]:
     except Exception as exc:  # noqa: BLE001 - best-effort post-pass
         logger.warning("Scoped call resolver failed: %s", exc)
         return None
+
+
+def _run_helm_resolver(store: GraphStore) -> None:
+    """Recompute dependencies on chart defaults from indexed YAML files."""
+    from .helm import resolve_helm_values
+
+    try:
+        resolve_helm_values(store)
+    except sqlite3.OperationalError as exc:
+        logger.warning("Helm values resolution failed: %s", exc)
 
 
 def _enrichment_skip_reason(enrich: Optional[bool]) -> Optional[str]:
@@ -3119,6 +3130,7 @@ def full_build(
     spring_event_stats = _run_spring_event_resolver(store)
     temporal_stats = _run_temporal_resolver(store)
     hcl_stats = _run_hcl_resolver(store)
+    _run_helm_resolver(store)
     scoped_stats = _run_scoped_resolver(store, repo_root)
     jedi_stats = _run_jedi_enrichment(store, repo_root, enrich=enrich)
     _relink_stored_edges(store, repo_root, followed_dirs)
@@ -3638,6 +3650,10 @@ def incremental_update(
         rp.endswith((".tf", ".hcl")) for rp in all_files
     )
     hcl_stats = _run_hcl_resolver(store) if hcl_changed else None
+    if has_graph_changes and any(
+        path.lower().endswith((".yaml", ".yml")) for path in candidate_paths
+    ):
+        _run_helm_resolver(store)
     # Project-only edits can rebind C# calls without reparsing a source file,
     # so a project file runs the resolver even when no source was stored.
     scoped_changed = any(
