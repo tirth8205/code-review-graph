@@ -443,6 +443,50 @@ class TestJavaMethodNames:
         assert "List" not in {f.name for f in funcs}
 
 
+class TestJavaRecords:
+    """A Java record is a class: its members belong to it, not to the file."""
+
+    def _parse(self, tmp_path):
+        p = tmp_path / "Point.java"
+        p.write_text(
+            "public record Point(int x, int y) implements Comparable<Point> {\n"
+            "    public Point {\n"
+            "        validate(x);\n"
+            "    }\n"
+            "    public int sum() { return add(x, y); }\n"
+            "    record Inner(String s) { String up() { return s.strip(); } }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        return CodeParser().parse_file(p)
+
+    @staticmethod
+    def _pairs(edges, kind):
+        def local(qualified):
+            return qualified.rsplit("Point.java", 1)[-1]
+
+        return {(local(e.source), local(e.target)) for e in edges if e.kind == kind}
+
+    def test_record_is_a_class_that_contains_its_methods(self, tmp_path):
+        nodes, edges = self._parse(tmp_path)
+        classes = {n.name: n for n in nodes if n.kind == "Class"}
+        assert set(classes) == {"Point", "Inner"}
+        assert classes["Inner"].parent_name == "Point"
+        sum_fn = next(n for n in nodes if n.kind == "Function" and n.name == "sum")
+        assert sum_fn.parent_name == "Point"
+        assert ("::Point", "::Point.sum") in self._pairs(edges, "CONTAINS")
+        assert ("::Point.Inner", "::Point.Inner.up") in self._pairs(edges, "CONTAINS")
+        assert ("::Point.sum", "add") in self._pairs(edges, "CALLS")
+        assert ("::Point", "Comparable<Point>") in self._pairs(edges, "INHERITS")
+
+    def test_compact_constructor_is_a_constructor(self, tmp_path):
+        nodes, edges = self._parse(tmp_path)
+        ctor = next(n for n in nodes if n.kind == "Function" and n.name == "Point")
+        assert ctor.parent_name == "Point"
+        assert ctor.extra.get("java_constructor") is True
+        assert ("::Point.Point", "validate") in self._pairs(edges, "CALLS")
+
+
 class TestJavaImportResolution:
     """Test that Java imports are resolved to absolute file paths."""
 
