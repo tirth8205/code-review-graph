@@ -166,6 +166,10 @@
   its analysis; it leaves a notice naming both commits.
 - A call that could mean several functions now stores them in sorted order, so
   the same code gives the same graph whatever order its files are read in.
+- Java records are now indexed as classes. Their methods, compact constructors
+  and nested types belong to the record instead of to the file, and the
+  interfaces a record implements appear as inheritance. Rebuild the graph to
+  pick this up.
 
 ## [2.4.0] - 2026-11-10
 

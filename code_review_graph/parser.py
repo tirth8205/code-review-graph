@@ -1467,7 +1467,10 @@ _CLASS_TYPES: dict[str, list[str]] = {
     # impl_item is a scope for methods, not a second type definition. It is
     # dispatched separately so repeated impl blocks cannot overwrite structs.
     "rust": ["struct_item", "enum_item", "trait_item"],
-    "java": ["class_declaration", "interface_declaration", "enum_declaration"],
+    "java": [
+        "class_declaration", "interface_declaration", "enum_declaration",
+        "record_declaration",
+    ],
     "c": ["struct_specifier", "type_definition"],
     "cpp": ["class_specifier", "struct_specifier"],
     "csharp": [
@@ -1570,7 +1573,10 @@ _FUNCTION_TYPES: dict[str, list[str]] = {
     ],
     "go": ["function_declaration", "method_declaration"],
     "rust": ["function_item", "function_signature_item"],
-    "java": ["method_declaration", "constructor_declaration"],
+    "java": [
+        "method_declaration", "constructor_declaration",
+        "compact_constructor_declaration",
+    ],
     "c": ["function_definition"],
     "cpp": ["function_definition", "declaration", "field_declaration"],
     "csharp": ["method_declaration", "constructor_declaration"],
@@ -17090,7 +17096,9 @@ class CodeParser:
         modifiers_str: Optional[str] = ",".join(deco_list) if deco_list else None
         if deco_list:
             method_extra["decorators"] = list(deco_list)
-        if language == "java" and child.type == "constructor_declaration":
+        if language == "java" and child.type in (
+            "constructor_declaration", "compact_constructor_declaration",
+        ):
             # Lets consumers tell a constructor from a method; Spring AOP,
             # for one, cannot intercept constructors.
             method_extra["java_constructor"] = True
