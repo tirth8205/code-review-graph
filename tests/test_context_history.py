@@ -251,6 +251,18 @@ def _line(ts: str, tool: str, baseline: int, returned: int) -> str:
 
 
 class TestRead:
+    def test_overhead_is_recorded_and_read_back(self, tmp_path, monkeypatch):
+        _enable(monkeypatch)
+        attach_context_savings(
+            {}, original_tokens=10, returned_tokens=20,
+            call=CallInfo(data_dir=tmp_path, tool="detect_changes_tool"),
+        )
+
+        entries, skipped = ch.read_history(tmp_path)
+
+        assert skipped == 0
+        assert [entry["saved_tokens"] for entry in entries] == [-10]
+
     def test_older_file_first_and_bad_lines_skipped(self, tmp_path):
         (tmp_path / (LOG_NAME + ".1")).write_text(
             _line("2026-11-01T10:00:00Z", "a", 10, 5) + "\n", encoding="utf-8",

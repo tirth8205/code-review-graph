@@ -188,7 +188,7 @@ def _parse(line: str) -> dict[str, Any] | None:
         return None
     for key in _TOKEN_KEYS:
         value = _count(entry.get(key))
-        if value is None or value < 0:
+        if value is None or (key != "saved_tokens" and value < 0):
             return None
     return entry
 
