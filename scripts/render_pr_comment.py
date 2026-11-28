@@ -463,10 +463,12 @@ def render_markdown(
     saved_tokens = savings.get("saved_tokens")
     saved_percent = savings.get("saved_percent")
     if saved_tokens and saved_percent is not None:
+        saved_tokens = int(saved_tokens)
+        direction = "more" if saved_tokens < 0 else "fewer"
         lines.append("")
         lines.append(
-            f"**Token savings:** this graph-backed report used ~{int(saved_tokens):,} "
-            f"fewer tokens (~{int(saved_percent)}%) than reading every changed file in "
+            f"**Token savings:** this graph-backed report used ~{abs(saved_tokens):,} "
+            f"{direction} tokens (~{abs(int(saved_percent))}%) than reading every changed file in "
             "full (estimated, chars/4 approximation)."
         )
 

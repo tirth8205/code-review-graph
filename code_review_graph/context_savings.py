@@ -76,8 +76,8 @@ def _savings(baseline: int, returned: int) -> dict[str, int | bool] | None:
     if baseline <= 0:
         return None
 
-    saved = max(0, baseline - returned)
-    percent = round((saved / baseline) * 100) if baseline else 0
+    saved = baseline - returned
+    percent = round((saved / baseline) * 100)
     return {
         "estimated": True,
         "saved_tokens": int(saved),
@@ -92,7 +92,7 @@ def estimate_context_savings(
     original_tokens: int | None = None,
     returned_tokens: int | None = None,
 ) -> dict[str, int | bool] | None:
-    """Return tiny savings metadata, or None when no baseline is available."""
+    """Return signed savings metadata, or None when no baseline is available."""
     return _savings(*_token_counts(
         original_context, returned_context, original_tokens, returned_tokens,
     ))
@@ -138,6 +138,8 @@ def format_context_savings(estimate: dict[str, Any] | None) -> str | None:
         return None
     saved = int(estimate.get("saved_tokens", 0))
     percent = int(estimate.get("saved_percent", 0))
+    if saved < 0:
+        return f"Estimated extra context: ~{-saved:,} tokens (~{abs(percent)}% more)"
     return f"Estimated context saved: ~{saved:,} tokens (~{percent}%)"
 
 
@@ -218,7 +220,7 @@ def verify_with_tiktoken(
         )
         graph_real = len(enc.encode(text))
 
-    saved = max(0, naive_real - graph_real)
+    saved = naive_real - graph_real
     pct = round(saved * 100 / naive_real) if naive_real > 0 else 0
     return {
         "verified_baseline": naive_real,
@@ -277,12 +279,14 @@ def format_context_savings_panel(
     saved = int(estimate.get("saved_tokens", 0))
     percent = int(estimate.get("saved_percent", 0))
 
-    # Derive baseline + returned from saved+percent if not provided
+    # Prefer exact counts before reconstructing a baseline from a rounded percentage.
     if original_tokens is None:
-        if percent > 0:
+        if returned_tokens is not None:
+            original_tokens = returned_tokens + saved
+        elif percent:
             original_tokens = int(round(saved * 100 / percent))
         else:
-            original_tokens = saved
+            original_tokens = max(0, saved)
     if returned_tokens is None:
         returned_tokens = max(0, (original_tokens or 0) - saved)
 
@@ -301,19 +305,25 @@ def format_context_savings_panel(
             breakdown = dict(breakdown)  # copy before mutating
             breakdown["Other"] = remainder
 
-    # Lines that go inside the box (without borders)
+    savings_line = (
+        f"Cost more:              {-saved:>9,} tokens (~{abs(percent)}% more)"
+        if saved < 0
+        else f"Saved:                  {saved:>9,} tokens (~{percent}%)"
+    )
     inner_lines: list[str] = [
         f"Full context would be:  {original_tokens:>9,} tokens",
         f"Graph context used:     {returned_tokens:>9,} tokens",
-        f"Saved:                  {saved:>9,} tokens (~{percent}%)",
+        savings_line,
     ]
     if verified:
         vb = verified["verified_baseline"]
         vr = verified["verified_returned"]
         vs = verified["verified_saved"]
         vp = verified["verified_percent"]
+        direction = " more" if vs < 0 else ""
+        comparison = f" (~{abs(vp)}%{direction})" if vb else direction
         inner_lines.append(
-            f"Verified (tiktoken):    {vs:>9,} tokens (~{vp}%)  "
+            f"Verified (tiktoken):    {abs(vs):>9,} tokens{comparison}  "
             f"[{vb:,} → {vr:,}]"
         )
     if breakdown:

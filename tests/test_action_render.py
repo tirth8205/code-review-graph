@@ -432,6 +432,14 @@ def test_token_savings_line_omitted_when_zero(report):
     assert "**Token savings:**" not in body
 
 
+def test_token_savings_line_reports_overhead_when_percent_rounds_to_zero(report):
+    report["context_savings"] = {"estimated": True, "saved_tokens": -2, "saved_percent": 0}
+
+    body = render.render_markdown(report)
+
+    assert "used ~2 more tokens (~0%) than reading every changed file" in body
+
+
 def test_token_savings_line_omitted_when_absent(report):
     del report["context_savings"]
     body = render.render_markdown(report)

@@ -985,14 +985,10 @@ def test_token_savings_panel_is_internally_honest(happy: ActionRun, diff_files):
     assert baseline > 0
     saved = int(savings["saved_tokens"])
     percent = int(savings["saved_percent"])
-    assert 0 <= saved <= baseline, (saved, baseline)
-    assert 0 <= percent <= 100, percent
     assert percent == round(saved / baseline * 100)
 
-    # The claim is "fewer tokens than reading every changed file in full", so
-    # it may never exceed what reading those files would have cost.
     returned = estimate_tokens({k: v for k, v in report.items() if k != "context_savings"})
-    assert saved <= max(0, baseline - returned) + 1, (saved, baseline, returned)
+    assert saved == baseline - returned
 
 
 def test_token_savings_line_matches_the_report_numbers(happy: ActionRun):
@@ -1005,24 +1001,28 @@ def test_token_savings_line_matches_the_report_numbers(happy: ActionRun):
         assert line is None, "a zero saving must not be advertised"
         return
     assert line is not None
-    assert f"~{saved:,} " in line, line
-    assert f"(~{percent}%)" in line, line
+    direction = "more" if saved < 0 else "fewer"
+    assert f"~{abs(saved):,} {direction} tokens" in line, line
+    assert f"(~{abs(percent)}%)" in line, line
     assert "estimated" in line, "the panel must say the figure is an estimate"
 
 
-def test_token_savings_panel_never_claims_a_saving_it_did_not_make(tmp_path: Path):
-    """A report whose own JSON is larger than the files must claim nothing."""
+def test_token_savings_panel_reports_when_the_response_costs_more(tmp_path: Path):
+    from code_review_graph.context_savings import attach_context_savings
+
     report = {
         "risk_score": 0.1,
         "changed_functions": [],
         "review_priorities": [],
         "test_gaps": [],
         "affected_flows": [],
-        "context_savings": {"estimated": True, "saved_tokens": 0, "saved_percent": 0},
     }
+    attach_context_savings(report, original_tokens=1)
     assert render_report(tmp_path, report).returncode == 0
     body = (tmp_path / "out.md").read_text(encoding="utf-8")
-    assert _savings_line(body) is None
+    line = _savings_line(body)
+    assert line is not None
+    assert "more tokens" in line
 
 
 # ---------------------------------------------------------------------------

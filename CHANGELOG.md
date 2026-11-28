@@ -66,6 +66,9 @@
 - `uninstall` and `uninstall --dry-run` word every planned action as "would
   remove …" and every action they took as "removed …". Most planned actions
   read "would removed …", and a few that were taken read "remove …".
+- Context savings report the extra tokens when a graph response is larger
+  than its baseline. JSON and history retain the signed difference, while
+  CLI and GitHub Action summaries show the overhead.
 - `uninstall` removes a config file `install` made, such as `.mcp.json`,
   `.vscode/mcp.json` or `.claude/settings.json`, when nothing else is left in
   it, and the empty folders `install` made, instead of leaving

@@ -62,7 +62,7 @@ Release highlights by version. The full changelog is in [CHANGELOG.md](../CHANGE
 - **FTS5 rebuild in eval**: the eval framework calls `run_post_processing` after `full_build`, so the FTS5 index is populated.
 
 ## v2.3.4
-- **Estimated context savings**: review, impact, detect-changes and compact architecture responses include `context_savings` metadata (`estimated`, `saved_tokens`, `saved_percent`) where a baseline can be estimated.
+- **Estimated context savings**: review, impact, detect-changes and compact architecture responses include `context_savings` metadata (`estimated`, `saved_tokens`, `saved_percent`) where a baseline can be estimated. Negative values indicate that the graph response used more context than the baseline.
 - **Compact architecture overview by default**: `get_architecture_overview_tool` defaults to `detail_level="minimal"`. Use `detail_level="standard"` for member lists and per-edge detail.
 - **Bounded change analysis**: `CRG_MAX_CHANGED_FUNCS`, `CRG_MAX_TRANSITIVE_FRONTIER` and `CRG_TOOL_TIMEOUT` keep large MCP review calls responsive. `CRG_TOOL_TIMEOUT` applies to read-only tools only; the tools that write (build, postprocess, embed, wiki, apply-refactor) are never cut short.
 - **Windows MCP reliability**: local embedding models are pre-warmed on Windows before FastMCP starts worker dispatch, avoiding semantic-search deadlocks.
