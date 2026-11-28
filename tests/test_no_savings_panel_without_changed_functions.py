@@ -72,11 +72,11 @@ def test_no_panel_when_no_function_changed(repo, monkeypatch, capsys, command):
 
 
 @pytest.mark.parametrize("command", COMMANDS)
-def test_panel_still_shows_when_a_function_changed(repo, monkeypatch, capsys, command):
+def test_panel_reports_overhead_for_a_small_function_change(repo, monkeypatch, capsys, command):
     _commit(repo, "app.py", "def f():\n    return 2\n\n\ndef g():\n    return 3\n")
 
     out = _run(monkeypatch, capsys, *command, "--repo", str(repo))
 
     assert "Token Savings" in out
-    assert "Saved:" in out
+    assert "Cost more:" in out
     assert NOTE not in out
