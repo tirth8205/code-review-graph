@@ -100,6 +100,7 @@ code-review-graph detect-changes               # Risk-scored change analysis (re
                                                 #   (HEAD~1) plus uncommitted and new files
 code-review-graph detect-changes --base HEAD~3 # Custom base revision (one Git does not know: exit 1)
 code-review-graph detect-changes --base origin/main # Branch refs use their merge base with HEAD
+code-review-graph detect-changes --data-dir /mnt/graphs/myrepo # Read graph.db there for this invocation
 code-review-graph detect-changes --brief       # Summary, the top three things to review, and the token-savings panel
 code-review-graph detect-changes --brief --verify  # ...and cross-check against tiktoken
 code-review-graph detect-changes --churn       # Add opt-in change-frequency risk (CRG_CHURN_WINDOW_DAYS, default 90)

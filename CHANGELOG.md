@@ -46,6 +46,8 @@
   the hooks.
 - The git pre-commit hook runs `update --quiet`, so a commit shows only the
   short review from `detect-changes --brief`, not the update log.
+- `detect-changes --data-dir PATH` reads an existing graph from the given
+  directory for one invocation without updating the registry.
 - `install` (and `install --platform all`) writes MCP entries, skills, hooks
   and instruction files only for the tools it finds on this machine. Claude
   Code, OpenCode, Qoder and CodeBuddy Code used to count as found everywhere,

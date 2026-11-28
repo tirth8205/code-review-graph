@@ -776,8 +776,9 @@ class TestDetectChangesEndToEnd:
 
         return repo
 
+    @pytest.mark.parametrize("external", [False, True], ids=["local", "external"])
     def test_detect_changes_maps_committed_change_to_functions(
-        self, tmp_path, capsys, monkeypatch,
+        self, tmp_path, capsys, monkeypatch, external,
     ):
         monkeypatch.delenv("CRG_DATA_DIR", raising=False)
         monkeypatch.delenv("CRG_REPO_ROOT", raising=False)
@@ -788,13 +789,23 @@ class TestDetectChangesEndToEnd:
         from code_review_graph.graph import GraphStore
         from code_review_graph.incremental import full_build, get_db_path
 
-        store = GraphStore(get_db_path(repo))
+        argv = ["code-review-graph", "detect-changes", "--repo", str(repo)]
+        if external:
+            data_dir = tmp_path / "external graph"
+            data_dir.mkdir()
+            db_path = data_dir / "graph.db"
+            argv.extend(["--data-dir", str(data_dir)])
+            monkeypatch.setenv("CRG_HOME", str(tmp_path / "crg-home"))
+            monkeypatch.setenv("CRG_DATA_DIR", str(tmp_path / "unused graph"))
+        else:
+            db_path = get_db_path(repo)
+
+        store = GraphStore(db_path)
         try:
             full_build(repo, store)
         finally:
             store.close()
 
-        argv = ["code-review-graph", "detect-changes", "--repo", str(repo)]
         with patch.object(sys, "argv", argv):
             cli.main()
 
@@ -810,6 +821,10 @@ class TestDetectChangesEndToEnd:
         savings = result["context_savings"]
         assert result["changed_functions"]
         assert savings["saved_percent"] < 100
+        if external:
+            assert not (tmp_path / "crg-home" / "registry.json").exists()
+            assert not (repo / ".code-review-graph").exists()
+            assert not (tmp_path / "unused graph").exists()
 
 def _prepare_monorepo_subproject(tmp_path, monkeypatch):
     mono = tmp_path / "mono"
