@@ -13,7 +13,7 @@ Usage:
     code-review-graph mcp [--auto-watch]
     code-review-graph visualize
     code-review-graph wiki
-    code-review-graph detect-changes [--base BASE] [--brief]
+    code-review-graph detect-changes [--base BASE] [--brief] [--data-dir PATH]
     code-review-graph register <path> [--alias name]
     code-review-graph unregister <path_or_alias>
     code-review-graph repos
@@ -2336,6 +2336,10 @@ def build_parser() -> argparse.ArgumentParser:
              "full JSON. Read-only against the existing graph.",
     )
     detect_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
+    detect_cmd.add_argument(
+        "--data-dir",
+        help="Directory containing an existing graph.db for this invocation",
+    )
     detect_cmd.add_argument(
         "--churn",
         action="store_true",

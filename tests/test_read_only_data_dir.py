@@ -172,12 +172,12 @@ def test_crg_data_dir_blocks_legacy_migration(
     assert not external.exists()
 
 
-@pytest.mark.parametrize("command", ["status", "visualize", "wiki", "watch"])
+@pytest.mark.parametrize("command", READ_ONLY_COMMANDS)
 def test_existing_empty_explicit_data_dir_gains_nothing(
     command, tmp_path, isolated_env, capsys,
 ):
     """--data-dir on an existing but graph-less dir: exit 1, dir stays empty."""
-    repo = _make_repo(tmp_path)
+    repo = _make_git_repo(tmp_path) if command == "detect-changes" else _make_repo(tmp_path)
     data_dir = tmp_path / "existing-empty"
     data_dir.mkdir()
 
